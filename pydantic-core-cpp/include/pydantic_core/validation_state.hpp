@@ -40,6 +40,7 @@ public:
     
     // Accessors
     std::optional<bool> strict() const { return config_.strict; }
+    void set_strict(bool value) { config_.strict = value; }
     std::optional<ExtraBehavior> extra_behavior() const { return config_.extra_behavior; }
     std::optional<bool> from_attributes() const { return config_.from_attributes; }
     StringCacheMode cache_strings() const { return config_.cache_strings; }

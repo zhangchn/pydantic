@@ -79,13 +79,14 @@ ValResultMatch<EitherFloat> StringInput::validate_float(bool strict) {
     return ValError::line_error(PydanticKnownError::float_type(), Location(), as_error_value().repr);
 }
 
-ValResult<std::unique_ptr<ValidatedDict>> StringInput::validate_dict(bool strict) {
+ValResult<std::unique_ptr<ValidatedDict>> StringInput::validate_dict(bool /*strict*/) {
     if (is_mapping()) {
-        return std::make_unique<StringValidatedDict>(mapping_);
+        std::unique_ptr<ValidatedDict> result = std::make_unique<StringValidatedDict>(mapping_);
+        return result;
     }
+    
     return ValError::line_error(PydanticKnownError::dict_type(), Location(), as_error_value().repr);
 }
-
 ValResultMatch<std::unique_ptr<ValidatedList>> StringInput::validate_list(bool strict) {
     return ValError::line_error(PydanticKnownError::list_type(), Location(), as_error_value().repr);
 }
