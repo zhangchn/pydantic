@@ -117,7 +117,7 @@ public:
     
     struct Entry {
         std::string key;
-        std::string value_repr;
+        std::string value_repr;  // String representation for error messages
     };
     
     virtual std::vector<Entry> entries() const = 0;
@@ -137,7 +137,7 @@ public:
     
     struct Entry {
         size_t index;
-        std::string value_repr;
+        std::string value_repr;  // String representation for error messages
     };
     
     virtual std::vector<Entry> entries() const = 0;

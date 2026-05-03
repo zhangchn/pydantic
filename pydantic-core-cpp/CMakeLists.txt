@@ -33,12 +33,15 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(doctest)
 
-# Source files for the Python module (minimal)
+# Source files for the Python module
 set(CORE_SOURCES
     src/errors/errors.cpp
     src/errors/error_types.cpp
     src/recursion_guard.cpp
     src/validation_state.cpp
+    src/validators/mod.cpp
+    src/input/json_input.cpp
+    src/input/string_input.cpp
     src/main_module.cpp
 )
 
@@ -64,6 +67,7 @@ target_compile_options(_pydantic_core_cpp PRIVATE
 # Tests
 enable_testing()
 
+# Test errors
 add_executable(test_errors tests/test_errors.cpp 
     src/errors/errors.cpp 
     src/errors/error_types.cpp
@@ -72,6 +76,7 @@ target_compile_definitions(test_errors PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAI
 target_link_libraries(test_errors PRIVATE doctest::doctest)
 target_include_directories(test_errors PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# Test validation state
 add_executable(test_validation_state tests/test_validation_state.cpp 
     src/validation_state.cpp 
     src/recursion_guard.cpp
@@ -80,5 +85,20 @@ target_compile_definitions(test_validation_state PRIVATE DOCTEST_CONFIG_IMPLEMEN
 target_link_libraries(test_validation_state PRIVATE doctest::doctest)
 target_include_directories(test_validation_state PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# Test validators - Phase 2
+add_executable(test_validators tests/test_validators.cpp
+    src/errors/errors.cpp
+    src/errors/error_types.cpp
+    src/recursion_guard.cpp
+    src/validation_state.cpp
+    src/validators/mod.cpp
+    src/input/json_input.cpp
+    src/input/string_input.cpp
+)
+target_compile_definitions(test_validators PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
+target_link_libraries(test_validators PRIVATE doctest::doctest simdjson::simdjson)
+target_include_directories(test_validators PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
 add_test(NAME Errors COMMAND test_errors)
 add_test(NAME ValidationState COMMAND test_validation_state)
+add_test(NAME Validators COMMAND test_validators)

@@ -4,6 +4,7 @@
 #include <vector>
 #include <memory>
 #include <simdjson.h>
+#include "result.hpp"
 #include "input.hpp"
 
 namespace pydantic_core {
@@ -55,6 +56,19 @@ private:
 class JsonValidatedList : public ValidatedList {
 public:
     explicit JsonValidatedList(simdjson::dom::array arr) : arr_(arr) {}
+    
+    size_t size() const override { return arr_.size(); }
+    bool empty() const override { return arr_.size() == 0; }
+    std::vector<Entry> entries() const override;
+    
+private:
+    simdjson::dom::array arr_;
+};
+
+// JSON validated tuple (arrays are used as tuples in JSON)
+class JsonValidatedTuple : public ValidatedTuple {
+public:
+    explicit JsonValidatedTuple(simdjson::dom::array arr) : arr_(arr) {}
     
     size_t size() const override { return arr_.size(); }
     bool empty() const override { return arr_.size() == 0; }

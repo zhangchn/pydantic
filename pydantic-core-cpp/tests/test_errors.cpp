@@ -16,27 +16,28 @@ TEST_CASE("ErrorType construction") {
     }
     
     SUBCASE("String too short") {
-        auto err = ErrorType::string_too_short(5);
+        auto err = ErrorType(ErrorType::Kind::StringTooShort, static_cast<int64_t>(5));
         CHECK(err.kind() == ErrorType::Kind::StringTooShort);
         CHECK(err.message() == "String should have at least 5 characters");
     }
     
     SUBCASE("String too long") {
-        auto err = ErrorType::string_too_long(100);
+        auto err = ErrorType(ErrorType::Kind::StringTooLong, static_cast<int64_t>(100));
         CHECK(err.kind() == ErrorType::Kind::StringTooLong);
         CHECK(err.message() == "String should have at most 100 characters");
     }
     
     SUBCASE("Int greater than") {
-        auto err = ErrorType::int_greater_than(10);
+        auto err = ErrorType(ErrorType::Kind::IntGreaterThan, static_cast<int64_t>(10));
         CHECK(err.kind() == ErrorType::Kind::IntGreaterThan);
         CHECK(err.message() == "Input should be greater than 10");
     }
     
     SUBCASE("Missing field") {
-        auto err = ErrorType::missing_field("name");
+        // Missing field doesn't have context in new simplified design
+        auto err = ErrorType(ErrorType::Kind::Missing);
         CHECK(err.kind() == ErrorType::Kind::Missing);
-        CHECK(err.message() == "Missing field: name");
+        CHECK(err.message() == "Missing field");
     }
 }
 
