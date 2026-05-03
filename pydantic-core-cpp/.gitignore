@@ -1,0 +1,32 @@
+# Build directories
+build/
+cmake-build-*/
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.ninja
+
+# Compiled files
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+
+# Python module
+*.cpython-*.so
+*.pyc
+__pycache__/
+*.pyd
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test outputs
+Testing/
+CTestTestfile.cmake
