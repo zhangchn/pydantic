@@ -7,13 +7,17 @@
 namespace pydantic_core {
 
 JsonInput::JsonInput(simdjson::simdjson_result<simdjson::dom::element> element) {
+    parser_ = std::make_unique<simdjson::dom::parser>();
     auto err = element.get(element_);
     if (err) {
         element_ = simdjson::dom::element();
     }
 }
 
-JsonInput::JsonInput(const simdjson::dom::element& element) : element_(element) {}
+JsonInput::JsonInput(const simdjson::dom::element& element) : element_(element) {
+    // For this constructor, we assume the parser is managed elsewhere
+    // This is a shallow copy - use with caution
+}
 
 InputValue JsonInput::as_error_value() const {
     auto type = element_.type();
@@ -43,7 +47,7 @@ bool JsonInput::is_none() const {
     return element_.type() == simdjson::dom::element_type::NULL_VALUE;
 }
 
-ValResultMatch<EitherString> JsonInput::validate_str(bool strict, bool coerce_numbers) {
+ValResult<ValMatch<EitherString>> JsonInput::validate_str(bool strict, bool coerce_numbers) const {
     if (element_.type() == simdjson::dom::element_type::STRING) {
         auto str_result = element_.get_string();
         if (!str_result.error()) {
@@ -51,6 +55,7 @@ ValResultMatch<EitherString> JsonInput::validate_str(bool strict, bool coerce_nu
         }
     }
     
+    // Lax mode - coerce from numbers
     if (!strict) {
         if (element_.type() == simdjson::dom::element_type::INT64) {
             return ValMatch<EitherString>::lax(EitherString(std::to_string(element_.get_int64().value_unsafe())));
@@ -62,14 +67,16 @@ ValResultMatch<EitherString> JsonInput::validate_str(bool strict, bool coerce_nu
             return ValMatch<EitherString>::lax(EitherString(std::to_string(element_.get_double().value_unsafe())));
         }
         if (element_.type() == simdjson::dom::element_type::BOOL) {
-            return ValMatch<EitherString>::lax(EitherString(std::string(element_.get_bool().value_unsafe() ? "true" : "false")));
+            return ValMatch<EitherString>::lax(EitherString(element_.get_bool().value_unsafe() ? std::string("true") : std::string("false")));
         }
     }
     
-    return ValError::line_error(PydanticKnownError::string_type(), Location(), as_error_value().repr);
+    return ValError::line_error(PydanticKnownError::string_type(), 
+                               Location(), as_error_value().repr);
 }
 
-ValResultMatch<EitherBytes> JsonInput::validate_bytes(bool strict) {
+ValResult<ValMatch<EitherBytes>> JsonInput::validate_bytes(bool strict) const {
+    // JSON doesn't have native bytes type - treat string as bytes in lax mode
     if (!strict) {
         if (element_.type() == simdjson::dom::element_type::STRING) {
             auto str = element_.get_string().value_unsafe();
@@ -77,14 +84,16 @@ ValResultMatch<EitherBytes> JsonInput::validate_bytes(bool strict) {
         }
     }
     
-    return ValError::line_error(PydanticKnownError::bytes_type(), Location(), as_error_value().repr);
+    return ValError::line_error(PydanticKnownError::bytes_type(),
+                               Location(), as_error_value().repr);
 }
 
-ValResultMatch<bool> JsonInput::validate_bool(bool strict) {
+ValResult<ValMatch<bool>> JsonInput::validate_bool(bool strict) const {
     if (element_.type() == simdjson::dom::element_type::BOOL) {
         return ValMatch<bool>::exact(element_.get_bool().value_unsafe());
     }
     
+    // Lax mode - coerce from strings/ints
     if (!strict) {
         if (element_.type() == simdjson::dom::element_type::INT64) {
             int64_t i = element_.get_int64().value_unsafe();
@@ -104,10 +113,11 @@ ValResultMatch<bool> JsonInput::validate_bool(bool strict) {
         }
     }
     
-    return ValError::line_error(PydanticKnownError::bool_type(), Location(), as_error_value().repr);
+    return ValError::line_error(PydanticKnownError::bool_type(),
+                               Location(), as_error_value().repr);
 }
 
-ValResultMatch<EitherInt> JsonInput::validate_int(bool strict) {
+ValResult<ValMatch<EitherInt>> JsonInput::validate_int(bool strict) const {
     if (element_.type() == simdjson::dom::element_type::INT64) {
         return ValMatch<EitherInt>::exact(EitherInt(element_.get_int64().value_unsafe()));
     }
@@ -115,6 +125,7 @@ ValResultMatch<EitherInt> JsonInput::validate_int(bool strict) {
         return ValMatch<EitherInt>::exact(EitherInt(element_.get_uint64().value_unsafe()));
     }
     
+    // Lax mode - coerce from float/string
     if (!strict) {
         if (element_.type() == simdjson::dom::element_type::DOUBLE) {
             double d = element_.get_double().value_unsafe();
@@ -136,14 +147,16 @@ ValResultMatch<EitherInt> JsonInput::validate_int(bool strict) {
         }
     }
     
-    return ValError::line_error(PydanticKnownError::int_type(), Location(), as_error_value().repr);
+    return ValError::line_error(PydanticKnownError::int_type(),
+                               Location(), as_error_value().repr);
 }
 
-ValResultMatch<EitherFloat> JsonInput::validate_float(bool strict) {
+ValResult<ValMatch<EitherFloat>> JsonInput::validate_float(bool strict) const {
     if (element_.type() == simdjson::dom::element_type::DOUBLE) {
         return ValMatch<EitherFloat>::exact(EitherFloat(element_.get_double().value_unsafe()));
     }
     
+    // Ints are valid floats
     if (element_.type() == simdjson::dom::element_type::INT64) {
         double d = static_cast<double>(element_.get_int64().value_unsafe());
         if (strict) {
@@ -159,6 +172,7 @@ ValResultMatch<EitherFloat> JsonInput::validate_float(bool strict) {
         return ValMatch<EitherFloat>::lax(EitherFloat(d));
     }
     
+    // Lax mode - string coercion
     if (!strict) {
         if (element_.type() == simdjson::dom::element_type::STRING) {
             auto str = std::string(element_.get_string().value_unsafe());
@@ -169,57 +183,60 @@ ValResultMatch<EitherFloat> JsonInput::validate_float(bool strict) {
         }
     }
     
-    return ValError::line_error(PydanticKnownError::float_type(), Location(), as_error_value().repr);
+    return ValError::line_error(PydanticKnownError::float_type(),
+                               Location(), as_error_value().repr);
 }
 
-ValResult<std::unique_ptr<ValidatedDict>> JsonInput::validate_dict(bool /*strict*/) {
+ValResult<std::unique_ptr<ValidatedDict>> JsonInput::validate_dict(bool strict) const {
     if (element_.type() == simdjson::dom::element_type::OBJECT) {
         auto obj = element_.get_object();
         if (!obj.error()) {
-            std::unique_ptr<ValidatedDict> result = std::make_unique<JsonValidatedDict>(obj.value_unsafe());
-            return result;
+            return ValResult<std::unique_ptr<ValidatedDict>>(
+                std::unique_ptr<ValidatedDict>(std::make_unique<JsonValidatedDict>(obj.value_unsafe()).release()));
         }
     }
     
-    return ValError::line_error(PydanticKnownError::dict_type(), Location(), as_error_value().repr);
+    return ValError::line_error(PydanticKnownError::dict_type(),
+                               Location(), as_error_value().repr);
 }
 
-ValResultMatch<std::unique_ptr<ValidatedList>> JsonInput::validate_list(bool strict) {
+ValResult<ValMatch<std::unique_ptr<ValidatedList>>> JsonInput::validate_list(bool strict) const {
     if (element_.type() == simdjson::dom::element_type::ARRAY) {
         auto arr = element_.get_array();
         if (!arr.error()) {
-            return ValMatch<std::unique_ptr<ValidatedList>>::exact(std::make_unique<JsonValidatedList>(arr.value_unsafe()));
+            return ValMatch<std::unique_ptr<ValidatedList>>::exact(
+                std::make_unique<JsonValidatedList>(arr.value_unsafe()));
         }
     }
     
-    return ValError::line_error(PydanticKnownError::list_type(), Location(), as_error_value().repr);
+    return ValError::line_error(PydanticKnownError::list_type(),
+                               Location(), as_error_value().repr);
 }
 
-ValResultMatch<std::unique_ptr<ValidatedTuple>> JsonInput::validate_tuple(bool strict) {
+ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> JsonInput::validate_tuple(bool strict) const {
+    // JSON doesn't distinguish tuples - treat arrays as tuples in lax mode
     if (element_.type() == simdjson::dom::element_type::ARRAY) {
         auto arr = element_.get_array();
         if (!arr.error()) {
-            if (strict) {
-                return ValMatch<std::unique_ptr<ValidatedTuple>>::exact(std::make_unique<JsonValidatedTuple>(arr.value_unsafe()));
-            }
-            return ValMatch<std::unique_ptr<ValidatedTuple>>::lax(std::make_unique<JsonValidatedTuple>(arr.value_unsafe()));
+            return ValMatch<std::unique_ptr<ValidatedTuple>>::lax(
+                std::make_unique<JsonValidatedTuple>(arr.value_unsafe()));
         }
     }
     
-    return ValError::line_error(PydanticKnownError::tuple_type(), Location(), as_error_value().repr);
+    return ValError::line_error(PydanticKnownError::tuple_type(),
+                               Location(), as_error_value().repr);
 }
 
-// JsonValidatedDict implementation - entries() only (size/empty are inline in header)
+// JsonValidatedDict implementation
 std::vector<ValidatedDict::Entry> JsonValidatedDict::entries() const {
     std::vector<Entry> result;
-    for (auto [key, value] : obj_) {
+    for (auto& [key, value] : obj_) {
         Entry e;
         e.key = std::string(key);
+        std::ostringstream oss;
         auto type = value.type();
         if (type == simdjson::dom::element_type::STRING) {
             e.value_repr = "'" + std::string(value.get_string().value_unsafe()) + "'";
-        } else if (type == simdjson::dom::element_type::INT64) {
-            e.value_repr = std::to_string(value.get_int64().value_unsafe());
         } else {
             e.value_repr = "...";
         }
@@ -230,15 +247,17 @@ std::vector<ValidatedDict::Entry> JsonValidatedDict::entries() const {
 
 std::vector<std::string> JsonValidatedDict::keys() const {
     std::vector<std::string> result;
-    for (auto& [k, _] : obj_) {
-        result.push_back(std::string(k));
+    for (auto& [key, _] : obj_) {
+        result.push_back(std::string(key));
     }
     return result;
 }
 
 bool JsonValidatedDict::has_key(const std::string& key) const {
     for (auto& [k, _] : obj_) {
-        if (std::string(k) == key) return true;
+        if (std::string(k) == key) {
+            return true;
+        }
     }
     return false;
 }
@@ -248,6 +267,7 @@ std::optional<ValidatedDict::Entry> JsonValidatedDict::get(const std::string& ke
         if (std::string(k) == key) {
             Entry e;
             e.key = key;
+            std::ostringstream oss;
             auto type = value.type();
             if (type == simdjson::dom::element_type::STRING) {
                 e.value_repr = "'" + std::string(value.get_string().value_unsafe()) + "'";
@@ -260,18 +280,17 @@ std::optional<ValidatedDict::Entry> JsonValidatedDict::get(const std::string& ke
     return std::nullopt;
 }
 
-// JsonValidatedList implementation - entries() only (size/empty are inline in header)
+// JsonValidatedList implementation
 std::vector<ValidatedList::Entry> JsonValidatedList::entries() const {
     std::vector<Entry> result;
     size_t idx = 0;
-    for (auto item : arr_) {
+    for (const auto& item : arr_) {
         Entry e;
         e.index = idx++;
+        std::ostringstream oss;
         auto type = item.type();
         if (type == simdjson::dom::element_type::STRING) {
             e.value_repr = "'" + std::string(item.get_string().value_unsafe()) + "'";
-        } else if (type == simdjson::dom::element_type::INT64) {
-            e.value_repr = std::to_string(item.get_int64().value_unsafe());
         } else {
             e.value_repr = "...";
         }
@@ -284,20 +303,36 @@ std::vector<ValidatedList::Entry> JsonValidatedList::entries() const {
 std::vector<ValidatedList::Entry> JsonValidatedTuple::entries() const {
     std::vector<Entry> result;
     size_t idx = 0;
-    for (auto item : arr_) {
+    for (const auto& item : arr_) {
         Entry e;
         e.index = idx++;
+        std::ostringstream oss;
         auto type = item.type();
         if (type == simdjson::dom::element_type::STRING) {
             e.value_repr = "'" + std::string(item.get_string().value_unsafe()) + "'";
-        } else if (type == simdjson::dom::element_type::INT64) {
-            e.value_repr = std::to_string(item.get_int64().value_unsafe());
         } else {
             e.value_repr = "...";
         }
         result.push_back(e);
     }
     return result;
+}
+
+// JSON parsing function
+ValResult<std::unique_ptr<JsonInput>> parse_json(std::string_view json_str) {
+    auto parser = std::make_unique<simdjson::dom::parser>();
+    auto result = parser->parse(json_str);
+    if (result.error()) {
+        return ValError::line_error(
+            ErrorType(ErrorType::Kind::CustomError),
+            Location(),
+            std::string(json_str.substr(0, std::min(json_str.size(), size_t(50))))
+        );
+    }
+    // Create JsonInput with the parser
+    auto input = std::make_unique<JsonInput>(result.value());
+    input->parser_ = std::move(parser);
+    return input;
 }
 
 } // namespace pydantic_core

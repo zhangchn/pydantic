@@ -39,7 +39,7 @@ set(CORE_SOURCES
     src/errors/error_types.cpp
     src/recursion_guard.cpp
     src/validation_state.cpp
-    src/validators/mod.cpp
+    src/validator.cpp
     src/input/json_input.cpp
     src/input/string_input.cpp
     src/main_module.cpp
@@ -91,7 +91,7 @@ add_executable(test_validators tests/test_validators.cpp
     src/errors/error_types.cpp
     src/recursion_guard.cpp
     src/validation_state.cpp
-    src/validators/mod.cpp
+    src/validator.cpp
     src/input/json_input.cpp
     src/input/string_input.cpp
 )

@@ -26,25 +26,35 @@ bool StringInput::is_none() const {
     return false;
 }
 
-ValResultMatch<EitherString> StringInput::validate_str(bool strict, bool coerce_numbers) {
+ValResult<ValMatch<EitherString>> StringInput::validate_str(bool strict, bool coerce_numbers) const {
     if (single_value_) {
+        // String input is always a string (exact match)
         return ValMatch<EitherString>::exact(EitherString(*single_value_));
     }
-    return ValError::line_error(PydanticKnownError::string_type(), Location(), as_error_value().repr);
+    
+    // Mapping is not a string
+    return ValError::line_error(PydanticKnownError::string_type(),
+                               Location(), as_error_value().repr);
 }
 
-ValResultMatch<EitherBytes> StringInput::validate_bytes(bool strict) {
-    if (single_value_ && !strict) {
-        return ValMatch<EitherBytes>::lax(EitherBytes(std::string_view(*single_value_)));
+ValResult<ValMatch<EitherBytes>> StringInput::validate_bytes(bool strict) const {
+    if (single_value_) {
+        // Treat string as bytes in lax mode
+        if (!strict) {
+            return ValMatch<EitherBytes>::lax(EitherBytes(std::string_view(*single_value_)));
+        }
     }
-    return ValError::line_error(PydanticKnownError::bytes_type(), Location(), as_error_value().repr);
+    
+    return ValError::line_error(PydanticKnownError::bytes_type(),
+                               Location(), as_error_value().repr);
 }
 
-ValResultMatch<bool> StringInput::validate_bool(bool strict) {
+ValResult<ValMatch<bool>> StringInput::validate_bool(bool strict) const {
     if (single_value_) {
         std::string v = *single_value_;
         std::transform(v.begin(), v.end(), v.begin(), ::tolower);
         
+        // Check boolean strings
         if (v == "true" || v == "1" || v == "on" || v == "yes") {
             return ValMatch<bool>::lax(true);
         }
@@ -52,23 +62,28 @@ ValResultMatch<bool> StringInput::validate_bool(bool strict) {
             return ValMatch<bool>::lax(false);
         }
     }
-    return ValError::line_error(PydanticKnownError::bool_type(), Location(), as_error_value().repr);
+    
+    return ValError::line_error(PydanticKnownError::bool_type(),
+                               Location(), as_error_value().repr);
 }
 
-ValResultMatch<EitherInt> StringInput::validate_int(bool strict) {
+ValResult<ValMatch<EitherInt>> StringInput::validate_int(bool strict) const {
     if (single_value_) {
         std::string v = *single_value_;
         try {
+            // Try parsing as integer
             if (v.find('.') == std::string::npos) {
                 int64_t i = std::stoll(v);
                 return ValMatch<EitherInt>::lax(EitherInt(i));
             }
         } catch (...) {}
     }
-    return ValError::line_error(PydanticKnownError::int_type(), Location(), as_error_value().repr);
+    
+    return ValError::line_error(PydanticKnownError::int_type(),
+                               Location(), as_error_value().repr);
 }
 
-ValResultMatch<EitherFloat> StringInput::validate_float(bool strict) {
+ValResult<ValMatch<EitherFloat>> StringInput::validate_float(bool strict) const {
     if (single_value_) {
         std::string v = *single_value_;
         try {
@@ -76,23 +91,31 @@ ValResultMatch<EitherFloat> StringInput::validate_float(bool strict) {
             return ValMatch<EitherFloat>::lax(EitherFloat(d));
         } catch (...) {}
     }
-    return ValError::line_error(PydanticKnownError::float_type(), Location(), as_error_value().repr);
+    
+    return ValError::line_error(PydanticKnownError::float_type(),
+                               Location(), as_error_value().repr);
 }
 
-ValResult<std::unique_ptr<ValidatedDict>> StringInput::validate_dict(bool /*strict*/) {
+ValResult<std::unique_ptr<ValidatedDict>> StringInput::validate_dict(bool strict) const {
     if (is_mapping()) {
-        std::unique_ptr<ValidatedDict> result = std::make_unique<StringValidatedDict>(mapping_);
-        return result;
+        return ValResult<std::unique_ptr<ValidatedDict>>(
+            std::unique_ptr<ValidatedDict>(std::make_unique<StringValidatedDict>(mapping_).release()));
     }
     
-    return ValError::line_error(PydanticKnownError::dict_type(), Location(), as_error_value().repr);
-}
-ValResultMatch<std::unique_ptr<ValidatedList>> StringInput::validate_list(bool strict) {
-    return ValError::line_error(PydanticKnownError::list_type(), Location(), as_error_value().repr);
+    return ValError::line_error(PydanticKnownError::dict_type(),
+                               Location(), as_error_value().repr);
 }
 
-ValResultMatch<std::unique_ptr<ValidatedTuple>> StringInput::validate_tuple(bool strict) {
-    return ValError::line_error(PydanticKnownError::tuple_type(), Location(), as_error_value().repr);
+ValResult<ValMatch<std::unique_ptr<ValidatedList>>> StringInput::validate_list(bool strict) const {
+    // String input can't be a list
+    return ValError::line_error(PydanticKnownError::list_type(),
+                               Location(), as_error_value().repr);
+}
+
+ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> StringInput::validate_tuple(bool strict) const {
+    // String input can't be a tuple
+    return ValError::line_error(PydanticKnownError::tuple_type(),
+                               Location(), as_error_value().repr);
 }
 
 // StringValidatedDict implementation

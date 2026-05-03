@@ -19,21 +19,24 @@ public:
     InputValue as_error_value() const override;
     bool is_none() const override;
     
-    ValResult<ValMatch<EitherString>> validate_str(bool strict, bool coerce_numbers = false) override;
-    ValResult<ValMatch<EitherBytes>> validate_bytes(bool strict) override;
-    ValResult<ValMatch<bool>> validate_bool(bool strict) override;
-    ValResult<ValMatch<EitherInt>> validate_int(bool strict) override;
-    ValResult<ValMatch<EitherFloat>> validate_float(bool strict) override;
+    ValResult<ValMatch<EitherString>> validate_str(bool strict, bool coerce_numbers = false) const override;
+    ValResult<ValMatch<EitherBytes>> validate_bytes(bool strict) const override;
+    ValResult<ValMatch<bool>> validate_bool(bool strict) const override;
+    ValResult<ValMatch<EitherInt>> validate_int(bool strict) const override;
+    ValResult<ValMatch<EitherFloat>> validate_float(bool strict) const override;
     
-    ValResult<std::unique_ptr<ValidatedDict>> validate_dict(bool strict) override;
-    ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_list(bool strict) override;
-    ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> validate_tuple(bool strict) override;
+    ValResult<std::unique_ptr<ValidatedDict>> validate_dict(bool strict) const override;
+    ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_list(bool strict) const override;
+    ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> validate_tuple(bool strict) const override;
     
     const simdjson::dom::element& json_element() const { return element_; }
     
 private:
     simdjson::dom::element element_;
-    bool owned_ = false;
+    std::unique_ptr<simdjson::dom::parser> parser_;  // Parser must stay alive
+    
+    // Friend declaration for parse_json
+    friend ValResult<std::unique_ptr<JsonInput>> parse_json(std::string_view json_str);
 };
 
 // JSON validated dict

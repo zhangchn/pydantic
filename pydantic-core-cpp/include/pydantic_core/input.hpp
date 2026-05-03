@@ -159,17 +159,17 @@ public:
     virtual InputValue as_error_value() const = 0;
     virtual bool is_none() const { return false; }
     
-    // Type validation methods
-    virtual ValResult<ValMatch<EitherString>> validate_str(bool strict, bool coerce_numbers = false) = 0;
-    virtual ValResult<ValMatch<EitherBytes>> validate_bytes(bool strict) = 0;
-    virtual ValResult<ValMatch<bool>> validate_bool(bool strict) = 0;
-    virtual ValResult<ValMatch<EitherInt>> validate_int(bool strict) = 0;
-    virtual ValResult<ValMatch<EitherFloat>> validate_float(bool strict) = 0;
+    // Type validation methods - return ValResult<ValMatch<T>>
+    virtual ValResult<ValMatch<EitherString>> validate_str(bool strict, bool coerce_numbers = false) const = 0;
+    virtual ValResult<ValMatch<EitherBytes>> validate_bytes(bool strict) const = 0;
+    virtual ValResult<ValMatch<bool>> validate_bool(bool strict) const = 0;
+    virtual ValResult<ValMatch<EitherInt>> validate_int(bool strict) const = 0;
+    virtual ValResult<ValMatch<EitherFloat>> validate_float(bool strict) const = 0;
     
     // Container validation
-    virtual ValResult<std::unique_ptr<ValidatedDict>> validate_dict(bool strict) = 0;
-    virtual ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_list(bool strict) = 0;
-    virtual ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> validate_tuple(bool strict) = 0;
+    virtual ValResult<std::unique_ptr<ValidatedDict>> validate_dict(bool strict) const = 0;
+    virtual ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_list(bool strict) const = 0;
+    virtual ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> validate_tuple(bool strict) const = 0;
 };
 
 // Helper to create type error
