@@ -16,6 +16,7 @@ public:
     enum class Kind {
         // Type errors - wrong type provided
         NoneRequired,
+        NoneType,
         BoolType,
         IntType,
         FloatType,
@@ -26,17 +27,48 @@ public:
         TupleType,
         SetType,
         FrozenSetType,
+        UnionType,
         
-        // Value errors - value out of bounds
-        StringTooShort,
-        StringTooLong,
-        
+        // Integer constraint errors
+        IntMultipleOf,
         IntGreaterThan,
         IntLessThan,
+        IntGreaterThanEqual,
+        IntLessThanEqual,
         
+        // Float constraint errors
+        FloatMultipleOf,
         FloatGreaterThan,
         FloatLessThan,
+        FloatGreaterThanEqual,
+        FloatLessThanEqual,
         
+        // String constraint errors
+        StringTooShort,
+        StringTooLong,
+        StringPatternMismatch,
+        
+        // Bytes constraint errors
+        BytesTooShort,
+        BytesTooLong,
+        
+        // List/Set constraint errors
+        ListTooShort,
+        ListTooLong,
+        SetTooShort,
+        SetTooLong,
+        
+        // Dict constraint errors
+        DictTooShort,
+        DictTooLong,
+        
+        // Tuple errors
+        TupleLengthMismatch,
+        
+        // Literal errors
+        LiteralMismatch,
+        
+        // Dict field errors
         DictKeysMissing,
         DictKeysUnexpected,
         
@@ -46,58 +78,39 @@ public:
         
         // Other errors
         JsonInvalid,
-        CustomError
+        CustomError,
+        RecursionError
     };
     
+    // Constructor for simple error types
     explicit ErrorType(Kind kind) : kind_(kind) {}
     
-    // Error types with context
-    static ErrorType string_too_short(size_t min_length) {
-        ErrorType err(Kind::StringTooShort);
-        err.context_["min_length"] = std::to_string(min_length);
-        return err;
+    // Constructor with numeric context (for constraints)
+    ErrorType(Kind kind, int64_t numeric_value) : kind_(kind) {
+        context_["value"] = std::to_string(numeric_value);
     }
     
-    static ErrorType string_too_long(size_t max_length) {
-        ErrorType err(Kind::StringTooLong);
-        err.context_["max_length"] = std::to_string(max_length);
-        return err;
+    // Constructor with two numeric values (for tuple mismatch)
+    ErrorType(Kind kind, int64_t val1, int64_t val2) : kind_(kind) {
+        context_["expected"] = std::to_string(val1);
+        context_["actual"] = std::to_string(val2);
     }
     
-    static ErrorType int_greater_than(int64_t gt) {
-        ErrorType err(Kind::IntGreaterThan);
-        err.context_["gt"] = std::to_string(gt);
-        return err;
-    }
-    
-    static ErrorType int_less_than(int64_t lt) {
-        ErrorType err(Kind::IntLessThan);
-        err.context_["lt"] = std::to_string(lt);
-        return err;
-    }
-    
-    static ErrorType missing_field(const std::string& field_name) {
-        ErrorType err(Kind::Missing);
-        err.context_["field_name"] = field_name;
-        return err;
-    }
-    
-    static ErrorType field_required() {
-        return ErrorType(Kind::FieldRequired);
-    }
-    
-    static ErrorType custom(const std::string& message, const std::string& error_type) {
-        ErrorType err(Kind::CustomError);
-        err.context_["message"] = message;
-        err.context_["error_type"] = error_type;
-        return err;
+    // Constructor with double context (for float constraints)
+    ErrorType(Kind kind, double numeric_value) : kind_(kind) {
+        context_["value"] = std::to_string(numeric_value);
     }
     
     Kind kind() const { return kind_; }
     const std::unordered_map<std::string, std::string>& context() const { return context_; }
     
+    // Get type name for error
     std::string type_name() const;
+    
+    // Get message template
     std::string message_template() const;
+    
+    // Get rendered message
     std::string message() const;
     
 private:
@@ -105,10 +118,11 @@ private:
     std::unordered_map<std::string, std::string> context_;
 };
 
-// PydanticKnownError - predefined error types
+// PydanticKnownError - predefined error types (factory methods)
 class PydanticKnownError {
 public:
     static ErrorType none_required() { return ErrorType(ErrorType::Kind::NoneRequired); }
+    static ErrorType none_type() { return ErrorType(ErrorType::Kind::NoneType); }
     static ErrorType bool_type() { return ErrorType(ErrorType::Kind::BoolType); }
     static ErrorType int_type() { return ErrorType(ErrorType::Kind::IntType); }
     static ErrorType float_type() { return ErrorType(ErrorType::Kind::FloatType); }
@@ -116,17 +130,10 @@ public:
     static ErrorType bytes_type() { return ErrorType(ErrorType::Kind::BytesType); }
     static ErrorType dict_type() { return ErrorType(ErrorType::Kind::DictType); }
     static ErrorType list_type() { return ErrorType(ErrorType::Kind::ListType); }
-};
-
-// PydanticCustomError - user-defined error
-class PydanticCustomError {
-public:
-    PydanticCustomError(const std::string& error_type, const std::string& message_template)
-        : error_type_(error_type), message_template_(message_template) {}
-    
-private:
-    std::string error_type_;
-    std::string message_template_;
+    static ErrorType tuple_type() { return ErrorType(ErrorType::Kind::TupleType); }
+    static ErrorType set_type() { return ErrorType(ErrorType::Kind::SetType); }
+    static ErrorType frozenset_type() { return ErrorType(ErrorType::Kind::FrozenSetType); }
+    static ErrorType union_type() { return ErrorType(ErrorType::Kind::UnionType); }
 };
 
 // PydanticOmit - signal to omit field from output
@@ -135,7 +142,7 @@ public:
     const char* what() const noexcept override { return "PydanticOmit"; }
 };
 
-// PydanticUseDefault - signal to use default value
+// PydanticUseDefault - signal to use default value  
 class PydanticUseDefault : public std::exception {
 public:
     const char* what() const noexcept override { return "PydanticUseDefault"; }

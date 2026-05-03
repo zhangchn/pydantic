@@ -104,6 +104,11 @@ public:
     void push_loc(const std::string& key) { location_.push(key); }
     void pop_loc() { location_.pop(); }
     
+    // Convenience methods for validators
+    void push_index(size_t index) { location_.push(static_cast<int64_t>(index)); }
+    void push_key(const std::string& key) { location_.push(key); }
+    void pop_location() { location_.pop(); }
+    
     // Create child state for nested validation
     ValidationState child(int64_t index) {
         ValidationState child(config_);

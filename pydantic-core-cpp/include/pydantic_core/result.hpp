@@ -134,4 +134,8 @@ private:
     Exactness exactness_;
 };
 
+// Convenience typedef for ValResult<ValMatch<T>>
+template<typename T>
+using ValResultMatch = ValResult<ValMatch<T>>;
+
 } // namespace pydantic_core
