@@ -17,17 +17,17 @@ JsonInput::JsonInput(const simdjson::dom::element& element) : element_(element) 
 
 InputValue JsonInput::as_error_value() const {
     auto type = element_.type();
-    switch (type.value_unsafe()) {
+    switch (type) {
         case simdjson::dom::element_type::STRING:
-            return InputValue("'" + std::string(element_.get_string().value_unsafe()) + "'");
+            return InputValue("'" + std::string(element_.get_string().value()) + "'");
         case simdjson::dom::element_type::INT64:
-            return InputValue(std::to_string(element_.get_int64().value_unsafe()));
+            return InputValue(std::to_string(element_.get_int64().value()));
         case simdjson::dom::element_type::UINT64:
-            return InputValue(std::to_string(element_.get_uint64().value_unsafe()));
+            return InputValue(std::to_string(element_.get_uint64().value()));
         case simdjson::dom::element_type::DOUBLE:
-            return InputValue(std::to_string(element_.get_double().value_unsafe()));
+            return InputValue(std::to_string(element_.get_double().value()));
         case simdjson::dom::element_type::BOOL:
-            return InputValue(element_.get_bool().value_unsafe() ? "True" : "False");
+            return InputValue(element_.get_bool().value() ? "True" : "False");
         case simdjson::dom::element_type::NULL_VALUE:
             return InputValue("null");
         case simdjson::dom::element_type::ARRAY:
@@ -62,7 +62,7 @@ ValResultMatch<EitherString> JsonInput::validate_str(bool strict, bool coerce_nu
             return ValMatch<EitherString>::lax(EitherString(std::to_string(element_.get_double().value_unsafe())));
         }
         if (element_.type() == simdjson::dom::element_type::BOOL) {
-            return ValMatch<EitherString>::lax(EitherString(element_.get_bool().value_unsafe() ? "true" : "false"));
+            return ValMatch<EitherString>::lax(EitherString(std::string(element_.get_bool().value_unsafe() ? "true" : "false")));
         }
     }
     
@@ -172,11 +172,12 @@ ValResultMatch<EitherFloat> JsonInput::validate_float(bool strict) {
     return ValError::line_error(PydanticKnownError::float_type(), Location(), as_error_value().repr);
 }
 
-ValResult<std::unique_ptr<ValidatedDict>> JsonInput::validate_dict(bool strict) {
+ValResult<std::unique_ptr<ValidatedDict>> JsonInput::validate_dict(bool /*strict*/) {
     if (element_.type() == simdjson::dom::element_type::OBJECT) {
         auto obj = element_.get_object();
         if (!obj.error()) {
-            return std::make_unique<JsonValidatedDict>(obj.value_unsafe());
+            std::unique_ptr<ValidatedDict> result = std::make_unique<JsonValidatedDict>(obj.value_unsafe());
+            return result;
         }
     }
     

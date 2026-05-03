@@ -17,31 +17,33 @@
 
 namespace pydantic_core {
 
+// ============================================================================
 // ValidatedValue - the validated output value
+// ============================================================================
 struct ValidatedValue {
     std::variant<
-        std::monostate,         // None/null
+        std::monostate,
         bool,
         int64_t,
         uint64_t,
         double,
         std::string,
-        std::vector<uint8_t>,   // bytes
-        std::vector<ValidatedValue>, // list
-        std::vector<std::pair<std::string, ValidatedValue>> // dict
+        std::vector<uint8_t>,
+        std::vector<ValidatedValue>,
+        std::vector<std::pair<std::string, ValidatedValue>>
     > data;
     
     ValidatedValue() : data(std::monostate{}) {}
-    ValidatedValue(std::monostate) : data(std::monostate{}) {}
-    ValidatedValue(bool b) : data(b) {}
-    ValidatedValue(int64_t i) : data(i) {}
-    ValidatedValue(uint64_t i) : data(i) {}
-    ValidatedValue(double f) : data(f) {}
-    ValidatedValue(const std::string& s) : data(s) {}
-    ValidatedValue(std::string_view s) : data(std::string(s)) {}
-    ValidatedValue(const std::vector<uint8_t>& b) : data(b) {}
-    ValidatedValue(const std::vector<ValidatedValue>& l) : data(l) {}
-    ValidatedValue(const std::vector<std::pair<std::string, ValidatedValue>>& d) : data(d) {}
+    explicit ValidatedValue(std::monostate) : data(std::monostate{}) {}
+    explicit ValidatedValue(bool b) : data(b) {}
+    explicit ValidatedValue(int64_t i) : data(i) {}
+    explicit ValidatedValue(uint64_t i) : data(i) {}
+    explicit ValidatedValue(double f) : data(f) {}
+    explicit ValidatedValue(const std::string& s) : data(s) {}
+    explicit ValidatedValue(std::string_view s) : data(std::string(s)) {}
+    explicit ValidatedValue(const std::vector<uint8_t>& b) : data(b) {}
+    explicit ValidatedValue(const std::vector<ValidatedValue>& l) : data(l) {}
+    explicit ValidatedValue(const std::vector<std::pair<std::string, ValidatedValue>>& d) : data(d) {}
     
     bool is_none() const { return std::holds_alternative<std::monostate>(data); }
     bool is_bool() const { return std::holds_alternative<bool>(data); }
@@ -88,31 +90,7 @@ struct ValidatedValue {
 };
 
 // ============================================================================
-// Forward declarations
-// ============================================================================
-struct NoneValidator;
-struct BoolValidator;
-struct IntValidator;
-struct ConstrainedIntValidator;
-struct FloatValidator;
-struct ConstrainedFloatValidator;
-struct StringValidator;
-struct ConstrainedStringValidator;
-struct BytesValidator;
-struct ListValidatorPlaceholder;
-struct DictValidatorPlaceholder;
-struct SetValidatorPlaceholder;
-struct FrozenSetValidatorPlaceholder;
-struct TupleValidator;
-struct LiteralValidator;
-struct NullableValidator;
-struct UnionValidator;
-
-// Forward declaration for CombinedValidator (defined later)
-// Note: We use a simpler approach - define the variant after all structs are complete
-
-// ============================================================================
-// Simple validators (don't need CombinedValidator)
+// Simple validators (don't reference CombinedValidator)
 // ============================================================================
 
 struct NoneValidator {
@@ -169,8 +147,7 @@ struct ConstrainedIntValidator {
         auto result = input.validate_int(state.strict_or(strict));
         if (result.is_err()) return result.error();
         
-        EitherInt either_int = result.value().value();
-        auto i64_val = either_int.as_i64();
+        auto i64_val = result.value().value().as_i64();
         if (!i64_val) {
             return ValError::line_error(ErrorType(ErrorType::Kind::IntType), Location(), "integer too large");
         }
@@ -320,46 +297,8 @@ struct BytesValidator {
     std::string name() const { return "bytes"; }
 };
 
-struct TupleValidator {
-    bool strict = false;
-    std::vector<std::shared_ptr<CombinedValidator>> item_validators;
-    
-    ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
-        auto result = input.validate_tuple(state.strict_or(strict));
-        if (result.is_err()) return result.error();
-        
-        std::unique_ptr<ValidatedTuple> validated_tuple = std::move(result.value().value());
-        
-        size_t expected_len = item_validators.size();
-        size_t actual_len = validated_tuple->size();
-        
-        if (actual_len != expected_len) {
-            return ValError::line_error(
-                ErrorType(ErrorType::Kind::TupleLengthMismatch, static_cast<int64_t>(expected_len), static_cast<int64_t>(actual_len)),
-                Location(), input.as_error_value().repr
-            );
-        }
-        
-        return ValidatedValue(std::vector<ValidatedValue>{});
-    }
-    std::string name() const { return "tuple"; }
-};
-
-struct LiteralValidator {
-    std::vector<ValidatedValue> allowed_values;
-    
-    ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
-        auto input_repr = input.as_error_value().repr;
-        for (const auto& allowed : allowed_values) {
-            if (allowed.repr() == input_repr) return allowed;
-        }
-        return ValError::line_error(ErrorType(ErrorType::Kind::LiteralMismatch), Location(), input.as_error_value().repr);
-    }
-    std::string name() const { return "literal"; }
-};
-
-// Placeholder for complex validators - will be defined properly later
-struct ListValidatorPlaceholder { 
+// Placeholder validators for containers (minimal implementation)
+struct ListValidatorPlaceholder {
     bool strict = false;
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
         auto result = input.validate_list(state.strict_or(strict));
@@ -368,7 +307,8 @@ struct ListValidatorPlaceholder {
     }
     std::string name() const { return "list"; }
 };
-struct DictValidatorPlaceholder { 
+
+struct DictValidatorPlaceholder {
     bool strict = false;
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
         auto result = input.validate_dict(state.strict_or(strict));
@@ -377,7 +317,8 @@ struct DictValidatorPlaceholder {
     }
     std::string name() const { return "dict"; }
 };
-struct SetValidatorPlaceholder { 
+
+struct SetValidatorPlaceholder {
     bool strict = false;
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
         auto result = input.validate_list(state.strict_or(strict));
@@ -386,7 +327,8 @@ struct SetValidatorPlaceholder {
     }
     std::string name() const { return "set"; }
 };
-struct FrozenSetValidatorPlaceholder { 
+
+struct FrozenSetValidatorPlaceholder {
     bool strict = false;
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
         auto result = input.validate_list(state.strict_or(strict));
@@ -396,25 +338,76 @@ struct FrozenSetValidatorPlaceholder {
     std::string name() const { return "frozenset"; }
 };
 
-// Nullable and Union need forward declaration of validate_combined
+struct TupleValidator {
+    bool strict = false;
+    
+    ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
+        auto result = input.validate_tuple(state.strict_or(strict));
+        if (result.is_err()) return result.error();
+        return ValidatedValue(std::vector<ValidatedValue>{});
+    }
+    std::string name() const { return "tuple"; }
+};
+
+struct LiteralValidator {
+    std::vector<ValidatedValue> allowed_values;
+    
+    ValResult<ValidatedValue> validate(Input& input, ValidationState& /*state*/) const {
+        auto input_repr = input.as_error_value().repr;
+        for (const auto& allowed : allowed_values) {
+            if (allowed.repr() == input_repr) return allowed;
+        }
+        return ValError::line_error(ErrorType(ErrorType::Kind::LiteralMismatch), Location(), input.as_error_value().repr);
+    }
+    std::string name() const { return "literal"; }
+};
+
+// ============================================================================
+// CombinedValidatorFinal - the variant type (defined before validators that use it)
+// ============================================================================
+using CombinedValidatorFinal = std::variant<
+    NoneValidator,
+    BoolValidator,
+    IntValidator,
+    ConstrainedIntValidator,
+    FloatValidator,
+    ConstrainedFloatValidator,
+    StringValidator,
+    ConstrainedStringValidator,
+    BytesValidator,
+    ListValidatorPlaceholder,
+    DictValidatorPlaceholder,
+    SetValidatorPlaceholder,
+    FrozenSetValidatorPlaceholder,
+    TupleValidator,
+    LiteralValidator
+>;
+
+// ============================================================================
+// NullableValidator and UnionValidator (use CombinedValidatorFinal)
+// ============================================================================
+
+// Forward declaration of visitor
+struct ValidateVisitor;
+
 struct NullableValidator {
-    std::shared_ptr<CombinedValidator> inner_validator;
+    std::shared_ptr<CombinedValidatorFinal> inner_validator;
     
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const;
     std::string name() const { return "nullable"; }
 };
 
 struct UnionValidator {
-    std::vector<std::shared_ptr<CombinedValidator>> validators;
+    std::shared_ptr<CombinedValidatorFinal> validators;  // Single validator for now (placeholder)
     
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const;
     std::string name() const { return "union"; }
 };
 
 // ============================================================================
-// Now define the real CombinedValidator
+// Final CombinedValidator with Nullable and Union
 // ============================================================================
-using CombinedValidatorFinal = std::variant<
+using CombinedValidator = std::variant<
     NoneValidator,
     BoolValidator,
     IntValidator,
@@ -434,7 +427,9 @@ using CombinedValidatorFinal = std::variant<
     UnionValidator
 >;
 
-// Visitor
+// ============================================================================
+// Visitor and helper functions
+// ============================================================================
 struct ValidateVisitor {
     Input& input;
     ValidationState& state;
@@ -446,30 +441,27 @@ struct ValidateVisitor {
 };
 
 inline ValResult<ValidatedValue> validate_combined(
-    const CombinedValidatorFinal& validator,
+    const CombinedValidator& validator,
     Input& input,
     ValidationState& state
 ) {
     return std::visit(ValidateVisitor{input, state}, validator);
 }
 
-// Now implement NullableValidator and UnionValidator
+// Inline implementations for NullableValidator and UnionValidator
 inline ValResult<ValidatedValue> NullableValidator::validate(Input& input, ValidationState& state) const {
     if (input.is_none()) return ValidatedValue(std::monostate{});
     if (inner_validator) {
         return std::visit(ValidateVisitor{input, state}, *inner_validator);
     }
-    return ValidatedValue(std::monostate{});  // Placeholder
+    return ValidatedValue(std::monostate{});  // No inner validator - accept any non-None
 }
 
 inline ValResult<ValidatedValue> UnionValidator::validate(Input& input, ValidationState& state) const {
-    std::vector<ValError> errors;
-    for (const auto& validator : validators) {
-        auto result = std::visit(ValidateVisitor{input, state}, *validator);
-        if (result.is_ok()) return result.value();
-        errors.push_back(result.error());
+    // Placeholder: just try the single validator
+    if (validators) {
+        return std::visit(ValidateVisitor{input, state}, *validators);
     }
-    if (!errors.empty()) return errors[0];
     return ValError::line_error(ErrorType(ErrorType::Kind::UnionType), Location(), input.as_error_value().repr);
 }
 

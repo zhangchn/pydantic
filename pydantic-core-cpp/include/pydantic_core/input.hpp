@@ -8,6 +8,7 @@
 #include "types.hpp"
 #include "error_types.hpp"
 #include "errors.hpp"
+#include "result.hpp"
 
 namespace pydantic_core {
 
