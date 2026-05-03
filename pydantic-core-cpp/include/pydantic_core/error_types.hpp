@@ -76,6 +76,11 @@ public:
         FieldRequired,
         Missing,
         
+        // Date/Time errors
+        DateType,
+        TimeType,
+        DateTimeType,
+        
         // Other errors
         JsonInvalid,
         CustomError,

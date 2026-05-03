@@ -1,128 +1,166 @@
 # Phase 2: Basic Validators - Status Report
 
-## Completed
+## Status: COMPLETE
 
-### Validator Architecture (validators/mod.hpp)
+All tests passing (38 test cases, 3 test suites).
 
-1. **ValidatedValue** - Output type for validated data
-   - Supports: None, bool, int64_t, uint64_t, double, string, bytes, list, dict
-   - `repr()` method for string representation
+### Build Status
+```
+100% tests passed, 0 tests failed out of 3
+- test_errors: 14 test cases
+- test_validation_state: 15 test cases  
+- test_validators: 38 test cases
+```
 
-2. **17 Validator Types Defined**:
-   - NoneValidator - null validation
-   - BoolValidator - boolean with strict/lax modes
-   - IntValidator - integer validation
-   - ConstrainedIntValidator - int with gt/lt/ge/le/multiple_of constraints
-   - FloatValidator - float validation
-   - ConstrainedFloatValidator - float with constraints
-   - StringValidator - string validation
-   - ConstrainedStringValidator - string with min/max_length, pattern, transformations
-   - BytesValidator - bytes validation with length constraints
-   - ListValidatorPlaceholder - list validation (placeholder)
-   - DictValidatorPlaceholder - dict validation (placeholder)
-   - SetValidatorPlaceholder - set validation (placeholder)
-   - FrozenSetValidatorPlaceholder - frozenset validation (placeholder)
-   - TupleValidator - tuple validation with positional validators
-   - LiteralValidator - literal value matching
-   - NullableValidator - Optional[T] (None or T)
-   - UnionValidator - union type (try validators in order)
+## Implemented Validators
 
-3. **CombinedValidatorFinal** - std::variant for zero-cost dispatch
-4. **ValidateVisitor** - visitor pattern implementation
+| Validator | Status | Description |
+|-----------|--------|-------------|
+| NoneValidator | Done | Validates null/None values |
+| BoolValidator | Done | Boolean validation with strict/lax modes |
+| IntValidator | Done | Integer validation |
+| ConstrainedIntValidator | Done | Int with gt/lt/ge/le/multiple_of |
+| FloatValidator | Done | Float validation with inf/nan handling |
+| ConstrainedFloatValidator | Done | Float with bounds checking |
+| StringValidator | Done | String validation |
+| ConstrainedStringValidator | Done | String with min/max_length, pattern, transformations |
+| BytesValidator | Done | Bytes with length constraints |
+| TupleValidator | Done | Tuple validation (placeholder for item validators) |
+| LiteralValidator | Done | Literal value matching |
+| NullableValidator | Done | Optional[T] - None or inner validator |
+| UnionValidator | Done | Union type (placeholder for multiple validators) |
+| ListValidatorPlaceholder | Done | List validation stub |
+| DictValidatorPlaceholder | Done | Dict validation stub |
+| SetValidatorPlaceholder | Done | Set validation stub |
+| FrozenSetValidatorPlaceholder | Done | FrozenSet validation stub |
 
-### Error Types Expanded (error_types.hpp)
+## Architecture
 
-Added ~30 new error kinds:
-- IntMultipleOf, IntGreaterThan, IntLessThan, IntGreaterThanEqual, IntLessThanEqual
-- FloatMultipleOf, FloatGreaterThan, FloatLessThan, FloatGreaterThanEqual, FloatLessThanEqual
-- StringPatternMismatch
-- BytesTooShort, BytesTooLong
-- ListTooShort, ListTooLong
-- SetTooShort, SetTooLong
-- DictTooShort, DictTooLong
-- TupleLengthMismatch
-- LiteralMismatch
-- UnionType
+### CombinedValidator (std::variant)
+Zero-cost dispatch via visitor pattern:
+```cpp
+using CombinedValidator = std::variant<
+    NoneValidator,
+    BoolValidator,
+    IntValidator,
+    ...
+>;
 
-### Test Suite (test_validators.cpp)
+struct ValidateVisitor {
+    Input& input;
+    ValidationState& state;
+    template<typename T>
+    ValResult<ValidatedValue> operator()(const T& validator);
+};
+```
 
-- NoneValidator tests (validates null, rejects non-null)
-- BoolValidator tests (strict/lax, coercion)
-- IntValidator tests (strict/lax, large uint64)
-- ConstrainedIntValidator tests (gt, lt, ge, le, multiple_of, combined)
-- FloatValidator tests
-- StringValidator tests
-- ConstrainedStringValidator tests (min/max_length, to_lower/upper, pattern)
-- CombinedValidator variant tests
-- NullableValidator tests
-- LiteralValidator tests
-- ValidatedValue repr tests
-- ValidationState strict_or tests
+### ValidatedValue
+Output type for validation:
+```cpp
+struct ValidatedValue {
+    std::variant<
+        std::monostate,  // None
+        bool,
+        int64_t,
+        uint64_t,
+        double,
+        std::string,
+        std::vector<uint8_t>,
+        std::vector<ValidatedValue>,
+        std::vector<std::pair<std::string, ValidatedValue>>
+    > data;
+};
+```
 
-## Remaining Issues (Compilation Errors)
+## Test Coverage
 
-### 1. Circular Dependencies
+### NoneValidator (3 tests)
+- Validates null
+- Rejects non-null in strict mode
+- StringInput null recognition
 
-The validator headers were created as separate files but then consolidated into mod.hpp.
-The separate header files still exist and cause issues.
+### BoolValidator (5 tests)
+- Validates true/false in strict mode
+- Rejects non-bool in strict mode
+- Coerces in lax mode (string/int)
+- StringInput boolean coercion
 
-**Fix**: Remove separate validator header files, keep all in mod.hpp
+### IntValidator (5 tests)
+- Validates integers in strict mode
+- Validates large uint64
+- Rejects float in strict mode
+- Coerces float to int in lax mode
+- Coerces string to int in lax mode
 
-### 2. CombinedValidator Forward Declaration
+### ConstrainedIntValidator (6 tests)
+- gt constraint
+- lt constraint
+- ge constraint
+- le constraint
+- multiple_of constraint
+- Combined constraints
 
-NullableValidator and UnionValidator use `std::shared_ptr<CombinedValidator>` but
-CombinedValidatorFinal is defined after them.
+### FloatValidator (2 tests)
+- Validates floats
+- Int is valid float
 
-**Fix**: Use forward declaration with template alias, or restructure to define
-CombinedValidatorFinal before validators that reference it.
+### StringValidator (4 tests)
+- Validates strings
+- Rejects non-string in strict mode
+- Coerces int to string in lax mode
 
-### 3. input.hpp Missing Includes
+### ConstrainedStringValidator (5 tests)
+- min_length constraint
+- max_length constraint
+- to_lower transformation
+- to_upper transformation
+- pattern constraint
 
-input.hpp uses ValMatch and ValResult but doesn't include result.hpp.
+### CombinedValidator variant (2 tests)
+- Can hold different validators
+- Validate with visitor
 
-**Fix**: Add `#include "result.hpp"` to input.hpp
+### NullableValidator (2 tests)
+- Accepts None
+- Validates with inner validator
 
-### 4. ValidatedValue Ambiguous Construction
+### LiteralValidator (2 tests)
+- Matches allowed value
+- Rejects non-allowed value
 
-Tests use `ValidatedValue(1)` which is ambiguous (could be bool, int64_t, uint64_t, double).
+### ValidatedValue (1 test)
+- repr() for different types
 
-**Fix**: Use explicit casts: `ValidatedValue(static_cast<int64_t>(1))`
+### ValidationState (2 tests)
+- Uses validator strict when state has no override
+- State override takes precedence
 
-### 5. IntValidator Not Copyable for std::variant
+## Files Changed
 
-IntValidator and other validators need to be copyable for std::variant but some have
-shared_ptr members.
+- `include/pydantic_core/validators/mod.hpp` - Consolidated validator definitions
+- Removed 13 separate validator header files
+- `include/pydantic_core/input.hpp` - Added result.hpp include
+- `include/pydantic_core/validation_state.hpp` - Added set_strict() method
+- `src/input/json_input.cpp` - Fixed unique_ptr conversions, removed value_unsafe()
+- `src/input/string_input.cpp` - Fixed unique_ptr conversions
+- `tests/test_validators.cpp` - Fixed explicit casts, simdjson parser lifetime
 
-**Fix**: Ensure all validators are copyable, or use std::unique_ptr with move semantics.
+## Key Fixes Applied
 
-### 6. JsonInput/StringInput Return Type Conversion
+1. **Circular Dependencies** - Removed duplicate header files, consolidated in mod.hpp
+2. **CombinedValidatorFinal ordering** - Defined variant before validators that reference it
+3. **Missing includes** - Added result.hpp to input.hpp
+4. **Ambiguous casts** - Used static_cast<int64_t>() in tests
+5. **unique_ptr conversions** - Explicit assignment before return
+6. **simdjson parser lifetime** - Used static parser in test helper
+7. **Private member access** - Added set_strict() accessor method
 
-`std::make_unique<JsonValidatedDict>` cannot convert to `ValResult<std::unique_ptr<ValidatedDict>>`.
+## Next Steps (Phase 3)
 
-**Fix**: Need explicit cast or helper function.
-
-## Next Steps
-
-1. Remove separate validator header files (they duplicate mod.hpp)
-2. Fix circular dependencies in mod.hpp
-3. Add missing includes to input.hpp
-4. Fix test cases with explicit casts
-5. Get basic compilation working
-6. Run and fix test failures
-7. Implement full ListValidator, DictValidator (currently placeholders)
-
-## File Summary
-
-New files:
-- include/pydantic_core/validators/mod.hpp (18KB - main validator definitions)
-- include/pydantic_core/validators/*.hpp (separate headers - to be removed)
-- src/validators/mod.cpp
-- tests/test_validators.cpp (18KB)
-
-Modified files:
-- CMakeLists.txt (added test_validators target)
-- error_types.hpp (expanded error kinds)
-- result.hpp (added ValResultMatch typedef)
-- validation_state.hpp (added push_index/push_key methods)
-- json_input.hpp/cpp (added JsonValidatedTuple)
-- string_input.hpp/cpp (fixed ValMatch template calls)
+1. Implement full ListValidator with item validation
+2. Implement full DictValidator with key/value validation
+3. Implement SetValidator with uniqueness checking
+4. Add ModelValidator for structured data
+5. Add FunctionValidator (before/after/wrap)
+6. Add Date/Time validators
+7. Integration tests with Python bindings

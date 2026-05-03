@@ -19,6 +19,9 @@ std::string ErrorType::type_name() const {
         {Kind::SetType, "set_type"},
         {Kind::FrozenSetType, "frozenset_type"},
         {Kind::UnionType, "union_type"},
+        {Kind::DateType, "date_type"},
+        {Kind::TimeType, "time_type"},
+        {Kind::DateTimeType, "datetime_type"},
         
         // Integer constraint errors
         {Kind::IntMultipleOf, "int_multiple_of"},
@@ -90,6 +93,9 @@ std::string ErrorType::message_template() const {
         {Kind::SetType, "Input should be a valid set"},
         {Kind::FrozenSetType, "Input should be a valid frozenset"},
         {Kind::UnionType, "Input should match one of the expected types"},
+        {Kind::DateType, "Input should be a valid date in YYYY-MM-DD format"},
+        {Kind::TimeType, "Input should be a valid time in HH:MM:SS format"},
+        {Kind::DateTimeType, "Input should be a valid datetime"},
         
         // Integer constraint errors
         {Kind::IntMultipleOf, "Input should be a multiple of {value}"},

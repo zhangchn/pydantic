@@ -5,6 +5,7 @@
 #include "input.hpp"
 
 namespace pydantic_core {
+
 // String input implementation
 // Used for string-based validation (URL params, query strings, etc.)
 class StringInput : public Input {
@@ -23,15 +24,15 @@ public:
     bool is_none() const override;
     
     // Type validation implementations
-    ValResultMatch<EitherString> validate_str(bool strict, bool coerce_numbers = false) override;
-    ValResultMatch<EitherBytes> validate_bytes(bool strict) override;
-    ValResultMatch<bool> validate_bool(bool strict) override;
-    ValResultMatch<EitherInt> validate_int(bool strict) override;
-    ValResultMatch<EitherFloat> validate_float(bool strict) override;
+    ValResult<ValMatch<EitherString>> validate_str(bool strict, bool coerce_numbers = false) const override;
+    ValResult<ValMatch<EitherBytes>> validate_bytes(bool strict) const override;
+    ValResult<ValMatch<bool>> validate_bool(bool strict) const override;
+    ValResult<ValMatch<EitherInt>> validate_int(bool strict) const override;
+    ValResult<ValMatch<EitherFloat>> validate_float(bool strict) const override;
     
-    ValResult<std::unique_ptr<ValidatedDict>> validate_dict(bool strict) override;
-    ValResultMatch<std::unique_ptr<ValidatedList>> validate_list(bool strict) override;
-    ValResultMatch<std::unique_ptr<ValidatedTuple>> validate_tuple(bool strict) override;
+    ValResult<std::unique_ptr<ValidatedDict>> validate_dict(bool strict) const override;
+    ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_list(bool strict) const override;
+    ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> validate_tuple(bool strict) const override;
     
     // Check if this is a single value vs mapping
     bool is_single_value() const { return single_value_.has_value(); }
