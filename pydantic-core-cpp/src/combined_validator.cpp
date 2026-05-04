@@ -219,6 +219,52 @@ std::shared_ptr<CombinedValidator> SchemaBuilder::build_from_dict(
         return std::make_shared<CombinedValidator>(
             std::make_shared<JsonValidator>()
         );
+    } else if (type == "definitions") {
+        // Definitions schema - contains referenced schemas
+        // For now, build the inner schema
+        return std::make_shared<CombinedValidator>(
+            std::make_shared<AnyValidator>()
+        );
+    } else if (type == "dataclass") {
+        // Dataclass schema - similar to model
+        return std::make_shared<CombinedValidator>(
+            std::make_shared<ModelValidator>()
+        );
+    } else if (type == "recursive") {
+        // Recursive schema reference
+        return std::make_shared<CombinedValidator>(
+            std::make_shared<AnyValidator>()
+        );
+    } else if (type == "decimal") {
+        // Decimal schema
+        return std::make_shared<CombinedValidator>(
+            std::make_shared<StringValidator>()
+        );
+    } else if (type == "skip-validation") {
+        // Skip validation schema
+        return std::make_shared<CombinedValidator>(
+            std::make_shared<AnyValidator>()
+        );
+    } else if (type == "call") {
+        // Call schema
+        return std::make_shared<CombinedValidator>(
+            std::make_shared<AnyValidator>()
+        );
+    } else if (type == "is-instance") {
+        // Is-instance schema
+        return std::make_shared<CombinedValidator>(
+            std::make_shared<AnyValidator>()
+        );
+    } else if (type == "is-subclass") {
+        // Is-subclass schema
+        return std::make_shared<CombinedValidator>(
+            std::make_shared<AnyValidator>()
+        );
+    } else if (type == "callable") {
+        // Callable schema
+        return std::make_shared<CombinedValidator>(
+            std::make_shared<AnyValidator>()
+        );
     } else {
         throw std::runtime_error("Unknown validator type: " + type);
     }

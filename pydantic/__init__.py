@@ -2,6 +2,10 @@ from importlib import import_module
 from typing import TYPE_CHECKING
 from warnings import warn
 
+# Set up pydantic_core shim to switch between Rust and C++ backends
+# This must be imported before any other pydantic_core imports
+from . import _pydantic_core_shim  # noqa: F401
+
 from ._migration import getattr_migration
 from .version import VERSION, _ensure_pydantic_core_version
 
