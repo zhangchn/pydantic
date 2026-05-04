@@ -18,8 +18,7 @@ public:
     SchemaValidator(const std::string& schema_json, 
                    const std::string& config_json = "");
     
-    // Validate Python object
-    // Returns validated object or throws ValidationError
+    // Validate Python object (JSON string input)
     std::string validate_python(const std::string& input_json,
                                std::optional<bool> strict = std::nullopt,
                                std::optional<ExtraBehavior> extra = std::nullopt);

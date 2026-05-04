@@ -83,25 +83,57 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
              py::arg("schema_json"),
              py::arg("config_json") = "",
              "Create a SchemaValidator from JSON schema and optional config JSON")
-        .def("validate_python", &SchemaValidator::validate_python,
-             py::arg("input_json"),
-             py::arg("strict") = std::nullopt,
-             py::arg("extra") = std::nullopt,
+        .def("validate_python", [](SchemaValidator& self, const std::string& input_json,
+                                   py::object strict, py::object extra) {
+            std::optional<bool> strict_opt;
+            if (!strict.is_none()) {
+                strict_opt = strict.cast<bool>();
+            }
+            std::optional<ExtraBehavior> extra_opt;
+            if (!extra.is_none()) {
+                // Parse extra behavior from string
+                std::string extra_str = extra.cast<std::string>();
+                if (extra_str == "allow") extra_opt = ExtraBehavior::Allow;
+                else if (extra_str == "forbid") extra_opt = ExtraBehavior::Forbid;
+                else if (extra_str == "ignore") extra_opt = ExtraBehavior::Ignore;
+            }
+            return self.validate_python(input_json, strict_opt, extra_opt);
+        }, py::arg("input_json"), py::arg("strict") = py::none(), py::arg("extra") = py::none(),
              "Validate input from Python object (as JSON)")
-        .def("validate_json", &SchemaValidator::validate_json,
-             py::arg("json_data"),
-             py::arg("strict") = std::nullopt,
+        .def("validate_json", [](SchemaValidator& self, const std::string& json_data,
+                                 py::object strict) {
+            std::optional<bool> strict_opt;
+            if (!strict.is_none()) {
+                strict_opt = strict.cast<bool>();
+            }
+            return self.validate_json(json_data, strict_opt);
+        }, py::arg("json_data"), py::arg("strict") = py::none(),
              "Validate input from JSON string")
-        .def("validate_strings", &SchemaValidator::validate_strings,
-             py::arg("string_data"),
-             py::arg("strict") = std::nullopt,
+        .def("validate_strings", [](SchemaValidator& self, const std::string& string_data,
+                                    py::object strict) {
+            std::optional<bool> strict_opt;
+            if (!strict.is_none()) {
+                strict_opt = strict.cast<bool>();
+            }
+            return self.validate_strings(string_data, strict_opt);
+        }, py::arg("string_data"), py::arg("strict") = py::none(),
              "Validate input from string mapping")
-        .def("isinstance_python", &SchemaValidator::isinstance_python,
-             py::arg("input_json"),
-             py::arg("strict") = std::nullopt,
+        .def("isinstance_python", [](SchemaValidator& self, const std::string& input_json,
+                                     py::object strict) {
+            std::optional<bool> strict_opt;
+            if (!strict.is_none()) {
+                strict_opt = strict.cast<bool>();
+            }
+            return self.isinstance_python(input_json, strict_opt);
+        }, py::arg("input_json"), py::arg("strict") = py::none(),
              "Check if input is an instance of the schema")
-        .def("get_default_value", &SchemaValidator::get_default_value,
-             py::arg("strict") = std::nullopt,
+        .def("get_default_value", [](SchemaValidator& self, py::object strict) {
+            std::optional<bool> strict_opt;
+            if (!strict.is_none()) {
+                strict_opt = strict.cast<bool>();
+            }
+            return self.get_default_value(strict_opt);
+        }, py::arg("strict") = py::none(),
              "Get the default value for the schema")
         .def("validate_assignment", &SchemaValidator::validate_assignment,
              py::arg("obj_json"),
@@ -121,8 +153,8 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
     
     // SerializationState
     py::class_<SerializationState>(m, "SerializationState")
-        .def(py::init<const SerializationConfig&, IncludeExclude>(),
+        .def(py::init<const SerializationConfig&>(),
              py::arg("config"),
-             py::arg("include_exclude") = IncludeExclude::empty())
+             "Create a SerializationState with the given config")
         .def_property_readonly("config", &SerializationState::config);
 }
