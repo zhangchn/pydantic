@@ -6,11 +6,9 @@
 #include "validation_state.hpp"
 #include "result.hpp"
 #include "types.hpp"
+#include "combined_validator.hpp"
 
 namespace pydantic_core {
-
-// Forward declaration
-class CombinedValidator;
 
 // SchemaValidator - the main validation class
 // Matches Rust's SchemaValidator pyclass
