@@ -1,0 +1,132 @@
+#pragma once
+
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <variant>
+#include "pydantic_core/validator.hpp"
+#include "pydantic_core/result.hpp"
+#include "pydantic_core/errors.hpp"
+#include "pydantic_core/validators/basic.hpp"
+#include "pydantic_core/validators/containers.hpp"
+#include "pydantic_core/validators/complex.hpp"
+#include "pydantic_core/validators/functions.hpp"
+#include "pydantic_core/validators/special.hpp"
+
+namespace pydantic_core {
+
+// CombinedValidator - variant type wrapping all validator types
+// Matches Rust's CombinedValidator enum
+class CombinedValidator {
+public:
+    // Variant type holding any validator
+    using VariantType = std::variant<
+        std::shared_ptr<AnyValidator>,
+        std::shared_ptr<NoneValidator>,
+        std::shared_ptr<BoolValidator>,
+        std::shared_ptr<IntValidator>,
+        std::shared_ptr<FloatValidator>,
+        std::shared_ptr<StringValidator>,
+        std::shared_ptr<BytesValidator>,
+        std::shared_ptr<ListValidator>,
+        std::shared_ptr<DictValidator>,
+        std::shared_ptr<SetValidator>,
+        std::shared_ptr<FrozenSetValidator>,
+        std::shared_ptr<TupleValidator>,
+        std::shared_ptr<NullableValidator>,
+        std::shared_ptr<UnionValidator>,
+        std::shared_ptr<TaggedUnionValidator>,
+        std::shared_ptr<ModelValidator>,
+        std::shared_ptr<ModelFieldsValidator>,
+        std::shared_ptr<TypedDictValidator>,
+        std::shared_ptr<LiteralValidator>,
+        std::shared_ptr<EnumValidator>,
+        std::shared_ptr<DateValidator>,
+        std::shared_ptr<TimeValidator>,
+        std::shared_ptr<DatetimeValidator>,
+        std::shared_ptr<TimedeltaValidator>,
+        std::shared_ptr<UrlValidator>,
+        std::shared_ptr<UuidValidator>,
+        std::shared_ptr<FunctionBeforeValidator>,
+        std::shared_ptr<FunctionAfterValidator>,
+        std::shared_ptr<FunctionPlainValidator>,
+        std::shared_ptr<FunctionWrapValidator>,
+        std::shared_ptr<WithDefaultValidator>,
+        std::shared_ptr<ChainValidator>,
+        std::shared_ptr<LaxOrStrictValidator>,
+        std::shared_ptr<JsonOrPythonValidator>,
+        std::shared_ptr<JsonValidator>
+    >;
+
+    CombinedValidator() = default;
+
+    // Construct from any validator type
+    template<typename T>
+    CombinedValidator(std::shared_ptr<T> validator)
+        : variant_(std::move(validator))
+    {}
+
+    // Validate input
+    ValResult<std::shared_ptr<void>> validate(
+        const Input& input,
+        ValidationState& state
+    ) const {
+        return std::visit([&](const auto& v) -> ValResult<std::shared_ptr<void>> {
+            if (v) {
+                return v->validate(input, state);
+            }
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::CustomError),
+                state.location(),
+                "Validator not implemented"
+            );
+        }, variant_);
+    }
+
+    // Get validator name
+    std::string name() const {
+        return std::visit([](const auto& v) -> std::string {
+            if (v) {
+                return v->name();
+            }
+            return "unknown";
+        }, variant_);
+    }
+
+    // Get default value
+    ValResult<std::shared_ptr<void>> default_value(ValidationState& state) const {
+        return std::visit([&](const auto& v) -> ValResult<std::shared_ptr<void>> {
+            if (v) {
+                return v->default_value(state);
+            }
+            return ValError::omit();
+        }, variant_);
+    }
+
+    // Check if variant holds a value
+    bool has_value() const {
+        return variant_.index() != 0 || std::holds_alternative<std::shared_ptr<AnyValidator>>(variant_);
+    }
+
+private:
+    VariantType variant_;
+};
+
+// Schema parser for building validators from JSON schema
+class SchemaBuilder {
+public:
+    // Build validator from JSON schema string
+    static std::shared_ptr<CombinedValidator> build(
+        const std::string& schema_json,
+        const std::string& config_json = ""
+    );
+
+private:
+    // Parse schema JSON and build validator
+    static std::shared_ptr<CombinedValidator> build_from_dict(
+        const std::unordered_map<std::string, std::string>& schema,
+        const std::unordered_map<std::string, std::string>& config
+    );
+};
+
+} // namespace pydantic_core

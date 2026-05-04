@@ -41,6 +41,8 @@ set(CORE_SOURCES
     src/validation_state.cpp
     src/validator.cpp
     src/serializer.cpp
+    src/combined_validator.cpp
+    src/schema_validator.cpp
     src/input/json_input.cpp
     src/input/string_input.cpp
     src/main_module.cpp
@@ -116,3 +118,22 @@ target_link_libraries(test_serializers PRIVATE doctest::doctest)
 target_include_directories(test_serializers PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 add_test(NAME Serializers COMMAND test_serializers)
+
+# Test integration - Phase 5
+add_executable(test_integration tests/test_integration.cpp
+    src/errors/errors.cpp
+    src/errors/error_types.cpp
+    src/recursion_guard.cpp
+    src/validation_state.cpp
+    src/validator.cpp
+    src/serializer.cpp
+    src/combined_validator.cpp
+    src/schema_validator.cpp
+    src/input/json_input.cpp
+    src/input/string_input.cpp
+)
+target_compile_definitions(test_integration PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
+target_link_libraries(test_integration PRIVATE doctest::doctest simdjson::simdjson)
+target_include_directories(test_integration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+add_test(NAME Integration COMMAND test_integration)
