@@ -145,6 +145,9 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
+        if (validators_.empty()) {
+            return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
+        }
         for (auto& validator : validators_) {
             auto result = validator->validate(input, state);
             if (result.is_ok()) {
@@ -215,15 +218,25 @@ private:
 // JsonValidator - validates JSON input directly
 class JsonValidator : public Validator {
 public:
+    JsonValidator() = default;
+    explicit JsonValidator(std::shared_ptr<Validator> inner) : inner_(std::move(inner)) {}
+    
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
     ) override {
-        // In Phase 2, we'll parse JSON and validate
-        return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
+        // If no inner validator, accept any JSON
+        if (!inner_) {
+            return ValResult<std::shared_ptr<void>>(std::make_shared<std::string>(input.as_error_value().repr));
+        }
+        // TODO: Parse JSON string and validate with inner validator
+        return ValResult<std::shared_ptr<void>>(std::make_shared<std::string>(input.as_error_value().repr));
     }
     
     std::string name() const override { return "json"; }
+    
+private:
+    std::shared_ptr<Validator> inner_;
 };
 
 } // namespace pydantic_core

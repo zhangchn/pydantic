@@ -19,6 +19,12 @@ JsonInput::JsonInput(const simdjson::dom::element& element) : element_(element) 
     // This is a shallow copy - use with caution
 }
 
+std::unique_ptr<JsonInput> JsonInput::create_from_element(const simdjson::dom::element& element) {
+    auto input = std::make_unique<JsonInput>(element);
+    // parser_ stays null - caller must ensure element's parser stays alive
+    return input;
+}
+
 InputValue JsonInput::as_error_value() const {
     auto type = element_.type();
     switch (type) {
@@ -275,6 +281,15 @@ std::optional<ValidatedDict::Entry> JsonValidatedDict::get(const std::string& ke
                 e.value_repr = "...";
             }
             return e;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<simdjson::dom::element> JsonValidatedDict::get_element(const std::string& key) const {
+    for (auto& [k, value] : obj_) {
+        if (std::string(k) == key) {
+            return value;
         }
     }
     return std::nullopt;

@@ -2,7 +2,7 @@
 
 #include <vector>
 #include <string>
-#include <exception>
+#include <stdexcept>
 #include <memory>
 #include <unordered_map>
 #include "types.hpp"
@@ -103,12 +103,9 @@ private:
 };
 
 // SchemaError
-class SchemaError : public std::exception {
+class SchemaError : public std::runtime_error {
 public:
-    explicit SchemaError(const std::string& message) : message_(message) {}
-    const char* what() const noexcept override { return message_.c_str(); }
-private:
-    std::string message_;
+    explicit SchemaError(const std::string& message) : std::runtime_error(message) {}
 };
 
 // PydanticSerializationError

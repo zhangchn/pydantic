@@ -28,6 +28,8 @@ public:
         SetType,
         FrozenSetType,
         UnionType,
+        ModelType,
+        DataclassType,
         
         // Integer constraint errors
         IntMultipleOf,
@@ -67,6 +69,7 @@ public:
         
         // Literal errors
         LiteralMismatch,
+        EnumError,
         
         // Dict field errors
         DictKeysMissing,
@@ -75,6 +78,9 @@ public:
         // Field errors
         FieldRequired,
         Missing,
+        ExtraForbidden,
+        InvalidKey,
+        NoSuchAttribute,
         
         // Date/Time errors
         DateType,
@@ -139,6 +145,13 @@ public:
     static ErrorType set_type() { return ErrorType(ErrorType::Kind::SetType); }
     static ErrorType frozenset_type() { return ErrorType(ErrorType::Kind::FrozenSetType); }
     static ErrorType union_type() { return ErrorType(ErrorType::Kind::UnionType); }
+    static ErrorType model_type() { return ErrorType(ErrorType::Kind::ModelType); }
+    static ErrorType dataclass_type() { return ErrorType(ErrorType::Kind::DataclassType); }
+    static ErrorType missing() { return ErrorType(ErrorType::Kind::Missing); }
+    static ErrorType extra_forbidden() { return ErrorType(ErrorType::Kind::ExtraForbidden); }
+    static ErrorType literal_mismatch() { return ErrorType(ErrorType::Kind::LiteralMismatch); }
+    static ErrorType enum_error() { return ErrorType(ErrorType::Kind::EnumError); }
+    static ErrorType custom_error(const std::string& msg = "") { return ErrorType(ErrorType::Kind::CustomError); }
 };
 
 // PydanticOmit - signal to omit field from output

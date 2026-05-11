@@ -4,6 +4,7 @@
 #include "pydantic_core/validators/complex.hpp"
 #include "pydantic_core/validators/functions.hpp"
 #include "pydantic_core/validators/special.hpp"
+#include "pydantic_core/validators/model_fields.hpp"
 #include <unordered_map>
 #include <memory>
 
