@@ -100,7 +100,9 @@ public:
             }
 
             if (has_entry) {
-                auto validate_result = validate_field_value_result(*dict, lookup_key, field, state, combined_errors);
+                // Use whichever key was actually found (alias or canonical)
+                std::string actual_key = dict->has_key(lookup_key) ? lookup_key : name;
+                auto validate_result = validate_field_value_result(*dict, actual_key, field, state, combined_errors);
 
                 if (validate_result.has_value()) {
                     // Validation succeeded (value may be nullptr for nullable)
