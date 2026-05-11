@@ -8,6 +8,7 @@
 #include "pydantic_core/combined_validator.hpp"
 #include "pydantic_core/json_input.hpp"
 #include "pydantic_core/validators/model_fields.hpp"
+#include "pydantic_core/validators/containers.hpp"
 #include "pydantic_core/validation_state.hpp"
 
 using namespace pydantic_core;
@@ -1023,4 +1024,288 @@ TEST_SUITE("Programmatic Validator Construction") {
         CHECK(output->fields.count("middle_name"));
     }
 
+    // ========================================================================
+    // Additional behavioral tests for model/typed-dict/dataclass depth
+    // ========================================================================
+
+    TEST_CASE("ModelFieldsValidator - strict mode rejects type coercion") {
+        std::unordered_map<std::string, FieldInfo> fields;
+
+        FieldInfo age_field;
+        age_field.name = "age";
+        age_field.schema = std::make_shared<IntValidator>();
+        fields["age"] = age_field;
+
+        auto validator = std::make_shared<ModelFieldsValidator>(
+            std::move(fields), ExtraBehavior::Ignore
+        );
+
+        // Strict mode: string "42" should NOT coerce to int
+        std::string input_json = R"({"age": "42"})";
+        auto input_result = parse_json(input_json);
+        REQUIRE(input_result.is_ok());
+
+        ValidationState state;
+        state.set_strict(true);
+        auto result = validator->validate(*input_result.value(), state);
+        CHECK(result.is_err());
+    }
+
+    TEST_CASE("ModelFieldsValidator - strict mode accepts native types") {
+        std::unordered_map<std::string, FieldInfo> fields;
+
+        FieldInfo age_field;
+        age_field.name = "age";
+        age_field.schema = std::make_shared<IntValidator>();
+        fields["age"] = age_field;
+
+        auto validator = std::make_shared<ModelFieldsValidator>(
+            std::move(fields), ExtraBehavior::Ignore
+        );
+
+        // Strict mode: native int should pass
+        std::string input_json = R"({"age": 42})";
+        auto input_result = parse_json(input_json);
+        REQUIRE(input_result.is_ok());
+
+        ValidationState state;
+        state.set_strict(true);
+        auto result = validator->validate(*input_result.value(), state);
+        REQUIRE(result.is_ok());
+
+        auto output = std::static_pointer_cast<ValidatedModelFieldsOutput>(result.value());
+        CHECK(output->fields.count("age"));
+    }
+
+    TEST_CASE("ModelFieldsValidator - list field validates nested items") {
+        std::unordered_map<std::string, FieldInfo> fields;
+
+        FieldInfo tags_field;
+        tags_field.name = "tags";
+        tags_field.schema = std::make_shared<ListValidator>();
+        fields["tags"] = tags_field;
+
+        auto validator = std::make_shared<ModelFieldsValidator>(
+            std::move(fields), ExtraBehavior::Ignore
+        );
+
+        // List of values — ListValidator checks type
+        std::string input_json = R"({"tags": ["python", "cpp", "rust"]})";
+        auto input_result = parse_json(input_json);
+        REQUIRE(input_result.is_ok());
+
+        ValidationState state;
+        auto result = validator->validate(*input_result.value(), state);
+        REQUIRE(result.is_ok());
+
+        auto output = std::static_pointer_cast<ValidatedModelFieldsOutput>(result.value());
+        CHECK(output->fields.count("tags"));
+    }
+
+    TEST_CASE("ModelFieldsValidator - list field rejects non-list input") {
+        std::unordered_map<std::string, FieldInfo> fields;
+
+        FieldInfo nums_field;
+        nums_field.name = "nums";
+        nums_field.schema = std::make_shared<ListValidator>();
+        fields["nums"] = nums_field;
+
+        auto validator = std::make_shared<ModelFieldsValidator>(
+            std::move(fields), ExtraBehavior::Ignore
+        );
+
+        // String input where list expected
+        std::string input_json = R"({"nums": "not-a-list"})";
+        auto input_result = parse_json(input_json);
+        REQUIRE(input_result.is_ok());
+
+        ValidationState state;
+        auto result = validator->validate(*input_result.value(), state);
+        CHECK(result.is_err());
+    }
+
+    TEST_CASE("ModelFieldsValidator - dict field validates nested object") {
+        std::unordered_map<std::string, FieldInfo> fields;
+
+        FieldInfo metadata_field;
+        metadata_field.name = "metadata";
+        metadata_field.schema = std::make_shared<DictValidator>();
+        fields["metadata"] = metadata_field;
+
+        auto validator = std::make_shared<ModelFieldsValidator>(
+            std::move(fields), ExtraBehavior::Ignore
+        );
+
+        std::string input_json = R"({"metadata": {"key1": "val1", "key2": "val2"}})";
+        auto input_result = parse_json(input_json);
+        REQUIRE(input_result.is_ok());
+
+        ValidationState state;
+        auto result = validator->validate(*input_result.value(), state);
+        REQUIRE(result.is_ok());
+
+        auto output = std::static_pointer_cast<ValidatedModelFieldsOutput>(result.value());
+        CHECK(output->fields.count("metadata"));
+    }
+
+    TEST_CASE("ModelFieldsValidator - dict field rejects non-dict input") {
+        std::unordered_map<std::string, FieldInfo> fields;
+
+        FieldInfo meta_field;
+        meta_field.name = "meta";
+        meta_field.schema = std::make_shared<DictValidator>();
+        fields["meta"] = meta_field;
+
+        auto validator = std::make_shared<ModelFieldsValidator>(
+            std::move(fields), ExtraBehavior::Ignore
+        );
+
+        // Array input where dict expected
+        std::string input_json = R"({"meta": [1, 2, 3]})";
+        auto input_result = parse_json(input_json);
+        REQUIRE(input_result.is_ok());
+
+        ValidationState state;
+        auto result = validator->validate(*input_result.value(), state);
+        CHECK(result.is_err());
+    }
+
+    TEST_CASE("ModelFieldsValidator - optional field without default is omitted") {
+        std::unordered_map<std::string, FieldInfo> fields;
+
+        FieldInfo name_field;
+        name_field.name = "name";
+        name_field.schema = std::make_shared<StringValidator>();
+        fields["name"] = name_field;
+
+        FieldInfo bio_field;
+        bio_field.name = "bio";
+        bio_field.schema = std::make_shared<StringValidator>();
+        bio_field.required = false;
+        bio_field.default_value = nullptr;  // No default
+        fields["bio"] = bio_field;
+
+        auto validator = std::make_shared<ModelFieldsValidator>(
+            std::move(fields), ExtraBehavior::Ignore
+        );
+
+        // Only required field provided
+        std::string input_json = R"({"name": "Alice"})";
+        auto input_result = parse_json(input_json);
+        REQUIRE(input_result.is_ok());
+
+        ValidationState state;
+        auto result = validator->validate(*input_result.value(), state);
+        REQUIRE(result.is_ok());
+
+        auto output = std::static_pointer_cast<ValidatedModelFieldsOutput>(result.value());
+        CHECK(output->fields.count("name"));
+        // bio is not required and has no default — should be absent from output
+        CHECK(!output->fields.count("bio"));
+    }
+
+    TEST_CASE("ModelFieldsValidator - alias fallback to canonical name") {
+        std::unordered_map<std::string, FieldInfo> fields;
+
+        FieldInfo name_field;
+        name_field.name = "full_name";
+        name_field.schema = std::make_shared<StringValidator>();
+        name_field.alias = "firstName";
+        fields["full_name"] = name_field;
+
+        auto validator = std::make_shared<ModelFieldsValidator>(
+            std::move(fields), ExtraBehavior::Ignore
+        );
+
+        // Input uses canonical name (not alias) — should still work
+        std::string input_json = R"({"full_name": "Alice"})";
+        auto input_result = parse_json(input_json);
+        REQUIRE(input_result.is_ok());
+
+        ValidationState state;
+        auto result = validator->validate(*input_result.value(), state);
+        REQUIRE(result.is_ok());
+
+        auto output = std::static_pointer_cast<ValidatedModelFieldsOutput>(result.value());
+        CHECK(output->fields.count("full_name"));
+    }
+
+    TEST_CASE("TypedDictValidator - strict mode rejects coercion on total fields") {
+        std::unordered_map<std::string, FieldInfo> fields;
+
+        FieldInfo count_field;
+        count_field.name = "count";
+        count_field.schema = std::make_shared<IntValidator>();
+        fields["count"] = count_field;
+
+        auto validator = std::make_shared<TypedDictValidator>(
+            std::move(fields), ExtraBehavior::Ignore, true
+        );
+
+        // String "10" should NOT coerce to int in strict mode
+        std::string input_json = R"({"count": "10"})";
+        auto input_result = parse_json(input_json);
+        REQUIRE(input_result.is_ok());
+
+        ValidationState state;
+        state.set_strict(true);
+        auto result = validator->validate(*input_result.value(), state);
+        CHECK(result.is_err());
+    }
+
+    TEST_CASE("DataclassValidator - multiple fields with mixed valid/invalid") {
+        std::vector<DataclassFieldInfo> fields;
+
+        DataclassFieldInfo name_field;
+        name_field.name = "name";
+        name_field.schema = std::make_shared<StringValidator>();
+        fields.push_back(name_field);
+
+        DataclassFieldInfo age_field;
+        age_field.name = "age";
+        age_field.schema = std::make_shared<IntValidator>();
+        fields.push_back(age_field);
+
+        DataclassFieldInfo email_field;
+        email_field.name = "email";
+        email_field.schema = std::make_shared<StringValidator>();
+        fields.push_back(email_field);
+
+        auto validator = std::make_shared<DataclassValidator>(
+            std::move(fields), "Person"
+        );
+
+        // 'age' is invalid (string), rest valid
+        std::string input_json = R"({"name": "Bob", "age": "not-a-number", "email": "bob@test.com"})";
+        auto input_result = parse_json(input_json);
+        REQUIRE(input_result.is_ok());
+
+        ValidationState state;
+        auto result = validator->validate(*input_result.value(), state);
+        CHECK(result.is_err());
+        CHECK(result.error().has_line_errors());
+    }
+
+    TEST_CASE("ModelFieldsValidator - bool coercion in lax mode for int field") {
+        std::unordered_map<std::string, FieldInfo> fields;
+
+        FieldInfo flag_field;
+        flag_field.name = "flag";
+        flag_field.schema = std::make_shared<IntValidator>();
+        fields["flag"] = flag_field;
+
+        auto validator = std::make_shared<ModelFieldsValidator>(
+            std::move(fields), ExtraBehavior::Ignore
+        );
+
+        // Lax mode: true → 1
+        std::string input_json = R"({"flag": true})";
+        auto input_result = parse_json(input_json);
+        REQUIRE(input_result.is_ok());
+
+        ValidationState state;
+        auto result = validator->validate(*input_result.value(), state);
+        // In lax mode, bool→int coercion is allowed
+        REQUIRE(result.is_ok());
+    }
 }
