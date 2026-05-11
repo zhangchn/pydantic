@@ -1426,4 +1426,198 @@ TEST_CASE("JsonOrPythonValidator - routes based on input type") {
     }
 }
 
+// ========================================================================
+// Union depth and complex validator chains
+// ========================================================================
+
+TEST_CASE("UnionValidator - three choices, third matches") {
+    // int → bool → string: "hello" should match string (3rd choice)
+    std::vector<std::shared_ptr<Validator>> validators;
+    validators.push_back(std::make_shared<IntValidator>());
+    validators.push_back(std::make_shared<BoolValidator>());
+    validators.push_back(std::make_shared<StringValidator>());
+    UnionValidator validator(validators);
+
+    ValidationState state;
+
+    // "hello" fails int, fails bool, passes string (lax)
+    {
+        auto json_result = parse_json("\"hello\"");
+        REQUIRE(json_result.is_ok());
+        auto result = validator.validate(*json_result.value(), state);
+        CHECK(result.is_ok());
+    }
+
+    // 42 passes int (first choice)
+    {
+        auto json_result = parse_json("42");
+        REQUIRE(json_result.is_ok());
+        auto result = validator.validate(*json_result.value(), state);
+        CHECK(result.is_ok());
+    }
+
+    // false fails int, passes bool (second choice)
+    {
+        auto json_result = parse_json("false");
+        REQUIRE(json_result.is_ok());
+        auto result = validator.validate(*json_result.value(), state);
+        CHECK(result.is_ok());
+    }
+}
+
+TEST_CASE("UnionValidator - nested unions") {
+    // union[union[int, bool], str] — effectively same as union[int, bool, str]
+    std::vector<std::shared_ptr<Validator>> inner_validators;
+    inner_validators.push_back(std::make_shared<IntValidator>());
+    inner_validators.push_back(std::make_shared<BoolValidator>());
+    auto inner_union = std::make_shared<UnionValidator>(inner_validators);
+
+    std::vector<std::shared_ptr<Validator>> outer_validators;
+    outer_validators.push_back(inner_union);
+    outer_validators.push_back(std::make_shared<StringValidator>());
+    UnionValidator validator(outer_validators);
+
+    ValidationState state;
+
+    // 42 passes inner union (int)
+    {
+        auto json_result = parse_json("42");
+        REQUIRE(json_result.is_ok());
+        auto result = validator.validate(*json_result.value(), state);
+        CHECK(result.is_ok());
+    }
+
+    // "hi" fails inner union, passes string
+    {
+        auto json_result = parse_json("\"hi\"");
+        REQUIRE(json_result.is_ok());
+        auto result = validator.validate(*json_result.value(), state);
+        CHECK(result.is_ok());
+    }
+}
+
+TEST_CASE("UnionValidator - all choices fail with strict mode") {
+    // int + bool — with strict mode, string "42" fails both
+    std::vector<std::shared_ptr<Validator>> validators;
+    validators.push_back(std::make_shared<IntValidator>());
+    validators.push_back(std::make_shared<BoolValidator>());
+    UnionValidator validator(validators);
+
+    ValidationState state;
+    state.set_strict(true);
+
+    auto json_result = parse_json("\"42\"");
+    REQUIRE(json_result.is_ok());
+    auto result = validator.validate(*json_result.value(), state);
+    CHECK(result.is_err());
+}
+
+TEST_CASE("ChainValidator - three steps all must pass") {
+    std::vector<std::shared_ptr<Validator>> validators;
+    validators.push_back(std::make_shared<IntValidator>());
+    validators.push_back(std::make_shared<IntValidator>());
+    validators.push_back(std::make_shared<IntValidator>());
+    ChainValidator validator(validators);
+
+    ValidationState state;
+
+    // 42 passes all three
+    {
+        auto json_result = parse_json("42");
+        REQUIRE(json_result.is_ok());
+        auto result = validator.validate(*json_result.value(), state);
+        CHECK(result.is_ok());
+    }
+
+    // "abc" fails first step
+    {
+        auto json_result = parse_json("\"abc\"");
+        REQUIRE(json_result.is_ok());
+        auto result = validator.validate(*json_result.value(), state);
+        CHECK(result.is_err());
+    }
+}
+
+TEST_CASE("LaxOrStrictValidator - both validators fail returns error") {
+    // Even though it selects lax or strict, if both are the same type
+    // and both fail, the error propagates
+    auto lax = std::make_shared<IntValidator>();
+    auto strict = std::make_shared<IntValidator>();
+    LaxOrStrictValidator validator(lax, strict);
+
+    ValidationState state;
+
+    // "abc" fails both int validators
+    {
+        auto json_result = parse_json("\"abc\"");
+        REQUIRE(json_result.is_ok());
+        auto result = validator.validate(*json_result.value(), state);
+        CHECK(result.is_err());
+    }
+}
+
+TEST_CASE("LaxOrStrictValidator - null lax validator crashes (documented)") {
+    auto strict = std::make_shared<IntValidator>();
+    LaxOrStrictValidator validator(nullptr, strict);
+
+    ValidationState state;
+    state.set_strict(false);
+    // With lax=nullptr and strict=false, this will dereference nullptr
+    // This is a known limitation — callers should always provide both.
+    // We document this rather than testing the crash.
+    CHECK(validator.name() == "lax-or-strict");
+}
+
+TEST_CASE("LaxOrStrictValidator - null strict validator crashes (documented)") {
+    auto lax = std::make_shared<StringValidator>();
+    LaxOrStrictValidator validator(lax, nullptr);
+
+    ValidationState state;
+    state.set_strict(true);
+    // With strict=nullptr and strict=true, this will dereference nullptr
+    // This is a known limitation — callers should always provide both.
+    CHECK(validator.name() == "lax-or-strict");
+}
+
+TEST_CASE("WithDefaultValidator - valid input passes through, default ignored") {
+    auto inner = std::make_shared<StringValidator>();
+    auto default_value = std::make_shared<std::string>("default");
+    WithDefaultValidator validator(inner, default_value);
+
+    ValidationState state;
+
+    // Valid string — passes inner validator, does NOT use default
+    {
+        auto json_result = parse_json("\"hello\"");
+        REQUIRE(json_result.is_ok());
+        auto result = validator.validate(*json_result.value(), state);
+        REQUIRE(result.is_ok());
+        // Result is from inner validator (not the default)
+        // Note: StringValidator currently returns a placeholder value
+        CHECK(result.value() != default_value);
+    }
+}
+
+TEST_CASE("DateValidator - stub always succeeds") {
+    DateValidator validator;
+    CHECK(validator.name() == "date");
+
+    ValidationState state;
+    auto json_result = parse_json("\"2024-01-15\"");
+    REQUIRE(json_result.is_ok());
+    auto result = validator.validate(*json_result.value(), state);
+    CHECK(result.is_ok());
+}
+
+TEST_CASE("DatetimeValidator - stub always succeeds") {
+    DatetimeValidator validator;
+    CHECK(validator.name() == "datetime");
+
+    ValidationState state;
+    auto json_result = parse_json("\"2024-01-15T10:30:00Z\"");
+    REQUIRE(json_result.is_ok());
+    auto result = validator.validate(*json_result.value(), state);
+    CHECK(result.is_ok());
+}
+
 } // TEST_SUITE
