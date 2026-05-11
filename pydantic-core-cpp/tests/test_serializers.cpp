@@ -560,4 +560,164 @@ TEST_SUITE("Serializers") {
         REQUIRE(result.is_ok());
         CHECK(result.value() == "{}");
     }
+
+    // ========================================================================
+    // Container serializer behavioral tests
+    // ========================================================================
+
+    TEST_CASE("ListSerializer - serialize_json returns array stub") {
+        auto item_ser = std::make_shared<serializers::IntSerializer>();
+        serializers::ListSerializer ser(item_ser);
+        auto state = make_state();
+
+        // serialize_json produces stub array
+        auto value = std::make_shared<int>(99);
+        auto result = ser.serialize_json(value, state);
+        REQUIRE(result.is_ok());
+        CHECK(result.value() == "[]");
+    }
+
+    TEST_CASE("ListSerializer - serialize delegates to inner and passes through") {
+        auto item_ser = std::make_shared<serializers::IntSerializer>();
+        serializers::ListSerializer ser(item_ser);
+        auto state = make_state();
+
+        auto value = std::make_shared<int>(42);
+        auto result = ser.serialize(value, SerMode::Python, state);
+        REQUIRE(result.is_ok());
+        CHECK(result.value() == value);
+    }
+
+    TEST_CASE("DictSerializer - serialize_json returns object stub") {
+        auto key_ser = std::make_shared<serializers::StringSerializer>();
+        auto val_ser = std::make_shared<serializers::IntSerializer>();
+        serializers::DictSerializer ser(key_ser, val_ser);
+        auto state = make_state();
+
+        auto value = std::make_shared<std::string>("key");
+        auto result = ser.serialize_json(value, state);
+        REQUIRE(result.is_ok());
+        CHECK(result.value() == "{}");
+    }
+
+    TEST_CASE("DictSerializer - serialize passes through value") {
+        auto key_ser = std::make_shared<serializers::StringSerializer>();
+        auto val_ser = std::make_shared<serializers::IntSerializer>();
+        serializers::DictSerializer ser(key_ser, val_ser);
+        auto state = make_state();
+
+        auto value = std::make_shared<int>(123);
+        auto result = ser.serialize(value, SerMode::Python, state);
+        REQUIRE(result.is_ok());
+        CHECK(result.value() == value);
+    }
+
+    TEST_CASE("SetSerializer - serialize_json returns array stub") {
+        auto item_ser = std::make_shared<serializers::StringSerializer>();
+        serializers::SetSerializer ser(item_ser);
+        auto state = make_state();
+
+        auto value = std::make_shared<std::string>("item");
+        auto result = ser.serialize_json(value, state);
+        REQUIRE(result.is_ok());
+        CHECK(result.value() == "[]");
+    }
+
+    TEST_CASE("TupleSerializer - serialize_json returns array stub") {
+        std::vector<std::shared_ptr<Serializer>> items;
+        items.push_back(std::make_shared<serializers::IntSerializer>());
+        items.push_back(std::make_shared<serializers::StringSerializer>());
+        serializers::TupleSerializer ser(std::move(items));
+        auto state = make_state();
+
+        auto value = std::make_shared<int>(1);
+        auto result = ser.serialize_json(value, state);
+        REQUIRE(result.is_ok());
+        CHECK(result.value() == "[]");
+    }
+
+    TEST_CASE("TupleSerializer - serialize passes through value") {
+        std::vector<std::shared_ptr<Serializer>> items;
+        items.push_back(std::make_shared<serializers::IntSerializer>());
+        items.push_back(std::make_shared<serializers::StringSerializer>());
+        serializers::TupleSerializer ser(std::move(items));
+        auto state = make_state();
+
+        auto value = std::make_shared<std::string>("tuple_data");
+        auto result = ser.serialize(value, SerMode::Python, state);
+        REQUIRE(result.is_ok());
+        CHECK(result.value() == value);
+    }
+
+    // ========================================================================
+    // Union and Nullable serializer behavioral tests
+    // ========================================================================
+
+    TEST_CASE("UnionSerializer - serialize_json first variant wins") {
+        // int first, string second — int should win for int value
+        std::vector<std::shared_ptr<Serializer>> serializers;
+        serializers.push_back(std::make_shared<serializers::IntSerializer>());
+        serializers.push_back(std::make_shared<serializers::StringSerializer>());
+        serializers::UnionSerializer ser(std::move(serializers));
+        auto state = make_state();
+
+        auto value = std::make_shared<int64_t>(77);
+        auto result = ser.serialize_json(value, state);
+        REQUIRE(result.is_ok());
+        CHECK(result.value() == "77");
+    }
+
+    TEST_CASE("UnionSerializer - serialize_json falls through on nullptr") {
+        // int serializer fails on nullptr (nullptr → error), string serializer succeeds on nullptr
+        // (actually string serializer also fails on nullptr)
+        // Let's test with both having nullptr behavior
+        std::vector<std::shared_ptr<Serializer>> serializers;
+        serializers.push_back(std::make_shared<serializers::IntSerializer>());
+        serializers.push_back(std::make_shared<serializers::StringSerializer>());
+        serializers::UnionSerializer ser(std::move(serializers));
+        auto state = make_state();
+
+        // nullptr: int fails → string also fails → union fails
+        auto result = ser.serialize_json(nullptr, state);
+        CHECK(result.is_err());
+    }
+
+    TEST_CASE("UnionSerializer - serialize_json empty list fails") {
+        // Empty union — no variants to try
+        std::vector<std::shared_ptr<Serializer>> serializers;
+        serializers::UnionSerializer ser(std::move(serializers));
+        auto state = make_state();
+
+        auto value = std::make_shared<int>(42);
+        auto result = ser.serialize_json(value, state);
+        CHECK(result.is_err());
+    }
+
+    // ========================================================================
+    // WithDefaultSerializer behavioral tests
+    // ========================================================================
+
+    TEST_CASE("WithDefaultSerializer - serialize_json uses default for nullptr") {
+        auto inner = std::make_shared<serializers::IntSerializer>();
+        auto default_val = std::make_shared<int64_t>(999);
+        serializers::WithDefaultSerializer ser(inner, default_val);
+        auto state = make_state();
+
+        // nullptr → should use default value
+        auto result = ser.serialize_json(nullptr, state);
+        REQUIRE(result.is_ok());
+        CHECK(result.value() == "999");
+    }
+
+    TEST_CASE("WithDefaultSerializer - serialize_json delegates to inner for non-null") {
+        auto inner = std::make_shared<serializers::IntSerializer>();
+        auto default_val = std::make_shared<int64_t>(0);
+        serializers::WithDefaultSerializer ser(inner, default_val);
+        auto state = make_state();
+
+        auto value = std::make_shared<int64_t>(123);
+        auto result = ser.serialize_json(value, state);
+        REQUIRE(result.is_ok());
+        CHECK(result.value() == "123");
+    }
 }
