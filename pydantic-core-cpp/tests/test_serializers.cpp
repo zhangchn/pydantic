@@ -421,4 +421,143 @@ TEST_SUITE("Serializers") {
         CHECK(new_state.include_exclude().include.has_value());
         CHECK(new_state.include_exclude().include->size() == 2);
     }
+
+    // ========================================================================
+    // Behavioral serializer tests (Python equivalents: test_simple.py, test_any.py)
+    // ========================================================================
+
+    TEST_CASE("IntSerializer - serialize_json handles negative and zero") {
+        serializers::IntSerializer ser;
+        auto state = make_state();
+
+        // Negative integer
+        {
+            auto value = std::make_shared<int64_t>(-999);
+            auto result = ser.serialize_json(value, state);
+            REQUIRE(result.is_ok());
+            CHECK(result.value() == "-999");
+        }
+
+        // Zero
+        {
+            auto value = std::make_shared<int64_t>(0);
+            auto result = ser.serialize_json(value, state);
+            REQUIRE(result.is_ok());
+            CHECK(result.value() == "0");
+        }
+
+        // Large integer
+        {
+            auto value = std::make_shared<int64_t>(9223372036854775807LL);
+            auto result = ser.serialize_json(value, state);
+            REQUIRE(result.is_ok());
+            CHECK(result.value() == "9223372036854775807");
+        }
+    }
+
+    TEST_CASE("IntSerializer - serialize_json fails on nullptr") {
+        serializers::IntSerializer ser;
+        auto state = make_state();
+
+        auto result = ser.serialize_json(nullptr, state);
+        CHECK(result.is_err());
+    }
+
+    TEST_CASE("FloatSerializer - serialize_json negative infinity") {
+        serializers::FloatSerializer ser;
+        auto state = make_state();
+
+        auto value = std::make_shared<double>(-std::numeric_limits<double>::infinity());
+        auto result = ser.serialize_json(value, state);
+        REQUIRE(result.is_ok());
+        CHECK(result.value() == "-Infinity");
+    }
+
+    TEST_CASE("FloatSerializer - serialize_json zero and negative zero") {
+        serializers::FloatSerializer ser;
+        auto state = make_state();
+
+        // Zero
+        {
+            auto value = std::make_shared<double>(0.0);
+            auto result = ser.serialize_json(value, state);
+            REQUIRE(result.is_ok());
+            CHECK(result.value().find("0.000000") != std::string::npos);
+        }
+    }
+
+    TEST_CASE("FloatSerializer - serialize_json fails on nullptr") {
+        serializers::FloatSerializer ser;
+        auto state = make_state();
+
+        auto result = ser.serialize_json(nullptr, state);
+        CHECK(result.is_err());
+    }
+
+    TEST_CASE("StringSerializer - serialize_json handles empty string") {
+        serializers::StringSerializer ser;
+        auto state = make_state();
+
+        auto value = std::make_shared<std::string>("");
+        auto result = ser.serialize_json(value, state);
+        REQUIRE(result.is_ok());
+        CHECK(result.value() == "\"\"");
+    }
+
+    TEST_CASE("StringSerializer - serialize_json handles quotes and backslashes") {
+        serializers::StringSerializer ser;
+        auto state = make_state();
+
+        // Double quote
+        {
+            auto value = std::make_shared<std::string>("say \"hello\"");
+            auto result = ser.serialize_json(value, state);
+            REQUIRE(result.is_ok());
+            CHECK(result.value() == "\"say \\\"hello\\\"\"");
+        }
+
+        // Backslash
+        {
+            auto value = std::make_shared<std::string>("path\\to\\file");
+            auto result = ser.serialize_json(value, state);
+            REQUIRE(result.is_ok());
+            CHECK(result.value() == "\"path\\\\to\\\\file\"");
+        }
+
+        // Tab
+        {
+            auto value = std::make_shared<std::string>("col1\tcol2");
+            auto result = ser.serialize_json(value, state);
+            REQUIRE(result.is_ok());
+            CHECK(result.value() == "\"col1\\tcol2\"");
+        }
+    }
+
+    TEST_CASE("StringSerializer - serialize_json fails on nullptr") {
+        serializers::StringSerializer ser;
+        auto state = make_state();
+
+        auto result = ser.serialize_json(nullptr, state);
+        CHECK(result.is_err());
+    }
+
+    TEST_CASE("NoneSerializer - serialize fails on non-None value") {
+        serializers::NoneSerializer ser;
+        auto state = make_state();
+
+        auto value = std::make_shared<int>(42);
+        auto result = ser.serialize(value, SerMode::Python, state);
+        CHECK(result.is_err());
+    }
+
+    TEST_CASE("AnySerializer - serialize_json returns stub for any value") {
+        serializers::AnySerializer ser;
+        auto state = make_state();
+
+        // Any value should produce stub JSON
+        auto value = std::make_shared<std::string>("anything");
+        auto result = ser.serialize_json(value, state);
+        REQUIRE(result.is_ok());
+        CHECK(result.value() == "{}");
+    }
 }
