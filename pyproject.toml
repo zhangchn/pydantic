@@ -188,6 +188,7 @@ addopts = [
 ]
 markers = [
     'skip_json_schema_validation: Disable JSON Schema validation.',
+    'thread_unsafe: Tests that are not thread-safe.',
     # Necessary as pytest-timeout doesn't work under emscripten:
     'timeout: pytest-timeout marker (no-op when plugin not installed)',
 ]
