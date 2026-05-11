@@ -30,7 +30,11 @@ public:
     ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> validate_tuple(bool strict) const override;
     
     const simdjson::dom::element& json_element() const { return element_; }
-    
+
+    // Create a JsonInput wrapping an existing element (shares the element, no parser needed)
+    // The caller must ensure the element's parent parser stays alive.
+    static std::unique_ptr<JsonInput> create_from_element(const simdjson::dom::element& element);
+
 private:
     simdjson::dom::element element_;
     std::unique_ptr<simdjson::dom::parser> parser_;  // Parser must stay alive
@@ -50,6 +54,7 @@ public:
     std::vector<std::string> keys() const override;
     bool has_key(const std::string& key) const override;
     std::optional<Entry> get(const std::string& key) const override;
+    std::optional<simdjson::dom::element> get_element(const std::string& key) const;
     
 private:
     simdjson::dom::object obj_;

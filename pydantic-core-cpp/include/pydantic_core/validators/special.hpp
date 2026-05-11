@@ -103,8 +103,34 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        // In Phase 2, we'll compare input against literal values
-        return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
+        if (values_.empty()) {
+            return ValError::line_error(
+                PydanticKnownError::literal_mismatch(),
+                state.location(),
+                input.as_error_value().repr
+            );
+        }
+        auto str_result = input.validate_str(state.strict_or(false), false);
+        if (str_result.is_err()) {
+            return str_result.error();
+        }
+        const auto& es = str_result.value().value();
+        std::string str_val;
+        if (auto* s = std::get_if<std::string>(&es.value)) {
+            str_val = *s;
+        } else {
+            str_val = std::string(std::get<std::string_view>(es.value));
+        }
+        for (const auto& v : values_) {
+            if (v == str_val) {
+                return ValResult<std::shared_ptr<void>>(std::make_shared<std::string>(str_val));
+            }
+        }
+        return ValError::line_error(
+            PydanticKnownError::literal_mismatch(),
+            state.location(),
+            input.as_error_value().repr
+        );
     }
     
     std::string name() const override { return "literal"; }
@@ -124,8 +150,32 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        // In Phase 2, we'll compare input against enum values
-        return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
+        if (valid_values_.empty()) {
+            return ValError::line_error(
+                PydanticKnownError::enum_error(),
+                state.location(),
+                input.as_error_value().repr
+            );
+        }
+        auto str_result = input.validate_str(state.strict_or(false), false);
+        if (str_result.is_err()) {
+            return str_result.error();
+        }
+        const auto& es = str_result.value().value();
+        std::string str_val;
+        if (auto* s = std::get_if<std::string>(&es.value)) {
+            str_val = *s;
+        } else {
+            str_val = std::string(std::get<std::string_view>(es.value));
+        }
+        if (valid_values_.count(str_val)) {
+            return ValResult<std::shared_ptr<void>>(std::make_shared<std::string>(str_val));
+        }
+        return ValError::line_error(
+            PydanticKnownError::enum_error(),
+            state.location(),
+            input.as_error_value().repr
+        );
     }
     
     std::string name() const override { return "enum"; }

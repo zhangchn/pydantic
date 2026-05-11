@@ -137,3 +137,20 @@ target_link_libraries(test_integration PRIVATE doctest::doctest simdjson::simdjs
 target_include_directories(test_integration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 add_test(NAME Integration COMMAND test_integration)
+
+# Test model/typed-dict/dataclass/model-fields validators
+add_executable(test_model_fields tests/test_model_fields.cpp
+    src/errors/errors.cpp
+    src/errors/error_types.cpp
+    src/recursion_guard.cpp
+    src/validation_state.cpp
+    src/validator.cpp
+    src/combined_validator.cpp
+    src/input/json_input.cpp
+    src/input/string_input.cpp
+)
+target_compile_definitions(test_model_fields PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
+target_link_libraries(test_model_fields PRIVATE doctest::doctest simdjson::simdjson)
+target_include_directories(test_model_fields PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+add_test(NAME ModelFields COMMAND test_model_fields)

@@ -12,6 +12,7 @@
 #include "pydantic_core/validators/complex.hpp"
 #include "pydantic_core/validators/functions.hpp"
 #include "pydantic_core/validators/special.hpp"
+#include "pydantic_core/validators/model_fields.hpp"
 
 namespace pydantic_core {
 
@@ -39,6 +40,7 @@ public:
         std::shared_ptr<ModelValidator>,
         std::shared_ptr<ModelFieldsValidator>,
         std::shared_ptr<TypedDictValidator>,
+        std::shared_ptr<DataclassValidator>,
         std::shared_ptr<LiteralValidator>,
         std::shared_ptr<EnumValidator>,
         std::shared_ptr<DateValidator>,
@@ -55,7 +57,8 @@ public:
         std::shared_ptr<ChainValidator>,
         std::shared_ptr<LaxOrStrictValidator>,
         std::shared_ptr<JsonOrPythonValidator>,
-        std::shared_ptr<JsonValidator>
+        std::shared_ptr<JsonValidator>,
+        std::shared_ptr<Validator>  // Fallback for base-class pointers
     >;
 
     CombinedValidator() = default;
