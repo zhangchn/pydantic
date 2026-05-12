@@ -5,8 +5,74 @@
 #include <string>
 #include <vector>
 #include <unordered_set>
+#include <unordered_map>
 
 namespace pydantic_core {
+
+// DefinitionsRegistry - stores named validators for recursive schema resolution
+// Uses std::shared_ptr<Validator> to avoid circular dependency with CombinedValidator
+class DefinitionsRegistry {
+public:
+    using ValidatorPtr = std::shared_ptr<Validator>;
+
+    void add_definition(const std::string& ref, ValidatorPtr validator) {
+        definitions_[ref] = std::move(validator);
+    }
+
+    ValidatorPtr get_definition(const std::string& ref) const {
+        auto it = definitions_.find(ref);
+        if (it != definitions_.end()) {
+            return it->second;
+        }
+        return nullptr;
+    }
+
+    bool has_definition(const std::string& ref) const {
+        return definitions_.find(ref) != definitions_.end();
+    }
+
+private:
+    std::unordered_map<std::string, ValidatorPtr> definitions_;
+};
+
+// DefinitionRefValidator - resolves recursive schema references
+class DefinitionRefValidator : public Validator {
+public:
+    DefinitionRefValidator() = default;
+    
+    void set_ref(const std::string& ref) {
+        schema_ref_ = ref;
+    }
+    
+    void set_definitions(std::shared_ptr<DefinitionsRegistry> definitions) {
+        definitions_ = std::move(definitions);
+    }
+
+    ValResult<std::shared_ptr<void>> validate(
+        const Input& input,
+        ValidationState& state
+    ) override {
+        if (definitions_) {
+            auto def = definitions_->get_definition(schema_ref_);
+            if (def) {
+                return def->validate(input, state);
+            }
+        }
+        return ValError::line_error(
+            ErrorType(ErrorType::Kind::CustomError),
+            state.location(),
+            "Definition reference not found: " + schema_ref_
+        );
+    }
+
+    std::string name() const override { return "definition-ref"; }
+
+    const std::string& get_ref() const { return schema_ref_; }
+
+private:
+    std::string schema_ref_;
+    std::shared_ptr<DefinitionsRegistry> definitions_;
+};
 
 // DateValidator - validates date values
 class DateValidator : public Validator {

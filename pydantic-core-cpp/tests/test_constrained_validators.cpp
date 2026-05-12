@@ -368,4 +368,83 @@ TEST_CASE("SchemaBuilder - builds plain StringValidator without constraints") {
     CHECK(v->name() == "str");
 }
 
+// ========================================================================
+// DefinitionRef / recursive schema tests
+// ========================================================================
+TEST_CASE("SchemaBuilder - handles definitions wrapper") {
+    std::string schema = R"({
+        "type": "definitions",
+        "schema": {"type": "definition-ref", "schema_ref": "MyNode"},
+        "definitions": [{
+            "type": "model",
+            "ref": "MyNode",
+            "cls": "NodeClass",
+            "schema": {
+                "type": "model-fields",
+                "fields": {
+                    "value": {
+                        "type": "model-field",
+                        "schema": {"type": "int"}
+                    }
+                }
+            }
+        }]
+    })";
+    auto v = SchemaBuilder::build(schema);
+    CHECK(v != nullptr);
+    CHECK(v->name() == "definition-ref");
+}
+
+TEST_CASE("SchemaBuilder - definition-ref validates against definition") {
+    std::string schema = R"({
+        "type": "definitions",
+        "schema": {"type": "definition-ref", "schema_ref": "MyNode"},
+        "definitions": [{
+            "type": "model",
+            "ref": "MyNode",
+            "cls": "NodeClass",
+            "schema": {
+                "type": "model-fields",
+                "fields": {
+                    "value": {
+                        "type": "model-field",
+                        "schema": {"type": "int"}
+                    }
+                }
+            }
+        }]
+    })";
+    auto v = SchemaBuilder::build(schema);
+    CHECK(v != nullptr);
+    
+    ValidationState state;
+    auto input = parse_json(R"({"value": 42})");
+    REQUIRE(input.is_ok());
+    auto result = v->validate(*input.value(), state);
+    CHECK(result.is_ok());
+}
+
+TEST_CASE("SchemaBuilder - handles nullable definition-ref") {
+    std::string schema = R"({
+        "type": "definitions",
+        "schema": {"type": "definition-ref", "schema_ref": "MyNode"},
+        "definitions": [{
+            "type": "model",
+            "ref": "MyNode",
+            "cls": "NodeClass",
+            "schema": {
+                "type": "model-fields",
+                "fields": {
+                    "value": {
+                        "type": "model-field",
+                        "schema": {"type": "int"}
+                    }
+                }
+            }
+        }]
+    })";
+    auto v = SchemaBuilder::build(schema);
+    CHECK(v != nullptr);
+}
+
 } // TEST_SUITE
