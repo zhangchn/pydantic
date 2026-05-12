@@ -23,15 +23,64 @@ from ._pydantic_core_cpp import (
     PydanticOmit,
     PydanticUseDefault,
     SchemaError,
-    SchemaValidator,
+    SchemaValidator as _SchemaValidatorBase,
     SerMode,
-    SerializationConfig,
-    SerializationState,
     StringCacheMode,
     TemporalMode,
     ValidationError,
     __version__,
 )
+
+# Wrapper for SchemaValidator that stores the schema for model construction
+class SchemaValidator:
+    def __init__(self, schema, config=None, _use_prebuilt=True):
+        self._schema = schema
+        self._config = config
+        self._base = _SchemaValidatorBase(schema, config, _use_prebuilt)
+
+    @property
+    def title(self):
+        return self._base.title
+
+    def validate_python(self, obj, *, strict=None, context=None, self_instance=None,
+                        extra=None, from_attributes=None, by_alias=None, by_name=None):
+        result = self._base.validate_python(
+            obj, strict=strict, context=context, self_instance=self_instance,
+            extra=extra, from_attributes=from_attributes, by_alias=by_alias, by_name=by_name)
+
+        # If result is a dict and no self_instance, construct model from schema
+        if isinstance(result, dict) and self_instance is None:
+            schema_type = self._schema.get("type") if hasattr(self._schema, "get") else None
+            if schema_type == "model":
+                cls = self._schema.get("cls")
+                if cls is not None and callable(cls):
+                    # Construct instance directly without going through __init__
+                    instance = object.__new__(cls)
+                    # Set __dict__ directly
+                    instance.__dict__ = result
+                    # Run __pydantic_complete__ if available
+                    if hasattr(cls, '__pydantic_complete__'):
+                        pass  # Already complete
+                    return instance
+        return result
+
+    def validate_json(self, json_data, *, strict=None):
+        return self._base.validate_json(json_data, strict=strict)
+
+    def validate_strings(self, string_data, *, strict=None):
+        return self._base.validate_strings(string_data, strict=strict)
+
+    def isinstance_python(self, obj, *, strict=None):
+        return self._base.isinstance_python(obj, strict=strict)
+
+    def get_default_value(self, *, strict=None):
+        return self._base.get_default_value(strict=strict)
+
+    def validate_assignment(self, obj, field_name, field_value):
+        return self._base.validate_assignment(obj, field_name, field_value)
+
+    def __repr__(self):
+        return self._base.__repr__()
 
 # ============================================================================
 # 2. C++ symbols that may be conditionally available
@@ -338,9 +387,6 @@ __all__: list[str] = [
     'BytesMode',
     'InfNanMode',
     'ErrorType',
-    # Serialization internals
-    'SerializationConfig',
-    'SerializationState',
     # Sub-modules
     'core_schema',
 ]

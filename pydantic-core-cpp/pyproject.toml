@@ -32,7 +32,7 @@ classifiers = [
     'Typing :: Typed',
 ]
 dependencies = ['typing-extensions>=4.14.1']
-version = '2.46.0'
+version = '2.46.4'
 readme = "INTERFACE_ANALYSIS.md"
 
 [project.urls]
