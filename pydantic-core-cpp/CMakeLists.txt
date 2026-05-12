@@ -9,11 +9,10 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # Dependencies
 # ---------------------------------------------------------------------------
 
+include(FetchContent)
+
 # When built via scikit-build-core, pybind11 is provided by the build frontend.
 # For standalone CMake builds (e.g. running tests directly), fetch it ourselves.
-if(NOT SKBUILD)
-    include(FetchContent)
-endif()
 
 # Python + pybind11
 if(SKBUILD)
@@ -29,21 +28,24 @@ else()
     FetchContent_MakeAvailable(pybind11)
 endif()
 
-# simdjson for JSON parsing
+# simdjson for JSON parsing (build-only dependency, don't install into wheel)
 FetchContent_Declare(
     simdjson
     GIT_REPOSITORY https://github.com/simdjson/simdjson.git
     GIT_TAG v3.9.4
+    EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(simdjson)
 
-# doctest for testing
-FetchContent_Declare(
-    doctest
-    GIT_REPOSITORY https://github.com/doctest/doctest.git
-    GIT_TAG v2.4.11
-)
-FetchContent_MakeAvailable(doctest)
+# doctest for testing (only for standalone builds)
+if(NOT SKBUILD)
+    FetchContent_Declare(
+        doctest
+        GIT_REPOSITORY https://github.com/doctest/doctest.git
+        GIT_TAG v2.4.11
+    )
+    FetchContent_MakeAvailable(doctest)
+endif()
 
 # ---------------------------------------------------------------------------
 # Python extension module
@@ -80,12 +82,8 @@ target_compile_options(_pydantic_core_cpp PRIVATE
     -O3
 )
 
-# scikit-build-core expects the module in the Python package directory.
-if(SKBUILD)
-    set_target_properties(_pydantic_core_cpp PROPERTIES
-        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/python/pydantic_core_cpp"
-    )
-endif()
+# Install the extension into the Python package directory for wheel building
+install(TARGETS _pydantic_core_cpp LIBRARY DESTINATION pydantic_core_cpp)
 
 # ---------------------------------------------------------------------------
 # Tests (only for standalone builds, not during wheel building)

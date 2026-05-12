@@ -5,9 +5,8 @@ build-backend = 'scikit_build_core.build'
 [project]
 name = 'pydantic-core-cpp'
 description = "C++ core functionality for Pydantic validation and serialization"
-requires-python = '>=3.10'
-license = 'MIT'
-license-files = ['LICENSE']
+requires-python = '>=3.9'
+license = { text = 'MIT' }
 authors = [
     { name = 'Pydantic Contributors' },
 ]
@@ -16,6 +15,7 @@ classifiers = [
     'Programming Language :: Python',
     'Programming Language :: Python :: 3',
     'Programming Language :: Python :: 3 :: Only',
+    'Programming Language :: Python :: 3.9',
     'Programming Language :: Python :: 3.10',
     'Programming Language :: Python :: 3.11',
     'Programming Language :: Python :: 3.12',
@@ -32,7 +32,8 @@ classifiers = [
     'Typing :: Typed',
 ]
 dependencies = ['typing-extensions>=4.14.1']
-dynamic = ['readme', 'version']
+version = '2.46.0'
+readme = "INTERFACE_ANALYSIS.md"
 
 [project.urls]
 Homepage = 'https://github.com/pydantic'
@@ -53,12 +54,10 @@ linting = [
 ]
 
 [tool.scikit-build]
-python-source = "python"
-wheel.packages = ["python/pydantic_core_cpp"]
 cmake.source-dir = "."
 wheel.py-api = "cp310"
-minimum-version = "0.10"
-build-dir = "build/{wheel_tag}"
+wheel.packages = ["pydantic_core_cpp"]
+wheel.license-files = []
 
 [tool.cibuildwheel]
 build-frontend = "build[uv]"
@@ -66,7 +65,7 @@ build-verbosity = 1
 
 [tool.ruff]
 line-length = 120
-target-version = 'py310'
+target-version = 'py39'
 
 [tool.ruff.lint]
 extend-select = ['Q', 'RUF100', 'C90', 'I', 'UP']
@@ -101,11 +100,11 @@ exclude_also = [
 ]
 
 [tool.mypy]
-python_version = '3.10'
+python_version = '3.9'
 strict = true
 warn_return_any = true
 warn_unused_configs = true
 
 [tool.pyright]
-include = ['python/pydantic_core_cpp']
+include = ['pydantic_core_cpp']
 reportUnnecessaryTypeIgnoreComment = true
