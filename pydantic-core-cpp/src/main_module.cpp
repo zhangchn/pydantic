@@ -602,17 +602,18 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                                     py::object, py::object, py::object, py::object) -> py::object {
             std::string ij = pyobj_to_json_str(input);
             std::string r = self.validate_python(ij, pyobj_to_bool(strict), std::nullopt);
-            py::dict validated = json_to_pyobj(r).cast<py::dict>();
+            py::object validated = json_to_pyobj(r);
 
             // If self_instance provided, populate and return it
             if (!self_instance.is_none() && py::hasattr(self_instance, "__dict__")) {
-                py::dict d = self_instance.attr("__dict__");
-                for (auto item : validated) d[item.first] = item.second;
+                if (py::isinstance<py::dict>(validated)) {
+                    py::dict d = self_instance.attr("__dict__");
+                    for (auto item : validated.cast<py::dict>()) d[item.first] = item.second;
+                }
                 return self_instance;
             }
 
-            // Otherwise return the dict (pydantic will handle model construction via __init__)
-            return std::move(validated);
+            return validated;
         }, py::arg("object"), py::arg("strict") = py::none(), py::arg("context") = py::none(), py::arg("self_instance") = py::none(),
              py::arg("extra") = py::none(), py::arg("from_attributes") = py::none(), py::arg("by_alias") = py::none(), py::arg("by_name") = py::none())
         .def("validate_json", [](SchemaValidator& self, const py::object& jd, py::object strict) {
