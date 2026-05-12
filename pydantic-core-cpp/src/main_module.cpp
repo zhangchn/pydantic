@@ -55,8 +55,21 @@ struct SerNode {
     py::object py_func;
     // For default
     py::object default_val;
+    bool has_default_val = false;
     // For format
     std::string format_str;
+
+    // Copy content from another node into this one (preserves shared_ptr identity)
+    void copy_from(const SerNode& other) {
+        type = other.type;
+        children = other.children;
+        tagged = other.tagged;
+        fields = other.fields;
+        py_func = other.py_func;
+        default_val = other.default_val;
+        has_default_val = other.has_default_val;
+        format_str = other.format_str;
+    }
 
     py::object to_python(const py::object& value, bool json_mode, bool exc_none) const {
         // Type-specific logic
@@ -88,7 +101,7 @@ struct SerNode {
             }
         }
         if (type == "default" || type == "with-default") {
-            if (value.is_none() && !default_val.is_none()) return default_val;
+            if (value.is_none() && has_default_val) return default_val;
             if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none);
         }
         if (type == "json") {
@@ -195,7 +208,7 @@ struct SerNode {
             if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent);
         }
         if (type == "default" || type == "with-default") {
-            if (value.is_none() && !default_val.is_none()) {
+            if (value.is_none() && has_default_val) {
                 if (!children.empty()) return children[0]->to_json(default_val, ensure_ascii, indent);
                 return infer_json(default_val, ensure_ascii, indent);
             }
@@ -213,6 +226,22 @@ struct SerNode {
             return infer_json(result, ensure_ascii, indent);
         }
         return infer_json(value, ensure_ascii, indent);
+    }
+
+    // Get the default value for this serializer node (for default/with-default types)
+    py::object get_default_value() const {
+        if (type == "default" || type == "with-default") {
+            return default_val;
+        }
+        return py::none();
+    }
+
+    // Check if this serializer has a default value
+    bool has_default() const {
+        if (type == "default" || type == "with-default") {
+            return has_default_val;
+        }
+        return false;
     }
 
 private:
@@ -298,8 +327,16 @@ private:
 
         for (auto& [k, ser] : fields) {
             py::str key(k);
-            if (!main.contains(key)) continue;
-            py::object fv = main[key];
+            py::object fv;
+            bool has_value = true;
+            if (main.contains(key)) {
+                fv = main[key];
+            } else if (ser->has_default()) {
+                fv = ser->get_default_value();
+            } else {
+                has_value = false;
+            }
+            if (!has_value) continue;
             if (exc_none && fv.is_none()) continue;
             result[py::str(k)] = ser->to_python(fv, false, exc_none);
         }
@@ -328,8 +365,16 @@ private:
 
         for (auto& [k, ser] : fields) {
             py::str key(k);
-            if (!main.contains(key)) continue;
-            py::object fv = main[key];
+            py::object fv;
+            bool has_value = true;
+            if (main.contains(key)) {
+                fv = main[key];
+            } else if (ser->has_default()) {
+                fv = ser->get_default_value();
+            } else {
+                has_value = false;
+            }
+            if (!has_value) continue;
             if (exc_none && fv.is_none()) continue;
             if (!first) out += ",";
             first = false;
@@ -357,7 +402,15 @@ private:
 // ---------------------------------------------------------------------------
 // Build serializer from schema
 // ---------------------------------------------------------------------------
+static SerRef build_ser_impl(const py::dict& schema,
+                        std::unordered_map<std::string, SerRef>& defs);
+
 static SerRef build_ser(const py::dict& schema,
+                        std::unordered_map<std::string, SerRef>& defs) {
+    return build_ser_impl(schema, defs);
+}
+
+static SerRef build_ser_impl(const py::dict& schema,
                         std::unordered_map<std::string, SerRef>& defs) {
     std::string type;
     try { type = schema["type"].cast<std::string>(); } catch (...) { type = "any"; }
@@ -383,30 +436,50 @@ static SerRef build_ser(const py::dict& schema,
 
     if (type == "definitions") {
         try {
-            for (auto item : schema["definitions"].cast<py::list>()) {
+            auto defs_list = schema["definitions"].cast<py::list>();
+            // Pass 1: register stub SerNodes for all definition refs
+            for (auto item : defs_list) {
                 auto d = item.cast<py::dict>();
                 std::string ref = d["ref"].cast<std::string>();
-                defs[ref] = build_ser(d["schema"].cast<py::dict>(), defs);
+                defs[ref] = std::make_shared<SerNode>();
+                defs[ref]->type = "__stub__";
             }
-        } catch (...) {}
-        try { return build_ser(schema["schema"].cast<py::dict>(), defs); } catch (...) {}
+            // Pass 2: build each definition, copying content into stub
+            for (auto item : defs_list) {
+                auto d = item.cast<py::dict>();
+                std::string ref = d["ref"].cast<std::string>();
+                auto actual = build_ser_impl(d["schema"].cast<py::dict>(), defs);
+                // Copy actual content into the stub (preserves shared_ptr identity)
+                defs[ref]->copy_from(*actual);
+            }
+        } catch (const std::exception& e) {
+            fprintf(stderr, "Error building definitions: %s\n", e.what());
+        }
+        try { return build_ser_impl(schema["schema"].cast<py::dict>(), defs); } catch (...) {}
         return node;
     }
     if (type == "definition-ref") {
         try {
             std::string ref = schema["schema_ref"].cast<std::string>();
             auto it = defs.find(ref);
-            if (it != defs.end()) return it->second;
+            if (it != defs.end()) return it->second;  // Return stub (will be populated)
         } catch (...) {}
         return node;
     }
 
-    // Types with inner schema
+    // Types with inner schema (schema key)
     if (type == "nullable" || type == "nullable-union" || type == "default" || type == "with-default" ||
-        type == "json" || type == "format" || type == "to-string" || type == "enum" ||
-        type == "list" || type == "set" || type == "frozenset" || type == "generator") {
+        type == "json" || type == "format" || type == "to-string" || type == "enum") {
         auto c = sub();
         if (c) node->children.push_back(c);
+    }
+
+    // Types with items_schema key
+    if (type == "list" || type == "set" || type == "frozenset" || type == "generator") {
+        try {
+            auto c = build_ser_impl(schema["items_schema"].cast<py::dict>(), defs);
+            if (c) node->children.push_back(c);
+        } catch (...) {}
     }
 
     if (type == "dict") {
@@ -457,7 +530,7 @@ static SerRef build_ser(const py::dict& schema,
     }
 
     if (type == "default" || type == "with-default") {
-        try { node->default_val = schema["default"]; } catch (...) {}
+        try { node->default_val = schema["default"]; node->has_default_val = true; } catch (...) {}
     }
     if (type == "format") {
         try { node->format_str = schema["formatting"].cast<std::string>(); } catch (...) {}
