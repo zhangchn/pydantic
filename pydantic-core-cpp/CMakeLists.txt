@@ -5,17 +5,29 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Find Python
-find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+# ---------------------------------------------------------------------------
+# Dependencies
+# ---------------------------------------------------------------------------
 
-# pybind11
-include(FetchContent)
-FetchContent_Declare(
-    pybind11
-    GIT_REPOSITORY https://github.com/pybind/pybind11.git
-    GIT_TAG v2.13.6
-)
-FetchContent_MakeAvailable(pybind11)
+# When built via scikit-build-core, pybind11 is provided by the build frontend.
+# For standalone CMake builds (e.g. running tests directly), fetch it ourselves.
+if(NOT SKBUILD)
+    include(FetchContent)
+endif()
+
+# Python + pybind11
+if(SKBUILD)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
+    find_package(pybind11 CONFIG REQUIRED)
+else()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+    FetchContent_Declare(
+        pybind11
+        GIT_REPOSITORY https://github.com/pybind/pybind11.git
+        GIT_TAG v2.13.6
+    )
+    FetchContent_MakeAvailable(pybind11)
+endif()
 
 # simdjson for JSON parsing
 FetchContent_Declare(
@@ -33,7 +45,10 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(doctest)
 
-# Source files for the Python module
+# ---------------------------------------------------------------------------
+# Python extension module
+# ---------------------------------------------------------------------------
+
 set(CORE_SOURCES
     src/errors/errors.cpp
     src/errors/error_types.cpp
@@ -48,7 +63,6 @@ set(CORE_SOURCES
     src/main_module.cpp
 )
 
-# Create Python module
 pybind11_add_module(_pydantic_core_cpp ${CORE_SOURCES})
 
 target_include_directories(_pydantic_core_cpp PRIVATE
@@ -59,7 +73,6 @@ target_link_libraries(_pydantic_core_cpp PRIVATE
     simdjson::simdjson
 )
 
-# Compile options
 target_compile_options(_pydantic_core_cpp PRIVATE
     -Wall
     -Wextra
@@ -67,90 +80,102 @@ target_compile_options(_pydantic_core_cpp PRIVATE
     -O3
 )
 
-# Tests
-enable_testing()
+# scikit-build-core expects the module in the Python package directory.
+if(SKBUILD)
+    set_target_properties(_pydantic_core_cpp PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/python/pydantic_core_cpp"
+    )
+endif()
 
-# Test errors
-add_executable(test_errors tests/test_errors.cpp 
-    src/errors/errors.cpp 
-    src/errors/error_types.cpp
-)
-target_compile_definitions(test_errors PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
-target_link_libraries(test_errors PRIVATE doctest::doctest)
-target_include_directories(test_errors PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# ---------------------------------------------------------------------------
+# Tests (only for standalone builds, not during wheel building)
+# ---------------------------------------------------------------------------
 
-# Test validation state
-add_executable(test_validation_state tests/test_validation_state.cpp 
-    src/validation_state.cpp 
-    src/recursion_guard.cpp
-)
-target_compile_definitions(test_validation_state PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
-target_link_libraries(test_validation_state PRIVATE doctest::doctest)
-target_include_directories(test_validation_state PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(NOT SKBUILD)
+    enable_testing()
 
-# Test validators - Phase 2
-add_executable(test_validators tests/test_validators.cpp
-    src/errors/errors.cpp
-    src/errors/error_types.cpp
-    src/recursion_guard.cpp
-    src/validation_state.cpp
-    src/validator.cpp
-    src/input/json_input.cpp
-    src/input/string_input.cpp
-)
-target_compile_definitions(test_validators PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
-target_link_libraries(test_validators PRIVATE doctest::doctest simdjson::simdjson)
-target_include_directories(test_validators PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    # Test errors
+    add_executable(test_errors tests/test_errors.cpp
+        src/errors/errors.cpp
+        src/errors/error_types.cpp
+    )
+    target_compile_definitions(test_errors PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
+    target_link_libraries(test_errors PRIVATE doctest::doctest)
+    target_include_directories(test_errors PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-add_test(NAME Errors COMMAND test_errors)
-add_test(NAME ValidationState COMMAND test_validation_state)
-add_test(NAME Validators COMMAND test_validators)
+    # Test validation state
+    add_executable(test_validation_state tests/test_validation_state.cpp
+        src/validation_state.cpp
+        src/recursion_guard.cpp
+    )
+    target_compile_definitions(test_validation_state PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
+    target_link_libraries(test_validation_state PRIVATE doctest::doctest)
+    target_include_directories(test_validation_state PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-# Test serializers - Phase 4
-add_executable(test_serializers tests/test_serializers.cpp
-    src/errors/errors.cpp
-    src/errors/error_types.cpp
-    src/recursion_guard.cpp
-    src/serializer.cpp
-)
-target_compile_definitions(test_serializers PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
-target_link_libraries(test_serializers PRIVATE doctest::doctest)
-target_include_directories(test_serializers PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    # Test validators
+    add_executable(test_validators tests/test_validators.cpp
+        src/errors/errors.cpp
+        src/errors/error_types.cpp
+        src/recursion_guard.cpp
+        src/validation_state.cpp
+        src/validator.cpp
+        src/input/json_input.cpp
+        src/input/string_input.cpp
+    )
+    target_compile_definitions(test_validators PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
+    target_link_libraries(test_validators PRIVATE doctest::doctest simdjson::simdjson)
+    target_include_directories(test_validators PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-add_test(NAME Serializers COMMAND test_serializers)
+    add_test(NAME Errors COMMAND test_errors)
+    add_test(NAME ValidationState COMMAND test_validation_state)
+    add_test(NAME Validators COMMAND test_validators)
 
-# Test integration - Phase 5
-add_executable(test_integration tests/test_integration.cpp
-    src/errors/errors.cpp
-    src/errors/error_types.cpp
-    src/recursion_guard.cpp
-    src/validation_state.cpp
-    src/validator.cpp
-    src/serializer.cpp
-    src/combined_validator.cpp
-    src/schema_validator.cpp
-    src/input/json_input.cpp
-    src/input/string_input.cpp
-)
-target_compile_definitions(test_integration PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
-target_link_libraries(test_integration PRIVATE doctest::doctest simdjson::simdjson)
-target_include_directories(test_integration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    # Test serializers
+    add_executable(test_serializers tests/test_serializers.cpp
+        src/errors/errors.cpp
+        src/errors/error_types.cpp
+        src/recursion_guard.cpp
+        src/serializer.cpp
+    )
+    target_compile_definitions(test_serializers PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
+    target_link_libraries(test_serializers PRIVATE doctest::doctest)
+    target_include_directories(test_serializers PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-add_test(NAME Integration COMMAND test_integration)
+    add_test(NAME Serializers COMMAND test_serializers)
 
-# Test model/typed-dict/dataclass/model-fields validators
-add_executable(test_model_fields tests/test_model_fields.cpp
-    src/errors/errors.cpp
-    src/errors/error_types.cpp
-    src/recursion_guard.cpp
-    src/validation_state.cpp
-    src/validator.cpp
-    src/combined_validator.cpp
-    src/input/json_input.cpp
-    src/input/string_input.cpp
-)
-target_compile_definitions(test_model_fields PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
-target_link_libraries(test_model_fields PRIVATE doctest::doctest simdjson::simdjson)
-target_include_directories(test_model_fields PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    # Test integration
+    add_executable(test_integration tests/test_integration.cpp
+        src/errors/errors.cpp
+        src/errors/error_types.cpp
+        src/recursion_guard.cpp
+        src/validation_state.cpp
+        src/validator.cpp
+        src/serializer.cpp
+        src/combined_validator.cpp
+        src/schema_validator.cpp
+        src/input/json_input.cpp
+        src/input/string_input.cpp
+    )
+    target_compile_definitions(test_integration PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
+    target_link_libraries(test_integration PRIVATE doctest::doctest simdjson::simdjson)
+    target_include_directories(test_integration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-add_test(NAME ModelFields COMMAND test_model_fields)
+    add_test(NAME Integration COMMAND test_integration)
+
+    # Test model/typed-dict/dataclass validators
+    add_executable(test_model_fields tests/test_model_fields.cpp
+        src/errors/errors.cpp
+        src/errors/error_types.cpp
+        src/recursion_guard.cpp
+        src/validation_state.cpp
+        src/validator.cpp
+        src/combined_validator.cpp
+        src/input/json_input.cpp
+        src/input/string_input.cpp
+    )
+    target_compile_definitions(test_model_fields PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
+    target_link_libraries(test_model_fields PRIVATE doctest::doctest simdjson::simdjson)
+    target_include_directories(test_model_fields PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+    add_test(NAME ModelFields COMMAND test_model_fields)
+endif()

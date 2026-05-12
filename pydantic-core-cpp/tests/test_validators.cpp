@@ -1620,4 +1620,132 @@ TEST_CASE("DatetimeValidator - stub always succeeds") {
     CHECK(result.is_ok());
 }
 
+// ========================================================================
+// Error detail verification and edge cases
+// ========================================================================
+
+TEST_CASE("IntValidator - error has correct error type (int_type)") {
+    IntValidator validator;
+
+    ValidationState state;
+    auto json_result = parse_json("\"not-int\"");
+    REQUIRE(json_result.is_ok());
+    auto result = validator.validate(*json_result.value(), state);
+    CHECK(result.is_err());
+
+    auto& err = result.error();
+    CHECK(err.has_line_errors());
+    CHECK(err.line_errors().size() >= 1);
+
+    auto& line_err = *err.line_errors()[0];
+    CHECK(line_err.error_type.kind() == ErrorType::Kind::IntType);
+}
+
+TEST_CASE("StringValidator - error has correct error type (string_type)") {
+    StringValidator validator;
+
+    ValidationState state;
+    state.set_strict(true);
+    auto json_result = parse_json("42");
+    REQUIRE(json_result.is_ok());
+    auto result = validator.validate(*json_result.value(), state);
+    CHECK(result.is_err());
+
+    auto& line_err = *result.error().line_errors()[0];
+    CHECK(line_err.error_type.kind() == ErrorType::Kind::StringType);
+}
+
+TEST_CASE("BoolValidator - error has correct error type (bool_type)") {
+    BoolValidator validator;
+
+    ValidationState state;
+    state.set_strict(true);
+    auto json_result = parse_json("\"not-bool\"");
+    REQUIRE(json_result.is_ok());
+    auto result = validator.validate(*json_result.value(), state);
+    CHECK(result.is_err());
+
+    auto& line_err = *result.error().line_errors()[0];
+    CHECK(line_err.error_type.kind() == ErrorType::Kind::BoolType);
+}
+
+TEST_CASE("NoneValidator - error has correct error type (none_required)") {
+    NoneValidator validator;
+
+    ValidationState state;
+    auto json_result = parse_json("42");
+    REQUIRE(json_result.is_ok());
+    auto result = validator.validate(*json_result.value(), state);
+    CHECK(result.is_err());
+
+    auto& line_err = *result.error().line_errors()[0];
+    CHECK(line_err.error_type.kind() == ErrorType::Kind::NoneRequired);
+}
+
+TEST_CASE("ValError - error location is empty for root-level errors") {
+    IntValidator validator;
+
+    ValidationState state;
+    auto json_result = parse_json("\"not-int\"");
+    REQUIRE(json_result.is_ok());
+    auto result = validator.validate(*json_result.value(), state);
+    REQUIRE(result.is_err());
+
+    auto& line_err = *result.error().line_errors()[0];
+    // Root-level errors should have an empty location path
+    CHECK(line_err.location.items.empty());
+}
+
+TEST_CASE("ValError - error contains input repr") {
+    IntValidator validator;
+
+    ValidationState state;
+    auto json_result = parse_json("\"abc\"");
+    REQUIRE(json_result.is_ok());
+    auto result = validator.validate(*json_result.value(), state);
+    REQUIRE(result.is_err());
+
+    auto& line_err = *result.error().line_errors()[0];
+    // Error should contain a reference to the invalid input
+    CHECK(!line_err.input_value.empty());
+}
+
+TEST_CASE("Validator - name() returns expected strings") {
+    CHECK(IntValidator().name() == "int");
+    CHECK(FloatValidator().name() == "float");
+    CHECK(StringValidator().name() == "str");
+    CHECK(BoolValidator().name() == "bool");
+    CHECK(NoneValidator().name() == "none");
+    CHECK(AnyValidator().name() == "any");
+    CHECK(ListValidator().name() == "list");
+    CHECK(DictValidator().name() == "dict");
+    CHECK(SetValidator().name() == "set");
+    CHECK(FrozenSetValidator().name() == "frozenset");
+    CHECK(TupleValidator().name() == "tuple");
+}
+
+TEST_CASE("ValidatorFactory - build nullable schema from JSON") {
+    std::unordered_map<std::string, std::string> schema;
+    schema["type"] = "nullable";
+    auto validator = ValidatorFactory::build(schema, {});
+    REQUIRE(validator != nullptr);
+    CHECK(validator->name() == "nullable");
+}
+
+TEST_CASE("ValidatorFactory - build union schema from JSON") {
+    std::unordered_map<std::string, std::string> schema;
+    schema["type"] = "union";
+    auto validator = ValidatorFactory::build(schema, {});
+    REQUIRE(validator != nullptr);
+    CHECK(validator->name() == "union");
+}
+
+TEST_CASE("ValidatorFactory - build chain schema from JSON") {
+    std::unordered_map<std::string, std::string> schema;
+    schema["type"] = "chain";
+    auto validator = ValidatorFactory::build(schema, {});
+    REQUIRE(validator != nullptr);
+    CHECK(validator->name() == "chain");
+}
+
 } // TEST_SUITE

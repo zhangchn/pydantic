@@ -1,0 +1,111 @@
+[build-system]
+requires = ['scikit-build-core>=0.10,<0.11', 'pybind11>=2.13,<3']
+build-backend = 'scikit_build_core.build'
+
+[project]
+name = 'pydantic-core-cpp'
+description = "C++ core functionality for Pydantic validation and serialization"
+requires-python = '>=3.10'
+license = 'MIT'
+license-files = ['LICENSE']
+authors = [
+    { name = 'Pydantic Contributors' },
+]
+classifiers = [
+    'Development Status :: 3 - Alpha',
+    'Programming Language :: Python',
+    'Programming Language :: Python :: 3',
+    'Programming Language :: Python :: 3 :: Only',
+    'Programming Language :: Python :: 3.10',
+    'Programming Language :: Python :: 3.11',
+    'Programming Language :: Python :: 3.12',
+    'Programming Language :: Python :: 3.13',
+    'Programming Language :: Python :: 3.14',
+    'Programming Language :: Python :: Implementation :: CPython',
+    'Programming Language :: C++',
+    'Framework :: Pydantic',
+    'Intended Audience :: Developers',
+    'Intended Audience :: Information Technology',
+    'Operating System :: POSIX :: Linux',
+    'Operating System :: Microsoft :: Windows',
+    'Operating System :: MacOS',
+    'Typing :: Typed',
+]
+dependencies = ['typing-extensions>=4.14.1']
+dynamic = ['readme', 'version']
+
+[project.urls]
+Homepage = 'https://github.com/pydantic'
+Source = 'https://github.com/pydantic/pydantic/tree/main/pydantic-core-cpp'
+
+[dependency-groups]
+dev = ["cmake", "ninja"]
+testing = [
+    { include-group = "dev" },
+    'coverage',
+    'pytest',
+    'pytest-timeout',
+]
+linting = [
+    { include-group = "dev" },
+    'mypy',
+    'ruff',
+]
+
+[tool.scikit-build]
+python-source = "python"
+wheel.packages = ["python/pydantic_core_cpp"]
+cmake.source-dir = "."
+wheel.py-api = "cp310"
+minimum-version = "0.10"
+build-dir = "build/{wheel_tag}"
+
+[tool.cibuildwheel]
+build-frontend = "build[uv]"
+build-verbosity = 1
+
+[tool.ruff]
+line-length = 120
+target-version = 'py310'
+
+[tool.ruff.lint]
+extend-select = ['Q', 'RUF100', 'C90', 'I', 'UP']
+flake8-quotes = { inline-quotes = 'single', multiline-quotes = 'double' }
+mccabe = { max-complexity = 13 }
+isort = { known-first-party = ['pydantic_core_cpp', 'tests'] }
+
+[tool.ruff.lint.pyupgrade]
+keep-runtime-typing = true
+
+[tool.ruff.format]
+quote-style = 'single'
+
+[tool.pytest.ini_options]
+testpaths = 'tests'
+log_format = '%(name)s %(levelname)s: %(message)s'
+filterwarnings = ['error']
+timeout = 30
+xfail_strict = true
+
+[tool.coverage.run]
+source = ['pydantic_core_cpp']
+branch = true
+
+[tool.coverage.report]
+precision = 2
+exclude_also = [
+    'raise\sNotImplementedError',
+    '@(typing\.)?overload',
+    'class .*\bProtocol\):',
+    '(typing\.)?.assert_never',
+]
+
+[tool.mypy]
+python_version = '3.10'
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pyright]
+include = ['python/pydantic_core_cpp']
+reportUnnecessaryTypeIgnoreComment = true
