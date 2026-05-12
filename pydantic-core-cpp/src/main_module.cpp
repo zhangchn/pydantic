@@ -112,6 +112,10 @@ struct SerNode {
         if (!fields.empty()) {
             return serialize_fields(value, exc_none);
         }
+        // Delegate model/dataclass/typed-dict to inner serializer
+        if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
+            return children[0]->to_python(value, json_mode, exc_none);
+        }
         if (!py_func.is_none()) {
             if (type == "function-plain") return py_func(value);
             if (type == "function-after" || type == "function-before" || type == "function-wrap") {
