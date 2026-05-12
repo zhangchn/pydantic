@@ -1,10 +1,8 @@
 """
-Shim module that switches between pydantic_core (Rust) and pydantic_core_cpp (C++) based on environment variable.
+Shim module that switches between pydantic_core (Rust) and pydantic_core_cpp (C++).
 
-Set PYDANTIC_USE_CPP_CORE=1 to use the C++ implementation.
-
-This module should be imported early in the pydantic package initialization
-to ensure all pydantic_core imports are redirected to the correct backend.
+C++ backend is used by default.
+Set PYDANTIC_USE_CPP_CORE=0 (or "false"/"no") to fall back to the Rust implementation.
 """
 from __future__ import annotations
 
@@ -12,8 +10,8 @@ import os
 import sys
 from typing import Any
 
-# Check if we should use the C++ implementation
-_USE_CPP = os.environ.get("PYDANTIC_USE_CPP_CORE", "").lower() in ("1", "true", "yes")
+# C++ is the default; opt-out by setting PYDANTIC_USE_CPP_CORE=0/false/no
+_USE_CPP = os.environ.get("PYDANTIC_USE_CPP_CORE", "1").lower() not in ("0", "false", "no")
 
 def _get_backend() -> tuple[Any, str]:
     """Get the appropriate pydantic_core backend based on environment variable."""
