@@ -1,6 +1,7 @@
 #include "pydantic_core/combined_validator.hpp"
 #include "pydantic_core/json_input.hpp"
 #include "pydantic_core/validators/model_fields.hpp"
+#include "pydantic_core/validators/special.hpp"
 #include <simdjson.h>
 
 namespace pydantic_core {
@@ -12,7 +13,15 @@ static ExtraBehavior extra_behavior_from_string(const std::string& s) {
     return ExtraBehavior::Ignore;
 }
 
-// Forward declaration for internal recursive schema parsing
+// Forward declarations for internal recursive schema parsing
+class DefinitionsRegistry;
+static std::shared_ptr<Validator> build_from_element(
+    const simdjson::dom::element& elem,
+    const std::unordered_map<std::string, std::string>& config,
+    std::shared_ptr<DefinitionsRegistry> definitions
+);
+
+// Overload without definitions (for backwards compatibility)
 static std::shared_ptr<Validator> build_from_element(
     const simdjson::dom::element& elem,
     const std::unordered_map<std::string, std::string>& config
@@ -92,7 +101,8 @@ static std::shared_ptr<Validator> build_from_flat_dict(
 // Internal recursive schema parser using simdjson elements
 static std::shared_ptr<Validator> build_from_element(
     const simdjson::dom::element& elem,
-    const std::unordered_map<std::string, std::string>& config
+    const std::unordered_map<std::string, std::string>& config,
+    std::shared_ptr<DefinitionsRegistry> definitions
 ) {
     auto obj = elem.get_object();
     if (obj.error()) {
@@ -228,7 +238,7 @@ static std::shared_ptr<Validator> build_from_element(
         auto lv = std::make_shared<ListValidator>();
         auto items_schema = elem["items_schema"];
         if (!items_schema.error() && !items_schema.value().is_null()) {
-            lv->items_schema = build_from_element(items_schema.value(), config);
+            lv->items_schema = build_from_element(items_schema.value(), config, definitions);
         }
         // Parse min_length/max_length
         auto parse_sz = [&](const char* k) -> std::optional<size_t> {
@@ -248,11 +258,11 @@ static std::shared_ptr<Validator> build_from_element(
         auto dv = std::make_shared<DictValidator>();
         auto keys_schema = elem["keys_schema"];
         if (!keys_schema.error() && !keys_schema.value().is_null()) {
-            dv->keys_schema = build_from_element(keys_schema.value(), config);
+            dv->keys_schema = build_from_element(keys_schema.value(), config, definitions);
         }
         auto values_schema = elem["values_schema"];
         if (!values_schema.error() && !values_schema.value().is_null()) {
-            dv->values_schema = build_from_element(values_schema.value(), config);
+            dv->values_schema = build_from_element(values_schema.value(), config, definitions);
         }
         return dv;
     }
@@ -265,7 +275,7 @@ static std::shared_ptr<Validator> build_from_element(
         auto items_arr = elem["items_schema"];
         if (!items_arr.error() && items_arr.value().is_array()) {
             for (auto item : items_arr.value().get_array().value()) {
-                tv->items.push_back(build_from_element(item, config));
+                tv->items.push_back(build_from_element(item, config, definitions));
             }
         }
         auto variadic = elem["variadic_item_index"];
@@ -279,7 +289,7 @@ static std::shared_ptr<Validator> build_from_element(
     if (type == "nullable") {
         auto schema_elem = elem["schema"];
         if (!schema_elem.error()) {
-            auto inner = build_from_element(schema_elem.value(), config);
+            auto inner = build_from_element(schema_elem.value(), config, definitions);
             return std::make_shared<NullableValidator>(inner);
         }
         return std::make_shared<NullableValidator>();
@@ -291,7 +301,7 @@ static std::shared_ptr<Validator> build_from_element(
         if (!choices.error() && choices.value().is_array()) {
             std::vector<std::shared_ptr<Validator>> validators;
             for (auto choice : choices.value().get_array().value()) {
-                validators.push_back(build_from_element(choice, config));
+                validators.push_back(build_from_element(choice, config, definitions));
             }
             return std::make_shared<UnionValidator>(validators);
         }
@@ -305,7 +315,7 @@ static std::shared_ptr<Validator> build_from_element(
         auto schema_elem = elem["schema"];
         std::shared_ptr<Validator> inner;
         if (!schema_elem.error()) {
-            inner = build_from_element(schema_elem.value(), config);
+            inner = build_from_element(schema_elem.value(), config, definitions);
         }
 
         auto default_elem = elem["default"];
@@ -341,7 +351,7 @@ static std::shared_ptr<Validator> build_from_element(
         if (!steps.error() && steps.value().is_array()) {
             std::vector<std::shared_ptr<Validator>> validators;
             for (auto step : steps.value().get_array().value()) {
-                validators.push_back(build_from_element(step, config));
+                validators.push_back(build_from_element(step, config, definitions));
             }
             return std::make_shared<ChainValidator>(validators);
         }
@@ -353,8 +363,8 @@ static std::shared_ptr<Validator> build_from_element(
         auto lax_elem = elem["lax_schema"];
         auto strict_elem = elem["strict_schema"];
         std::shared_ptr<Validator> lax, strict;
-        if (!lax_elem.error()) lax = build_from_element(lax_elem.value(), config);
-        if (!strict_elem.error()) strict = build_from_element(strict_elem.value(), config);
+        if (!lax_elem.error()) lax = build_from_element(lax_elem.value(), config, definitions);
+        if (!strict_elem.error()) strict = build_from_element(strict_elem.value(), config, definitions);
         if (!lax) lax = std::make_shared<AnyValidator>();
         if (!strict) strict = std::make_shared<AnyValidator>();
         return std::make_shared<LaxOrStrictValidator>(lax, strict);
@@ -447,14 +457,14 @@ static std::shared_ptr<Validator> build_from_element(
                     // The actual validator is nested inside schema.schema
                     auto inner_schema = schema_elem.value()["schema"];
                     if (!inner_schema.error()) {
-                        info.schema = build_from_element(inner_schema.value(), config);
+                        info.schema = build_from_element(inner_schema.value(), config, definitions);
                     } else {
                         info.schema = std::make_shared<AnyValidator>();
                     }
                     // The default value will be parsed below from schema.default
                     // We don't set info.required = false yet; that happens in default parsing
                 } else {
-                    info.schema = build_from_element(schema_elem.value(), config);
+                    info.schema = build_from_element(schema_elem.value(), config, definitions);
                 }
             } else {
                 info.schema = std::make_shared<AnyValidator>();
@@ -562,7 +572,7 @@ static std::shared_ptr<Validator> build_from_element(
 
             auto schema_elem = field_def_elem["schema"];
             if (!schema_elem.error()) {
-                info.schema = build_from_element(schema_elem.value(), config);
+                info.schema = build_from_element(schema_elem.value(), config, definitions);
             } else {
                 info.schema = std::make_shared<AnyValidator>();
             }
@@ -617,7 +627,7 @@ static std::shared_ptr<Validator> build_from_element(
         std::shared_ptr<Validator> fields_validator;
         auto schema_elem = elem["schema"];
         if (!schema_elem.error()) {
-            fields_validator = build_from_element(schema_elem.value(), config);
+            fields_validator = build_from_element(schema_elem.value(), config, definitions);
         } else {
             fields_validator = std::make_shared<ModelFieldsValidator>();
         }
@@ -656,7 +666,7 @@ static std::shared_ptr<Validator> build_from_element(
 
                 auto schema_val = field_elem["schema"];
                 if (!schema_val.error()) {
-                    info.schema = build_from_element(schema_val.value(), config);
+                    info.schema = build_from_element(schema_val.value(), config, definitions);
                 } else {
                     info.schema = std::make_shared<AnyValidator>();
                 }
@@ -691,30 +701,77 @@ static std::shared_ptr<Validator> build_from_element(
         auto schema_val = elem["schema"];
         std::shared_ptr<Validator> inner;
         if (!schema_val.error()) {
-            inner = build_from_element(schema_val.value(), config);
+            inner = build_from_element(schema_val.value(), config, definitions);
         } else {
             inner = std::make_shared<AnyValidator>();
         }
         return std::make_shared<JsonValidator>(inner);
     }
-
     // ========================================================================
     // Definitions - for recursive schemas
     // ========================================================================
     if (type == "definitions") {
+        auto defs_arr = elem["definitions"];
         auto schema_val = elem["schema"];
+        
+        auto registry = std::make_shared<DefinitionsRegistry>();
+        
+        // First pass: extract all refs and register stubs so recursive refs can resolve
+        if (!defs_arr.error() && defs_arr.value().is_array()) {
+            for (auto def_elem : defs_arr.value().get_array().value()) {
+                auto ref_val = def_elem["ref"];
+                if (!ref_val.error() && ref_val.value().is_string()) {
+                    std::string ref = std::string(ref_val.value().get_string().value());
+                    registry->add_definition(ref, std::make_shared<AnyValidator>());
+                }
+            }
+        }
+        
+        // Second pass: build all definitions (recursive refs resolve to stubs, then get replaced)
+        if (!defs_arr.error() && defs_arr.value().is_array()) {
+            for (auto def_elem : defs_arr.value().get_array().value()) {
+                auto ref_val = def_elem["ref"];
+                std::string ref;
+                if (!ref_val.error() && ref_val.value().is_string()) {
+                    ref = std::string(ref_val.value().get_string().value());
+                }
+                if (ref.empty()) continue;
+                
+                auto def_validator = build_from_element(def_elem, config, registry);
+                registry->add_definition(ref, def_validator);
+            }
+        }
+        
+        // Third pass: build the main schema with fully populated registry
         if (!schema_val.error()) {
-            return build_from_element(schema_val.value(), config);
+            auto main_validator = build_from_element(schema_val.value(), config, registry);
+            return main_validator;
         }
         return std::make_shared<AnyValidator>();
     }
 
     if (type == "definition-ref") {
-        // Recursive reference - for now treat as any
-        return std::make_shared<AnyValidator>();
+        auto ref_val = elem["schema_ref"];
+        std::string ref;
+        if (!ref_val.error() && ref_val.value().is_string()) {
+            ref = std::string(ref_val.value().get_string().value());
+        }
+        
+        auto def_ref = std::make_shared<DefinitionRefValidator>();
+        def_ref->set_ref(ref);
+        def_ref->set_definitions(definitions);
+        return def_ref;
     }
 
     throw SchemaError("Unknown validator type: " + type);
+}
+
+// Backwards-compatible overload without definitions
+static std::shared_ptr<Validator> build_from_element(
+    const simdjson::dom::element& elem,
+    const std::unordered_map<std::string, std::string>& config
+) {
+    return build_from_element(elem, config, nullptr);
 }
 
 // ============================================================================

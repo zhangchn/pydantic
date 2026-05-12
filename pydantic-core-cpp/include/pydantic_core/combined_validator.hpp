@@ -13,6 +13,8 @@
 #include "pydantic_core/validators/functions.hpp"
 #include "pydantic_core/validators/special.hpp"
 #include "pydantic_core/validators/model_fields.hpp"
+#include "pydantic_core/validators/special.hpp"
+#include <simdjson.h>
 
 namespace pydantic_core {
 
@@ -62,6 +64,7 @@ public:
         std::shared_ptr<LaxOrStrictValidator>,
         std::shared_ptr<JsonOrPythonValidator>,
         std::shared_ptr<JsonValidator>,
+        std::shared_ptr<DefinitionRefValidator>,
         std::shared_ptr<Validator>  // Fallback for base-class pointers
     >;
 

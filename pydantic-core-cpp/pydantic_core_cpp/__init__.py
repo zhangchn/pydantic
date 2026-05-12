@@ -37,6 +37,138 @@ class SchemaValidator:
         self._schema = schema
         self._config = config
         self._base = _SchemaValidatorBase(schema, config, _use_prebuilt)
+        # Build a map of definition refs to model classes for recursive model construction
+        self._model_classes = self._extract_model_classes(schema)
+
+    @staticmethod
+    def _extract_model_classes(schema):
+        """Extract a map of definition-ref -> model class from the schema."""
+        classes = {}
+        if not isinstance(schema, dict):
+            return classes
+
+        # Handle definitions wrapper
+        if schema.get("type") == "definitions":
+            for defn in schema.get("definitions", []):
+                ref = defn.get("ref")
+                if ref and defn.get("type") == "model":
+                    cls = defn.get("cls")
+                    if cls is not None and callable(cls):
+                        classes[ref] = cls
+        
+        # Handle direct model schema
+        if schema.get("type") == "model":
+            cls = schema.get("cls")
+            if cls is not None and callable(cls):
+                # Use a special key for the top-level model
+                classes["__root__"] = cls
+
+        return classes
+
+    def _dict_to_model(self, data, schema=None):
+        """Recursively convert dicts to model instances based on schema."""
+        if schema is None:
+            schema = self._schema
+
+        if not isinstance(schema, dict):
+            return data
+
+        # Unwrapping handlers - these must run before the data type check
+        # so we can find the actual inner schema type
+        if schema.get("type") == "default":
+            inner = schema.get("schema", {})
+            return self._dict_to_model(data, inner)
+
+        if schema.get("type") == "nullable":
+            if data is None:
+                return None
+            inner = schema.get("schema", {})
+            return self._dict_to_model(data, inner)
+
+        if schema.get("type") == "definitions":
+            inner = schema.get("schema", {})
+            if inner.get("type") == "definition-ref":
+                ref = inner.get("schema_ref", "__root__")
+                cls = self._model_classes.get(ref)
+                if cls:
+                    return self._build_model(data, cls, schema)
+            return self._dict_to_model(data, inner)
+
+        if schema.get("type") == "definition-ref":
+            ref = schema.get("schema_ref", "__root__")
+            cls = self._model_classes.get(ref)
+            if cls:
+                return self._build_model(data, cls, self._schema)
+            return data
+
+        if schema.get("type") == "union":
+            for choice in schema.get("choices", []):
+                if isinstance(choice, dict):
+                    result = self._dict_to_model(data, choice)
+                    if result != data:
+                        return result
+            return data
+
+        # Now that schema is unwrapped, check data types
+        # Handle list data type
+        if schema.get("type") == "list":
+            items_schema = schema.get("items_schema", {})
+            if isinstance(items_schema, dict) and isinstance(data, list):
+                return [self._dict_to_model(item, items_schema) for item in data]
+            return data
+
+        # Handle non-dict data (return as-is for non-list schemas)
+        if not isinstance(data, dict):
+            return data
+
+        if schema.get("type") == "model":
+            cls = schema.get("cls")
+            if cls is not None and callable(cls):
+                return self._build_model(data, cls, schema)
+            return data
+
+        if schema.get("type") == "model-fields":
+            return self._process_model_fields(data, schema)
+
+        return data
+
+    def _build_model(self, data, cls, full_schema):
+        """Build a model instance from dict data."""
+        instance = object.__new__(cls)
+        
+        # Find the model-fields schema to process nested models
+        inner_schema = full_schema.get("schema", {})
+        if isinstance(inner_schema, dict):
+            # Unwrap definition-ref if needed
+            if inner_schema.get("type") == "definition-ref":
+                ref = inner_schema.get("schema_ref")
+                for defn in full_schema.get("definitions", []):
+                    if defn.get("ref") == ref:
+                        inner_schema = defn.get("schema", inner_schema)
+                        break
+            
+            if inner_schema.get("type") in ("model-fields", "typed-dict"):
+                data = self._process_model_fields(data, inner_schema)
+
+        instance.__dict__ = data
+        return instance
+
+    def _process_model_fields(self, data, fields_schema):
+        """Process model fields, recursively converting nested dicts to models."""
+        fields = fields_schema.get("fields", {})
+        if not isinstance(fields, dict):
+            return data
+
+        result = dict(data)
+        for field_name, field_def in fields.items():
+            if field_name not in result:
+                continue
+            
+            field_schema = field_def.get("schema", {})
+            if isinstance(field_schema, dict):
+                result[field_name] = self._dict_to_model(result[field_name], field_schema)
+
+        return result
 
     @property
     def title(self):
@@ -48,20 +180,45 @@ class SchemaValidator:
             obj, strict=strict, context=context, self_instance=self_instance,
             extra=extra, from_attributes=from_attributes, by_alias=by_alias, by_name=by_name)
 
-        # If result is a dict and no self_instance, construct model from schema
-        if isinstance(result, dict) and self_instance is None:
+        if isinstance(result, dict):
+            # Recursively convert nested dicts to model instances
+            result = self._dict_to_model(result)
+            
+            # If result is a model instance, return it
+            if not isinstance(result, dict):
+                return result
+                
+            # Otherwise, try to construct a model from the top-level schema
             schema_type = self._schema.get("type") if hasattr(self._schema, "get") else None
-            if schema_type == "model":
+            if schema_type == "definitions":
+                inner = self._schema.get("schema", {})
+                if inner.get("type") == "definition-ref":
+                    ref = inner.get("schema_ref", "__root__")
+                    cls = self._model_classes.get(ref)
+                    if cls:
+                        instance = object.__new__(cls)
+                        instance.__dict__ = result
+                        return instance
+            elif schema_type == "model":
                 cls = self._schema.get("cls")
                 if cls is not None and callable(cls):
-                    # Construct instance directly without going through __init__
                     instance = object.__new__(cls)
-                    # Set __dict__ directly
                     instance.__dict__ = result
-                    # Run __pydantic_complete__ if available
-                    if hasattr(cls, '__pydantic_complete__'):
-                        pass  # Already complete
                     return instance
+
+        elif self_instance is not None:
+            # self_instance was provided and C++ returned it.
+            # Recursively convert nested dicts in __dict__ to model instances
+            processed = self._dict_to_model(dict(self_instance.__dict__))
+            if isinstance(processed, dict):
+                self_instance.__dict__.clear()
+                self_instance.__dict__.update(processed)
+            else:
+                # _dict_to_model returned a model instance - copy its __dict__
+                if hasattr(processed, '__dict__'):
+                    self_instance.__dict__.clear()
+                    self_instance.__dict__.update(processed.__dict__)
+
         return result
 
     def validate_json(self, json_data, *, strict=None):
