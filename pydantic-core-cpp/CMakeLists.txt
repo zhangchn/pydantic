@@ -176,4 +176,21 @@ if(NOT SKBUILD)
     target_include_directories(test_model_fields PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
     add_test(NAME ModelFields COMMAND test_model_fields)
+
+    # Constrained validators test suite
+    add_executable(test_constrained_validators tests/test_constrained_validators.cpp
+        src/errors/errors.cpp
+        src/errors/error_types.cpp
+        src/recursion_guard.cpp
+        src/validation_state.cpp
+        src/validator.cpp
+        src/combined_validator.cpp
+        src/input/json_input.cpp
+        src/input/string_input.cpp
+    )
+    target_compile_definitions(test_constrained_validators PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
+    target_link_libraries(test_constrained_validators PRIVATE doctest::doctest simdjson::simdjson)
+    target_include_directories(test_constrained_validators PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+    add_test(NAME ConstrainedValidators COMMAND test_constrained_validators)
 endif()

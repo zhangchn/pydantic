@@ -64,7 +64,10 @@ static std::shared_ptr<Validator> build_from_flat_dict(
     if (type == "any") return std::make_shared<AnyValidator>();
     if (type == "none") return std::make_shared<NoneValidator>();
     if (type == "bool") return std::make_shared<BoolValidator>();
-    if (type == "int") return std::make_shared<IntValidator>();
+    if (type == "int") {
+        auto v = std::make_shared<IntValidator>();
+        return v;
+    }
     if (type == "float") return std::make_shared<FloatValidator>();
     if (type == "str") return std::make_shared<StringValidator>();
     if (type == "bytes") return std::make_shared<BytesValidator>();
@@ -114,27 +117,163 @@ static std::shared_ptr<Validator> build_from_element(
     if (type == "any") return std::make_shared<AnyValidator>();
     if (type == "none") return std::make_shared<NoneValidator>();
     if (type == "bool") return std::make_shared<BoolValidator>();
-    if (type == "int") return std::make_shared<IntValidator>();
-    if (type == "float") return std::make_shared<FloatValidator>();
-    if (type == "str") return std::make_shared<StringValidator>();
-    if (type == "bytes") return std::make_shared<BytesValidator>();
+
+    // Int validator — check for constraints
+    if (type == "int") {
+        auto ci = [&](const char* key) { return !elem[key].error(); };
+        bool has_c = ci("gt") || ci("ge") || ci("lt") || ci("le") || ci("multiple_of");
+        if (has_c) {
+            auto cv = std::make_shared<ConstrainedIntValidator>();
+            auto cfg_s = config.find("strict");
+            if (cfg_s != config.end()) cv->strict = (cfg_s->second == "true");
+            auto pi = [&](const char* k) -> std::optional<int64_t> {
+                auto v = elem[k];
+                if (!v.error()) {
+                    if (v.value().is_int64()) return v.value().get_int64();
+                    if (v.value().is_uint64()) return static_cast<int64_t>(v.value().get_uint64());
+                }
+                return std::nullopt;
+            };
+            if (auto v = pi("gt")) cv->gt = *v;
+            if (auto v = pi("ge")) cv->ge = *v;
+            if (auto v = pi("lt")) cv->lt = *v;
+            if (auto v = pi("le")) cv->le = *v;
+            if (auto v = pi("multiple_of")) cv->multiple_of = *v;
+            return cv;
+        }
+        return std::make_shared<IntValidator>();
+    }
+
+    // Float validator — check for constraints
+    if (type == "float") {
+        auto ci = [&](const char* key) { return !elem[key].error(); };
+        bool has_c = ci("gt") || ci("ge") || ci("lt") || ci("le") || ci("multiple_of");
+        if (has_c) {
+            auto cv = std::make_shared<ConstrainedFloatValidator>();
+            auto cfg_s = config.find("strict");
+            if (cfg_s != config.end()) cv->strict = (cfg_s->second == "true");
+            auto pf = [&](const char* k) -> std::optional<double> {
+                auto v = elem[k];
+                if (!v.error()) {
+                    if (v.value().is_double()) return v.value().get_double();
+                    if (v.value().is_int64()) return static_cast<double>(v.value().get_int64());
+                }
+                return std::nullopt;
+            };
+            if (auto v = pf("gt")) cv->gt = *v;
+            if (auto v = pf("ge")) cv->ge = *v;
+            if (auto v = pf("lt")) cv->lt = *v;
+            if (auto v = pf("le")) cv->le = *v;
+            if (auto v = pf("multiple_of")) cv->multiple_of = *v;
+            return cv;
+        }
+        return std::make_shared<FloatValidator>();
+    }
+
+    // Str validator — check for constraints
+    if (type == "str") {
+        auto ci = [&](const char* key) { return !elem[key].error(); };
+        bool has_c = ci("min_length") || ci("max_length") || ci("pattern") ||
+                     ci("strip_whitespace") || ci("to_lower") || ci("to_upper");
+        if (has_c) {
+            auto cv = std::make_shared<StrConstrainedValidator>();
+            auto cfg_s = config.find("strict");
+            if (cfg_s != config.end()) cv->strict = (cfg_s->second == "true");
+            auto ps = [&](const char* k) -> std::optional<size_t> {
+                auto v = elem[k];
+                if (!v.error() && v.value().is_uint64()) return static_cast<size_t>(v.value().get_uint64());
+                if (!v.error() && v.value().is_int64() && v.value().get_int64() >= 0)
+                    return static_cast<size_t>(v.value().get_int64());
+                return std::nullopt;
+            };
+            if (auto v = ps("min_length")) cv->min_length = *v;
+            if (auto v = ps("max_length")) cv->max_length = *v;
+            auto pat = elem["pattern"];
+            if (!pat.error() && pat.value().is_string()) cv->pattern = std::string(pat.value().get_string().value());
+            auto sw = elem["strip_whitespace"];
+            if (!sw.error() && sw.value().is_bool()) cv->strip_whitespace = sw.value().get_bool();
+            auto tl = elem["to_lower"];
+            if (!tl.error() && tl.value().is_bool()) cv->to_lower = tl.value().get_bool();
+            auto tu = elem["to_upper"];
+            if (!tu.error() && tu.value().is_bool()) cv->to_upper = tu.value().get_bool();
+            return cv;
+        }
+        return std::make_shared<StringValidator>();
+    }
+
+    // Bytes validator — check for constraints
+    if (type == "bytes") {
+        auto ci = [&](const char* key) { return !elem[key].error(); };
+        bool has_c = ci("min_length") || ci("max_length");
+        if (has_c) {
+            auto cv = std::make_shared<BytesConstrainedValidator>();
+            auto cfg_s = config.find("strict");
+            if (cfg_s != config.end()) cv->strict = (cfg_s->second == "true");
+            auto ps = [&](const char* k) -> std::optional<size_t> {
+                auto v = elem[k];
+                if (!v.error() && v.value().is_uint64()) return static_cast<size_t>(v.value().get_uint64());
+                if (!v.error() && v.value().is_int64() && v.value().get_int64() >= 0)
+                    return static_cast<size_t>(v.value().get_int64());
+                return std::nullopt;
+            };
+            if (auto v = ps("min_length")) cv->min_length = *v;
+            if (auto v = ps("max_length")) cv->max_length = *v;
+            return cv;
+        }
+        return std::make_shared<BytesValidator>();
+    }
 
     // List with item validator
     if (type == "list") {
-        auto list_validator = std::make_shared<ListValidator>();
+        auto lv = std::make_shared<ListValidator>();
         auto items_schema = elem["items_schema"];
         if (!items_schema.error() && !items_schema.value().is_null()) {
-            auto inner = build_from_element(items_schema.value(), config);
-            // ListValidator needs to be updated to support inner validators
-            // For now, build succeeds but item validation is not performed
+            lv->items_schema = build_from_element(items_schema.value(), config);
         }
-        return list_validator;
+        // Parse min_length/max_length
+        auto parse_sz = [&](const char* k) -> std::optional<size_t> {
+            auto v = elem[k];
+            if (!v.error() && v.value().is_uint64()) return static_cast<size_t>(v.value().get_uint64());
+            return std::nullopt;
+        };
+        if (auto v = parse_sz("min_length")) lv->min_length = *v;
+        if (auto v = parse_sz("max_length")) lv->max_length = *v;
+        auto cfg_s = config.find("strict");
+        if (cfg_s != config.end()) lv->strict = (cfg_s->second == "true");
+        return lv;
     }
 
-    if (type == "dict") return std::make_shared<DictValidator>();
+    // Dict with key/value validators
+    if (type == "dict") {
+        auto dv = std::make_shared<DictValidator>();
+        auto keys_schema = elem["keys_schema"];
+        if (!keys_schema.error() && !keys_schema.value().is_null()) {
+            dv->keys_schema = build_from_element(keys_schema.value(), config);
+        }
+        auto values_schema = elem["values_schema"];
+        if (!values_schema.error() && !values_schema.value().is_null()) {
+            dv->values_schema = build_from_element(values_schema.value(), config);
+        }
+        return dv;
+    }
     if (type == "set") return std::make_shared<SetValidator>();
     if (type == "frozenset") return std::make_shared<FrozenSetValidator>();
-    if (type == "tuple") return std::make_shared<TupleValidator>();
+
+    // Tuple with positional items
+    if (type == "tuple") {
+        auto tv = std::make_shared<TupleValidator>();
+        auto items_arr = elem["items_schema"];
+        if (!items_arr.error() && items_arr.value().is_array()) {
+            for (auto item : items_arr.value().get_array().value()) {
+                tv->items.push_back(build_from_element(item, config));
+            }
+        }
+        auto variadic = elem["variadic_item_index"];
+        if (!variadic.error() && variadic.value().is_uint64()) {
+            tv->variadic = true;
+        }
+        return tv;
+    }
 
     // Nullable
     if (type == "nullable") {
