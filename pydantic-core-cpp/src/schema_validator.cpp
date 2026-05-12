@@ -2,6 +2,7 @@
 #include "pydantic_core/errors.hpp"
 #include "pydantic_core/combined_validator.hpp"
 #include "pydantic_core/json_input.hpp"
+#include "pydantic_core/validators/model_fields.hpp"
 
 namespace pydantic_core {
 
@@ -54,7 +55,75 @@ std::string SchemaValidator::validate_python(const std::string& input_json,
     auto result = validator_->validate(*json_input, state);
     
     if (result.is_ok()) {
-        // Return the validated value as JSON
+        // For model-fields validation, merge default values into the output JSON.
+        // Only do this if the validator chain contains a ModelFieldsValidator.
+        // We detect this by checking if the top-level validator is a ModelValidator
+        // (which wraps a ModelFieldsValidator) or directly a ModelFieldsValidator.
+        const ModelFieldsValidator* mf_validator = nullptr;
+
+        // Check if validator_ is directly a ModelFieldsValidator
+        // CombinedValidator wraps validators in a variant, so we need to check each variant element
+        // For simplicity, we try a heuristic: attempt to access model-fields specific output
+        auto& validated = result.value();
+
+        // Check if validator_ has a fields() method (ModelFieldsValidator)
+        // Since we can't dynamic_cast on CombinedValidator, we use a simple approach:
+        // Check if the result value pointer could be a ValidatedModelFieldsOutput.
+        // ValidatedModelFieldsOutput has specific fields (fields, fields_set, extra).
+        // We'll check by looking at the validator name.
+        if (validator_) {
+            auto vname = validator_->name();
+            if (vname == "model" || vname == "model-fields" || vname == "typed-dict" || vname == "dataclass") {
+                // This is a model-like validator, try to apply defaults
+                auto* mfo = static_cast<ValidatedModelFieldsOutput*>(validated.get());
+                if (mfo && (!mfo->fields.empty() || !mfo->fields_set.empty() || !mfo->extra.empty())) {
+                // Parse input JSON to get existing values
+                auto input_doc = simdjson::padded_string(input_json);
+                simdjson::dom::parser parser;
+                auto input_obj = parser.parse(input_doc);
+                if (!input_obj.error() && input_obj.value().is_object()) {
+                    auto obj = input_obj.value().get_object();
+                    std::string out = "{";
+                    bool first = true;
+
+                    // Write all existing fields from input
+                    for (auto& [key, val] : obj.value()) {
+                        if (!first) out += ",";
+                        first = false;
+                        out += "\"" + std::string(key) + "\":" + simdjson::minify(val);
+                    }
+
+                    // Add validated fields that weren't in input (defaults)
+                    for (const auto& [fname, fval] : mfo->fields) {
+                        // Skip if already in input
+                        bool in_input = false;
+                        for (auto& [k, v] : obj.value()) {
+                            if (std::string(k) == fname) { in_input = true; break; }
+                        }
+                        if (in_input) continue;
+
+                        if (!first) out += ",";
+                        first = false;
+                        out += "\"" + fname + "\":";
+                        if (!fval) {
+                            out += "null";
+                        } else {
+                            // The default value is stored as a JSON string
+                            auto* json_str = static_cast<std::string*>(fval.get());
+                            if (fval.get() == json_str) {
+                                out += *json_str;
+                            } else {
+                                out += "null";
+                            }
+                        }
+                    }
+                    out += "}";
+                    return out;
+                }
+                }
+            }
+        }
+        // For non-model validators, just return the input
         return input_json;
     } else {
         // Prepare and throw validation error

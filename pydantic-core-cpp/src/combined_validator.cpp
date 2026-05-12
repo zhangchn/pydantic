@@ -291,10 +291,32 @@ static std::shared_ptr<Validator> build_from_element(
             FieldInfo info;
             info.name = fname;
 
-            // Parse schema
+            // Parse schema — may be wrapped in a "default" schema type
             auto schema_elem = field_def_elem["schema"];
             if (!schema_elem.error()) {
-                info.schema = build_from_element(schema_elem.value(), config);
+                // Check if this is a "default" wrapper schema
+                auto schema_type_elem = schema_elem.value()["type"];
+                bool is_default_schema = false;
+                if (!schema_type_elem.error() && schema_type_elem.value().is_string()) {
+                    std::string st = std::string(schema_type_elem.value().get_string().value());
+                    if (st == "default" || st == "with-default") {
+                        is_default_schema = true;
+                    }
+                }
+
+                if (is_default_schema) {
+                    // The actual validator is nested inside schema.schema
+                    auto inner_schema = schema_elem.value()["schema"];
+                    if (!inner_schema.error()) {
+                        info.schema = build_from_element(inner_schema.value(), config);
+                    } else {
+                        info.schema = std::make_shared<AnyValidator>();
+                    }
+                    // The default value will be parsed below from schema.default
+                    // We don't set info.required = false yet; that happens in default parsing
+                } else {
+                    info.schema = build_from_element(schema_elem.value(), config);
+                }
             } else {
                 info.schema = std::make_shared<AnyValidator>();
             }
@@ -317,27 +339,28 @@ static std::shared_ptr<Validator> build_from_element(
                 info.alias = std::string(alias_val.value().get_string().value());
             }
 
-            // Parse default value (from with_default_schema nested inside)
+            // Parse default value — check both field_def_elem["default"] and schema_elem["default"]
+            // When schema type is "default", the default value is inside the schema wrapper
             auto default_elem = field_def_elem["default"];
+            if (default_elem.error() && !schema_elem.error()) {
+                // Try schema_elem["default"] for "default" wrapper schema type
+                default_elem = schema_elem.value()["default"];
+            }
             if (!default_elem.error()) {
                 info.required = false;
                 if (default_elem.value().is_string()) {
-                    info.default_value = std::make_shared<std::string>(
-                        std::string(default_elem.value().get_string().value()));
+                    // Wrap string in JSON quotes
+                    info.default_json = "\"" + std::string(default_elem.value().get_string().value()) + "\"";
                 } else if (default_elem.value().is_int64()) {
-                    info.default_value = std::make_shared<int64_t>(
-                        default_elem.value().get_int64());
+                    info.default_json = std::to_string(default_elem.value().get_int64());
                 } else if (default_elem.value().is_uint64()) {
-                    info.default_value = std::make_shared<uint64_t>(
-                        default_elem.value().get_uint64());
+                    info.default_json = std::to_string(default_elem.value().get_uint64());
                 } else if (default_elem.value().is_double()) {
-                    info.default_value = std::make_shared<double>(
-                        default_elem.value().get_double());
+                    info.default_json = std::to_string(default_elem.value().get_double());
                 } else if (default_elem.value().is_bool()) {
-                    info.default_value = std::make_shared<bool>(
-                        default_elem.value().get_bool());
+                    info.default_json = default_elem.value().get_bool() ? "true" : "false";
                 } else if (default_elem.value().is_null()) {
-                    info.default_value = nullptr;
+                    info.default_json = "null";
                     info.required = false;
                 }
             }
