@@ -1,59 +1,190 @@
+"""
+pydantic_core_cpp — C++ backend for pydantic-core.
+
+Provides the same public API as pydantic_core (Rust) by combining:
+  1. Native C++ extension symbols (_pydantic_core_cpp)
+  2. Lazy fallbacks to the Rust pydantic_core for unimplemented symbols
+  3. Re-export of the core_schema module from Rust
+"""
 from __future__ import annotations
 
 import sys as _sys
+import types as _types
 from typing import Any as _Any
 
-from typing_extensions import Sentinel
-
 # ============================================================================
-# Native C++ extension exports
+# 1. Native C++ extension exports (always available)
 # ============================================================================
 from ._pydantic_core_cpp import (
     BytesMode,
     ExtraBehavior,
     InfNanMode,
     InputType,
+    PydanticOmit,
+    PydanticUseDefault,
     SchemaError,
     SchemaValidator,
     SerMode,
+    SerializationConfig,
+    SerializationState,
     StringCacheMode,
     TemporalMode,
     ValidationError,
     __version__,
 )
 
-# Optional exports that may not yet be in the C++ build
-try:
-    from ._pydantic_core_cpp import SchemaSerializer
-except ImportError:
-    SchemaSerializer = None  # type: ignore[misc,assignment]
+# ============================================================================
+# 2. C++ symbols that may be conditionally available
+# ============================================================================
 
-try:
-    from ._pydantic_core_cpp import PydanticOmit, PydanticUseDefault
-except ImportError:
-    PydanticOmit = None  # type: ignore[misc,assignment]
-    PydanticUseDefault = None  # type: ignore[misc,assignment]
-
-try:
-    from ._pydantic_core_cpp import PydanticKnownError, PydanticCustomError
-except ImportError:
-    PydanticKnownError = None  # type: ignore[misc,assignment]
-    PydanticCustomError = None  # type: ignore[misc,assignment]
-
+# ErrorType enum
 try:
     from ._pydantic_core_cpp import ErrorType
 except ImportError:
     ErrorType = None  # type: ignore[misc,assignment]
 
+# SchemaSerializer — not yet in C++, will fall back to Rust
+# Do NOT set it to None here, or __getattr__ won't be called.
+try:
+    from ._pydantic_core_cpp import SchemaSerializer
+except ImportError:
+    pass  # __getattr__ will resolve from Rust
+
 # ============================================================================
-# Standalone functions (delegate to Rust backend until C++ implements them)
+# 2b. Pure-Python symbols (not in any native extension)
 # ============================================================================
+
+from typing_extensions import Sentinel
+MISSING = Sentinel('MISSING')
+
+# ============================================================================
+# 3. Rust backend fallback (lazy, only on first access)
+# ============================================================================
+
+# Symbols implemented in Rust but not yet in C++.
+# These are resolved lazily via __getattr__ to avoid importing
+# the Rust backend at module load time.
+_RUST_FALLBACKS = frozenset({
+    # Data types (from native extension)
+    'ArgsKwargs',
+    'MultiHostUrl',
+    'Some',
+    'TzInfo',
+    'Url',
+    # Sentinels (from native extension)
+    'PydanticUndefined',
+    'PydanticUndefinedType',
+    # Errors / exceptions (from native extension)
+    'PydanticCustomError',
+    'PydanticKnownError',
+    'PydanticSerializationError',
+    'PydanticSerializationUnexpectedValue',
+    # Serializer (from native extension)
+    'SchemaSerializer',
+    # Type aliases (from core_schema module, NOT native extension)
+    'CoreConfig',
+    'CoreSchema',
+    'CoreSchemaType',
+    # Error type enum (from core_schema if C++ doesn't have it)
+    'ErrorType',
+})
+
+# Symbols that come from core_schema rather than the native extension
+_CORE_SCHEMA_FALLBACKS = frozenset({
+    'CoreConfig',
+    'CoreSchema',
+    'CoreSchemaType',
+})
+
+
+_RUST_NATIVE_MODULE = None
+
+
+def _find_rust_native_path() -> str | None:
+    """Find the Rust pydantic_core native extension .so file on disk.
+
+    Since the shim may have replaced sys.modules['pydantic_core'] with this
+    C++ module, we can't rely on standard import machinery. Instead, we
+    search site-packages for the actual .so file.
+    """
+    import site
+    import os
+    import glob
+    for sp in site.getsitepackages() + [site.getusersitepackages()]:
+        # Pattern: pydantic_core/_pydantic_core.cpython-*.so (or .pyd on Windows)
+        pattern = os.path.join(sp, 'pydantic_core', '_pydantic_core.*.so')
+        matches = glob.glob(pattern)
+        if matches:
+            return matches[0]
+        pattern = os.path.join(sp, 'pydantic_core', '_pydantic_core.*.pyd')
+        matches = glob.glob(pattern)
+        if matches:
+            return matches[0]
+    return None
+
 
 def _rust() -> _Any:
-    """Lazy import of the Rust pydantic_core backend."""
-    import pydantic_core
-    return pydantic_core
+    """
+    Lazy import of the Rust pydantic_core backend.
 
+    We load the native extension `_pydantic_core` directly from its
+    .so file on disk, because the shim may have replaced
+    sys.modules['pydantic_core'] with this module (cpp), which would
+    cause import machinery to fail.
+    """
+    global _RUST_NATIVE_MODULE
+    if _RUST_NATIVE_MODULE is not None:
+        return _RUST_NATIVE_MODULE
+
+    import importlib.util
+    import types
+
+    # Find the .so file directly on disk
+    so_path = _find_rust_native_path()
+    if so_path is None:
+        raise ImportError(
+            "Cannot find Rust pydantic_core native extension. "
+            "Install pydantic-core (Rust) as a fallback backend."
+        )
+
+    # Load the extension module directly from the .so file
+    spec = importlib.util.spec_from_file_location(
+        'pydantic_core._pydantic_core', so_path
+    )
+    _native = importlib.util.module_from_spec(spec)
+    # Add to sys.modules temporarily so relative imports work inside the extension
+    _sys.modules.setdefault('pydantic_core._pydantic_core', _native)
+    spec.loader.exec_module(_native)  # type: ignore[union-attr]
+
+    # Build a wrapper that exposes all native symbols
+    _wrapper: dict[str, _Any] = {}
+    for name in dir(_native):
+        if not name.startswith('_'):
+            _wrapper[name] = getattr(_native, name)
+
+    # Also grab __version__ from the rust package
+    try:
+        _rust_pkg = importlib.import_module('pydantic_core')
+        if hasattr(_rust_pkg, '__version__'):
+            _wrapper['__version__'] = _rust_pkg.__version__
+    except Exception:
+        pass
+
+    _RUST_NATIVE_MODULE = types.SimpleNamespace(**_wrapper)
+    return _RUST_NATIVE_MODULE
+
+
+def __getattr__(name: str) -> _Any:
+    if name in _CORE_SCHEMA_FALLBACKS:
+        return getattr(_get_rust_core_schema(), name)
+    if name in _RUST_FALLBACKS:
+        return getattr(_rust(), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# ============================================================================
+# 4. Standalone functions (delegate to Rust until C++ implements them)
+# ============================================================================
 
 def from_json(*args: _Any, **kwargs: _Any) -> _Any:
     return _rust().from_json(*args, **kwargs)
@@ -68,23 +199,92 @@ def to_jsonable_python(*args: _Any, **kwargs: _Any) -> _Any:
 
 
 # ============================================================================
-# Type-only re-exports from Rust (for IDE/type-checker compatibility)
+# 5. core_schema module — re-export from Rust
 # ============================================================================
 
-def __getattr__(name: str) -> _Any:
-    if name in (
-        'ArgsKwargs', 'MultiHostUrl', 'PydanticSerializationError',
-        'PydanticSerializationUnexpectedValue', 'PydanticUndefined',
-        'PydanticUndefinedType', 'Some', 'TzInfo', 'Url',
-        # Type hints
-        'CoreConfig', 'CoreSchema', 'CoreSchemaType',
-    ):
-        return getattr(_rust(), name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+# The core_schema module contains all the schema builder functions and type
+# definitions (int_schema, str_schema, model_fields_schema, etc.).
+# Pydantic imports `from pydantic_core import core_schema` extensively.
+#
+# IMPORTANT: We must use importlib.import_module('pydantic_core.core_schema')
+# directly, NOT `from pydantic_core import core_schema`, because the shim
+# may have replaced sys.modules['pydantic_core'] with this module.
 
+def __dir__() -> list[str]:
+    return list(__all__)
+
+
+def _get_rust_core_schema() -> _Any:
+    """Import core_schema from the Rust backend, bypassing any shim.
+
+    Uses importlib.util to load directly from the .py file on disk,
+    since the shim may have replaced sys.modules['pydantic_core'].
+    """
+    import importlib.util
+    import os
+    import glob
+    import site
+
+    # Check cache first
+    cached = _sys.modules.get('pydantic_core_cpp._rust_core_schema')
+    if cached is not None:
+        return cached
+
+    # Find the core_schema.py file on disk
+    for sp in site.getsitepackages() + [site.getusersitepackages()]:
+        cs_path = os.path.join(sp, 'pydantic_core', 'core_schema.py')
+        if os.path.exists(cs_path):
+            spec = importlib.util.spec_from_file_location(
+                'pydantic_core.core_schema', cs_path
+            )
+            _cs = importlib.util.module_from_spec(spec)
+            _sys.modules.setdefault('pydantic_core.core_schema', _cs)
+            spec.loader.exec_module(_cs)  # type: ignore[union-attr]
+            # Cache under our namespace to avoid polluting pydantic_core namespace
+            _sys.modules['pydantic_core_cpp._rust_core_schema'] = _cs
+            return _cs
+
+    raise ImportError(
+        "Cannot find Rust pydantic_core.core_schema module. "
+        "Install pydantic-core (Rust) as a fallback backend."
+    )
+
+
+class _CoreSchemaModuleProxy(_types.ModuleType):
+    def __init__(self, name: str):
+        super().__init__(name)
+        self.__dict__['_resolved'] = False
+        self.__path__ = None  # needed for import machinery
+
+    def _resolve(self) -> None:
+        if not self.__dict__['_resolved']:
+            _cs = _get_rust_core_schema()
+            self.__dict__.update(_cs.__dict__)
+            self.__dict__['_resolved'] = True
+
+    def __getattr__(self, name: str) -> _Any:
+        # Avoid resolving for special attrs that import machinery queries
+        if name in ('__path__', '__file__', '__package__', '__spec__',
+                     '__loader__', '__cached__'):
+            raise AttributeError(name)
+        self._resolve()
+        return self.__dict__[name]
+
+    def __dir__(self) -> list[str]:
+        self._resolve()
+        return list(self.__dict__.keys())
+
+
+# Install the core_schema proxy as both a module in sys.modules
+# and a module-level attribute. This handles:
+#   import pydantic_core_cpp.core_schema
+#   from pydantic_core_cpp import core_schema
+_core_schema_module = _CoreSchemaModuleProxy('pydantic_core_cpp.core_schema')
+_sys.modules['pydantic_core_cpp.core_schema'] = _core_schema_module
+core_schema = _core_schema_module  # type: ignore[misc]
 
 # ============================================================================
-# Module metadata
+# 6. Module metadata
 # ============================================================================
 
 if _sys.version_info < (3, 11):
@@ -97,22 +297,38 @@ if _sys.version_info < (3, 12):
 else:
     from typing import TypedDict as _TypedDict
 
-__all__ = [
+__all__: list[str] = [
     '__version__',
-    # Core classes
+    # Core validation
     'SchemaValidator',
     'SchemaSerializer',
     'ValidationError',
     'SchemaError',
-    # Exceptions / sentinels
-    'PydanticOmit',
-    'PydanticUseDefault',
+    # Sentinels
+    'PydanticUndefined',
+    'PydanticUndefinedType',
+    'MISSING',
+    # Exceptions
     'PydanticCustomError',
     'PydanticKnownError',
-    # Standalone functions
+    'PydanticOmit',
+    'PydanticUseDefault',
+    'PydanticSerializationError',
+    'PydanticSerializationUnexpectedValue',
+    # Functions
     'from_json',
     'to_json',
     'to_jsonable_python',
+    # Types
+    'ArgsKwargs',
+    'Some',
+    'Url',
+    'MultiHostUrl',
+    'TzInfo',
+    # Type aliases
+    'CoreConfig',
+    'CoreSchema',
+    'CoreSchemaType',
     # Enums
     'InputType',
     'ExtraBehavior',
@@ -122,19 +338,9 @@ __all__ = [
     'BytesMode',
     'InfNanMode',
     'ErrorType',
-    # Re-exported from Rust (type hints)
-    'CoreConfig',
-    'CoreSchema',
-    'CoreSchemaType',
-    'ArgsKwargs',
-    'MultiHostUrl',
-    'PydanticSerializationError',
-    'PydanticSerializationUnexpectedValue',
-    'PydanticUndefined',
-    'PydanticUndefinedType',
-    'Some',
-    'TzInfo',
-    'Url',
+    # Serialization internals
+    'SerializationConfig',
+    'SerializationState',
+    # Sub-modules
+    'core_schema',
 ]
-
-UNSET = Sentinel('UNSET')
