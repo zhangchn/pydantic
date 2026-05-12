@@ -90,7 +90,22 @@ public:
         // Other errors
         JsonInvalid,
         CustomError,
-        RecursionError
+        RecursionError,
+        
+        // Generic constraint errors (used by constrained int/float validators)
+        GreaterThan,
+        LessThan,
+        GreaterThanEqual,
+        LessThanEqual,
+        MultipleOf,
+        FiniteNumber,
+        
+        // Container length errors (generic)
+        TooShort,
+        TooLong,
+        
+        // String encoding errors
+        StringNotAscii
     };
     
     // Constructor for simple error types

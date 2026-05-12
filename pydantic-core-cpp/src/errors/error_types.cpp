@@ -71,7 +71,18 @@ std::string ErrorType::type_name() const {
         // Other errors
         {Kind::JsonInvalid, "json_invalid"},
         {Kind::CustomError, "custom_error"},
-        {Kind::RecursionError, "recursion_error"}
+        {Kind::RecursionError, "recursion_error"},
+        
+        // Generic constraint errors
+        {Kind::GreaterThan, "greater_than"},
+        {Kind::LessThan, "less_than"},
+        {Kind::GreaterThanEqual, "greater_than_equal"},
+        {Kind::LessThanEqual, "less_than_equal"},
+        {Kind::MultipleOf, "multiple_of"},
+        {Kind::FiniteNumber, "finite_number"},
+        {Kind::TooShort, "too_short"},
+        {Kind::TooLong, "too_long"},
+        {Kind::StringNotAscii, "string_not_ascii"}
     };
     auto it = names.find(kind_);
     return it != names.end() ? it->second : "unknown_error";
@@ -145,7 +156,18 @@ std::string ErrorType::message_template() const {
         // Other errors
         {Kind::JsonInvalid, "Invalid JSON"},
         {Kind::CustomError, "{message}"},
-        {Kind::RecursionError, "Recursion depth exceeded"}
+        {Kind::RecursionError, "Recursion depth exceeded"},
+        
+        // Generic constraint errors
+        {Kind::GreaterThan, "Input should be greater than {value}"},
+        {Kind::LessThan, "Input should be less than {value}"},
+        {Kind::GreaterThanEqual, "Input should be greater than or equal to {value}"},
+        {Kind::LessThanEqual, "Input should be less than or equal to {value}"},
+        {Kind::MultipleOf, "Input should be a multiple of {value}"},
+        {Kind::FiniteNumber, "Input should be a finite number"},
+        {Kind::TooShort, "Input should have at least {value} items"},
+        {Kind::TooLong, "Input should have at most {value} items"},
+        {Kind::StringNotAscii, "Input should be ASCII"}
     };
     auto it = templates.find(kind_);
     return it != templates.end() ? it->second : "Validation error";
