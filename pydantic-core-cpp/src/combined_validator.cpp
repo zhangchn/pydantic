@@ -349,18 +349,18 @@ static std::shared_ptr<Validator> build_from_element(
             if (!default_elem.error()) {
                 info.required = false;
                 if (default_elem.value().is_string()) {
-                    // Wrap string in JSON quotes
-                    info.default_json = "\"" + std::string(default_elem.value().get_string().value()) + "\"";
+                    // Store raw string (no JSON quotes)
+                    info.default_value_str = std::string(default_elem.value().get_string().value());
                 } else if (default_elem.value().is_int64()) {
-                    info.default_json = std::to_string(default_elem.value().get_int64());
+                    info.default_value_str = std::to_string(default_elem.value().get_int64());
                 } else if (default_elem.value().is_uint64()) {
-                    info.default_json = std::to_string(default_elem.value().get_uint64());
+                    info.default_value_str = std::to_string(default_elem.value().get_uint64());
                 } else if (default_elem.value().is_double()) {
-                    info.default_json = std::to_string(default_elem.value().get_double());
+                    info.default_value_str = std::to_string(default_elem.value().get_double());
                 } else if (default_elem.value().is_bool()) {
-                    info.default_json = default_elem.value().get_bool() ? "true" : "false";
+                    info.default_value_str = default_elem.value().get_bool() ? "true" : "false";
                 } else if (default_elem.value().is_null()) {
-                    info.default_json = "null";
+                    info.default_value_str = "null";
                     info.required = false;
                 }
             }
