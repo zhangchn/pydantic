@@ -108,10 +108,38 @@ std::string SchemaValidator::validate_python(const std::string& input_json,
                         if (!fval) {
                             out += "null";
                         } else {
-                            // The default value is stored as a JSON string
-                            auto* json_str = static_cast<std::string*>(fval.get());
-                            if (fval.get() == json_str) {
-                                out += *json_str;
+                            auto* val_str = static_cast<std::string*>(fval.get());
+                            if (fval.get() == val_str) {
+                                const std::string& s = *val_str;
+                                // Heuristic: detect JSON literals and numbers
+                                if (s == "null" || s == "true" || s == "false") {
+                                    out += s;
+                                } else {
+                                    // Check if it looks like a number
+                                    bool is_number = !s.empty();
+                                    size_t start = 0;
+                                    if (s[0] == '-') { start = 1; if (s.size() == 1) is_number = false; }
+                                    for (size_t i = start; i < s.size() && is_number; ++i) {
+                                        if (s[i] != '.' && s[i] != 'e' && s[i] != 'E' && s[i] != '+' && !std::isdigit(s[i])) {
+                                            is_number = false;
+                                        }
+                                    }
+                                    if (is_number) {
+                                        out += s;
+                                    } else {
+                                        // JSON-escape and wrap in quotes
+                                        out += "\"";
+                                        for (char c : s) {
+                                            if (c == '"') out += "\\\"";
+                                            else if (c == '\\') out += "\\\\";
+                                            else if (c == '\n') out += "\\n";
+                                            else if (c == '\r') out += "\\r";
+                                            else if (c == '\t') out += "\\t";
+                                            else out += c;
+                                        }
+                                        out += "\"";
+                                    }
+                                }
                             } else {
                                 out += "null";
                             }

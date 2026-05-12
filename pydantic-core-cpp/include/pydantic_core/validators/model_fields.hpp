@@ -22,9 +22,10 @@ struct FieldInfo {
     std::string name;                          // Field name (e.g., "field_a")
     std::shared_ptr<Validator> schema;         // Inner validator for this field
     bool required = true;                      // Whether the field must be present
-    std::string default_json;                  // Default value as JSON string.
-                                                // Empty string = no default (field is required).
+    std::string default_value_str;           // Default value as string representation.
+                                                // Empty = no default (field is required).
                                                 // "null" = explicit null default.
+                                                // Strings stored raw (no JSON quotes).
     bool frozen = false;                       // Whether field can be reassigned
     std::string alias;                         // Alternative name for lookup
 
@@ -120,8 +121,8 @@ public:
                         original_input.as_error_value().repr
                     );
                     combined_errors.merge(std::move(err));
-                } else if (!field.default_json.empty()) {
-                    output.fields[name] = std::make_shared<std::string>(field.default_json);
+                } else if (!field.default_value_str.empty()) {
+                    output.fields[name] = std::make_shared<std::string>(field.default_value_str);
                 }
             }
 

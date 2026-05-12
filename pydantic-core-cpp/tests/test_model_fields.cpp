@@ -831,7 +831,7 @@ TEST_SUITE("Programmatic Validator Construction") {
         age_field.name = "age";
         age_field.schema = std::make_shared<IntValidator>();
         age_field.required = false;
-        age_field.default_value = std::make_shared<int64_t>(0);
+        age_field.default_value_str = "0";
         fields["age"] = age_field;
 
         auto validator = std::make_shared<ModelFieldsValidator>(
@@ -1182,7 +1182,7 @@ TEST_SUITE("Programmatic Validator Construction") {
         bio_field.name = "bio";
         bio_field.schema = std::make_shared<StringValidator>();
         bio_field.required = false;
-        bio_field.default_value = nullptr;  // No default
+        bio_field.default_value_str.clear();  // No default
         fields["bio"] = bio_field;
 
         auto validator = std::make_shared<ModelFieldsValidator>(
