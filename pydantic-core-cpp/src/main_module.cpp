@@ -694,7 +694,37 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             return json_to_pyobj(self.validate_json(js, pyobj_to_bool(strict)));
         }, py::arg("json_data"), py::arg("strict") = py::none())
         .def("validate_strings", [](SchemaValidator& self, const py::object& sd, py::object strict) {
-            return json_to_pyobj(self.validate_strings(pyobj_to_json_str(sd), pyobj_to_bool(strict)));
+            // For strings input: convert each string value to its Python type
+            // (int, float, bool, etc.) before JSON serialization
+            std::string input_json;
+            if (py::isinstance<py::dict>(sd)) {
+                // Convert dict with string values to typed values
+                py::dict typed_dict;
+                for (auto item : sd.cast<py::dict>()) {
+                    py::str key = py::reinterpret_borrow<py::str>(item.first);
+                    py::object val = py::reinterpret_borrow<py::object>(item.second);
+                    if (py::isinstance<py::str>(val)) {
+                        std::string s = val.cast<std::string>();
+                        // Try to parse as int, float, bool
+                        if (s == "true") { typed_dict[key] = py::bool_(true); }
+                        else if (s == "false") { typed_dict[key] = py::bool_(false); }
+                        else if (s == "null") { typed_dict[key] = py::none(); }
+                        else {
+                            try { typed_dict[key] = py::int_(py::str(s)); }
+                            catch (...) {
+                                try { typed_dict[key] = py::float_(py::str(s)); }
+                                catch (...) { typed_dict[key] = val; }
+                            }
+                        }
+                    } else {
+                        typed_dict[key] = val;
+                    }
+                }
+                input_json = pyobj_to_json_str(typed_dict);
+            } else {
+                input_json = pyobj_to_json_str(sd);
+            }
+            return json_to_pyobj(self.validate_strings(input_json, pyobj_to_bool(strict)));
         }, py::arg("string_data"), py::arg("strict") = py::none())
         .def("isinstance_python", [](SchemaValidator& self, const py::object& input, py::object strict) {
             return self.isinstance_python(pyobj_to_json_str(input), pyobj_to_bool(strict));
