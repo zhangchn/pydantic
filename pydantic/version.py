@@ -4,9 +4,16 @@ from __future__ import annotations as _annotations
 
 import sys
 
-from pydantic_core import __version__ as __pydantic_core_version__
+# Prefer pydantic_core_cpp (C++ backend), fall back to pydantic_core (Rust backend)
+try:
+    import pydantic_core_cpp as _core_pkg
+except ImportError:
+    import pydantic_core as _core_pkg
 
-__all__ = 'VERSION', 'version_info'
+__pydantic_core_version__ = _core_pkg.__version__
+__pydantic_core_name__ = _core_pkg.__name__
+
+__all__ = 'VERSION', 'version_info', '__pydantic_core_version__', '__pydantic_core_name__'
 
 VERSION = '2.14.0a1'
 """The version of Pydantic.
@@ -36,9 +43,10 @@ def version_info() -> str:
     import platform
     from pathlib import Path
 
-    import pydantic_core._pydantic_core as pdc
-
     from ._internal import _git as git
+
+    # Use whichever core backend is active
+    _pdc = _core_pkg
 
     # get data about packages that are closely related to pydantic, use pydantic or often conflict with pydantic
     package_names = {
@@ -62,10 +70,13 @@ def version_info() -> str:
         git.git_revision(pydantic_dir) if git.is_git_repo(pydantic_dir) and git.have_git() else 'unknown'
     )
 
+    build_info = getattr(_pdc, 'build_info', None) or getattr(_pdc, 'build_profile', None)
+
     info = {
         'pydantic version': VERSION,
         'pydantic-core version': __pydantic_core_version__,
-        'pydantic-core build': getattr(pdc, 'build_info', None) or pdc.build_profile,  # pyright: ignore[reportPrivateImportUsage]
+        'pydantic-core variant': __pydantic_core_name__,
+        'pydantic-core build': build_info,
         'python version': sys.version,
         'platform': platform.platform(),
         'related packages': ' '.join(related_packages),
@@ -75,7 +86,7 @@ def version_info() -> str:
 
 
 def check_pydantic_core_version() -> bool:
-    """Check that the installed `pydantic-core` dependency is compatible."""
+    """Check that the installed `pydantic-core` (or `pydantic-core-cpp`) dependency is compatible."""
     return __pydantic_core_version__ == _COMPATIBLE_PYDANTIC_CORE_VERSION
 
 
@@ -92,9 +103,9 @@ def _ensure_pydantic_core_version() -> None:  # pragma: no cover
 
         if raise_error:
             raise SystemError(
-                f'The installed pydantic-core version ({__pydantic_core_version__}) is incompatible '
+                f'The installed {_core_pkg.__name__} version ({__pydantic_core_version__}) is incompatible '
                 f'with the current pydantic version, which requires {_COMPATIBLE_PYDANTIC_CORE_VERSION}. '
-                "If you encounter this error, make sure that you haven't upgraded pydantic-core manually."
+                f"If you encounter this error, make sure that you haven't upgraded {_core_pkg.__name__} manually."
             )
 
 
