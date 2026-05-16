@@ -93,6 +93,10 @@ static std::shared_ptr<Validator> build_from_flat_dict(
     if (type == "timedelta") return std::make_shared<TimedeltaValidator>();
     if (type == "url") return std::make_shared<UrlValidator>();
     if (type == "uuid") return std::make_shared<UuidValidator>();
+    if (type == "is-instance") return std::make_shared<IsInstanceValidator>();
+    if (type == "is-subclass") return std::make_shared<IsSubclassValidator>();
+    if (type == "callable") return std::make_shared<CallableValidator>();
+    if (type == "generator") return std::make_shared<AnyValidator>();
 
     // Complex validators need recursive parsing - handled by build_from_element
     throw SchemaError("Validator type requires recursive parsing: " + type);
@@ -396,6 +400,52 @@ static std::shared_ptr<Validator> build_from_element(
     if (type == "timedelta") return std::make_shared<TimedeltaValidator>();
     if (type == "url") return std::make_shared<UrlValidator>();
     if (type == "uuid") return std::make_shared<UuidValidator>();
+
+    // is-instance validator
+    if (type == "is-instance") {
+        auto v = std::make_shared<IsInstanceValidator>();
+        auto cls_val = elem["cls"];
+        if (!cls_val.error() && cls_val.value().is_string()) {
+            v->set_class_name(std::string(cls_val.value().get_string().value()));
+        }
+        return v;
+    }
+
+    // is-subclass validator
+    if (type == "is-subclass") {
+        auto v = std::make_shared<IsSubclassValidator>();
+        auto cls_val = elem["cls"];
+        if (!cls_val.error() && cls_val.value().is_string()) {
+            v->set_class_name(std::string(cls_val.value().get_string().value()));
+        }
+        return v;
+    }
+
+    // callable validator
+    if (type == "callable") {
+        return std::make_shared<CallableValidator>();
+    }
+
+    // generator validator (treated as any for now)
+    if (type == "generator") {
+        return std::make_shared<AnyValidator>();
+    }
+
+    // json-or-python validator
+    if (type == "json-or-python") {
+        auto json_schema = elem["json_schema"];
+        auto python_schema = elem["python_schema"];
+        std::shared_ptr<Validator> json_v, python_v;
+        if (!json_schema.error()) {
+            json_v = build_from_element(json_schema.value(), config, definitions);
+        }
+        if (!python_schema.error()) {
+            python_v = build_from_element(python_schema.value(), config, definitions);
+        }
+        if (!json_v) json_v = std::make_shared<AnyValidator>();
+        if (!python_v) python_v = std::make_shared<AnyValidator>();
+        return std::make_shared<JsonOrPythonValidator>(json_v, python_v);
+    }
 
     // ========================================================================
     // ModelFields - the core nested validator

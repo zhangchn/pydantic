@@ -193,4 +193,18 @@ if(NOT SKBUILD)
     target_include_directories(test_constrained_validators PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
     add_test(NAME ConstrainedValidators COMMAND test_constrained_validators)
+
+    # Test suite: New validators and features
+    add_executable(test_new_validators tests/test_new_validators.cpp
+        src/combined_validator.cpp
+        src/validator.cpp
+        src/errors/error_types.cpp
+        src/input/string_input.cpp
+        src/input/json_input.cpp
+    )
+    target_compile_definitions(test_new_validators PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
+    target_link_libraries(test_new_validators PRIVATE doctest::doctest simdjson::simdjson)
+    target_include_directories(test_new_validators PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+    add_test(NAME NewValidators COMMAND test_new_validators)
 endif()
