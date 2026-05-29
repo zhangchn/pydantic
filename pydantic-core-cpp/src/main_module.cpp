@@ -11,7 +11,7 @@
 namespace py = pybind11;
 using namespace pydantic_core;
 
-std::string get_version() { return "2.46.4"; }
+std::string get_version() { return "2.47.0"; }
 
 // ---------------------------------------------------------------------------
 // SerializationInfo — Python-visible info object for custom serializer functions
