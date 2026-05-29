@@ -1,10 +1,48 @@
 #include "pydantic_core/json_input.hpp"
 #include "pydantic_core/result.hpp"
-#include <simdjson.h>
 #include "pydantic_core/error_types.hpp"
+#include <simdjson.h>
 #include <sstream>
+#include <pybind11/pybind11.h>
+
+namespace py = pybind11;
 
 namespace pydantic_core {
+
+// Helper: convert simdjson element to Python object
+static py::object json_element_to_py(const simdjson::dom::element& elem) {
+    auto type = elem.type();
+    switch (type) {
+        case simdjson::dom::element_type::STRING:
+            return py::str(std::string(elem.get_string().value()));
+        case simdjson::dom::element_type::INT64:
+            return py::int_(elem.get_int64().value());
+        case simdjson::dom::element_type::UINT64:
+            return py::int_(static_cast<int64_t>(elem.get_uint64().value()));
+        case simdjson::dom::element_type::DOUBLE:
+            return py::float_(elem.get_double().value());
+        case simdjson::dom::element_type::BOOL:
+            return py::bool_(elem.get_bool().value());
+        case simdjson::dom::element_type::NULL_VALUE:
+            return py::none();
+        case simdjson::dom::element_type::ARRAY: {
+            py::list lst;
+            for (auto item : elem.get_array().value()) {
+                lst.append(json_element_to_py(item));
+            }
+            return lst;
+        }
+        case simdjson::dom::element_type::OBJECT: {
+            py::dict d;
+            for (auto [key, value] : elem.get_object().value()) {
+                d[py::str(std::string(key))] = json_element_to_py(value);
+            }
+            return d;
+        }
+        default:
+            return py::none();
+    }
+}
 
 JsonInput::JsonInput(simdjson::simdjson_result<simdjson::dom::element> element) {
     parser_ = std::make_unique<simdjson::dom::parser>();
@@ -51,6 +89,10 @@ InputValue JsonInput::as_error_value() const {
 
 bool JsonInput::is_none() const {
     return element_.type() == simdjson::dom::element_type::NULL_VALUE;
+}
+
+py::object JsonInput::as_python_object() const {
+    return json_element_to_py(element_);
 }
 
 ValResult<ValMatch<EitherString>> JsonInput::validate_str(bool strict, bool coerce_numbers) const {

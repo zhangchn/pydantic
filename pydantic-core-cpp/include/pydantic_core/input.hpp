@@ -9,6 +9,9 @@
 #include "error_types.hpp"
 #include "errors.hpp"
 #include "result.hpp"
+#include <pybind11/pybind11.h>
+
+namespace py = pybind11;
 
 namespace pydantic_core {
 
@@ -154,18 +157,21 @@ public:
 class Input {
 public:
     virtual ~Input() = default;
-    
+
     virtual InputType input_type() const = 0;
     virtual InputValue as_error_value() const = 0;
     virtual bool is_none() const { return false; }
     
+    // Get Python object representation (for function validators)
+    virtual py::object as_python_object() const = 0;
+
     // Type validation methods - return ValResult<ValMatch<T>>
     virtual ValResult<ValMatch<EitherString>> validate_str(bool strict, bool coerce_numbers = false) const = 0;
     virtual ValResult<ValMatch<EitherBytes>> validate_bytes(bool strict) const = 0;
     virtual ValResult<ValMatch<bool>> validate_bool(bool strict) const = 0;
     virtual ValResult<ValMatch<EitherInt>> validate_int(bool strict) const = 0;
     virtual ValResult<ValMatch<EitherFloat>> validate_float(bool strict) const = 0;
-    
+
     // Container validation
     virtual ValResult<std::unique_ptr<ValidatedDict>> validate_dict(bool strict) const = 0;
     virtual ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_list(bool strict) const = 0;

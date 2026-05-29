@@ -79,6 +79,9 @@ public:
     InputType input_type() const override { return InputType::Python; }
     InputValue as_error_value() const override;
     bool is_none() const override;
+    
+    // Get Python object representation - returns the underlying PyObject
+    py::object as_python_object() const override { return obj_; }
 
     // Type validation methods
     ValResult<ValMatch<EitherString>> validate_str(bool strict, bool coerce_numbers = false) const override;

@@ -3,6 +3,9 @@
 #include "pydantic_core/result.hpp"
 #include <sstream>
 #include <algorithm>
+#include <pybind11/pybind11.h>
+
+namespace py = pybind11;
 
 namespace pydantic_core {
 
@@ -24,6 +27,18 @@ bool StringInput::is_none() const {
         return v == "none" || v == "null" || v == "" || v == "~";
     }
     return false;
+}
+
+py::object StringInput::as_python_object() const {
+    if (single_value_) {
+        return py::str(*single_value_);
+    }
+    // Return mapping as Python dict
+    py::dict d;
+    for (const auto& [key, value] : mapping_) {
+        d[py::str(key)] = py::str(value);
+    }
+    return d;
 }
 
 ValResult<ValMatch<EitherString>> StringInput::validate_str(bool strict, bool coerce_numbers) const {

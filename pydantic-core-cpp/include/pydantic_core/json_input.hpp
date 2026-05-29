@@ -14,11 +14,14 @@ class JsonInput : public Input {
 public:
     explicit JsonInput(simdjson::simdjson_result<simdjson::dom::element> element);
     explicit JsonInput(const simdjson::dom::element& element);
-    
+
     InputType input_type() const override { return InputType::Json; }
     InputValue as_error_value() const override;
     bool is_none() const override;
     
+    // Convert JSON to Python object
+    py::object as_python_object() const override;
+
     ValResult<ValMatch<EitherString>> validate_str(bool strict, bool coerce_numbers = false) const override;
     ValResult<ValMatch<EitherBytes>> validate_bytes(bool strict) const override;
     ValResult<ValMatch<bool>> validate_bool(bool strict) const override;

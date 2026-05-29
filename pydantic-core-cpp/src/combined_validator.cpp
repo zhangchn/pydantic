@@ -2,7 +2,11 @@
 #include "pydantic_core/json_input.hpp"
 #include "pydantic_core/validators/model_fields.hpp"
 #include "pydantic_core/validators/special.hpp"
+#include "pydantic_core/validators/functions.hpp"
+#include <pybind11/pybind11.h>
 #include <simdjson.h>
+
+namespace py = pybind11;
 
 namespace pydantic_core {
 
@@ -429,6 +433,51 @@ static std::shared_ptr<Validator> build_from_element(
     // generator validator (treated as any for now)
     if (type == "generator") {
         return std::make_shared<AnyValidator>();
+    }
+
+    // ========================================================================
+    // Function validators - call Python functions with ValidationInfo
+    // ========================================================================
+    
+    // function-before: func(input, info) -> transformed, then validate
+    if (type == "function-before") {
+        auto inner_schema = elem["schema"];
+        std::shared_ptr<Validator> inner_v;
+        if (!inner_schema.error()) {
+            inner_v = build_from_element(inner_schema.value(), config, definitions);
+        }
+        auto validator = std::make_shared<FunctionBeforeValidator>(inner_v, py::none());
+        // Note: Python function is set later by SchemaValidator when it receives the schema dict
+        return validator;
+    }
+    
+    // function-after: validate first, then func(validated, info) -> output
+    if (type == "function-after") {
+        auto inner_schema = elem["schema"];
+        std::shared_ptr<Validator> inner_v;
+        if (!inner_schema.error()) {
+            inner_v = build_from_element(inner_schema.value(), config, definitions);
+        }
+        auto validator = std::make_shared<FunctionAfterValidator>(inner_v, py::none());
+        return validator;
+    }
+    
+    // function-plain: func(input, info) -> output (no inner validation)
+    if (type == "function-plain") {
+        auto validator = std::make_shared<FunctionPlainValidator>(py::none());
+        return validator;
+    }
+    
+    // function-wrap: func(input, handler, info) -> output
+    // handler calls inner validator
+    if (type == "function-wrap") {
+        auto inner_schema = elem["schema"];
+        std::shared_ptr<Validator> inner_v;
+        if (!inner_schema.error()) {
+            inner_v = build_from_element(inner_schema.value(), config, definitions);
+        }
+        auto validator = std::make_shared<FunctionWrapValidator>(inner_v, py::none());
+        return validator;
     }
 
     // json-or-python validator

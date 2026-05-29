@@ -2,7 +2,10 @@
 
 #include <string>
 #include <unordered_map>
+#include <pybind11/pybind11.h>
 #include "input.hpp"
+
+namespace py = pybind11;
 
 namespace pydantic_core {
 
@@ -13,16 +16,19 @@ public:
     // Construct from string mapping (key -> value)
     explicit StringInput(std::unordered_map<std::string, std::string> mapping)
         : mapping_(std::move(mapping)) {}
-    
+
     // Construct from single string value
     explicit StringInput(const std::string& value) : single_value_(value) {}
-    
+
     InputType input_type() const override { return InputType::String; }
-    
+
     InputValue as_error_value() const override;
-    
+
     bool is_none() const override;
     
+    // Convert to Python object - returns py::str for single value, py::dict for mapping
+    py::object as_python_object() const override;
+
     // Type validation implementations
     ValResult<ValMatch<EitherString>> validate_str(bool strict, bool coerce_numbers = false) const override;
     ValResult<ValMatch<EitherBytes>> validate_bytes(bool strict) const override;
