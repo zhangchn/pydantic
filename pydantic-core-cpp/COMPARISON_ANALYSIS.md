@@ -13,12 +13,12 @@
 | # | Rust Variant | Source File | C++ Status | C++ Impl File | Notes |
 |---|-------------|-------------|------------|---------------|-------|
 | 1 | `TypedDict` | `typed_dict.rs` | ✅ Implemented | `model_fields.hpp` | Via `TypedDictValidator` (inherits `ModelFieldsValidator`) |
-| 2 | `Union` | `union.rs` | ✅ Implemented | `special.hpp` | `UnionValidator` |
+| 2 | `Union` | `union.rs` | ✅ Implemented | `special.hpp` | `UnionValidator`; tries variants in order |
 | 3 | `TaggedUnion` | `union.rs` | ✅ Implemented | `special.hpp` | `TaggedUnionValidator` |
 | 4 | `Nullable` | `nullable.rs` | ✅ Implemented | `special.hpp` | `NullableValidator` |
 | 5 | `Model` | `model.rs` | ✅ Implemented | `model_fields.hpp` | `ModelValidator` |
-| 6 | `ModelFields` | `model_fields.rs` | ✅ Implemented | `model_fields.hpp` | `ModelFieldsValidator` |
-| 7 | `DataclassArgs` | `dataclass.rs` | ✅ Implemented | `model_fields.hpp` | `DataclassArgsValidator` |
+| 6 | `ModelFields` | `model_fields.rs` | ✅ Implemented | `model_fields.hpp` | `ModelFieldsValidator`; default values now validated through field validator |
+| 7 | `DataclassArgs` | `dataclass.rs` | ❌ Missing | — | No DataclassArgsValidator class; serializer path (main_module.cpp) handles dataclass-args, but validator path uses `dataclass` instead |
 | 8 | `Dataclass` | `dataclass.rs` | ✅ Implemented | `model_fields.hpp` | `DataclassValidator` |
 | 9 | `Str` | `string.rs` | ✅ Implemented | `basic.hpp` | `StringValidator` |
 | 10 | `StrConstrained` | `string.rs` | ⚠️ Partial | `basic.hpp` | `StrConstrainedValidator` exists (min_length/max_length/pattern/strip_whitespace/to_lower/to_upper) |
@@ -33,10 +33,10 @@
 | 19 | `Tuple` | `tuple.rs` | ✅ Implemented | `containers.hpp` | `TupleValidator` |
 | 20 | `Dict` | `dict.rs` | ✅ Implemented | `containers.hpp` | `DictValidator` |
 | 21 | `None` | `none.rs` | ✅ Implemented | `special.hpp` | `NoneValidator` |
-| 22 | `FunctionBefore` | `function.rs` | ✅ Implemented | `functions.hpp` | `FunctionBeforeValidator` |
-| 23 | `FunctionAfter` | `function.rs` | ✅ Implemented | `functions.hpp` | `FunctionAfterValidator` |
-| 24 | `FunctionPlain` | `function.rs` | ✅ Implemented | `functions.hpp` | `FunctionPlainValidator` |
-| 25 | `FunctionWrap` | `function.rs` | ✅ Implemented | `functions.hpp` | `FunctionWrapValidator` (with SerializationInfo support) |
+| 22 | `FunctionBefore` | `function.rs` | ⚠️ Partial | `functions.hpp` | Stub — delegates to inner validator; does NOT call Python function |
+| 23 | `FunctionAfter` | `function.rs` | ⚠️ Partial | `functions.hpp` | Stub — delegates to inner validator; does NOT call Python function |
+| 24 | `FunctionPlain` | `function.rs` | ⚠️ Partial | `functions.hpp` | Stub — does NOT call Python function, returns placeholder |
+| 25 | `FunctionWrap` | `function.rs` | ⚠️ Partial | `functions.hpp` | Stub — delegates to inner validator; does NOT call Python function (serializer side in main_module.cpp has real FunctionWrap with SerializationInfo) |
 | 26 | `FunctionCall` | `call.rs` | ❌ Missing | — | No call/argument validation |
 | 27 | `Literal` | `literal.rs` | ✅ Implemented | `special.hpp` | `LiteralValidator` |
 | 28 | `MissingSentinel` | `missing_sentinel.rs` | ❌ Missing | — | No MISSING sentinel type |
@@ -58,33 +58,38 @@
 | 44 | `Arguments` | `arguments.rs` | ❌ Missing | — | No argument validation (positional+keyword) |
 | 45 | `ArgumentsV3` | `arguments_v3.rs` | ❌ Missing | — | New argument validation |
 | 46 | `WithDefault` | `with_default.rs` | ✅ Implemented | `special.hpp` | `WithDefaultValidator` |
-| 47 | `Chain` | `chain.rs` | ✅ Implemented | `special.hpp` | `ChainValidator` |
+| 47 | `Chain` | `chain.rs` | ✅ Implemented | `special.hpp` | `ChainValidator`; tries steps in order |
 | 48 | `LaxOrStrict` | `lax_or_strict.rs` | ✅ Implemented | `special.hpp` | `LaxOrStrictValidator` |
-| 49 | `Generator` | `generator.rs` | ❌ Missing | — | No generator validation |
+| 49 | `Generator` | `generator.rs` | ❌ Missing | — | No generator validation; build_from_element falls back to AnyValidator (silently accepts any value without validation) |
 | 50 | `CustomError` | `custom_error.rs` | ❌ Missing | — | No custom error wrapper |
-| 51 | `Json` | `json.rs` | ✅ Implemented | `combined_validator.cpp` | `JsonValidator` |
-| 52 | `Url` | `url.rs` | ⚠️ Partial | `basic.hpp` | `UrlValidator` (stub — returns success marker) |
+| 51 | `Json` | `json.rs` | ⚠️ Partial | `combined_validator.cpp` | Stub — contains `// TODO: Parse JSON string`, does not actually parse JSON input (serializer side in main_module.cpp has real JSON handling with round_trip) |
+| 52 | `Url` | `url.rs` | ⚠️ Partial | `basic.hpp` | Stub — returns success marker unconditionally; comment says "In Phase 2, we'll parse URLs" |
 | 53 | `MultiHostUrl` | `url.rs` | ❌ Missing | — | No multi-host URL support |
 | 54 | `Uuid` | `uuid.rs` | ✅ Implemented | `basic.hpp` | `UuidValidator` |
 | 55 | `DefinitionRef` | `definitions.rs` | ✅ Implemented | `combined_validator.cpp` | Recursive schemas now work via definitions lookup |
-| 56 | `JsonOrPython` | `json_or_python.rs` | ✅ Implemented | `special.hpp` | `JsonOrPythonValidator` |
-| 57 | `Complex` | `complex.rs` | ✅ Implemented | `complex.hpp` | `ComplexValidator` |
+| 56 | `JsonOrPython` | `json_or_python.rs` | ✅ Implemented | `special.hpp` | `JsonOrPythonValidator`; routes by InputType |
+| 57 | `Complex` | `complex.rs` | ❌ Missing | — | **No ComplexValidator class exists anywhere in the codebase**. complex.hpp contains Nullable/Union/TaggedUnion only; no `complex` schema type handler in build_from_element |
 | 58 | `Prebuilt` | `prebuilt.rs` | ❌ Missing | — | No prebuilt validator reuse |
 
 ### Validator Summary
 
 | Status | Count | Percentage |
 |--------|-------|------------|
-| ✅ Fully implemented | 34 | 59% |
-| ⚠️ Partially implemented | 10 | 17% |
-| ❌ Missing | 14 | 24% |
+| ✅ Fully implemented | 30 | 52% |
+| ⚠️ Partially implemented | 18 | 31% |
+| ❌ Missing | 10 | 17% |
 
 **Progress since last update:**
 - `DefinitionRef` ✅ (recursive/self-referencing models now work)
 - `ConstrainedInt/Float/Str/Bytes` ⚠️ (validators exist, constraints implemented)
 - `IsInstance/IsSubclass/Callable` ⚠️ (stub validators added)
 
-**Remaining critical gaps**: Decimal, Arguments, FunctionCall, Generator, CustomError, MissingSentinel, MultiHostUrl, Prebuilt
+**Remaining critical gaps**: Decimal, Arguments, FunctionCall, MultiHostUrl, Complex, Prebuilt, MissingSentinel, CustomError, Generator
+
+**Note on status criteria:**
+- ✅ **Fully implemented**: Validator class exists, `build_from_element` constructs it, and `validate()` performs actual validation logic (not just a success-marker stub).
+- ⚠️ **Partially implemented**: Validator class exists but is a stub (returns placeholder), or only implements a subset of expected behavior, or is only wired in the serializer path.
+- ❌ **Missing**: No validator class, no schema type handler in `build_from_element`, or both.
 
 ---
 
@@ -270,8 +275,9 @@
 
 | Metric | Previous | Current |
 |--------|----------|---------|
-| Validator types | 52% | **59%** |
-| Serializer types | 95% (stubs) | **97%** (functional) |
+| Validator types | 52% | **52%** (actual; 59% if counting stubs as ✅) |
+| Serializer types | 95% (stubs) | **95%** (functional, main_module.cpp) |
+| Validators calling Python callables | 0% | **0%** (all Function* validators are stubs) |
 | Actual functional coverage | 15-20% | **20-25%** |
 | Pydantic compatibility | ~25% | **~30%** |
 
@@ -284,7 +290,14 @@
 6. ✅ Default values validated through field validator
 7. ⚠️ Native PythonInput via pybind11 (improved from JSON round-trip)
 
-**Remaining critical gaps:**
+**Remaining critical gaps (validator side):**
+1. **Function* validators** — All 4 are stubs; no Python callable invocation
+2. **JsonValidator** — Stub, doesn't parse JSON input
+3. **UrlValidator** — Stub, unconditionally returns success
+4. **DataclassArgs** — No class exists; serializer-only concept
+5. **Complex** — No class exists; entire validator missing
+
+**Remaining critical gaps (infrastructure):**
 1. **ValidationInfo** — Python validators lack context
 2. **from_attributes** — Ignored at C++ level
 3. **ArgsKwargs** — Dataclass init fails
