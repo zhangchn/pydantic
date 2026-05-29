@@ -414,7 +414,14 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
     // For "nullable", try all types since we don't know the inner type
     bool try_all = (type_name == "nullable");
 
-    if (try_all || type_name == "str" || type_name == "string") {
+    // Helper: match base type name, including constrained- variants
+    auto matches_type = [&](const std::string& base) -> bool {
+        return type_name == base || type_name == ("constrained-" + base) ||
+               type_name == (base + "-constrained") || type_name == ("constr-" + base) ||
+               type_name == (base + "-constr");
+    };
+
+    if (try_all || matches_type("str") || type_name == "string") {
         auto* s = static_cast<std::string*>(value.get());
         if (s) {
             try {
@@ -434,7 +441,7 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
         }
     }
 
-    if (try_all || type_name == "int" || type_name == "int64") {
+    if (try_all || matches_type("int") || type_name == "int64") {
         try {
             auto* i = static_cast<int64_t*>(value.get());
             if (i) return py::int_(*i);
@@ -444,19 +451,19 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
             if (i) return py::int_(*i);
         } catch (...) {}
     }
-    if (try_all || type_name == "float") {
+    if (try_all || matches_type("float")) {
         try {
             auto* d = static_cast<double*>(value.get());
             if (d) return py::float_(*d);
         } catch (...) {}
     }
-    if (try_all || type_name == "bool") {
+    if (try_all || matches_type("bool")) {
         try {
             auto* b = static_cast<bool*>(value.get());
             if (b) return py::bool_(*b);
         } catch (...) {}
     }
-    if (try_all || type_name == "bytes") {
+    if (try_all || matches_type("bytes")) {
         try {
             auto* v = static_cast<std::vector<uint8_t>*>(value.get());
             if (v) return py::bytes(reinterpret_cast<const char*>(v->data()), v->size());

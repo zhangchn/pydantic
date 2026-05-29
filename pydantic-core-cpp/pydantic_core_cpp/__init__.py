@@ -25,6 +25,7 @@ from ._pydantic_core_cpp import (
     SchemaError,
     SchemaValidator as _SchemaValidatorBase,
     SerMode,
+    SerializationInfo,
     StringCacheMode,
     TemporalMode,
     ValidationError,
@@ -91,14 +92,14 @@ class SchemaValidator:
                 ref = inner.get("schema_ref", "__root__")
                 cls = self._model_classes.get(ref)
                 if cls:
-                    return self._build_model(data, cls, schema)
+                    return self._build_model(data, cls, ref)
             return self._dict_to_model(data, inner)
 
         if schema.get("type") == "definition-ref":
             ref = schema.get("schema_ref", "__root__")
             cls = self._model_classes.get(ref)
             if cls:
-                return self._build_model(data, cls, self._schema)
+                return self._build_model(data, cls, ref)
             return data
 
         if schema.get("type") == "union":
@@ -124,7 +125,16 @@ class SchemaValidator:
         if schema.get("type") == "model":
             cls = schema.get("cls")
             if cls is not None and callable(cls):
-                return self._build_model(data, cls, schema)
+                # Direct model schema (not in definitions) — use schema's own inner schema
+                instance = object.__new__(cls)
+                inner_schema = schema.get("schema", {})
+                if isinstance(inner_schema, dict) and inner_schema.get("type") in ("model-fields", "typed-dict"):
+                    data = self._process_model_fields(data, inner_schema)
+                instance.__dict__ = data
+                object.__setattr__(instance, '__pydantic_private__', {})
+                object.__setattr__(instance, '__pydantic_extra__', None)
+                object.__setattr__(instance, '__pydantic_fields_set__', set(data.keys()))
+                return instance
             return data
 
         if schema.get("type") == "model-fields":
@@ -132,25 +142,28 @@ class SchemaValidator:
 
         return data
 
-    def _build_model(self, data, cls, full_schema):
-        """Build a model instance from dict data."""
+    def _build_model(self, data, cls, ref):
+        """Build a model instance from dict data by looking up the definition ref.
+
+        Looks up the definition by ref in self._schema['definitions'],
+        extracts its model-fields schema, recursively processes nested fields,
+        and creates the model instance.
+        """
         instance = object.__new__(cls)
-        
-        # Find the model-fields schema to process nested models
-        inner_schema = full_schema.get("schema", {})
-        if isinstance(inner_schema, dict):
-            # Unwrap definition-ref if needed
-            if inner_schema.get("type") == "definition-ref":
-                ref = inner_schema.get("schema_ref")
-                for defn in full_schema.get("definitions", []):
-                    if defn.get("ref") == ref:
-                        inner_schema = defn.get("schema", inner_schema)
-                        break
-            
-            if inner_schema.get("type") in ("model-fields", "typed-dict"):
-                data = self._process_model_fields(data, inner_schema)
+
+        # Find the definition by ref in the top-level definitions list
+        for defn in self._schema.get("definitions", []):
+            if defn.get("ref") == ref:
+                inner_schema = defn.get("schema", {})
+                if isinstance(inner_schema, dict) and inner_schema.get("type") in ("model-fields", "typed-dict"):
+                    data = self._process_model_fields(data, inner_schema)
+                break
 
         instance.__dict__ = data
+        # Initialize pydantic slot attributes expected by BaseModel
+        object.__setattr__(instance, '__pydantic_private__', {})
+        object.__setattr__(instance, '__pydantic_extra__', None)
+        object.__setattr__(instance, '__pydantic_fields_set__', set(data.keys()))
         return instance
 
     def _process_model_fields(self, data, fields_schema):
@@ -196,14 +209,19 @@ class SchemaValidator:
                     ref = inner.get("schema_ref", "__root__")
                     cls = self._model_classes.get(ref)
                     if cls:
-                        instance = object.__new__(cls)
-                        instance.__dict__ = result
-                        return instance
+                        return self._build_model(result, cls, ref)
             elif schema_type == "model":
                 cls = self._schema.get("cls")
                 if cls is not None and callable(cls):
+                    # Process nested models in the result dict
+                    inner_schema = self._schema.get("schema", {})
+                    if isinstance(inner_schema, dict) and inner_schema.get("type") in ("model-fields", "typed-dict"):
+                        result = self._process_model_fields(result, inner_schema)
                     instance = object.__new__(cls)
                     instance.__dict__ = result
+                    object.__setattr__(instance, '__pydantic_private__', {})
+                    object.__setattr__(instance, '__pydantic_extra__', None)
+                    object.__setattr__(instance, '__pydantic_fields_set__', set(result.keys()))
                     return instance
 
         elif self_instance is not None:
@@ -223,7 +241,10 @@ class SchemaValidator:
 
     def validate_json(self, json_data, *, strict=None, context=None, extra=None,
                       from_attributes=None, by_alias=None, by_name=None):
-        return self._base.validate_json(json_data, strict=strict)
+        result = self._base.validate_json(json_data, strict=strict)
+        if isinstance(result, dict):
+            result = self._dict_to_model(result)
+        return result
 
     def validate_strings(self, string_data, *, strict=None):
         return self._base.validate_strings(string_data, strict=strict)

@@ -14,6 +14,14 @@ using namespace pydantic_core;
 std::string get_version() { return "2.46.4"; }
 
 // ---------------------------------------------------------------------------
+// SerializationInfo — Python-visible info object for custom serializer functions
+// ---------------------------------------------------------------------------
+struct PySerializationInfo {
+    bool round_trip;
+    PySerializationInfo(bool round_trip_) : round_trip(round_trip_) {}
+};
+
+// ---------------------------------------------------------------------------
 // Helper: convert a py::object to JSON string
 // ---------------------------------------------------------------------------
 static std::string pyobj_to_json_str(const py::object& obj) {
@@ -51,6 +59,8 @@ struct SerNode {
     std::unordered_map<std::string, SerRef> tagged;
     // For model-fields: map from field_name -> serializer
     std::unordered_map<std::string, SerRef> fields;
+    // Set of computed field names (excluded when round_trip=True)
+    std::unordered_set<std::string> computed_fields_;
     // For function serializers
     py::object py_func;
     // For default
@@ -65,21 +75,22 @@ struct SerNode {
         children = other.children;
         tagged = other.tagged;
         fields = other.fields;
+        computed_fields_ = other.computed_fields_;
         py_func = other.py_func;
         default_val = other.default_val;
         has_default_val = other.has_default_val;
         format_str = other.format_str;
     }
 
-    py::object to_python(const py::object& value, bool json_mode, bool exc_none) const {
+    py::object to_python(const py::object& value, bool json_mode, bool exc_none, bool round_trip = false) const {
         // Type-specific logic
         if (type == "nullable" || type == "nullable-union") {
             if (value.is_none()) return py::none();
-            if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none);
+            if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip);
         }
         if (type == "union") {
             for (auto& c : children) {
-                try { return c->to_python(value, json_mode, exc_none); } catch (...) {}
+                try { return c->to_python(value, json_mode, exc_none, round_trip); } catch (...) {}
             }
         }
         if (type == "tagged-union" && !tagged.empty()) {
@@ -91,51 +102,64 @@ struct SerNode {
                     if (ks == "type" || ks == "discriminator") {
                         std::string tag = py::str(item.second).cast<std::string>();
                         auto it = tagged.find(tag);
-                        if (it != tagged.end()) return it->second->to_python(value, json_mode, exc_none);
+                        if (it != tagged.end()) return it->second->to_python(value, json_mode, exc_none, round_trip);
                         break;
                     }
                 }
             }
             for (auto& [t, c] : tagged) {
-                try { return c->to_python(value, json_mode, exc_none); } catch (...) {}
+                try { return c->to_python(value, json_mode, exc_none, round_trip); } catch (...) {}
             }
         }
         if (type == "default" || type == "with-default") {
             if (value.is_none() && has_default_val) return default_val;
-            if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none);
+            if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip);
         }
         if (type == "json") {
+            if (round_trip) {
+                // Serialize value to JSON string, return as Python string
+                std::string json_str;
+                if (!children.empty()) {
+                    json_str = children[0]->to_json(value, false, -1, round_trip);
+                } else {
+                    json_str = infer_json(value, false, -1);
+                }
+                return py::cast(json_str);
+            }
+            // Non-round-trip: delegate to inner serializer
             if (!children.empty()) {
-                auto inner = children[0]->to_python(value, json_mode, exc_none);
-                std::string s = inner.cast<std::string>();
-                return json_to_pyobj(s);
+                return children[0]->to_python(value, json_mode, exc_none, round_trip);
             }
         }
         if (type == "json-or-python") {
-            if (json_mode && !children.empty()) return children[0]->to_python(value, true, exc_none);
-            if (children.size() > 1) return children[1]->to_python(value, false, exc_none);
+            if (json_mode && !children.empty()) return children[0]->to_python(value, true, exc_none, round_trip);
+            if (children.size() > 1) return children[1]->to_python(value, false, exc_none, round_trip);
         }
         if (type == "enum") {
             if (py::hasattr(value, "value")) {
                 auto ev = py::getattr(value, "value");
-                if (!children.empty()) return children[0]->to_python(ev, json_mode, exc_none);
+                if (!children.empty()) return children[0]->to_python(ev, json_mode, exc_none, round_trip);
                 return ev;
             }
         }
         if (!fields.empty()) {
-            return serialize_fields(value, exc_none);
+            return serialize_fields(value, exc_none, round_trip);
         }
         // Delegate model/dataclass/typed-dict to inner serializer
         if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
-            return children[0]->to_python(value, json_mode, exc_none);
+            return children[0]->to_python(value, json_mode, exc_none, round_trip);
         }
         if (!py_func.is_none()) {
             if (type == "function-plain") return py_func(value);
             if (type == "function-after" || type == "function-before" || type == "function-wrap") {
-                auto handler = [this, value, json_mode, exc_none](const py::object& v) {
-                    if (!children.empty()) return children[0]->to_python(v, json_mode, exc_none);
+                py::object handler = py::cpp_function([this, value, json_mode, exc_none, round_trip](const py::object& v) -> py::object {
+                    if (!children.empty()) return children[0]->to_python(v, json_mode, exc_none, round_trip);
                     return v;
-                };
+                });
+                if (type == "function-wrap") {
+                    PySerializationInfo info(round_trip);
+                    return py_func(value, handler, py::cast(info));
+                }
                 return py_func(value, handler);
             }
         }
@@ -143,7 +167,7 @@ struct SerNode {
         if ((type == "list" || type == "set" || type == "frozenset") && !children.empty()) {
             py::list result;
             for (auto item : py::reinterpret_borrow<py::sequence>(value)) {
-                result.append(children[0]->to_python(py::reinterpret_borrow<py::object>(item), json_mode, exc_none));
+                result.append(children[0]->to_python(py::reinterpret_borrow<py::object>(item), json_mode, exc_none, round_trip));
             }
             return std::move(result);
         }
@@ -153,8 +177,9 @@ struct SerNode {
             for (auto item : d) {
                 auto k = py::reinterpret_borrow<py::object>(item.first);
                 auto v = py::reinterpret_borrow<py::object>(item.second);
-                auto out_v = children.size() > 1 ? children[1]->to_python(v, json_mode, exc_none) : v;
-                result[k] = out_v;
+                auto out_k = children[0]->to_python(k, json_mode, exc_none, round_trip);
+                auto out_v = children.size() > 1 ? children[1]->to_python(v, json_mode, exc_none, round_trip) : v;
+                result[out_k] = out_v;
             }
             return std::move(result);
         }
@@ -163,7 +188,7 @@ struct SerNode {
             size_t i = 0;
             for (auto item : py::reinterpret_borrow<py::sequence>(value)) {
                 auto v = py::reinterpret_borrow<py::object>(item);
-                result.append(i < children.size() ? children[i]->to_python(v, json_mode, exc_none) : children.back()->to_python(v, json_mode, exc_none));
+                result.append(i < children.size() ? children[i]->to_python(v, json_mode, exc_none, round_trip) : children.back()->to_python(v, json_mode, exc_none, round_trip));
                 i++;
             }
             return std::move(result);
@@ -171,7 +196,7 @@ struct SerNode {
         return value;
     }
 
-    std::string to_json(const py::object& value, bool ensure_ascii, int indent) const {
+    std::string to_json(const py::object& value, bool ensure_ascii, int indent, bool round_trip = false) const {
         if (type == "none" || type == "is-none") return "null";
         if (type == "bool" || py::isinstance<py::bool_>(value)) {
             return value.cast<bool>() ? "true" : "false";
@@ -203,26 +228,41 @@ struct SerNode {
             }
             return "\"" + enc + "\"";
         }
+        if (type == "json") {
+            if (round_trip) {
+                // round_trip: serialize value to JSON, wrap as escaped JSON string
+                std::string inner_json;
+                if (!children.empty()) {
+                    inner_json = children[0]->to_json(value, ensure_ascii, indent, round_trip);
+                } else {
+                    inner_json = infer_json(value, ensure_ascii, indent);
+                }
+                return json_escape(inner_json, ensure_ascii);
+            }
+            if (!children.empty()) {
+                return children[0]->to_json(value, ensure_ascii, indent, round_trip);
+            }
+        }
         if (type == "nullable" || type == "nullable-union") {
             if (value.is_none()) return "null";
-            if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent);
+            if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip);
         }
         if (type == "default" || type == "with-default") {
             if (value.is_none() && has_default_val) {
-                if (!children.empty()) return children[0]->to_json(default_val, ensure_ascii, indent);
+                if (!children.empty()) return children[0]->to_json(default_val, ensure_ascii, indent, round_trip);
                 return infer_json(default_val, ensure_ascii, indent);
             }
-            if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent);
+            if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip);
         }
         if (type == "to-string") {
-            py::object inner = !children.empty() ? children[0]->to_python(value, false, false) : value;
+            py::object inner = !children.empty() ? children[0]->to_python(value, false, false, round_trip) : value;
             return json_escape(py::str(inner).cast<std::string>(), ensure_ascii);
         }
         if (!fields.empty()) {
-            return serialize_fields_json(value, ensure_ascii, indent, false);
+            return serialize_fields_json(value, ensure_ascii, indent, false, round_trip);
         }
         if (!py_func.is_none()) {
-            auto result = type == "function-plain" ? py_func(value) : to_python(value, false, false);
+            auto result = type == "function-plain" ? py_func(value) : to_python(value, false, false, round_trip);
             return infer_json(result, ensure_ascii, indent);
         }
         return infer_json(value, ensure_ascii, indent);
@@ -319,13 +359,15 @@ private:
         return json_escape(py::repr(value).cast<std::string>(), ensure_ascii);
     }
 
-    py::object serialize_fields(const py::object& value, bool exc_none) const {
+    py::object serialize_fields(const py::object& value, bool exc_none, bool round_trip = false) const {
         py::dict result;
         py::dict main;
         if (py::isinstance<py::dict>(value)) main = value.cast<py::dict>();
         else if (py::hasattr(value, "__dict__")) main = py::getattr(value, "__dict__").cast<py::dict>();
 
         for (auto& [k, ser] : fields) {
+            // Skip computed fields when round_trip=True
+            if (round_trip && computed_fields_.count(k)) continue;
             py::str key(k);
             py::object fv;
             bool has_value = true;
@@ -338,7 +380,7 @@ private:
             }
             if (!has_value) continue;
             if (exc_none && fv.is_none()) continue;
-            result[py::str(k)] = ser->to_python(fv, false, exc_none);
+            result[py::str(k)] = ser->to_python(fv, false, exc_none, round_trip);
         }
         // Extra fields
         if (py::hasattr(value, "__pydantic_extra__")) {
@@ -356,7 +398,7 @@ private:
         return std::move(result);
     }
 
-    std::string serialize_fields_json(const py::object& value, bool ensure_ascii, int indent, bool exc_none) const {
+    std::string serialize_fields_json(const py::object& value, bool ensure_ascii, int indent, bool exc_none, bool round_trip = false) const {
         std::string out = "{";
         bool first = true;
         py::dict main;
@@ -364,6 +406,8 @@ private:
         else if (py::hasattr(value, "__dict__")) main = py::getattr(value, "__dict__").cast<py::dict>();
 
         for (auto& [k, ser] : fields) {
+            // Skip computed fields when round_trip=True
+            if (round_trip && computed_fields_.count(k)) continue;
             py::str key(k);
             py::object fv;
             bool has_value = true;
@@ -378,7 +422,7 @@ private:
             if (exc_none && fv.is_none()) continue;
             if (!first) out += ",";
             first = false;
-            out += json_escape(k, ensure_ascii) + ":" + ser->to_json(fv, ensure_ascii, -1);
+            out += json_escape(k, ensure_ascii) + ":" + ser->to_json(fv, ensure_ascii, -1, round_trip);
         }
         if (py::hasattr(value, "__pydantic_extra__")) {
             auto extra = py::getattr(value, "__pydantic_extra__");
@@ -549,6 +593,23 @@ static SerRef build_ser_impl(const py::dict& schema,
                 auto fdef = item.second.cast<py::dict>();
                 node->fields[k] = build_ser(fdef["schema"].cast<py::dict>(), defs);
             }
+            // Collect computed field names (excluded when round_trip=True)
+            // Also add them to fields map with their return_schema serializer
+            if (schema.contains("computed_fields")) {
+                for (auto cf_item : schema["computed_fields"].cast<py::list>()) {
+                    auto cf = cf_item.cast<py::dict>();
+                    std::string prop = cf["property_name"].cast<std::string>();
+                    node->computed_fields_.insert(prop);
+                    try {
+                        node->fields[prop] = build_ser(cf["return_schema"].cast<py::dict>(), defs);
+                    } catch (...) {
+                        // If no return_schema, fall back to any
+                        py::dict any_schema;
+                        any_schema["type"] = "any";
+                        node->fields[prop] = build_ser(any_schema, defs);
+                    }
+                }
+            }
         } catch (...) {}
     }
 
@@ -585,20 +646,20 @@ public:
     py::object to_python(const py::object& value, std::optional<std::string> mode,
                          std::optional<py::object>, std::optional<py::object>,
                          std::optional<bool>, bool, bool, bool exc_none,
-                         bool, bool, py::object, std::optional<py::object>,
+                         bool, bool round_trip, py::object, std::optional<py::object>,
                          bool, std::optional<bool>, std::optional<py::object>) const {
         if (!ser_) throw std::runtime_error("Serializer not initialized");
-        return ser_->to_python(value, mode && *mode == "json", exc_none);
+        return ser_->to_python(value, mode && *mode == "json", exc_none, round_trip);
     }
 
     py::bytes to_json(const py::object& value, std::optional<size_t>, std::optional<bool> ea,
                       std::optional<py::object>, std::optional<py::object>,
                       std::optional<bool>, bool, bool, bool exc_none,
-                      bool, bool, py::object, std::optional<py::object>,
+                      bool, bool round_trip, py::object, std::optional<py::object>,
                       bool, std::optional<bool>, std::optional<py::object>) const {
         if (!ser_) throw std::runtime_error("Serializer not initialized");
         bool e = ea.value_or(false);
-        std::string json = ser_->to_json(value, e, -1);
+        std::string json = ser_->to_json(value, e, -1, round_trip);
         return py::bytes(json);
     }
 
@@ -617,17 +678,18 @@ private:
 // Standalone to_json
 // ---------------------------------------------------------------------------
 static py::bytes to_json_fn(const py::object& value, std::optional<size_t>, std::optional<bool> ea,
-    std::optional<py::object>, std::optional<py::object>, bool, bool, bool,
+    std::optional<py::object>, std::optional<py::object>, bool, bool, bool round_trip,
     std::string, std::string, std::string, std::string, bool,
     std::optional<py::object>, bool, std::optional<bool>, std::optional<py::object>) {
     SerRef any = std::make_shared<SerNode>();
     any->type = "any";
-    return py::bytes(any->to_json(value, ea.value_or(false), -1));
+    return py::bytes(any->to_json(value, ea.value_or(false), -1, round_trip));
 }
 
 static py::object to_jsonable_fn(const py::object& value, std::optional<py::object>, std::optional<py::object>,
-    bool, bool, bool, std::string, std::string, std::string, std::string, bool,
+    bool, bool, bool round_trip, std::string, std::string, std::string, std::string, bool,
     std::optional<py::object>, bool, std::optional<bool>, std::optional<py::object>) {
+    (void)round_trip;
     return py::reinterpret_borrow<py::object>(value);
 }
 
@@ -649,14 +711,41 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
     py::enum_<InfNanMode>(m, "InfNanMode")
         .value("null", InfNanMode::Null).value("constants", InfNanMode::Constants).value("strings", InfNanMode::Strings);
 
-    py::class_<ValidationError>(m, "ValidationError")
-        .def(py::init<const std::string&, InputType, const ValError&>())
-        .def_property_readonly("title", &ValidationError::title)
-        .def_property_readonly("error_count", &ValidationError::error_count)
-        .def("errors", &ValidationError::errors).def("to_json", &ValidationError::to_json_string)
-        .def("__str__", &ValidationError::to_json_string)
-        .def("__repr__", [](const ValidationError& e) { return "ValidationError(" + e.to_json_string() + ")"; });
-    py::class_<SchemaError>(m, "SchemaError").def(py::init<const std::string&>()).def("__str__", &SchemaError::what);
+    // SerializationInfo - passed to custom serializer functions
+    py::class_<PySerializationInfo>(m, "SerializationInfo")
+        .def(py::init<bool>(), py::arg("round_trip"))
+        .def_readonly("round_trip", &PySerializationInfo::round_trip);
+
+    // Register ValidationError as a proper Python exception (inherits from ValueError like Rust)
+    py::register_exception<ValidationError>(m, "ValidationError", PyExc_ValueError);
+
+    // SchemaError as a proper Python exception
+    py::register_exception<SchemaError>(m, "SchemaError", PyExc_ValueError);
+
+    // Add custom methods to ValidationError (register_exception creates bare Exception subclass)
+    {   // title property
+        auto ve_cls = m.attr("ValidationError");
+        py::setattr(ve_cls, "title",
+            py::cpp_function([](py::object self) -> std::string {
+                return self.cast<const ValidationError&>().title();
+            }, py::is_method(ve_cls))
+        );
+        py::setattr(ve_cls, "error_count",
+            py::cpp_function([](py::object self) -> int {
+                return self.cast<const ValidationError&>().error_count();
+            }, py::is_method(ve_cls))
+        );
+        py::setattr(ve_cls, "errors",
+            py::cpp_function([](py::object self) {
+                return self.cast<const ValidationError&>().errors();
+            }, py::is_method(ve_cls))
+        );
+        py::setattr(ve_cls, "to_json",
+            py::cpp_function([](py::object self) {
+                return self.cast<const ValidationError&>().to_json_string();
+            }, py::is_method(ve_cls))
+        );
+    }
     py::class_<PydanticOmit>(m, "PydanticOmit").def(py::init<>());
     py::class_<PydanticUseDefault>(m, "PydanticUseDefault").def(py::init<>());
 
@@ -690,6 +779,17 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                         py::dict validated_dict = validated.cast<py::dict>();
                         for (auto item : validated_dict) {
                             d[item.first] = item.second;
+                        }
+                        // Initialize pydantic slot attributes expected by BaseModel
+                        // __pydantic_private__ is in BaseModel.__slots__ and must exist
+                        if (!py::hasattr(self_instance, "__pydantic_private__")) {
+                            py::setattr(self_instance, "__pydantic_private__", py::dict());
+                        }
+                        if (!py::hasattr(self_instance, "__pydantic_extra__")) {
+                            py::setattr(self_instance, "__pydantic_extra__", py::none());
+                        }
+                        if (!py::hasattr(self_instance, "__pydantic_fields_set__")) {
+                            py::setattr(self_instance, "__pydantic_fields_set__", py::set());
                         }
                     }
                 } catch (const std::exception& e) {

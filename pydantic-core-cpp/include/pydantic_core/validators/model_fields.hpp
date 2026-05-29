@@ -141,8 +141,24 @@ public:
                     combined_errors.merge(std::move(err));
                 } else if (!field.default_value_str.empty()) {
                     ValidatedModelFieldsOutput::FieldValue fv;
-                    fv.value = std::make_shared<std::string>(field.default_value_str);
-                    fv.type_name = "str";  // Default values are strings
+                    // Parse the default value through the field's validator
+                    // to get a properly typed result (e.g. double* for float fields,
+                    // not a raw string like "0.700000")
+                    auto parse_result = parse_json(field.default_value_str);
+                    if (parse_result.is_ok() && field.schema) {
+                        auto json_input = std::move(parse_result.value());
+                        auto default_result = field.schema->validate(*json_input, state);
+                        if (default_result.is_ok()) {
+                            fv.value = default_result.value();
+                            fv.type_name = field.schema->name();
+                        } else {
+                            fv.value = std::make_shared<std::string>(field.default_value_str);
+                            fv.type_name = "str";
+                        }
+                    } else {
+                        fv.value = std::make_shared<std::string>(field.default_value_str);
+                        fv.type_name = "str";
+                    }
                     output.fields[name] = std::move(fv);
                 }
             }
