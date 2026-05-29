@@ -185,7 +185,8 @@ TEST_SUITE("ModelFieldsValidator") {
         CHECK(output->fields.count("name"));
         CHECK(output->fields.count("role"));
         // Default value should be present
-        auto role_val = std::static_pointer_cast<std::string>(output->fields["role"]);
+        auto& role_fv = output->fields["role"];
+        auto role_val = std::static_pointer_cast<std::string>(role_fv.value);
         CHECK(*role_val == "user");
     }
 

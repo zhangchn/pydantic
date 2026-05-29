@@ -3,6 +3,11 @@
 #include "pydantic_core/validator.hpp"
 #include "pydantic_core/json_input.hpp"
 #include "pydantic_core/string_input.hpp"
+// Note: python_input.hpp is included in the .cpp file that uses it
+// to avoid pybind11 dependency in test targets
+#ifdef HAS_PYBIND11
+#include "pydantic_core/python_input.hpp"
+#endif
 #include <memory>
 #include <string>
 #include <vector>
@@ -38,8 +43,12 @@ struct FieldInfo {
 // ValidatedModelFieldsOutput - the return value from ModelFieldsValidator
 // ============================================================================
 struct ValidatedModelFieldsOutput {
-    std::unordered_map<std::string, std::shared_ptr<void>> fields;  // Validated field values
-    std::unordered_map<std::string, std::shared_ptr<void>> extra;   // Extra fields (if allow)
+    struct FieldValue {
+        std::shared_ptr<void> value;
+        std::string type_name;  // "str", "int", "float", "bool", "bytes", "dict", "list", etc.
+    };
+    std::unordered_map<std::string, FieldValue> fields;  // Validated field values
+    std::unordered_map<std::string, FieldValue> extra;   // Extra fields (if allow)
     std::set<std::string> fields_set;                                // Names of fields that were in input
 };
 
@@ -109,7 +118,16 @@ public:
 
                 if (validate_result.has_value()) {
                     // Validation succeeded (value may be nullptr for nullable)
-                    output.fields[name] = validate_result.value();
+                    auto& val = validate_result.value();
+                    ValidatedModelFieldsOutput::FieldValue fv;
+                    fv.value = val;
+                    // Determine type name from field validator
+                    if (field.schema) {
+                        fv.type_name = field.schema->name();
+                    } else {
+                        fv.type_name = "null_schema";
+                    }
+                    output.fields[name] = std::move(fv);
                     output.fields_set.insert(name);
                 }
             } else {
@@ -122,7 +140,10 @@ public:
                     );
                     combined_errors.merge(std::move(err));
                 } else if (!field.default_value_str.empty()) {
-                    output.fields[name] = std::make_shared<std::string>(field.default_value_str);
+                    ValidatedModelFieldsOutput::FieldValue fv;
+                    fv.value = std::make_shared<std::string>(field.default_value_str);
+                    fv.type_name = "str";  // Default values are strings
+                    output.fields[name] = std::move(fv);
                 }
             }
 
@@ -165,6 +186,39 @@ protected:
         ValidationState& state,
         ValError& combined_errors
     ) {
+        // Try PythonValidatedDict path first
+        // Note: HAS_PYBIND11 is defined in CMakeLists.txt for targets that use pybind11
+#ifdef HAS_PYBIND11
+        auto* py_dict = dynamic_cast<const PythonValidatedDict*>(&dict);
+        if (py_dict) {
+            auto py_obj_opt = py_dict->get_object(key);
+            if (py_obj_opt) {
+                PythonInput field_input(*py_obj_opt);
+                auto result = field.schema->validate(field_input, state);
+                if (result.is_ok()) {
+                    return result.value();
+                }
+                auto& err = result.error();
+                if (err.is_omit()) {
+                    return std::nullopt;
+                } else if (err.has_line_errors()) {
+                    auto mutable_err = const_cast<ValError*>(&err);
+                    combined_errors.merge(std::move(*mutable_err));
+                } else if (err.is_internal()) {
+                    auto new_err = ValError::line_error(
+                        ErrorType(ErrorType::Kind::CustomError),
+                        state.location(),
+                        err.internal_message()
+                    );
+                    combined_errors.merge(std::move(new_err));
+                }
+                return std::nullopt;
+            }
+        }
+        // Fallback for Python path: try to get entry and use StringInput
+#endif
+
+        // Try JsonValidatedDict path
         auto* json_dict = dynamic_cast<const JsonValidatedDict*>(&dict);
         if (json_dict) {
             auto element_opt = json_dict->get_element(key);
@@ -172,11 +226,11 @@ protected:
                 auto field_input = JsonInput::create_from_element(*element_opt);
                 auto result = field.schema->validate(*field_input, state);
                 if (result.is_ok()) {
-                    return result.value();  // May be nullptr for nullable
+                    return result.value();
                 }
                 auto& err = result.error();
                 if (err.is_omit()) {
-                    return std::nullopt;  // Omit
+                    return std::nullopt;
                 } else if (err.has_line_errors()) {
                     auto mutable_err = const_cast<ValError*>(&err);
                     combined_errors.merge(std::move(*mutable_err));
@@ -324,13 +378,19 @@ protected:
                 auto result = extras_validator_->validate(*field_input, state);
                 state.pop_loc();
                 if (result.is_ok()) {
-                    output.extra[key] = result.value();
+                    ValidatedModelFieldsOutput::FieldValue fv;
+                    fv.value = result.value();
+                    fv.type_name = extras_validator_->name();
+                    output.extra[key] = std::move(fv);
                     output.fields_set.insert(key);
                 }
             } else {
-                output.extra[key] = std::make_shared<std::string>(
+                ValidatedModelFieldsOutput::FieldValue fv;
+                fv.value = std::make_shared<std::string>(
                     field_input->as_error_value().repr
                 );
+                fv.type_name = "str";
+                output.extra[key] = std::move(fv);
                 output.fields_set.insert(key);
             }
         }
@@ -499,7 +559,7 @@ public:
         }
 
         auto dict = std::move(dict_result.value());
-        std::unordered_map<std::string, std::shared_ptr<void>> output;
+        ValidatedModelFieldsOutput output;
         std::set<std::string> fields_set;
         ValError combined_errors(ValError::Kind::LineErrors);
 
@@ -562,7 +622,12 @@ public:
                 );
                 combined_errors.merge(std::move(err));
             } else if (validated_value) {
-                output[field.name] = validated_value;
+                ValidatedModelFieldsOutput::FieldValue fv;
+                fv.value = validated_value;
+                if (field.schema) {
+                    fv.type_name = field.schema->name();
+                }
+                output.fields[field.name] = std::move(fv);
                 fields_set.insert(field.name);
             }
 
@@ -593,7 +658,8 @@ public:
         }
 
         auto result = std::make_shared<ValidatedModelFieldsOutput>();
-        result->fields = std::move(output);
+        result->fields = std::move(output.fields);
+        result->extra = std::move(output.extra);
         result->fields_set = std::move(fields_set);
 
         return ValResult<std::shared_ptr<void>>(result);

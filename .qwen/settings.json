@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make *)",
+      "Bash(sed *)",
+      "Bash(cmake *)",
+      "Bash(ctest *)",
+      "Bash(/users/cuser/documents/github/pydantic/.venv/bin/python3.10 *)",
+      "Bash(/users/cuser/documents/github/pydantic/.venv/bin/pip3.10 *)",
+      "Bash(./build/test_model_fields)"
+    ]
+  },
+  "$version": 3
+}
