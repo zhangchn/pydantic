@@ -62,6 +62,7 @@ set(CORE_SOURCES
     src/schema_validator.cpp
     src/input/json_input.cpp
     src/input/string_input.cpp
+    src/input/python_input.cpp
     src/main_module.cpp
 )
 
@@ -70,6 +71,8 @@ pybind11_add_module(_pydantic_core_cpp ${CORE_SOURCES})
 target_include_directories(_pydantic_core_cpp PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+
+target_compile_definitions(_pydantic_core_cpp PRIVATE HAS_PYBIND11)
 
 target_link_libraries(_pydantic_core_cpp PRIVATE
     simdjson::simdjson
@@ -153,9 +156,10 @@ if(NOT SKBUILD)
         src/schema_validator.cpp
         src/input/json_input.cpp
         src/input/string_input.cpp
+        src/input/python_input.cpp
     )
-    target_compile_definitions(test_integration PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
-    target_link_libraries(test_integration PRIVATE doctest::doctest simdjson::simdjson)
+    target_compile_definitions(test_integration PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN HAS_PYBIND11)
+    target_link_libraries(test_integration PRIVATE doctest::doctest simdjson::simdjson pybind11::module Python3::Python)
     target_include_directories(test_integration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
     add_test(NAME Integration COMMAND test_integration)
@@ -207,4 +211,18 @@ if(NOT SKBUILD)
     target_include_directories(test_new_validators PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
     add_test(NAME NewValidators COMMAND test_new_validators)
+
+    # Test suite: PythonInput (native Python object validation)
+    add_executable(test_python_input tests/test_python_input.cpp
+        src/input/python_input.cpp
+        src/errors/errors.cpp
+        src/errors/error_types.cpp
+        src/validation_state.cpp
+        src/recursion_guard.cpp
+    )
+    target_compile_definitions(test_python_input PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
+    target_link_libraries(test_python_input PRIVATE doctest::doctest pybind11::module Python3::Python)
+    target_include_directories(test_python_input PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+    add_test(NAME PythonInput COMMAND test_python_input)
 endif()

@@ -221,7 +221,8 @@ class SchemaValidator:
 
         return result
 
-    def validate_json(self, json_data, *, strict=None):
+    def validate_json(self, json_data, *, strict=None, context=None, extra=None,
+                      from_attributes=None, by_alias=None, by_name=None):
         return self._base.validate_json(json_data, strict=strict)
 
     def validate_strings(self, string_data, *, strict=None):

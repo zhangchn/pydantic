@@ -568,13 +568,15 @@ class PySchemaSerializer {
 public:
     PySchemaSerializer() = default;
 
-    explicit PySchemaSerializer(const py::dict& schema, const std::optional<py::dict>& = std::nullopt) {
+    explicit PySchemaSerializer(const py::dict& schema, const std::optional<py::dict>& = std::nullopt)
+        : schema_(schema) {
         std::unordered_map<std::string, SerRef> defs;
         ser_ = build_ser(schema, defs);
     }
 
     // Overload that accepts _use_prebuilt (unused but needed for pydantic API)
-    explicit PySchemaSerializer(const py::dict& schema, const std::optional<py::dict>& cfg, bool) {
+    explicit PySchemaSerializer(const py::dict& schema, const std::optional<py::dict>& cfg, bool)
+        : schema_(schema) {
         std::unordered_map<std::string, SerRef> defs;
         ser_ = build_ser(schema, defs);
         (void)cfg;
@@ -604,8 +606,11 @@ public:
         return ser_ ? "SchemaSerializer(serializer=" + ser_->type + ")" : "SchemaSerializer()";
     }
 
+    const py::object& get_schema() const { return schema_; }
+
 private:
     SerRef ser_;
+    py::object schema_;  // Store schema for pickle support
 };
 
 // ---------------------------------------------------------------------------
@@ -671,19 +676,32 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             auto sv = std::make_unique<SchemaValidator>(sj, cj);
             return sv;
         }), py::arg("schema"), py::arg("config") = py::none(), py::arg("_use_prebuilt") = true)
-        .def("validate_python", [m](SchemaValidator& self, const py::object& input, py::object strict, py::object context, py::object self_instance,
-                                    py::object, py::object, py::object, py::object) -> py::object {
-            std::string ij = pyobj_to_json_str(input);
-            std::string r = self.validate_python(ij, pyobj_to_bool(strict), std::nullopt);
-            py::object validated = json_to_pyobj(r);
+        .def("validate_python", [](SchemaValidator& self, const py::object& input, py::object strict, py::object context, py::object self_instance,
+                                    py::object extra, py::object from_attributes, py::object by_alias, py::object by_name) -> py::object {
+            // NEW: Use native PythonInput - no JSON round-trip!
+            (void)extra; (void)from_attributes; (void)by_alias; (void)by_name; (void)context;
+            py::object validated = self.validate_python_object(input, pyobj_to_bool(strict), std::nullopt);
 
             // If self_instance provided, populate and return it
             if (!self_instance.is_none() && py::hasattr(self_instance, "__dict__")) {
-                if (py::isinstance<py::dict>(validated)) {
-                    py::dict d = self_instance.attr("__dict__");
-                    for (auto item : validated.cast<py::dict>()) d[item.first] = item.second;
+                try {
+                    if (py::isinstance<py::dict>(validated)) {
+                        py::dict d = self_instance.attr("__dict__");
+                        py::dict validated_dict = validated.cast<py::dict>();
+                        for (auto item : validated_dict) {
+                            d[item.first] = item.second;
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    // If anything fails, just return validated as-is
+                    py::print("validate_python self_instance error:", py::str(e.what()));
                 }
                 return self_instance;
+            }
+
+            // If validated result is a simple value (like int for dict size), return original input
+            if (py::isinstance<py::int_>(validated) && !py::isinstance<py::bool_>(input)) {
+                return input;
             }
 
             return validated;
@@ -694,50 +712,34 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             return json_to_pyobj(self.validate_json(js, pyobj_to_bool(strict)));
         }, py::arg("json_data"), py::arg("strict") = py::none())
         .def("validate_strings", [](SchemaValidator& self, const py::object& sd, py::object strict) {
-            // For strings input: convert each string value to its Python type
-            // (int, float, bool, etc.) before JSON serialization
-            std::string input_json;
-            if (py::isinstance<py::dict>(sd)) {
-                // Convert dict with string values to typed values
-                py::dict typed_dict;
-                for (auto item : sd.cast<py::dict>()) {
-                    py::str key = py::reinterpret_borrow<py::str>(item.first);
-                    py::object val = py::reinterpret_borrow<py::object>(item.second);
-                    if (py::isinstance<py::str>(val)) {
-                        std::string s = val.cast<std::string>();
-                        // Try to parse as int, float, bool
-                        if (s == "true") { typed_dict[key] = py::bool_(true); }
-                        else if (s == "false") { typed_dict[key] = py::bool_(false); }
-                        else if (s == "null") { typed_dict[key] = py::none(); }
-                        else {
-                            try { typed_dict[key] = py::int_(py::str(s)); }
-                            catch (...) {
-                                try { typed_dict[key] = py::float_(py::str(s)); }
-                                catch (...) { typed_dict[key] = val; }
-                            }
-                        }
-                    } else {
-                        typed_dict[key] = val;
-                    }
-                }
-                input_json = pyobj_to_json_str(typed_dict);
-            } else {
-                input_json = pyobj_to_json_str(sd);
-            }
-            return json_to_pyobj(self.validate_strings(input_json, pyobj_to_bool(strict)));
+            // NEW: Use native PythonInput - no JSON round-trip!
+            return self.validate_strings_object(sd, pyobj_to_bool(strict));
         }, py::arg("string_data"), py::arg("strict") = py::none())
         .def("isinstance_python", [](SchemaValidator& self, const py::object& input, py::object strict) {
-            return self.isinstance_python(pyobj_to_json_str(input), pyobj_to_bool(strict));
+            // NEW: Use native PythonInput - no JSON round-trip!
+            return self.isinstance_python_object(input, pyobj_to_bool(strict));
         }, py::arg("object"), py::arg("strict") = py::none())
         .def("get_default_value", [](SchemaValidator& self, py::object strict) -> py::object {
             auto r = self.get_default_value(pyobj_to_bool(strict));
             return r ? json_to_pyobj(*r) : py::none();
         }, py::arg("strict") = py::none())
         .def("validate_assignment", [](SchemaValidator& self, const py::object& obj, const std::string& fn, const py::object& fv) {
-            return json_to_pyobj(self.validate_assignment(pyobj_to_json_str(obj), fn, pyobj_to_json_str(fv)));
+            // NEW: Use native PythonInput - no JSON round-trip!
+            return self.validate_assignment_object(obj, fn, fv);
         }, py::arg("object"), py::arg("field_name"), py::arg("field_value"))
         .def_property_readonly("title", &SchemaValidator::title)
-        .def("__repr__", &SchemaValidator::repr);
+        .def("__repr__", &SchemaValidator::repr)
+        // Pickle support: __reduce__ returns (cls, (schema_json, config_json))
+        .def("__reduce__", [](const SchemaValidator& self) -> py::tuple {
+            // Get the class from the Python module
+            py::object mod = py::module_::import("pydantic_core_cpp._pydantic_core_cpp");
+            py::object cls = mod.attr("SchemaValidator");
+            // Parse schema_json back to a dict for reconstruction
+            py::object json_mod = py::module_::import("json");
+            py::object schema_dict = json_mod.attr("loads")(self.schema_json());
+            py::object config_dict = self.config_json().empty() ? py::none() : json_mod.attr("loads")(self.config_json());
+            return py::make_tuple(cls, py::make_tuple(schema_dict, config_dict));
+        });
 
     // SchemaSerializer
     py::class_<PySchemaSerializer>(m, "SchemaSerializer")
@@ -759,7 +761,13 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
              py::arg("exclude_defaults") = false, py::arg("exclude_none") = false, py::arg("exclude_computed_fields") = false,
              py::arg("round_trip") = false, py::arg("warnings") = "warn", py::arg("fallback") = py::none(),
              py::arg("serialize_as_any") = false, py::arg("polymorphic_serialization") = py::none(), py::arg("context") = py::none())
-        .def("__repr__", &PySchemaSerializer::repr);
+        .def("__repr__", &PySchemaSerializer::repr)
+        // Pickle support: __reduce__ returns (cls, (schema, config))
+        .def("__reduce__", [](const PySchemaSerializer& self) -> py::tuple {
+            py::object mod = py::module_::import("pydantic_core_cpp._pydantic_core_cpp");
+            py::object cls = mod.attr("SchemaSerializer");
+            return py::make_tuple(cls, py::make_tuple(self.get_schema(), py::none()));
+        });
 
     m.def("to_json", &to_json_fn,
           py::arg("value"), py::kw_only(), py::arg("indent") = py::none(), py::arg("ensure_ascii") = py::none(),

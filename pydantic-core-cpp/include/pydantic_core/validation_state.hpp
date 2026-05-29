@@ -42,6 +42,7 @@ public:
     std::optional<bool> strict() const { return config_.strict; }
     void set_strict(bool value) { config_.strict = value; }
     std::optional<ExtraBehavior> extra_behavior() const { return config_.extra_behavior; }
+    void set_extra_behavior(ExtraBehavior value) { config_.extra_behavior = value; }
     std::optional<bool> from_attributes() const { return config_.from_attributes; }
     StringCacheMode cache_strings() const { return config_.cache_strings; }
     std::optional<bool> by_alias() const { return config_.by_alias; }
