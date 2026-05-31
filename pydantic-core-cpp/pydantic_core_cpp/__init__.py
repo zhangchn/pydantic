@@ -307,10 +307,8 @@ MISSING = Sentinel('MISSING')
 # the Rust backend at module load time.
 _RUST_FALLBACKS = frozenset({
     # Data types (from native extension)
-    'MultiHostUrl',
     'Some',
     'TzInfo',
-    'Url',
     # Sentinels (from native extension)
     'PydanticUndefined',
     'PydanticUndefinedType',
@@ -477,6 +475,225 @@ class ArgsKwargs:
         func(*args, **kwargs)
         """
         return (self.args, self.kwargs)
+
+
+# ============================================================================
+# 4.6. URL types implemented in Python
+# ============================================================================
+
+class Url:
+    """URL type with parsing and validation.
+    
+    Matches pydantic_core.Url from Rust implementation.
+    """
+    
+    __slots__ = ('_url', '_scheme', '_host', '_port', '_path', '_query', '_fragment', '_user', '_password')
+    
+    def __init__(self, url: str) -> None:
+        import urllib.parse
+        parsed = urllib.parse.urlparse(url)
+        
+        if not parsed.scheme:
+            raise ValueError(f"URL must have a scheme: {url}")
+        
+        self._url = url
+        self._scheme = parsed.scheme
+        self._host = parsed.hostname or ''
+        self._port = parsed.port
+        self._path = parsed.path
+        self._query = parsed.query
+        self._fragment = parsed.fragment
+        self._user = parsed.username
+        self._password = parsed.password
+    
+    def __repr__(self) -> str:
+        return f"Url('{self._url}')"
+    
+    def __str__(self) -> str:
+        return self._url
+    
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Url):
+            return self._url == other._url
+        if isinstance(other, str):
+            return self._url == other
+        return NotImplemented
+    
+    def __hash__(self) -> int:
+        return hash(self._url)
+    
+    @property
+    def scheme(self) -> str:
+        return self._scheme
+    
+    @property
+    def host(self) -> str:
+        return self._host
+    
+    @property
+    def port(self) -> int | None:
+        return self._port
+    
+    @property
+    def path(self) -> str:
+        return self._path
+    
+    @property
+    def query(self) -> str:
+        return self._query
+    
+    @property
+    def fragment(self) -> str:
+        return self._fragment
+    
+    @property
+    def user(self) -> str | None:
+        return self._user
+    
+    @property
+    def password(self) -> str | None:
+        return self._password
+    
+    @property
+    def url(self) -> str:
+        return self._url
+
+
+class MultiHostUrl:
+    """URL with multiple hosts (e.g., for SMTP configuration).
+    
+    Format: scheme://[user:pass@]host1:port1,host2:port2,.../path
+    
+    Matches pydantic_core.MultiHostUrl from Rust implementation.
+    """
+    
+    __slots__ = ('_url', '_scheme', '_hosts', '_path', '_query', '_fragment', '_user', '_password')
+    
+    def __init__(self, url: str) -> None:
+        import urllib.parse
+        import re
+        
+        # Parse the URL to extract scheme and auth info
+        # Format: scheme://[user:pass@]host1:port1,host2:port2,.../path
+        
+        # First, find the scheme
+        scheme_match = re.match(r'^([a-zA-Z][a-zA-Z0-9+.-]*)://', url)
+        if not scheme_match:
+            raise ValueError(f"MultiHostUrl must have a scheme: {url}")
+        
+        self._scheme = scheme_match.group(1)
+        rest = url[scheme_match.end():]
+        
+        # Extract user:pass if present
+        self._user = None
+        self._password = None
+        auth_match = re.match(r'^([^@]+)@', rest)
+        if auth_match:
+            auth_part = auth_match.group(1)
+            if ':' in auth_part:
+                self._user, self._password = auth_part.split(':', 1)
+            else:
+                self._user = auth_part
+            rest = rest[auth_match.end():]
+        
+        # Find the path (starts with /)
+        path_idx = rest.find('/')
+        if path_idx >= 0:
+            hosts_part = rest[:path_idx]
+            remaining = rest[path_idx:]
+        else:
+            hosts_part = rest
+            remaining = ''
+        
+        # Parse hosts (comma-separated)
+        # Each host can be: hostname or hostname:port
+        self._hosts = []
+        for host_spec in hosts_part.split(','):
+            if ':' in host_spec and not host_spec.startswith('['):
+                # Has port
+                parts = host_spec.rsplit(':', 1)
+                host = parts[0]
+                try:
+                    port = int(parts[1])
+                except ValueError:
+                    raise ValueError(f"Invalid port in host specification: {host_spec}")
+            elif host_spec.startswith('[') and ']:' in host_spec:
+                # IPv6 with port
+                bracket_end = host_spec.find(']')
+                host = host_spec[:bracket_end + 1]
+                port_str = host_spec[bracket_end + 2:]
+                try:
+                    port = int(port_str)
+                except ValueError:
+                    raise ValueError(f"Invalid port in host specification: {host_spec}")
+            else:
+                host = host_spec
+                port = None
+            
+            if not host:
+                raise ValueError(f"Empty host in MultiHostUrl: {url}")
+            
+            self._hosts.append({'host': host, 'port': port})
+        
+        if not self._hosts:
+            raise ValueError(f"MultiHostUrl must have at least one host: {url}")
+        
+        # Parse remaining path/query/fragment
+        parsed = urllib.parse.urlparse(f"{self._scheme}://dummy{remaining}")
+        self._path = parsed.path
+        self._query = parsed.query
+        self._fragment = parsed.fragment
+        
+        self._url = url
+    
+    def __repr__(self) -> str:
+        return f"MultiHostUrl('{self._url}')"
+    
+    def __str__(self) -> str:
+        return self._url
+    
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, MultiHostUrl):
+            return self._url == other._url
+        if isinstance(other, str):
+            return self._url == other
+        return NotImplemented
+    
+    def __hash__(self) -> int:
+        return hash(self._url)
+    
+    @property
+    def scheme(self) -> str:
+        return self._scheme
+    
+    @property
+    def hosts(self) -> list[dict]:
+        """List of host specifications, each with 'host' and 'port' keys."""
+        return self._hosts
+    
+    @property
+    def path(self) -> str:
+        return self._path
+    
+    @property
+    def query(self) -> str:
+        return self._query
+    
+    @property
+    def fragment(self) -> str:
+        return self._fragment
+    
+    @property
+    def user(self) -> str | None:
+        return self._user
+    
+    @property
+    def password(self) -> str | None:
+        return self._password
+    
+    @property
+    def url(self) -> str:
+        return self._url
 
 
 # ============================================================================
