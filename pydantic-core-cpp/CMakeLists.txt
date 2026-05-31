@@ -63,6 +63,7 @@ set(CORE_SOURCES
     src/input/json_input.cpp
     src/input/string_input.cpp
     src/input/python_input.cpp
+    src/url_types.cpp
     src/main_module.cpp
 )
 

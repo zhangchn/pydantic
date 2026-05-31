@@ -8,6 +8,7 @@
 #include "pydantic_core/types.hpp"
 #include "pydantic_core/schema_validator.hpp"
 #include "pydantic_core/serialization_config.hpp"
+#include "pydantic_core/url_types.hpp"
 
 namespace py = pybind11;
 using namespace pydantic_core;
@@ -1007,4 +1008,74 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
           py::arg("serialize_unknown") = false, py::arg("fallback") = py::none(),
           py::arg("serialize_as_any") = false, py::arg("polymorphic_serialization") = py::none(),
           py::arg("context") = py::none());
+
+    // Url class - URL type with parsing and validation
+    py::class_<Url>(m, "Url")
+        .def(py::init([](const std::string& url_str) {
+            return Url(url_str);
+        }), py::arg("url"))
+        .def("__repr__", [](const Url& u) { return "Url('" + u.str() + "')"; })
+        .def("__str__", &Url::str)
+        .def("__eq__", [](const Url& u, const py::object& other) {
+            if (py::isinstance<Url>(other)) return u.str() == other.cast<Url>().str();
+            if (py::isinstance<py::str>(other)) return u.str() == other.cast<std::string>();
+            return false;
+        })
+        .def("__hash__", [](const Url& u) { return py::hash(py::str(u.str())); })
+        .def_property_readonly("scheme", &Url::scheme)
+        .def_property_readonly("host", &Url::host)
+        .def_property_readonly("port", [](const Url& u) -> py::object {
+            auto port = u.port();
+            return port ? py::cast(*port) : py::none();
+        })
+        .def_property_readonly("path", &Url::path)
+        .def_property_readonly("query", &Url::query)
+        .def_property_readonly("fragment", &Url::fragment)
+        .def_property_readonly("user", [](const Url& u) -> py::object {
+            auto user = u.user();
+            return user && !user->empty() ? py::cast(*user) : py::none();
+        })
+        .def_property_readonly("password", [](const Url& u) -> py::object {
+            auto pw = u.password();
+            return pw && !pw->empty() ? py::cast(*pw) : py::none();
+        })
+        .def_property_readonly("url", &Url::str);
+
+    // MultiHostUrl class - URL with multiple hosts
+    py::class_<MultiHostUrl>(m, "MultiHostUrl")
+        .def(py::init([](const std::string& url_str) {
+            return MultiHostUrl(url_str);
+        }), py::arg("url"))
+        .def("__repr__", [](const MultiHostUrl& u) { return "MultiHostUrl('" + u.str() + "')"; })
+        .def("__str__", &MultiHostUrl::str)
+        .def("__eq__", [](const MultiHostUrl& u, const py::object& other) {
+            if (py::isinstance<MultiHostUrl>(other)) return u.str() == other.cast<MultiHostUrl>().str();
+            if (py::isinstance<py::str>(other)) return u.str() == other.cast<std::string>();
+            return false;
+        })
+        .def("__hash__", [](const MultiHostUrl& u) { return py::hash(py::str(u.str())); })
+        .def_property_readonly("scheme", &MultiHostUrl::scheme)
+        .def_property_readonly("hosts", [](const MultiHostUrl& u) {
+            py::list result;
+            for (const auto& h : u.hosts()) {
+                py::dict host_dict;
+                host_dict["host"] = h.host;
+                if (h.port) host_dict["port"] = *h.port;
+                else host_dict["port"] = py::none();
+                result.append(host_dict);
+            }
+            return result;
+        })
+        .def_property_readonly("path", &MultiHostUrl::path)
+        .def_property_readonly("query", &MultiHostUrl::query)
+        .def_property_readonly("fragment", &MultiHostUrl::fragment)
+        .def_property_readonly("user", [](const MultiHostUrl& u) -> py::object {
+            auto user = u.user();
+            return user && !user->empty() ? py::cast(*user) : py::none();
+        })
+        .def_property_readonly("password", [](const MultiHostUrl& u) -> py::object {
+            auto pw = u.password();
+            return pw && !pw->empty() ? py::cast(*pw) : py::none();
+        })
+        .def_property_readonly("url", &MultiHostUrl::str);
 }
