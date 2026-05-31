@@ -307,7 +307,6 @@ MISSING = Sentinel('MISSING')
 # the Rust backend at module load time.
 _RUST_FALLBACKS = frozenset({
     # Data types (from native extension)
-    'ArgsKwargs',
     'MultiHostUrl',
     'Some',
     'TzInfo',
@@ -437,6 +436,47 @@ def to_json(*args: _Any, **kwargs: _Any) -> _Any:
 
 def to_jsonable_python(*args: _Any, **kwargs: _Any) -> _Any:
     return _rust().to_jsonable_python(*args, **kwargs)
+
+
+# ============================================================================
+# 4.5. Data types implemented in Python
+# ============================================================================
+
+class ArgsKwargs:
+    """Container for positional and keyword arguments.
+    
+    Used by dataclass validation to support positional arguments in __init__.
+    Matches pydantic_core.ArgsKwargs from Rust implementation.
+    """
+    
+    __slots__ = ('args', 'kwargs')
+    
+    def __init__(self, args: tuple = (), kwargs: dict = None) -> None:
+        if kwargs is None:
+            kwargs = {}
+        self.args = args if isinstance(args, tuple) else tuple(args)
+        self.kwargs = kwargs if isinstance(kwargs, dict) else dict(kwargs)
+    
+    def __repr__(self) -> str:
+        if not self.kwargs:
+            return f"ArgsKwargs({self.args!r})"
+        return f"ArgsKwargs({self.args!r}, {self.kwargs!r})"
+    
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, ArgsKwargs):
+            return NotImplemented
+        return self.args == other.args and self.kwargs == other.kwargs
+    
+    def __hash__(self) -> int:
+        return hash((self.args, frozenset(self.kwargs.items())))
+    
+    def to_call_args(self) -> tuple:
+        """Convert to arguments suitable for a function call.
+        
+        Returns a tuple of (args, kwargs) that can be used as:
+        func(*args, **kwargs)
+        """
+        return (self.args, self.kwargs)
 
 
 # ============================================================================
