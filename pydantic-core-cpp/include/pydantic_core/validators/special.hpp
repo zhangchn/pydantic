@@ -6,7 +6,9 @@
 #include <vector>
 #include <unordered_set>
 #include <unordered_map>
+#include <pybind11/pybind11.h>
 
+namespace py = pybind11;
 namespace pydantic_core {
 
 // DefinitionsRegistry - stores named validators for recursive schema resolution
@@ -137,10 +139,58 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        // In Phase 2, we'll parse and validate URLs
-        return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
+        // Validate URL using Python's urllib.parse
+        py::object input_py = input.as_python_object();
+        
+        if (!py::isinstance<py::str>(input_py)) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::UrlType),
+                state.location(),
+                input.as_error_value().repr
+            );
+        }
+        
+        std::string url_str = py::str(input_py).cast<std::string>();
+        
+        // Basic URL validation - check for scheme and netloc
+        try {
+            py::object urllib = py::module_::import("urllib.parse");
+            py::object parsed = urllib.attr("urlparse")(url_str);
+            
+            std::string scheme = py::str(parsed.attr("scheme")).cast<std::string>();
+            std::string netloc = py::str(parsed.attr("netloc")).cast<std::string>();
+            
+            // URL must have a scheme (http, https, ftp, etc.)
+            if (scheme.empty()) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::UrlScheme),
+                    state.location(),
+                    url_str + " (missing scheme)"
+                );
+            }
+            
+            // URL must have a netloc (host) for most schemes
+            if (netloc.empty() && scheme != "file" && scheme != "data") {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::UrlHost),
+                    state.location(),
+                    url_str + " (missing host)"
+                );
+            }
+            
+            // Valid URL - return the string
+            return ValResult<std::shared_ptr<void>>(
+                std::make_shared<std::string>(url_str)
+            );
+        } catch (py::error_already_set& e) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::UrlType),
+                state.location(),
+                "URL parsing failed: " + std::string(e.what())
+            );
+        }
     }
-    
+
     std::string name() const override { return "url"; }
 };
 
@@ -151,10 +201,45 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        // In Phase 2, we'll parse and validate UUIDs
-        return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
+        // Validate UUID using Python's uuid module
+        py::object input_py = input.as_python_object();
+        
+        // If already a UUID object, accept it
+        try {
+            py::object uuid_mod = py::module_::import("uuid");
+            py::object uuid_class = uuid_mod.attr("UUID");
+            if (py::isinstance(input_py, uuid_class)) {
+                return ValResult<std::shared_ptr<void>>(
+                    std::make_shared<std::string>(py::str(input_py).cast<std::string>())
+                );
+            }
+        } catch (...) {}
+        
+        // If string, validate format
+        if (py::isinstance<py::str>(input_py)) {
+            std::string uuid_str = py::str(input_py).cast<std::string>();
+            try {
+                py::object uuid_mod = py::module_::import("uuid");
+                py::object uuid_obj = uuid_mod.attr("UUID")(uuid_str);
+                return ValResult<std::shared_ptr<void>>(
+                    std::make_shared<std::string>(uuid_str)
+                );
+            } catch (py::error_already_set& e) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::UuidType),
+                    state.location(),
+                    "Invalid UUID format: " + uuid_str
+                );
+            }
+        }
+        
+        return ValError::line_error(
+            ErrorType(ErrorType::Kind::UuidType),
+            state.location(),
+            input.as_error_value().repr
+        );
     }
-    
+
     std::string name() const override { return "uuid"; }
 };
 

@@ -87,6 +87,14 @@ public:
         TimeType,
         DateTimeType,
         
+        // URL errors
+        UrlType,
+        UrlScheme,
+        UrlHost,
+        
+        // UUID errors
+        UuidType,
+        
         // Other errors
         JsonInvalid,
         CustomError,
