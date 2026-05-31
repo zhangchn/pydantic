@@ -92,11 +92,19 @@ public:
 
     // Container validation
     ValResult<std::unique_ptr<ValidatedDict>> validate_dict(bool strict) const override;
+    ValResult<std::unique_ptr<ValidatedDict>> validate_dict_from_attributes(bool strict) const;
     ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_list(bool strict) const override;
     ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> validate_tuple(bool strict) const override;
 
     // Access underlying PyObject
     const py::object& py_object() const { return obj_; }
+    
+    // from_attributes support: check if object has attributes
+    bool has_attributes() const;
+    bool is_dict_like() const;  // dict or object with attributes
+    
+    // Get object attributes as Python dict (for from_attributes mode)
+    py::dict get_attributes_as_dict() const;
 
     // Type detection helpers (Python-specific)
     bool is_bool() const;

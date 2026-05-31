@@ -376,7 +376,8 @@ ValidationError SchemaValidator::prepare_error(const ValError& err, InputType in
 
 py::object SchemaValidator::validate_python_object(const py::object& input,
                                                    std::optional<bool> strict,
-                                                   std::optional<ExtraBehavior> extra) {
+                                                   std::optional<ExtraBehavior> extra,
+                                                   std::optional<bool> from_attributes) {
     if (!validator_) {
         throw std::runtime_error("Validator not initialized");
     }
@@ -391,6 +392,9 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
     }
     if (extra.has_value()) {
         state.set_extra_behavior(*extra);
+    }
+    if (from_attributes.has_value()) {
+        state.set_from_attributes(*from_attributes);
     }
 
     // Validate using the unified Input interface

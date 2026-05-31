@@ -75,6 +75,24 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
+        // Check from_attributes setting from state or schema
+        bool use_from_attributes = state.from_attributes_or(from_attributes_);
+        
+        // Get dict - if from_attributes is true, try to get attributes from object
+        if (use_from_attributes) {
+            // For Python input with from_attributes, use validate_dict_from_attributes
+            auto* py_input = dynamic_cast<const PythonInput*>(&input);
+            if (py_input) {
+                auto dict_result = py_input->validate_dict_from_attributes(state.strict_or(false));
+                if (dict_result.is_ok()) {
+                    auto dict = std::move(dict_result.value());
+                    return validate_dict(std::move(dict), input, state);
+                }
+                // If validate_dict_from_attributes failed, fall back to regular validate_dict
+            }
+        }
+        
+        // Regular dict validation
         auto dict_result = input.validate_dict(state.strict_or(false));
         if (dict_result.is_err()) {
             return ValError::line_error(
@@ -193,6 +211,8 @@ public:
     void set_extra_behavior(ExtraBehavior eb) { extra_behavior_ = eb; }
     void set_model_name(const std::string& name) { model_name_ = name; }
     void set_extras_validator(std::shared_ptr<Validator> v) { extras_validator_ = std::move(v); }
+    void set_from_attributes(bool value) { from_attributes_ = value; }
+    bool from_attributes() const { return from_attributes_; }
 
 protected:
     std::optional<std::shared_ptr<void>> validate_field_value_result(
@@ -416,6 +436,7 @@ protected:
     ExtraBehavior extra_behavior_ = ExtraBehavior::Ignore;
     std::shared_ptr<Validator> extras_validator_;
     std::string model_name_;
+    bool from_attributes_ = false;  // from_attributes setting from schema
 };
 
 // ============================================================================

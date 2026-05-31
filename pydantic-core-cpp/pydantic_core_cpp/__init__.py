@@ -37,7 +37,20 @@ class SchemaValidator:
     def __init__(self, schema, config=None, _use_prebuilt=True):
         self._schema = schema
         self._config = config
-        self._base = _SchemaValidatorBase(schema, config, _use_prebuilt)
+        # Convert dict to JSON string if needed
+        if isinstance(schema, dict):
+            import json
+            schema_str = json.dumps(schema)
+        else:
+            schema_str = str(schema) if schema is not None else ""
+        if isinstance(config, dict):
+            import json
+            config_str = json.dumps(config)
+        elif config is None:
+            config_str = None
+        else:
+            config_str = str(config)
+        self._base = _SchemaValidatorBase(schema_str, config_str, _use_prebuilt)
         # Build a map of definition refs to model classes for recursive model construction
         self._model_classes = self._extract_model_classes(schema)
 

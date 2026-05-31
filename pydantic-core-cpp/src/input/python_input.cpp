@@ -399,6 +399,147 @@ ValResult<std::unique_ptr<ValidatedDict>> PythonInput::validate_dict(bool strict
     return type_error(ErrorType::Kind::DictType, *this);
 }
 
+ValResult<std::unique_ptr<ValidatedDict>> PythonInput::validate_dict_from_attributes(bool strict) const {
+    // First try as dict
+    if (is_dict()) {
+        return validate_dict(strict);
+    }
+    
+    // Then try to get attributes from object
+    py::dict attrs_dict = get_attributes_as_dict();
+    if (!attrs_dict.empty()) {
+        return ValResult<std::unique_ptr<ValidatedDict>>(
+            std::make_unique<PythonValidatedDict>(attrs_dict)
+        );
+    }
+    
+    // Try __dict__ attribute
+    if (py::hasattr(obj_, "__dict__")) {
+        try {
+            py::dict d = obj_.attr("__dict__").cast<py::dict>();
+            return ValResult<std::unique_ptr<ValidatedDict>>(
+                std::make_unique<PythonValidatedDict>(d)
+            );
+        } catch (...) {}
+    }
+    
+    return type_error(ErrorType::Kind::DictType, *this);
+}
+
+// from_attributes support methods
+bool PythonInput::has_attributes() const {
+    // Check if object has __dict__ or is not a built-in type
+    if (py::hasattr(obj_, "__dict__")) {
+        return true;
+    }
+    // Check if object has_slots (slots objects can have attributes too)
+    if (py::hasattr(obj_, "__slots__")) {
+        return true;
+    }
+    // Use dir() to check for attributes beyond built-in methods
+    try {
+        py::list attrs = obj_.attr("__dir__")().cast<py::list>();
+        for (auto attr : attrs) {
+            std::string name = py::str(attr).cast<std::string>();
+            // Skip private/dunder attributes and methods
+            if (name.size() > 2 && name.substr(0, 2) == "__" && name.substr(name.size()-2) == "__") {
+                continue;
+            }
+            if (name.size() > 1 && name[0] == '_') {
+                continue;
+            }
+            // Check if it's a property or attribute (not a bound method)
+            try {
+                py::object value = obj_.attr(name.c_str());
+                if (!py::hasattr(value, "__call__") || py::hasattr(value, "__self__")) {
+                    // It's a property or data attribute, not a method
+                    return true;
+                }
+            } catch (...) {}
+        }
+    } catch (...) {}
+    return false;
+}
+
+bool PythonInput::is_dict_like() const {
+    return is_dict() || has_attributes();
+}
+
+py::dict PythonInput::get_attributes_as_dict() const {
+    py::dict result;
+    
+    // First, try __dict__ if it exists
+    if (py::hasattr(obj_, "__dict__")) {
+        try {
+            py::dict d = obj_.attr("__dict__").cast<py::dict>();
+            for (auto item : d) {
+                std::string key = py::str(item.first).cast<std::string>();
+                // Skip private attributes
+                if (key.size() > 0 && key[0] == '_') {
+                    continue;
+                }
+                result[item.first] = item.second;
+            }
+        } catch (...) {}
+    }
+    
+    // Then, check for slots-defined attributes
+    if (py::hasattr(obj_, "__slots__")) {
+        try {
+            py::object slots = obj_.attr("__slots__");
+            if (py::isinstance<py::str>(slots)) {
+                std::string slot_name = slots.cast<std::string>();
+                if (slot_name.size() > 0 && slot_name[0] != '_') {
+                    try {
+                        result[py::str(slot_name)] = obj_.attr(slot_name.c_str());
+                    } catch (...) {}
+                }
+            } else {
+                py::sequence slot_seq = slots.cast<py::sequence>();
+                for (auto slot : slot_seq) {
+                    std::string slot_name = py::str(slot).cast<std::string>();
+                    if (slot_name.size() > 0 && slot_name[0] != '_') {
+                        try {
+                            result[py::str(slot_name)] = obj_.attr(slot_name.c_str());
+                        } catch (...) {}
+                    }
+                }
+            }
+        } catch (...) {}
+    }
+    
+    // Finally, iterate over dir() for property-like attributes
+    try {
+        py::list attrs = obj_.attr("__dir__")().cast<py::list>();
+        for (auto attr : attrs) {
+            std::string name = py::str(attr).cast<std::string>();
+            // Skip private/dunder attributes
+            if (name.size() > 2 && name.substr(0, 2) == "__") {
+                continue;
+            }
+            if (name.size() > 0 && name[0] == '_') {
+                continue;
+            }
+            // Skip if already in result
+            if (result.contains(attr)) {
+                continue;
+            }
+            // Get the attribute
+            try {
+                py::object value = obj_.attr(name.c_str());
+                // Skip bound methods (but allow properties which might have __call__)
+                if (py::hasattr(value, "__self__") && py::hasattr(value, "__func__")) {
+                    continue;
+                }
+                // Include the attribute
+                result[attr] = value;
+            } catch (...) {}
+        }
+    } catch (...) {}
+    
+    return result;
+}
+
 ValResult<ValMatch<std::unique_ptr<ValidatedList>>> PythonInput::validate_list(bool strict) const {
     if (is_list()) {
         return ValMatch<std::unique_ptr<ValidatedList>>::lax(

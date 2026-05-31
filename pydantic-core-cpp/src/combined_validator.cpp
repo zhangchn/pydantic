@@ -521,9 +521,17 @@ static std::shared_ptr<Validator> build_from_element(
             model_name = std::string(mn_val.value().get_string().value());
         }
 
+        // Parse from_attributes from schema
+        bool from_attributes = false;
+        auto fa_val = elem["from_attributes"];
+        if (!fa_val.error() && fa_val.value().is_bool()) {
+            from_attributes = fa_val.value().get_bool();
+        }
+
         auto validator = std::make_shared<ModelFieldsValidator>();
         validator->set_extra_behavior(extra_behavior);
         validator->set_model_name(model_name);
+        validator->set_from_attributes(from_attributes);
 
         if (fields_elem.error() || !fields_elem.value().is_object()) {
             // Empty fields

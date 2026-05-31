@@ -23,8 +23,13 @@ struct PySerializationInfo {
 
 // ---------------------------------------------------------------------------
 // Helper: convert a py::object to JSON string
-// ---------------------------------------------------------------------------
+// Helper: convert Python object to JSON string, handling string input specially
 static std::string pyobj_to_json_str(const py::object& obj) {
+    // If already a string, assume it's JSON and return directly
+    if (py::isinstance<py::str>(obj)) {
+        return obj.cast<std::string>();
+    }
+    // Otherwise convert via json.dumps
     py::object json_mod = py::module_::import("json");
     auto default_fn = py::cpp_function([](py::handle o) -> py::object {
         if (py::hasattr(o, "__dict__")) {
@@ -768,8 +773,12 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
         .def("validate_python", [](SchemaValidator& self, const py::object& input, py::object strict, py::object context, py::object self_instance,
                                     py::object extra, py::object from_attributes, py::object by_alias, py::object by_name) -> py::object {
             // NEW: Use native PythonInput - no JSON round-trip!
-            (void)extra; (void)from_attributes; (void)by_alias; (void)by_name; (void)context;
-            py::object validated = self.validate_python_object(input, pyobj_to_bool(strict), std::nullopt);
+            (void)by_alias; (void)by_name; (void)context;
+            std::optional<bool> fa_opt;
+            if (!from_attributes.is_none()) {
+                fa_opt = pyobj_to_bool(from_attributes);
+            }
+            py::object validated = self.validate_python_object(input, pyobj_to_bool(strict), std::nullopt, fa_opt);
 
             // If self_instance provided, populate and return it
             if (!self_instance.is_none() && py::hasattr(self_instance, "__dict__")) {

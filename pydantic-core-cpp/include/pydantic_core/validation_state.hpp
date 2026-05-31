@@ -44,6 +44,7 @@ public:
     std::optional<ExtraBehavior> extra_behavior() const { return config_.extra_behavior; }
     void set_extra_behavior(ExtraBehavior value) { config_.extra_behavior = value; }
     std::optional<bool> from_attributes() const { return config_.from_attributes; }
+    void set_from_attributes(bool value) { config_.from_attributes = value; }
     StringCacheMode cache_strings() const { return config_.cache_strings; }
     std::optional<bool> by_alias() const { return config_.by_alias; }
     std::optional<bool> by_name() const { return config_.by_name; }
