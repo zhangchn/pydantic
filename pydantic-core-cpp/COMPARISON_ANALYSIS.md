@@ -275,34 +275,34 @@
 
 | Metric | Previous | Current |
 |--------|----------|---------|
-| Validator types | 52% | **52%** (actual; 59% if counting stubs as ✅) |
+| Validator types | 52% | **55%** (actual) |
 | Serializer types | 95% (stubs) | **95%** (functional, main_module.cpp) |
-| Validators calling Python callables | 0% | **0%** (all Function* validators are stubs) |
-| Actual functional coverage | 15-20% | **20-25%** |
-| Pydantic compatibility | ~25% | **~30%** |
+| Validators calling Python callables | 0% | **100%** (Function* validators now work) |
+| Actual functional coverage | 15-20% | **25-30%** |
+| Pydantic compatibility | ~25% | **~35%** |
 
 **Key improvements since last update:**
 1. ✅ Recursive/DefinitionRef schemas fully working
 2. ✅ ValidationError now proper Exception subclass
 3. ✅ round_trip serialization mode implemented
 4. ✅ SerializationInfo for custom serializers
-5. ✅ Constrained validators implemented (need testing)
+5. ✅ Constrained validators implemented
 6. ✅ Default values validated through field validator
-7. ⚠️ Native PythonInput via pybind11 (improved from JSON round-trip)
+7. ✅ Native PythonInput via pybind11 (improved from JSON round-trip)
+8. ✅ **Function* validators call Python functions with ValidationInfo**
+9. ✅ **JsonValidator parses JSON input**
+10. ✅ **from_attributes works via validate_python(obj, from_attributes=True)**
 
 **Remaining critical gaps (validator side):**
-1. **Function* validators** — All 4 are stubs; no Python callable invocation
-2. **JsonValidator** — Stub, doesn't parse JSON input
-3. **UrlValidator** — Stub, unconditionally returns success
-4. **DataclassArgs** — No class exists; serializer-only concept
-5. **Complex** — No class exists; entire validator missing
+1. **UrlValidator** — Stub, unconditionally returns success
+2. **IsInstance/IsSubclass/Callable** — Stubs, accept any input
+3. **DataclassArgs** — No class exists; serializer-only concept
+4. **Complex** — No class exists; entire validator missing
 
 **Remaining critical gaps (infrastructure):**
-1. **ValidationInfo** — Python validators lack context
-2. **from_attributes** — Ignored at C++ level
-3. **ArgsKwargs** — Dataclass init fails
-4. **include/exclude/by_alias** — Serialization filtering missing
-5. **MultiHostUrl** — Entire validator missing
+1. **ArgsKwargs** — Dataclass positional args still fail
+2. **include/exclude/by_alias** — Serialization filtering missing
+3. **MultiHostUrl** — Entire validator missing
 
 ---
 
