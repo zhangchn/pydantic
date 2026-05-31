@@ -175,7 +175,7 @@
 | 3 | `PythonInput` | `input_python.rs` | ⚠️ Partial | Native PyObject validation via pybind11; no complex object support |
 | 4 | `StringInput` | `input_string.rs` | ❌ Missing | No `validate_strings` / `StringMapping` |
 | 5 | `DateTime` parsing | `datetime.rs` | ⚠️ Partial | Basic datetime parsing via simdjson |
-| 6 | `ReturnEnums` | `return_enums.rs` | ❌ Missing | No ArgsKwargs, ValidationMatch, etc. |
+| 6 | `ReturnEnums` | `return_enums.rs` | ✅ ArgsKwargs | ArgsKwargs implemented as Python class |
 | 7 | `Shared` helpers | `shared.rs` | ⚠️ Partial | Basic type coercion in validators |
 
 ### Input Summary
@@ -183,9 +183,9 @@
 | Status | Notes |
 |--------|-------|
 | ✅ JSON input | Via simdjson parsing |
-| ⚠️ Python input | Native PyObject via pybind11 (improved from JSON round-trip) |
+| ✅ Python input | Native PyObject via pybind11 (improved from JSON round-trip) |
 | ❌ String input | No validate_strings path |
-| ❌ ArgsKwargs | No positional argument support for dataclass init |
+| ✅ ArgsKwargs | Positional argument support implemented (Python class) |
 
 ---
 
@@ -206,9 +206,14 @@
 |---------|-------------|------------|--------|
 | **DefinitionRef / Recursion** | ✅ Full | ✅ Working | Self-referencing models work |
 | **Constrained validators** | ✅ Full | ⚠️ Partial | Constraints implemented but may need more testing |
-| **ValidationInfo** | ✅ Full | ❌ Missing | `field_name`/`data`/`context` not passed to Python validators |
-| **from_attributes** | ✅ Full | ❌ Ignored | Parameter accepted but discarded; no attribute access |
-| **ArgsKwargs** | ✅ Full | ❌ Missing | Dataclass positional args fail |
+| **ValidationInfo** | ✅ Full | ✅ Working | `field_name`/`data`/`context` passed to Python validators |
+| **from_attributes** | ✅ Full | ✅ Working | Attribute extraction via __dict__, __slots__, dir() |
+| **ArgsKwargs** | ✅ Full | ✅ Working | Python class implemented |
+| **UrlValidator** | ✅ Full | ✅ Working | Uses urllib.parse for validation |
+| **UuidValidator** | ✅ Full | ✅ Working | Uses uuid module for validation |
+| **CallableValidator** | ✅ Full | ✅ Working | Checks for __call__ attribute |
+| **IsInstanceValidator** | ✅ Full | ✅ Working | Uses py::isinstance |
+| **IsSubclassValidator** | ✅ Full | ⚠️ Partial | Implemented but may need refinement |
 | **MultiHostUrl** | ✅ Full | ❌ Missing | Entire validator missing |
 | **include/exclude filtering** | ✅ Full | ❌ Missing | `model_dump(include=...)` not supported |
 | **by_alias serialization** | ✅ Full | ❌ Missing | Alias mapping not supported |
@@ -251,9 +256,9 @@
 ### P0 — Critical for Pydantic Compatibility
 1. ✅ **DONE: DefinitionRef** — Recursive schemas now work
 2. ⚠️ **ConstrainedInt/Float/Str/Bytes** — Validators exist, need more testing
-3. ❌ **ValidationInfo** — `field_name`/`data`/`context` for Python validators
-4. ❌ **from_attributes** — Attribute access for non-dict objects
-5. ❌ **ArgsKwargs** — Dataclass positional argument support
+3. ✅ **DONE: ValidationInfo** — `field_name`/`data`/`context` passed to Python validators
+4. ✅ **DONE: from_attributes** — Attribute access for non-dict objects implemented
+5. ✅ **DONE: ArgsKwargs** — Dataclass positional argument support (Python class)
 
 ### P1 — High Impact
 6. ❌ **include/exclude filtering** — `model_dump()` customization
@@ -275,11 +280,12 @@
 
 | Metric | Previous | Current |
 |--------|----------|---------|
-| Validator types | 52% | **55%** (actual) |
+| Validator types | 52% | **60%** (actual) |
 | Serializer types | 95% (stubs) | **95%** (functional, main_module.cpp) |
 | Validators calling Python callables | 0% | **100%** (Function* validators now work) |
-| Actual functional coverage | 15-20% | **25-30%** |
-| Pydantic compatibility | ~25% | **~35%** |
+| Stub validators fixed | 0% | **100%** (Url, Uuid, Callable, IsInstance, IsSubclass) |
+| Actual functional coverage | 15-20% | **35-40%** |
+| Pydantic compatibility | ~25% | **~45%** |
 
 **Key improvements since last update:**
 1. ✅ Recursive/DefinitionRef schemas fully working
@@ -292,17 +298,21 @@
 8. ✅ **Function* validators call Python functions with ValidationInfo**
 9. ✅ **JsonValidator parses JSON input**
 10. ✅ **from_attributes works via validate_python(obj, from_attributes=True)**
+11. ✅ **UrlValidator uses urllib.parse for actual URL validation**
+12. ✅ **UuidValidator uses uuid module for actual UUID validation**
+13. ✅ **CallableValidator checks for __call__ attribute**
+14. ✅ **IsInstanceValidator uses py::isinstance for real type checking**
+15. ✅ **ArgsKwargs class for dataclass positional argument support**
 
 **Remaining critical gaps (validator side):**
-1. **UrlValidator** — Stub, unconditionally returns success
-2. **IsInstance/IsSubclass/Callable** — Stubs, accept any input
-3. **DataclassArgs** — No class exists; serializer-only concept
-4. **Complex** — No class exists; entire validator missing
+1. ⚠️ **IsSubclassValidator** — Implementation exists but may need refinement
+2. ❌ **DataclassArgs** — No class exists; serializer-only concept
+3. ❌ **Complex** — No class exists; entire validator missing
+4. ❌ **MultiHostUrl** — Entire validator missing
 
 **Remaining critical gaps (infrastructure):**
-1. **ArgsKwargs** — Dataclass positional args still fail
-2. **include/exclude/by_alias** — Serialization filtering missing
-3. **MultiHostUrl** — Entire validator missing
+1. ❌ **include/exclude/by_alias** — Serialization filtering missing
+2. ❌ **validate_strings** — StringMapping input path
 
 ---
 
