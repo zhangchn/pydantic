@@ -451,23 +451,32 @@ private:
 // IsInstanceValidator - validates that input is an instance of a given Python class
 class IsInstanceValidator : public Validator {
 public:
-    IsInstanceValidator() = default;
-    explicit IsInstanceValidator(std::string class_name)
-        : class_name_(std::move(class_name)) {}
+    IsInstanceValidator() : py_class_(py::none()) {}
+    IsInstanceValidator(std::string class_name, py::object py_class)
+        : class_name_(std::move(class_name)), py_class_(std::move(py_class)) {}
 
     void set_class_name(const std::string& name) { class_name_ = name; }
+    void set_py_class(py::object cls) { py_class_ = std::move(cls); }
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
     ) override {
-        // In the C++ backend, we check if the JSON input represents an object
-        // that could be an instance of the given class. Since we go through JSON,
-        // we accept dicts and return them as-is (instance checking is done at
-        // the Python level via pydantic's isinstance checks).
-        // Accept any input - actual instance validation happens in Python
-        (void)input;
-        (void)state;
+        // Check if input is an instance of the specified Python class
+        if (!py_class_.is_none()) {
+            py::object input_py = input.as_python_object();
+            if (!py::isinstance(input_py, py_class_)) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::UnionType),  // Use UnionType as generic type error
+                    state.location(),
+                    "Input is not an instance of " + class_name_
+                );
+            }
+            return ValResult<std::shared_ptr<void>>(
+                std::make_shared<py::object>(input_py)
+            );
+        }
+        // Fallback: accept if class not specified
         return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
     }
 
@@ -475,25 +484,56 @@ public:
 
 private:
     std::string class_name_;
+    py::object py_class_;
 };
 
 // IsSubclassValidator - validates that input is a subclass of a given Python class
 class IsSubclassValidator : public Validator {
 public:
-    IsSubclassValidator() = default;
-    explicit IsSubclassValidator(std::string class_name)
-        : class_name_(std::move(class_name)) {}
+    IsSubclassValidator() : py_class_(py::none()) {}
+    IsSubclassValidator(std::string class_name, py::object py_class)
+        : class_name_(std::move(class_name)), py_class_(std::move(py_class)) {}
 
     void set_class_name(const std::string& name) { class_name_ = name; }
+    void set_py_class(py::object cls) { py_class_ = std::move(cls); }
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
     ) override {
-        // Similar to IsInstance - we can't check subclass relationships through JSON.
-        // Accept any input and let Python handle the actual check.
-        (void)input;
-        (void)state;
+        // Check if input is a subclass of the specified Python class
+        // Input must be a type/class itself
+        if (!py_class_.is_none()) {
+            py::object input_py = input.as_python_object();
+            try {
+                py::object type_obj = py::module_::import("builtins").attr("type");
+                if (!py::isinstance(input_py, type_obj)) {
+                    return ValError::line_error(
+                        ErrorType(ErrorType::Kind::UnionType),
+                        state.location(),
+                        "Input must be a class/type, not an instance"
+                    );
+                }
+                // Check subclass relationship
+                py::bool_ is_subclass = py_class_.attr("__subclasshook__")(input_py);
+                if (!is_subclass.cast<bool>()) {
+                    return ValError::line_error(
+                        ErrorType(ErrorType::Kind::UnionType),
+                        state.location(),
+                        "Input is not a subclass of " + class_name_
+                    );
+                }
+                return ValResult<std::shared_ptr<void>>(
+                    std::make_shared<py::object>(input_py)
+                );
+            } catch (py::error_already_set& e) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::UnionType),
+                    state.location(),
+                    "Subclass check failed: " + std::string(e.what())
+                );
+            }
+        }
         return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
     }
 
@@ -501,6 +541,7 @@ public:
 
 private:
     std::string class_name_;
+    py::object py_class_;
 };
 
 // CallableValidator - validates that input is callable
@@ -510,11 +551,18 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        // In JSON context, we can't determine callability.
-        // Accept any input and let Python handle the actual check.
-        (void)input;
-        (void)state;
-        return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
+        // Check if input is callable
+        py::object input_py = input.as_python_object();
+        if (!py::hasattr(input_py, "__call__")) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::UnionType),
+                state.location(),
+                "Input is not callable"
+            );
+        }
+        return ValResult<std::shared_ptr<void>>(
+            std::make_shared<py::object>(input_py)
+        );
     }
 
     std::string name() const override { return "callable"; }
