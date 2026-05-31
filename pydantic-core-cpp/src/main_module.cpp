@@ -65,6 +65,8 @@ struct SerNode {
     std::unordered_map<std::string, SerRef> tagged;
     // For model-fields: map from field_name -> serializer
     std::unordered_map<std::string, SerRef> fields;
+    // Field aliases: map from field_name -> alias (for serialization)
+    std::unordered_map<std::string, std::string> field_aliases;
     // Set of computed field names (excluded when round_trip=True)
     std::unordered_set<std::string> computed_fields_;
     // For function serializers
@@ -81,6 +83,7 @@ struct SerNode {
         children = other.children;
         tagged = other.tagged;
         fields = other.fields;
+        field_aliases = other.field_aliases;
         computed_fields_ = other.computed_fields_;
         py_func = other.py_func;
         default_val = other.default_val;
@@ -90,7 +93,8 @@ struct SerNode {
 
     py::object to_python(const py::object& value, bool json_mode, bool exc_none, bool round_trip = false,
                          const std::optional<std::unordered_set<std::string>>& include_fields = std::nullopt,
-                         const std::optional<std::unordered_set<std::string>>& exclude_fields = std::nullopt) const {
+                         const std::optional<std::unordered_set<std::string>>& exclude_fields = std::nullopt,
+                         bool by_alias = false) const {
         // Type-specific logic
         if (type == "nullable" || type == "nullable-union") {
             if (value.is_none()) return py::none();
@@ -151,7 +155,7 @@ struct SerNode {
             }
         }
         if (!fields.empty()) {
-            return serialize_fields(value, exc_none, round_trip, include_fields, exclude_fields);
+            return serialize_fields(value, exc_none, round_trip, include_fields, exclude_fields, by_alias);
         }
         // Delegate model/dataclass/typed-dict to inner serializer
         if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
@@ -369,7 +373,8 @@ private:
 
     py::object serialize_fields(const py::object& value, bool exc_none, bool round_trip = false,
                                  const std::optional<std::unordered_set<std::string>>& include_fields = std::nullopt,
-                                 const std::optional<std::unordered_set<std::string>>& exclude_fields = std::nullopt) const {
+                                 const std::optional<std::unordered_set<std::string>>& exclude_fields = std::nullopt,
+                                 bool by_alias = false) const {
         py::dict result;
         py::dict main;
         if (py::isinstance<py::dict>(value)) main = value.cast<py::dict>();
@@ -383,6 +388,15 @@ private:
             if (include_fields && !include_fields->count(k)) continue;
             if (exclude_fields && exclude_fields->count(k)) continue;
             
+            // Determine output key name
+            std::string output_key = k;
+            if (by_alias) {
+                auto alias_it = field_aliases.find(k);
+                if (alias_it != field_aliases.end()) {
+                    output_key = alias_it->second;
+                }
+            }
+            
             py::str key(k);
             py::object fv;
             bool has_value = true;
@@ -395,7 +409,7 @@ private:
             }
             if (!has_value) continue;
             if (exc_none && fv.is_none()) continue;
-            result[py::str(k)] = ser->to_python(fv, false, exc_none, round_trip);
+            result[py::str(output_key)] = ser->to_python(fv, false, exc_none, round_trip);
         }
         // Extra fields - also apply include/exclude if they match by name
         if (py::hasattr(value, "__pydantic_extra__")) {
@@ -418,7 +432,8 @@ private:
 
     std::string serialize_fields_json(const py::object& value, bool ensure_ascii, int indent, bool exc_none, bool round_trip = false,
                                        const std::optional<std::unordered_set<std::string>>& include_fields = std::nullopt,
-                                       const std::optional<std::unordered_set<std::string>>& exclude_fields = std::nullopt) const {
+                                       const std::optional<std::unordered_set<std::string>>& exclude_fields = std::nullopt,
+                                       bool by_alias = false) const {
         std::string out = "{";
         bool first = true;
         py::dict main;
@@ -432,6 +447,15 @@ private:
             // Apply include/exclude filters
             if (include_fields && !include_fields->count(k)) continue;
             if (exclude_fields && exclude_fields->count(k)) continue;
+            
+            // Determine output key name
+            std::string output_key = k;
+            if (by_alias) {
+                auto alias_it = field_aliases.find(k);
+                if (alias_it != field_aliases.end()) {
+                    output_key = alias_it->second;
+                }
+            }
             
             py::str key(k);
             py::object fv;
@@ -447,7 +471,7 @@ private:
             if (exc_none && fv.is_none()) continue;
             if (!first) out += ",";
             first = false;
-            out += json_escape(k, ensure_ascii) + ":" + ser->to_json(fv, ensure_ascii, -1, round_trip);
+            out += json_escape(output_key, ensure_ascii) + ":" + ser->to_json(fv, ensure_ascii, -1, round_trip);
         }
         if (py::hasattr(value, "__pydantic_extra__")) {
             auto extra = py::getattr(value, "__pydantic_extra__");
@@ -627,8 +651,16 @@ static SerRef build_ser_impl(const py::dict& schema,
                     py::dict field_schema;
                     if (fdef.contains("schema")) {
                         field_schema = fdef["schema"].cast<py::dict>();
+                        // Check for alias in field definition (pydantic-core format)
+                        if (fdef.contains("alias")) {
+                            node->field_aliases[k] = fdef["alias"].cast<std::string>();
+                        }
                     } else {
                         field_schema = fdef;  // Use fdef directly as schema
+                        // Check for alias directly in schema
+                        if (field_schema.contains("alias")) {
+                            node->field_aliases[k] = field_schema["alias"].cast<std::string>();
+                        }
                     }
                     node->fields[k] = build_ser(field_schema, defs);
                 }
@@ -689,14 +721,15 @@ public:
 
     py::object to_python(const py::object& value, std::optional<std::string> mode,
                          std::optional<py::object> include, std::optional<py::object> exclude,
-                         std::optional<bool>, bool, bool, bool exc_none,
+                         std::optional<bool> by_alias, bool, bool, bool exc_none,
                          bool, bool round_trip, py::object, std::optional<py::object>,
                          bool, std::optional<bool>, std::optional<py::object>) const {
         if (!ser_) throw std::runtime_error("Serializer not initialized");
-        
+
         // Parse include/exclude from Python objects to C++ sets
         std::optional<std::unordered_set<std::string>> include_fields;
         std::optional<std::unordered_set<std::string>> exclude_fields;
+        bool use_alias = by_alias.value_or(false);
         
         if (include && !include->is_none()) {
             include_fields = std::unordered_set<std::string>();
@@ -726,7 +759,7 @@ public:
             }
         }
         
-        return ser_->to_python(value, mode && *mode == "json", exc_none, round_trip, include_fields, exclude_fields);
+        return ser_->to_python(value, mode && *mode == "json", exc_none, round_trip, include_fields, exclude_fields, use_alias);
     }
 
     py::bytes to_json(const py::object& value, std::optional<size_t>, std::optional<bool> ea,
