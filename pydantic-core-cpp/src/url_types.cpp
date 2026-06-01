@@ -111,8 +111,12 @@ MultiHostUrl::MultiHostUrl(const std::string& url_str) : url_(url_str) {
     std::stringstream ss(hosts_part);
     std::string host_spec;
     while (std::getline(ss, host_spec, ',')) {
+        if (host_spec.empty()) {
+            throw std::invalid_argument("Empty host specification in MultiHostUrl: " + url_str);
+        }
+
         HostSpec spec;
-        
+
         // Check for IPv6 with port
         if (host_spec[0] == '[' && host_spec.find(']:') != std::string::npos) {
             size_t bracket_end = host_spec.find(']');

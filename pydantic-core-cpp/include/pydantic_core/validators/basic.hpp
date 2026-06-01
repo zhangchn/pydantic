@@ -467,7 +467,7 @@ public:
             py::object input_py = input.as_python_object();
             if (!py::isinstance(input_py, py_class_)) {
                 return ValError::line_error(
-                    ErrorType(ErrorType::Kind::UnionType),  // Use UnionType as generic type error
+                    ErrorType(ErrorType::Kind::IsInstanceType),
                     state.location(),
                     "Input is not an instance of " + class_name_
                 );
@@ -509,16 +509,17 @@ public:
                 py::object type_obj = py::module_::import("builtins").attr("type");
                 if (!py::isinstance(input_py, type_obj)) {
                     return ValError::line_error(
-                        ErrorType(ErrorType::Kind::UnionType),
+                        ErrorType(ErrorType::Kind::IsSubclassType),
                         state.location(),
                         "Input must be a class/type, not an instance"
                     );
                 }
-                // Check subclass relationship
-                py::bool_ is_subclass = py_class_.attr("__subclasshook__")(input_py);
+                // Check subclass relationship using Python's issubclass()
+                py::object builtins = py::module_::import("builtins");
+                py::bool_ is_subclass = builtins.attr("issubclass")(input_py, py_class_);
                 if (!is_subclass.cast<bool>()) {
                     return ValError::line_error(
-                        ErrorType(ErrorType::Kind::UnionType),
+                        ErrorType(ErrorType::Kind::IsSubclassType),
                         state.location(),
                         "Input is not a subclass of " + class_name_
                     );
@@ -528,7 +529,7 @@ public:
                 );
             } catch (py::error_already_set& e) {
                 return ValError::line_error(
-                    ErrorType(ErrorType::Kind::UnionType),
+                    ErrorType(ErrorType::Kind::IsSubclassType),
                     state.location(),
                     "Subclass check failed: " + std::string(e.what())
                 );
@@ -555,7 +556,7 @@ public:
         py::object input_py = input.as_python_object();
         if (!py::hasattr(input_py, "__call__")) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::UnionType),
+                ErrorType(ErrorType::Kind::CallableType),
                 state.location(),
                 "Input is not callable"
             );

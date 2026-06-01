@@ -94,7 +94,12 @@ public:
         
         // UUID errors
         UuidType,
-        
+
+        // Type checking errors
+        IsInstanceType,
+        IsSubclassType,
+        CallableType,
+
         // Other errors
         JsonInvalid,
         CustomError,

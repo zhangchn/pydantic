@@ -34,10 +34,10 @@ public:
                 info_dict["field_name"] = py::str(*state.field_name());
             }
             info_dict["strict"] = state.strict_or(false);
-            if (state.context()) {
-                info_dict["context"] = py::cast(state.context());
+            if (!state.context_py().is_none()) {
+                info_dict["context"] = state.context_py();
             }
-            
+
             py::object transformed = py_func_(input.as_python_object(), info_dict);
             
             if (inner_) {
@@ -87,10 +87,10 @@ public:
                 info_dict["field_name"] = py::str(*state.field_name());
             }
             info_dict["strict"] = state.strict_or(false);
-            if (state.context()) {
-                info_dict["context"] = py::cast(state.context());
+            if (!state.context_py().is_none()) {
+                info_dict["context"] = state.context_py();
             }
-            
+
             py::object output = py_func_(input.as_python_object(), info_dict);
             return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(output));
         } catch (py::error_already_set& e) {
@@ -130,10 +130,10 @@ public:
                 info_dict["field_name"] = py::str(*state.field_name());
             }
             info_dict["strict"] = state.strict_or(false);
-            if (state.context()) {
-                info_dict["context"] = py::cast(state.context());
+            if (!state.context_py().is_none()) {
+                info_dict["context"] = state.context_py();
             }
-            
+
             py::object output = py_func_(input.as_python_object(), info_dict);
             return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(output));
         } catch (py::error_already_set& e) {
@@ -185,6 +185,9 @@ public:
                     if (result.is_err()) {
                         throw py::value_error("Inner validator failed");
                     }
+                    // Extract validated result - try py::object first
+                    auto* obj = static_cast<py::object*>(result.value().get());
+                    if (obj) return *obj;
                 }
                 return v;
             });

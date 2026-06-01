@@ -445,16 +445,15 @@ bool PythonInput::has_attributes() const {
             if (name.size() > 2 && name.substr(0, 2) == "__" && name.substr(name.size()-2) == "__") {
                 continue;
             }
-            if (name.size() > 1 && name[0] == '_') {
-                continue;
-            }
             // Check if it's a property or attribute (not a bound method)
             try {
                 py::object value = obj_.attr(name.c_str());
-                if (!py::hasattr(value, "__call__") || py::hasattr(value, "__self__")) {
-                    // It's a property or data attribute, not a method
-                    return true;
+                // Skip bound methods (have __self__)
+                if (py::hasattr(value, "__self__")) {
+                    continue;
                 }
+                // It's a property or data attribute
+                return true;
             } catch (...) {}
         }
     } catch (...) {}
@@ -474,10 +473,6 @@ py::dict PythonInput::get_attributes_as_dict() const {
             py::dict d = obj_.attr("__dict__").cast<py::dict>();
             for (auto item : d) {
                 std::string key = py::str(item.first).cast<std::string>();
-                // Skip private attributes
-                if (key.size() > 0 && key[0] == '_') {
-                    continue;
-                }
                 result[item.first] = item.second;
             }
         } catch (...) {}
@@ -489,20 +484,16 @@ py::dict PythonInput::get_attributes_as_dict() const {
             py::object slots = obj_.attr("__slots__");
             if (py::isinstance<py::str>(slots)) {
                 std::string slot_name = slots.cast<std::string>();
-                if (slot_name.size() > 0 && slot_name[0] != '_') {
-                    try {
-                        result[py::str(slot_name)] = obj_.attr(slot_name.c_str());
-                    } catch (...) {}
-                }
+                try {
+                    result[py::str(slot_name)] = obj_.attr(slot_name.c_str());
+                } catch (...) {}
             } else {
                 py::sequence slot_seq = slots.cast<py::sequence>();
                 for (auto slot : slot_seq) {
                     std::string slot_name = py::str(slot).cast<std::string>();
-                    if (slot_name.size() > 0 && slot_name[0] != '_') {
-                        try {
-                            result[py::str(slot_name)] = obj_.attr(slot_name.c_str());
-                        } catch (...) {}
-                    }
+                    try {
+                        result[py::str(slot_name)] = obj_.attr(slot_name.c_str());
+                    } catch (...) {}
                 }
             }
         } catch (...) {}

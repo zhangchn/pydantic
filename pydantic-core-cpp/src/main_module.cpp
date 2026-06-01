@@ -683,10 +683,11 @@ static SerRef build_ser_impl(const py::dict& schema,
                     }
                 }
             }
-        } catch (std::exception& e) {
-            std::cerr << "DEBUG build_ser: exception: " << e.what() << std::endl;
+        } catch (const std::exception& e) {
+            // Schema field parsing failed silently
+            (void)e;
         } catch (...) {
-            std::cerr << "DEBUG build_ser: unknown exception" << std::endl;
+            // Unknown exception during field parsing
         }
     }
 

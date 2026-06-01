@@ -5,6 +5,11 @@
 #include "types.hpp"
 #include "recursion_guard.hpp"
 
+#ifdef HAS_PYBIND11
+#include <pybind11/pybind11.h>
+namespace py = pybind11;
+#endif
+
 namespace pydantic_core {
 
 // Validation state passed through validation chain
@@ -90,6 +95,12 @@ public:
     // Context (for validation functions)
     void* context() const { return context_; }
     void set_context(void* ctx) { context_ = ctx; }
+
+#ifdef HAS_PYBIND11
+    // Python context (for Python callable validators)
+    py::object context_py() const { return context_py_; }
+    void set_context_py(py::object ctx) { context_py_ = std::move(ctx); }
+#endif
     
     // Recursion management
     RecursionState::RecursionEntry enter_recursion(const void* obj) {
@@ -152,7 +163,10 @@ private:
     InputType input_type_ = InputType::Python;
     Exactness exactness_ = Exactness::Unknown;
     void* context_ = nullptr;
-    
+#ifdef HAS_PYBIND11
+    py::object context_py_ = py::none();
+#endif
+
     Location location_;
 };
 
