@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pydantic_core/validator.hpp"
+#include "pydantic_core/url_types.hpp"
 #include <memory>
 #include <string>
 #include <vector>
@@ -178,9 +179,10 @@ public:
                 );
             }
             
-            // Valid URL - return the string
+            // Valid URL - return Url object
+            auto url_obj = std::make_shared<Url>(url_str);
             return ValResult<std::shared_ptr<void>>(
-                std::make_shared<std::string>(url_str)
+                std::static_pointer_cast<void>(url_obj)
             );
         } catch (py::error_already_set& e) {
             return ValError::line_error(

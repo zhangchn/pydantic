@@ -3,6 +3,7 @@
 #include "pydantic_core/combined_validator.hpp"
 #include "pydantic_core/json_input.hpp"
 #include "pydantic_core/python_input.hpp"
+#include "pydantic_core/url_types.hpp"
 #include "pydantic_core/validators/model_fields.hpp"
 #include <pybind11/stl.h>
 
@@ -490,6 +491,16 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
         } catch (...) {}
     }
 
+    // Url type - convert to Python Url object using pybind11 cast
+    if (type_name == "url") {
+        try {
+            auto* url_ptr = static_cast<Url*>(value.get());
+            if (url_ptr) {
+                return py::cast(*url_ptr);
+            }
+        } catch (...) {}
+    }
+
     // Fallback
     return py::none();
 }
@@ -499,75 +510,34 @@ py::object SchemaValidator::result_to_python(const std::shared_ptr<void>& result
         return py::none();
     }
 
-    // For model-like validators, try ValidatedModelFieldsOutput
-    // Always try this, not just when check_model is true
+    // Determine the type from the validator name
+    std::string vname;
     if (validator_) {
-        auto vname = validator_->name();
-        if (vname == "model" || vname == "model-fields" || vname == "typed-dict" || vname == "dataclass") {
-            try {
-                auto* mfo = static_cast<ValidatedModelFieldsOutput*>(result.get());
-                if (mfo) {
-                    py::dict out;
-                    for (const auto& [key, fv] : mfo->fields) {
-                        // Use type_name to convert value
-                        py::object py_val = result_to_python_with_type(fv.value, fv.type_name);
-                        out[py::str(key)] = py_val;
-                    }
-                    for (const auto& [key, fv] : mfo->extra) {
-                        out[py::str(key)] = result_to_python_with_type(fv.value, fv.type_name);
-                    }
-                    return std::move(out);
-                }
-            } catch (...) {}
-        }
+        vname = validator_->name();
     }
 
-    // Try to determine type using typeid
-    // Note: this requires RTTI and works with shared_ptr<void> only if
-    // the shared_ptr was created with the correct type
+    // For model-like validators, try ValidatedModelFieldsOutput
+    if (!vname.empty() && (vname == "model" || vname == "model-fields" || vname == "typed-dict" || vname == "dataclass")) {
+        try {
+            auto* mfo = static_cast<ValidatedModelFieldsOutput*>(result.get());
+            if (mfo) {
+                py::dict out;
+                for (const auto& [key, fv] : mfo->fields) {
+                    py::object py_val = result_to_python_with_type(fv.value, fv.type_name);
+                    out[py::str(key)] = py_val;
+                }
+                for (const auto& [key, fv] : mfo->extra) {
+                    out[py::str(key)] = result_to_python_with_type(fv.value, fv.type_name);
+                }
+                return std::move(out);
+            }
+        } catch (...) {}
+    }
 
-    // Try string - use a wrapper approach
-    // Since we can't safely cast shared_ptr<void> to shared_ptr<string>,
-    // we'll try to detect the type by checking the memory layout
-
-    // For now, return a placeholder for string values
-    // TODO: Implement proper type-safe result storage
-
-    // Try int
-    try {
-        auto* i = static_cast<int*>(result.get());
-        if (i) return py::int_(*i);
-    } catch (...) {}
-
-    // Try int64_t
-    try {
-        auto* i = static_cast<int64_t*>(result.get());
-        if (i) return py::int_(*i);
-    } catch (...) {}
-
-    // Try uint64_t
-    try {
-        auto* u = static_cast<uint64_t*>(result.get());
-        if (u) return py::int_(*u);
-    } catch (...) {}
-
-    // Try double
-    try {
-        auto* d = static_cast<double*>(result.get());
-        if (d) return py::float_(*d);
-    } catch (...) {}
-
-    // Try bool
-    try {
-        auto* b = static_cast<bool*>(result.get());
-        if (b) return py::bool_(*b);
-    } catch (...) {}
-
-    // Try vector<uint8_t> (bytes)
-    try {
-        auto* v = static_cast<std::vector<uint8_t>*>(result.get());
-        if (v) return py::bytes(reinterpret_cast<const char*>(v->data()), v->size());
-    } catch (...) {}
+    // Use result_to_python_with_type with the validator's name for proper type dispatch
+    if (!vname.empty()) {
+        return result_to_python_with_type(result, vname);
+    }
 
     // Fallback
     return py::none();
