@@ -4,12 +4,11 @@ pydantic_core_cpp — C++ backend for pydantic-core.
 Provides the same public API as pydantic_core (Rust) by combining:
   1. Native C++ extension symbols (_pydantic_core_cpp)
   2. Lazy fallbacks to the Rust pydantic_core for unimplemented symbols
-  3. Re-export of the core_schema module from Rust
+  3. Local core_schema module (type definitions and builder functions)
 """
 from __future__ import annotations
 
 import sys as _sys
-import types as _types
 from typing import Any as _Any
 
 # ============================================================================
@@ -323,16 +322,10 @@ _RUST_FALLBACKS = frozenset({
     'PydanticUndefined',
     'PydanticUndefinedType',
     # Errors / exceptions (from native extension)
-    'PydanticCustomError',
-    'PydanticKnownError',
     'PydanticSerializationError',
     'PydanticSerializationUnexpectedValue',
     # Serializer (from native extension)
     'SchemaSerializer',
-    # Type aliases (from core_schema module, NOT native extension)
-    'CoreConfig',
-    'CoreSchema',
-    'CoreSchemaType',
     # Error type enum (from core_schema if C++ doesn't have it)
     'ErrorType',
 })
@@ -424,7 +417,7 @@ def _rust() -> _Any:
 
 def __getattr__(name: str) -> _Any:
     if name in _CORE_SCHEMA_FALLBACKS:
-        return getattr(_get_rust_core_schema(), name)
+        return getattr(core_schema, name)
     if name in _RUST_FALLBACKS:
         return getattr(_rust(), name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
@@ -488,89 +481,108 @@ class ArgsKwargs:
 
 
 # ============================================================================
-# 5. core_schema module — re-export from Rust
+# 4.6. Exception classes (pure Python, no Rust dependency)
+# ============================================================================
+
+class PydanticCustomError(ValueError):
+    """A custom exception providing flexible error handling for Pydantic validators.
+
+    Matches Rust's PydanticCustomError pyclass.
+
+    Arguments:
+        error_type: The error type.
+        message_template: The message template.
+        context: The data to inject into the message template.
+    """
+
+    def __init__(
+        self,
+        error_type: str,
+        message_template: str,
+        context: dict[str, _Any] | None = None,
+    ) -> None:
+        self._type = error_type
+        self._message_template = message_template
+        self._context = context or {}
+        super().__init__(message_template.format(**self._context))
+
+    @property
+    def type(self) -> str:
+        """The error type associated with the error."""
+        return self._type
+
+    @property
+    def message_template(self) -> str:
+        """The message template associated with the error."""
+        return self._message_template
+
+    @property
+    def context(self) -> dict[str, _Any] | None:
+        """Values which are required to render the error message."""
+        return self._context
+
+    def message(self) -> str:
+        """The formatted message associated with the error."""
+        return self._message_template.format(**self._context)
+
+
+class PydanticKnownError(ValueError):
+    """A helper class for raising exceptions that mimic Pydantic's built-in exceptions.
+
+    Unlike PydanticCustomError, the error_type argument must be a known ErrorType.
+
+    Arguments:
+        error_type: The error type.
+        context: The data to inject into the message template.
+    """
+
+    def __init__(
+        self,
+        error_type: str,
+        context: dict[str, _Any] | None = None,
+    ) -> None:
+        self._type = error_type
+        self._context = context or {}
+        # PydanticKnownError does not format the message at init time
+        super().__init__(str(error_type))
+
+    @property
+    def type(self) -> str:
+        """The type of the error."""
+        return self._type
+
+    @property
+    def message_template(self) -> str:
+        """The message template associated with the provided error type."""
+        return self._type
+
+    @property
+    def context(self) -> dict[str, _Any] | None:
+        """Values which are required to render the error message."""
+        return self._context
+
+    def message(self) -> str:
+        """The formatted message associated with the error."""
+        return self._type
+
+
+# ============================================================================
+# 5. core_schema module — now a local Python module
 # ============================================================================
 
 # The core_schema module contains all the schema builder functions and type
 # definitions (int_schema, str_schema, model_fields_schema, etc.).
 # Pydantic imports `from pydantic_core import core_schema` extensively.
 #
-# IMPORTANT: We must use importlib.import_module('pydantic_core.core_schema')
-# directly, NOT `from pydantic_core import core_schema`, because the shim
-# may have replaced sys.modules['pydantic_core'] with this module.
+# Previously this was proxied to the Rust pydantic_core.core_schema module.
+# Now it's a local copy in pydantic_core_cpp/core_schema.py.
+
+from . import core_schema
+_sys.modules['pydantic_core_cpp.core_schema'] = core_schema
+
 
 def __dir__() -> list[str]:
     return list(__all__)
-
-
-def _get_rust_core_schema() -> _Any:
-    """Import core_schema from the Rust backend, bypassing any shim.
-
-    Uses importlib.util to load directly from the .py file on disk,
-    since the shim may have replaced sys.modules['pydantic_core'].
-    """
-    import importlib.util
-    import os
-    import glob
-    import site
-
-    # Check cache first
-    cached = _sys.modules.get('pydantic_core_cpp._rust_core_schema')
-    if cached is not None:
-        return cached
-
-    # Find the core_schema.py file on disk
-    for sp in site.getsitepackages() + [site.getusersitepackages()]:
-        cs_path = os.path.join(sp, 'pydantic_core', 'core_schema.py')
-        if os.path.exists(cs_path):
-            spec = importlib.util.spec_from_file_location(
-                'pydantic_core.core_schema', cs_path
-            )
-            _cs = importlib.util.module_from_spec(spec)
-            _sys.modules.setdefault('pydantic_core.core_schema', _cs)
-            spec.loader.exec_module(_cs)  # type: ignore[union-attr]
-            # Cache under our namespace to avoid polluting pydantic_core namespace
-            _sys.modules['pydantic_core_cpp._rust_core_schema'] = _cs
-            return _cs
-
-    raise ImportError(
-        "Cannot find Rust pydantic_core.core_schema module. "
-        "Install pydantic-core (Rust) as a fallback backend."
-    )
-
-
-class _CoreSchemaModuleProxy(_types.ModuleType):
-    def __init__(self, name: str):
-        super().__init__(name)
-        self.__dict__['_resolved'] = False
-        self.__path__ = None  # needed for import machinery
-
-    def _resolve(self) -> None:
-        if not self.__dict__['_resolved']:
-            _cs = _get_rust_core_schema()
-            self.__dict__.update(_cs.__dict__)
-            self.__dict__['_resolved'] = True
-
-    def __getattr__(self, name: str) -> _Any:
-        # Avoid resolving for special attrs that import machinery queries
-        if name in ('__path__', '__file__', '__package__', '__spec__',
-                     '__loader__', '__cached__'):
-            raise AttributeError(name)
-        self._resolve()
-        return self.__dict__[name]
-
-    def __dir__(self) -> list[str]:
-        self._resolve()
-        return list(self.__dict__.keys())
-
-
-# Install the core_schema proxy as both a module in sys.modules
-# and a module-level attribute. This handles:
-#   import pydantic_core_cpp.core_schema
-#   from pydantic_core_cpp import core_schema
-_core_schema_module = _CoreSchemaModuleProxy('pydantic_core_cpp.core_schema')
-_sys.modules['pydantic_core_cpp.core_schema'] = _core_schema_module
-core_schema = _core_schema_module  # type: ignore[misc]
 
 # ============================================================================
 # 6. Module metadata
