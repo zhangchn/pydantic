@@ -29,6 +29,8 @@ from ._pydantic_core_cpp import (
     TemporalMode,
     ValidationError,
     __version__,
+    to_json,
+    to_jsonable_python,
 )
 
 # Wrapper for SchemaValidator that stores the schema for model construction
@@ -424,19 +426,11 @@ def __getattr__(name: str) -> _Any:
 
 
 # ============================================================================
-# 4. Standalone functions (delegate to Rust until C++ implements them)
+# 4. Standalone functions (still from Rust until C++ implements them)
 # ============================================================================
 
 def from_json(*args: _Any, **kwargs: _Any) -> _Any:
     return _rust().from_json(*args, **kwargs)
-
-
-def to_json(*args: _Any, **kwargs: _Any) -> _Any:
-    return _rust().to_json(*args, **kwargs)
-
-
-def to_jsonable_python(*args: _Any, **kwargs: _Any) -> _Any:
-    return _rust().to_jsonable_python(*args, **kwargs)
 
 
 # ============================================================================
