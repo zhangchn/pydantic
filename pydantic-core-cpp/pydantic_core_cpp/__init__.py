@@ -320,9 +320,6 @@ _RUST_FALLBACKS = frozenset({
     'Some',
     'TzInfo',
     'Url',
-    # Sentinels (from native extension)
-    'PydanticUndefined',
-    'PydanticUndefinedType',
     # Errors / exceptions (from native extension)
     'PydanticSerializationError',
     'PydanticSerializationUnexpectedValue',
@@ -475,7 +472,42 @@ class ArgsKwargs:
 
 
 # ============================================================================
-# 4.6. Exception classes (pure Python, no Rust dependency)
+# 4.6. Sentinel types (pure Python, no Rust dependency)
+# ============================================================================
+
+class _PydanticUndefinedType:
+    """A type used as a sentinel for undefined values.
+
+    Matches Rust's PydanticUndefinedType. The singleton instance
+    PydanticUndefined is falsy and supports copy/deepcopy.
+    """
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return 'PydanticUndefined'
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
+
+
+PydanticUndefined = _PydanticUndefinedType()
+PydanticUndefinedType = _PydanticUndefinedType
+
+
+# ============================================================================
+# 4.7. Exception classes (pure Python, no Rust dependency)
 # ============================================================================
 
 class PydanticCustomError(ValueError):
