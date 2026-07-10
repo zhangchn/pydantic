@@ -317,7 +317,6 @@ MISSING = Sentinel('MISSING')
 _RUST_FALLBACKS = frozenset({
     # Data types (from native extension)
     'MultiHostUrl',
-    'Some',
     'TzInfo',
     'Url',
     # Errors / exceptions (from native extension)
@@ -325,8 +324,6 @@ _RUST_FALLBACKS = frozenset({
     'PydanticSerializationUnexpectedValue',
     # Serializer (from native extension)
     'SchemaSerializer',
-    # Error type enum (from core_schema if C++ doesn't have it)
-    'ErrorType',
 })
 
 # Symbols that come from core_schema rather than the native extension
@@ -334,6 +331,7 @@ _CORE_SCHEMA_FALLBACKS = frozenset({
     'CoreConfig',
     'CoreSchema',
     'CoreSchemaType',
+    'ErrorType',
 })
 
 
@@ -469,6 +467,42 @@ class ArgsKwargs:
         func(*args, **kwargs)
         """
         return (self.args, self.kwargs)
+
+
+class Some:
+    """Wrapper for optional values.
+
+    Similar to Rust's Option::Some type, identifies a value as being present.
+    Used in union with None to distinguish between 'some value which could be
+    None' and 'no value'.
+
+    Matches Rust's Some pyclass.
+    """
+
+    __match_args__ = ('value',)
+
+    def __init__(self, value):
+        self._value = value
+
+    @property
+    def value(self):
+        """Returns the value wrapped by Some."""
+        return self._value
+
+    def __repr__(self):
+        return f'Some({self._value!r})'
+
+    def __eq__(self, other):
+        if isinstance(other, Some):
+            return self._value == other._value
+        return NotImplemented
+
+    def __hash__(self):
+        return hash(self._value)
+
+    @classmethod
+    def __class_getitem__(cls, item):
+        return cls
 
 
 # ============================================================================
