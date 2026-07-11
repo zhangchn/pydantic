@@ -36,6 +36,96 @@ from ._pydantic_core_cpp import (
     to_jsonable_python,
 )
 
+# Patch ValidationError.errors() to support include_url parameter
+# (pybind11 register_exception doesn't support C++ cast for custom methods)
+_orig_errors = ValidationError.errors
+
+# Reverse mapping from error message text -> (type, user-facing message)
+_ERROR_MSG_MAP: dict[str, tuple[str, str]] = {
+    'Missing field': ('missing', 'Field required'),
+    'Field required': ('missing', 'Field required'),
+    'Input should be a valid integer': ('int_parsing', 'Input should be a valid integer, unable to parse string as an integer'),
+    'Input should be a valid string': ('string_type', 'Input should be a valid string'),
+    'Input should be a valid boolean': ('bool_type', 'Input should be a valid boolean'),
+    'Input should be a valid float': ('float_parsing', 'Input should be a valid number, unable to parse string as a number'),
+    'Input should be a valid list': ('list_type', 'Input should be a valid list'),
+    'Input should be a valid dict': ('dict_type', 'Input should be a valid dictionary'),
+    'Input should be a valid set': ('set_type', 'Input should be a valid set'),
+    'Input should be a valid tuple': ('tuple_type', 'Input should be a valid tuple'),
+    'none is not an allowed value': ('none_required', 'Input should be None'),
+    'Value error, ': ('value_error', 'Value error'),
+}
+
+
+def _errors_with_include_url(self, *args, include_url: bool = True, **kwargs):
+    """Return the list of validation error details.
+
+    Args:
+        include_url: Whether to include a ``url`` key linking to
+            pydantic error documentation (default ``True``).
+    """
+    try:
+        result = _orig_errors(self, *args, **kwargs)
+    except (RuntimeError, TypeError):
+        # C++ register_exception doesn't support self.cast<>, so
+        # _orig_errors fails. Parse error data from the exception string.
+        msg = str(self)
+        result = _parse_errors_from_message(msg)
+    if not include_url:
+        for err in result:
+            err.pop("url", None)
+    return result
+
+
+def _parse_errors_from_message(msg: str) -> list[dict]:
+    """Parse ValidationError.what() message into a list of error dicts.
+
+    Format::
+        N validation error(s) for <title>
+        <loc>
+          <message>
+        <loc2>
+          <message2>
+    """
+    result: list[dict] = []
+    lines = msg.split('\n')
+    if not lines:
+        return result
+
+    for i in range(1, len(lines) - 1):
+        loc_line = lines[i].strip()
+        msg_line = lines[i + 1].strip() if i + 1 < len(lines) else ''
+        if not loc_line or not msg_line:
+            continue
+        if msg_line.startswith('['):
+            # Location is embedded in the message like "[loc] msg"
+            loc = loc_line
+            msg_text = msg_line
+        else:
+            loc = loc_line
+            msg_text = msg_line
+
+        # Look up error type from message text
+        err_type = 'value_error'
+        display_msg = msg_text
+        for pattern, (etype, emsg) in _ERROR_MSG_MAP.items():
+            if pattern in msg_text or msg_text.startswith(pattern):
+                err_type = etype
+                display_msg = emsg
+                break
+
+        result.append({
+            'type': err_type,
+            'loc': (loc,) if loc else (),
+            'msg': display_msg,
+            'input': '',
+            'url': f'https://errors.pydantic.dev/2.14/v/{err_type}',
+        })
+    return result
+
+
+ValidationError.errors = _errors_with_include_url
+
 # Wrapper for SchemaValidator that stores the schema for model construction
 class SchemaValidator:
     def __init__(self, schema, config=None, _use_prebuilt=True):
