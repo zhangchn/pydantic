@@ -319,9 +319,6 @@ _RUST_FALLBACKS = frozenset({
     'MultiHostUrl',
     'TzInfo',
     'Url',
-    # Errors / exceptions (from native extension)
-    'PydanticSerializationError',
-    'PydanticSerializationUnexpectedValue',
     # Serializer (from native extension)
     'SchemaSerializer',
 })
@@ -624,6 +621,34 @@ class PydanticKnownError(ValueError):
     def message(self) -> str:
         """The formatted message associated with the error."""
         return self._type
+
+
+class PydanticSerializationError(ValueError):
+    """An error raised when an issue occurs during serialization.
+
+    In custom serializers, this error can be used to indicate that
+    serialization has failed.
+
+    Arguments:
+        message: The message associated with the error.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
+class PydanticSerializationUnexpectedValue(PydanticSerializationError):
+    """An error raised when an unexpected value is encountered during serialization.
+
+    This error is often caught and coerced into a warning, as pydantic-core
+    generally makes a best attempt at serializing values.
+
+    Arguments:
+        message: The message associated with the error.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
 
 
 # ============================================================================
