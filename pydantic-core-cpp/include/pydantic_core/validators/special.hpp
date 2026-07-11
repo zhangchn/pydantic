@@ -196,6 +196,59 @@ public:
     std::string name() const override { return "url"; }
 };
 
+// MultiHostUrlValidator - validates multi-host URLs (e.g., mongodb://host1,host2,host3/db)
+class MultiHostUrlValidator : public Validator {
+public:
+    ValResult<std::shared_ptr<void>> validate(
+        const Input& input,
+        ValidationState& state
+    ) override {
+        py::object input_py = input.as_python_object();
+        
+        // Check if already a MultiHostUrl object
+        try {
+            py::object mod = py::module_::import("pydantic_core_cpp._pydantic_core_cpp");
+            py::object mh_class = mod.attr("MultiHostUrl");
+            if (py::isinstance(input_py, mh_class)) {
+                return ValResult<std::shared_ptr<void>>(
+                    std::make_shared<std::string>(py::str(input_py).cast<std::string>())
+                );
+            }
+        } catch (...) {}
+        
+        if (!py::isinstance<py::str>(input_py)) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::UrlType),
+                state.location(),
+                input.as_error_value().repr
+            );
+        }
+        
+        std::string url_str = py::str(input_py).cast<std::string>();
+        
+        try {
+            auto url_obj = std::make_shared<MultiHostUrl>(url_str);
+            return ValResult<std::shared_ptr<void>>(
+                std::static_pointer_cast<void>(url_obj)
+            );
+        } catch (const std::invalid_argument& e) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::UrlScheme),
+                state.location(),
+                e.what()
+            );
+        } catch (...) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::UrlType),
+                state.location(),
+                "Multi-host URL parsing failed: " + url_str
+            );
+        }
+    }
+
+    std::string name() const override { return "multi-host-url"; }
+};
+
 // UuidValidator - validates UUID values
 class UuidValidator : public Validator {
 public:

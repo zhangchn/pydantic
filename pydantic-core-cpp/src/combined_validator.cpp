@@ -96,6 +96,7 @@ static std::shared_ptr<Validator> build_from_flat_dict(
     if (type == "datetime") return std::make_shared<DatetimeValidator>();
     if (type == "timedelta") return std::make_shared<TimedeltaValidator>();
     if (type == "url") return std::make_shared<UrlValidator>();
+    if (type == "multi-host-url") return std::make_shared<MultiHostUrlValidator>();
     if (type == "uuid") return std::make_shared<UuidValidator>();
     if (type == "is-instance") return std::make_shared<IsInstanceValidator>();
     if (type == "is-subclass") return std::make_shared<IsSubclassValidator>();
@@ -403,6 +404,7 @@ static std::shared_ptr<Validator> build_from_element(
     if (type == "datetime") return std::make_shared<DatetimeValidator>();
     if (type == "timedelta") return std::make_shared<TimedeltaValidator>();
     if (type == "url") return std::make_shared<UrlValidator>();
+    if (type == "multi-host-url") return std::make_shared<MultiHostUrlValidator>();
     if (type == "uuid") return std::make_shared<UuidValidator>();
 
     // is-instance validator

@@ -54,6 +54,7 @@ public:
         std::shared_ptr<DatetimeValidator>,
         std::shared_ptr<TimedeltaValidator>,
         std::shared_ptr<UrlValidator>,
+        std::shared_ptr<MultiHostUrlValidator>,
         std::shared_ptr<UuidValidator>,
         std::shared_ptr<FunctionBeforeValidator>,
         std::shared_ptr<FunctionAfterValidator>,

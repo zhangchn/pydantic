@@ -37,6 +37,7 @@ class TimeValidator;
 class DatetimeValidator;
 class TimedeltaValidator;
 class UrlValidator;
+class MultiHostUrlValidator;
 class UuidValidator;
 class FunctionBeforeValidator;
 class FunctionAfterValidator;

@@ -95,15 +95,17 @@ struct SerNode {
     py::object to_python(const py::object& value, bool json_mode, bool exc_none, bool round_trip = false,
                          const std::optional<std::unordered_set<std::string>>& include_fields = std::nullopt,
                          const std::optional<std::unordered_set<std::string>>& exclude_fields = std::nullopt,
-                         bool by_alias = false) const {
+                         bool by_alias = false,
+                         bool exclude_unset = false,
+                         bool exclude_defaults = false) const {
         // Type-specific logic
         if (type == "nullable" || type == "nullable-union") {
             if (value.is_none()) return py::none();
-            if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields);
+            if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
         }
         if (type == "union") {
             for (auto& c : children) {
-                try { return c->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields); } catch (...) {}
+                try { return c->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults); } catch (...) {}
             }
         }
         if (type == "tagged-union" && !tagged.empty()) {
@@ -115,18 +117,18 @@ struct SerNode {
                     if (ks == "type" || ks == "discriminator") {
                         std::string tag = py::str(item.second).cast<std::string>();
                         auto it = tagged.find(tag);
-                        if (it != tagged.end()) return it->second->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields);
+                        if (it != tagged.end()) return it->second->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
                         break;
                     }
                 }
             }
             for (auto& [t, c] : tagged) {
-                try { return c->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields); } catch (...) {}
+                try { return c->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults); } catch (...) {}
             }
         }
         if (type == "default" || type == "with-default") {
             if (value.is_none() && has_default_val) return default_val;
-            if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields);
+            if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
         }
         if (type == "json") {
             if (round_trip) {
@@ -141,32 +143,32 @@ struct SerNode {
             }
             // Non-round-trip: delegate to inner serializer
             if (!children.empty()) {
-                return children[0]->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields);
+                return children[0]->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
             }
         }
         if (type == "json-or-python") {
-            if (json_mode && !children.empty()) return children[0]->to_python(value, true, exc_none, round_trip, include_fields, exclude_fields);
-            if (children.size() > 1) return children[1]->to_python(value, false, exc_none, round_trip, include_fields, exclude_fields);
+            if (json_mode && !children.empty()) return children[0]->to_python(value, true, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+            if (children.size() > 1) return children[1]->to_python(value, false, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
         }
         if (type == "enum") {
             if (py::hasattr(value, "value")) {
                 auto ev = py::getattr(value, "value");
-                if (!children.empty()) return children[0]->to_python(ev, json_mode, exc_none, round_trip, include_fields, exclude_fields);
+                if (!children.empty()) return children[0]->to_python(ev, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
                 return ev;
             }
         }
         if (!fields.empty()) {
-            return serialize_fields(value, exc_none, round_trip, include_fields, exclude_fields, by_alias);
+            return serialize_fields(value, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
         }
         // Delegate model/dataclass/typed-dict to inner serializer
         if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
-            return children[0]->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields);
+            return children[0]->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
         }
         if (!py_func.is_none()) {
             if (type == "function-plain") return py_func(value);
             if (type == "function-after" || type == "function-before" || type == "function-wrap") {
-                py::object handler = py::cpp_function([this, value, json_mode, exc_none, round_trip, include_fields, exclude_fields](const py::object& v) -> py::object {
-                    if (!children.empty()) return children[0]->to_python(v, json_mode, exc_none, round_trip, include_fields, exclude_fields);
+                py::object handler = py::cpp_function([this, value, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults](const py::object& v) -> py::object {
+                    if (!children.empty()) return children[0]->to_python(v, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
                     return v;
                 });
                 if (type == "function-wrap") {
@@ -209,7 +211,12 @@ struct SerNode {
         return value;
     }
 
-    std::string to_json(const py::object& value, bool ensure_ascii, int indent, bool round_trip = false) const {
+    std::string to_json(const py::object& value, bool ensure_ascii, int indent, bool round_trip = false,
+                         const std::optional<std::unordered_set<std::string>>& include_fields = std::nullopt,
+                         const std::optional<std::unordered_set<std::string>>& exclude_fields = std::nullopt,
+                         bool by_alias = false,
+                         bool exclude_unset = false,
+                         bool exclude_defaults = false) const {
         if (type == "none" || type == "is-none") return "null";
         if (type == "bool" || py::isinstance<py::bool_>(value)) {
             return value.cast<bool>() ? "true" : "false";
@@ -246,33 +253,37 @@ struct SerNode {
                 // round_trip: serialize value to JSON, wrap as escaped JSON string
                 std::string inner_json;
                 if (!children.empty()) {
-                    inner_json = children[0]->to_json(value, ensure_ascii, indent, round_trip);
+                    inner_json = children[0]->to_json(value, ensure_ascii, indent, round_trip, include_fields, exclude_fields, by_alias);
                 } else {
                     inner_json = infer_json(value, ensure_ascii, indent);
                 }
                 return json_escape(inner_json, ensure_ascii);
             }
             if (!children.empty()) {
-                return children[0]->to_json(value, ensure_ascii, indent, round_trip);
+                return children[0]->to_json(value, ensure_ascii, indent, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
             }
         }
         if (type == "nullable" || type == "nullable-union") {
             if (value.is_none()) return "null";
-            if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip);
+            if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
         }
         if (type == "default" || type == "with-default") {
             if (value.is_none() && has_default_val) {
-                if (!children.empty()) return children[0]->to_json(default_val, ensure_ascii, indent, round_trip);
+                if (!children.empty()) return children[0]->to_json(default_val, ensure_ascii, indent, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
                 return infer_json(default_val, ensure_ascii, indent);
             }
-            if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip);
+            if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
         }
         if (type == "to-string") {
             py::object inner = !children.empty() ? children[0]->to_python(value, false, false, round_trip) : value;
             return json_escape(py::str(inner).cast<std::string>(), ensure_ascii);
         }
         if (!fields.empty()) {
-            return serialize_fields_json(value, ensure_ascii, indent, false, round_trip);
+            return serialize_fields_json(value, ensure_ascii, indent, false, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+        }
+        // Delegate model/dataclass/typed-dict to inner serializer
+        if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
+            return children[0]->to_json(value, ensure_ascii, indent, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
         }
         if (!py_func.is_none()) {
             auto result = type == "function-plain" ? py_func(value) : to_python(value, false, false, round_trip);
@@ -369,25 +380,81 @@ private:
             return out;
         }
         if (py::hasattr(value, "__dict__")) return infer_json(value.attr("__dict__"), ensure_ascii, indent);
+
+        // Check for Url and MultiHostUrl objects
+        try {
+            py::object url_mod = py::module_::import("pydantic_core_cpp._pydantic_core_cpp");
+            py::object url_cls = url_mod.attr("Url");
+            py::object murl_cls = url_mod.attr("MultiHostUrl");
+            if (py::isinstance(value, url_cls) || py::isinstance(value, murl_cls)) {
+                return json_escape(py::str(value).cast<std::string>(), ensure_ascii);
+            }
+        } catch (...) {}
+
         return json_escape(py::repr(value).cast<std::string>(), ensure_ascii);
     }
 
     py::object serialize_fields(const py::object& value, bool exc_none, bool round_trip = false,
                                  const std::optional<std::unordered_set<std::string>>& include_fields = std::nullopt,
                                  const std::optional<std::unordered_set<std::string>>& exclude_fields = std::nullopt,
-                                 bool by_alias = false) const {
+                                 bool by_alias = false,
+                                 bool exclude_unset = false,
+                                 bool exclude_defaults = false) const {
         py::dict result;
         py::dict main;
         if (py::isinstance<py::dict>(value)) main = value.cast<py::dict>();
         else if (py::hasattr(value, "__dict__")) main = py::getattr(value, "__dict__").cast<py::dict>();
 
         for (auto& [k, ser] : fields) {
+            // Skip internal metadata keys
+            if (k == "__pydantic_fields_set__" || k == "__pydantic_defaults__") continue;
+            
             // Skip computed fields when round_trip=True
             if (round_trip && computed_fields_.count(k)) continue;
             
             // Apply include/exclude filters
             if (include_fields && !include_fields->count(k)) continue;
             if (exclude_fields && exclude_fields->count(k)) continue;
+            
+            // exclude_unset: skip fields that were not explicitly set in input
+            if (exclude_unset) {
+                py::object fs = py::none();
+                if (py::isinstance<py::dict>(value)) {
+                    py::dict vd = value.cast<py::dict>();
+                    py::str fs_key("__pydantic_fields_set__");
+                    if (vd.contains(fs_key)) fs = vd[fs_key];
+                } else if (py::hasattr(value, "__pydantic_fields_set__")) {
+                    fs = py::getattr(value, "__pydantic_fields_set__");
+                }
+                if (!fs.is_none() && py::isinstance<py::set>(fs)) {
+                    if (!fs.cast<py::set>().contains(py::str(k))) continue;
+                }
+            }
+            
+            // exclude_defaults: skip fields whose value equals their default
+            if (exclude_defaults) {
+                py::object defaults = py::none();
+                if (py::isinstance<py::dict>(value)) {
+                    py::dict vd = value.cast<py::dict>();
+                    py::str d_key("__pydantic_defaults__");
+                    if (vd.contains(d_key)) defaults = vd[d_key];
+                } else if (py::hasattr(value, "__pydantic_defaults__")) {
+                    defaults = py::getattr(value, "__pydantic_defaults__");
+                }
+                if (!defaults.is_none() && py::isinstance<py::dict>(defaults)) {
+                    py::str key(k);
+                    py::dict dd = defaults.cast<py::dict>();
+                    if (dd.contains(key)) {
+                        py::object def_val = dd[key];
+                        if (main.contains(key)) {
+                            py::object cur = main[key];
+                            try {
+                                if (cur.equal(def_val)) continue;
+                            } catch (...) {}
+                        }
+                    }
+                }
+            }
             
             // Determine output key name
             std::string output_key = k;
@@ -434,7 +501,9 @@ private:
     std::string serialize_fields_json(const py::object& value, bool ensure_ascii, int indent, bool exc_none, bool round_trip = false,
                                        const std::optional<std::unordered_set<std::string>>& include_fields = std::nullopt,
                                        const std::optional<std::unordered_set<std::string>>& exclude_fields = std::nullopt,
-                                       bool by_alias = false) const {
+                                       bool by_alias = false,
+                                       bool exclude_unset = false,
+                                       bool exclude_defaults = false) const {
         std::string out = "{";
         bool first = true;
         py::dict main;
@@ -442,12 +511,55 @@ private:
         else if (py::hasattr(value, "__dict__")) main = py::getattr(value, "__dict__").cast<py::dict>();
 
         for (auto& [k, ser] : fields) {
+            // Skip internal metadata keys
+            if (k == "__pydantic_fields_set__" || k == "__pydantic_defaults__") continue;
+            
             // Skip computed fields when round_trip=True
             if (round_trip && computed_fields_.count(k)) continue;
             
             // Apply include/exclude filters
             if (include_fields && !include_fields->count(k)) continue;
             if (exclude_fields && exclude_fields->count(k)) continue;
+            
+            // exclude_unset: skip fields that were not explicitly set in input
+            if (exclude_unset) {
+                py::object fs = py::none();
+                if (py::isinstance<py::dict>(value)) {
+                    py::dict vd = value.cast<py::dict>();
+                    py::str fs_key("__pydantic_fields_set__");
+                    if (vd.contains(fs_key)) fs = vd[fs_key];
+                } else if (py::hasattr(value, "__pydantic_fields_set__")) {
+                    fs = py::getattr(value, "__pydantic_fields_set__");
+                }
+                if (!fs.is_none() && py::isinstance<py::set>(fs)) {
+                    if (!fs.cast<py::set>().contains(py::str(k))) continue;
+                }
+            }
+            
+            // exclude_defaults: skip fields whose value equals their default
+            if (exclude_defaults) {
+                py::object defaults = py::none();
+                if (py::isinstance<py::dict>(value)) {
+                    py::dict vd = value.cast<py::dict>();
+                    py::str d_key("__pydantic_defaults__");
+                    if (vd.contains(d_key)) defaults = vd[d_key];
+                } else if (py::hasattr(value, "__pydantic_defaults__")) {
+                    defaults = py::getattr(value, "__pydantic_defaults__");
+                }
+                if (!defaults.is_none() && py::isinstance<py::dict>(defaults)) {
+                    py::str key(k);
+                    py::dict dd = defaults.cast<py::dict>();
+                    if (dd.contains(key)) {
+                        py::object def_val = dd[key];
+                        if (main.contains(key)) {
+                            py::object cur = main[key];
+                            try {
+                                if (cur.equal(def_val)) continue;
+                            } catch (...) {}
+                        }
+                    }
+                }
+            }
             
             // Determine output key name
             std::string output_key = k;
@@ -723,7 +835,7 @@ public:
 
     py::object to_python(const py::object& value, std::optional<std::string> mode,
                          std::optional<py::object> include, std::optional<py::object> exclude,
-                         std::optional<bool> by_alias, bool, bool, bool exc_none,
+                         std::optional<bool> by_alias, bool exclude_unset, bool exclude_defaults, bool exc_none,
                          bool, bool round_trip, py::object, std::optional<py::object>,
                          bool, std::optional<bool>, std::optional<py::object>) const {
         if (!ser_) throw std::runtime_error("Serializer not initialized");
@@ -761,23 +873,51 @@ public:
             }
         }
         
-        return ser_->to_python(value, mode && *mode == "json", exc_none, round_trip, include_fields, exclude_fields, use_alias);
+        return ser_->to_python(value, mode && *mode == "json", exc_none, round_trip, include_fields, exclude_fields, use_alias, exclude_unset, exclude_defaults);
     }
 
     py::bytes to_json(const py::object& value, std::optional<size_t>, std::optional<bool> ea,
                       std::optional<py::object> include, std::optional<py::object> exclude,
-                      std::optional<bool>, bool, bool, bool exc_none,
+                      std::optional<bool> by_alias, bool exclude_unset, bool exclude_defaults, bool exc_none,
                       bool, bool round_trip, py::object, std::optional<py::object>,
                       bool, std::optional<bool>, std::optional<py::object>) const {
         if (!ser_) throw std::runtime_error("Serializer not initialized");
         
-        // Parse include/exclude from Python objects to C++ sets (for JSON serialization)
-        // Note: JSON serialization doesn't fully support include/exclude yet, but we accept the params
-        (void)include;
-        (void)exclude;
+        // Parse include/exclude from Python objects to C++ sets
+        std::optional<std::unordered_set<std::string>> include_fields;
+        std::optional<std::unordered_set<std::string>> exclude_fields;
+        bool use_alias = by_alias.value_or(false);
+        
+        if (include && !include->is_none()) {
+            include_fields = std::unordered_set<std::string>();
+            py::object inc_obj = *include;
+            if (py::isinstance<py::set>(inc_obj) || py::isinstance<py::list>(inc_obj) || py::isinstance<py::tuple>(inc_obj)) {
+                for (auto item : inc_obj) {
+                    include_fields->insert(py::str(item).cast<std::string>());
+                }
+            } else if (py::isinstance<py::dict>(inc_obj)) {
+                for (auto item : inc_obj.cast<py::dict>()) {
+                    include_fields->insert(py::str(item.first).cast<std::string>());
+                }
+            }
+        }
+        
+        if (exclude && !exclude->is_none()) {
+            exclude_fields = std::unordered_set<std::string>();
+            py::object exc_obj = *exclude;
+            if (py::isinstance<py::set>(exc_obj) || py::isinstance<py::list>(exc_obj) || py::isinstance<py::tuple>(exc_obj)) {
+                for (auto item : exc_obj) {
+                    exclude_fields->insert(py::str(item).cast<std::string>());
+                }
+            } else if (py::isinstance<py::dict>(exc_obj)) {
+                for (auto item : exc_obj.cast<py::dict>()) {
+                    exclude_fields->insert(py::str(item.first).cast<std::string>());
+                }
+            }
+        }
         
         bool e = ea.value_or(false);
-        std::string json = ser_->to_json(value, e, -1, round_trip);
+        std::string json = ser_->to_json(value, e, -1, round_trip, include_fields, exclude_fields, use_alias, exclude_unset, exclude_defaults);
         return py::bytes(json);
     }
 

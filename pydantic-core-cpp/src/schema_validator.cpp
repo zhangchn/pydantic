@@ -483,6 +483,22 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
                 for (const auto& [key, fv] : mfo->fields) {
                     out[py::str(key)] = result_to_python_with_type(fv.value, fv.type_name);
                 }
+                // Attach __pydantic_fields_set__ for exclude_unset support
+                py::set fields_set;
+                for (const auto& fname : mfo->fields_set) {
+                    fields_set.add(py::str(fname));
+                }
+                out[py::str("__pydantic_fields_set__")] = std::move(fields_set);
+
+                // Attach __pydantic_defaults__ for exclude_defaults support
+                py::dict defaults_dict;
+                for (const auto& [key, fv] : mfo->fields) {
+                    if (mfo->fields_set.find(key) == mfo->fields_set.end()) {
+                        defaults_dict[py::str(key)] = result_to_python_with_type(fv.value, fv.type_name);
+                    }
+                }
+                out[py::str("__pydantic_defaults__")] = std::move(defaults_dict);
+
                 for (const auto& [key, fv] : mfo->extra) {
                     out[py::str(key)] = result_to_python_with_type(fv.value, fv.type_name);
                 }
@@ -495,6 +511,16 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
     if (type_name == "url") {
         try {
             auto* url_ptr = static_cast<Url*>(value.get());
+            if (url_ptr) {
+                return py::cast(*url_ptr);
+            }
+        } catch (...) {}
+    }
+
+    // MultiHostUrl type
+    if (type_name == "multi-host-url") {
+        try {
+            auto* url_ptr = static_cast<MultiHostUrl*>(value.get());
             if (url_ptr) {
                 return py::cast(*url_ptr);
             }
@@ -526,9 +552,29 @@ py::object SchemaValidator::result_to_python(const std::shared_ptr<void>& result
                     py::object py_val = result_to_python_with_type(fv.value, fv.type_name);
                     out[py::str(key)] = py_val;
                 }
+                // Attach __pydantic_fields_set__ for exclude_unset support
+                py::set fields_set;
+                for (const auto& fname : mfo->fields_set) {
+                    fields_set.add(py::str(fname));
+                }
+                out[py::str("__pydantic_fields_set__")] = std::move(fields_set);
+
+                // Attach __pydantic_defaults__ for exclude_defaults support
+                // (fields NOT in fields_set that have defaults)
+                py::dict defaults_dict;
+                for (const auto& [key, fv] : mfo->fields) {
+                    if (mfo->fields_set.find(key) == mfo->fields_set.end()) {
+                        // This field was NOT in the input — it came from a default
+                        defaults_dict[py::str(key)] = result_to_python_with_type(fv.value, fv.type_name);
+                    }
+                }
+                out[py::str("__pydantic_defaults__")] = std::move(defaults_dict);
+
+                // Include extra fields
                 for (const auto& [key, fv] : mfo->extra) {
                     out[py::str(key)] = result_to_python_with_type(fv.value, fv.type_name);
                 }
+
                 return std::move(out);
             }
         } catch (...) {}
