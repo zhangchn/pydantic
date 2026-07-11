@@ -41,34 +41,42 @@ class SchemaValidator:
     def __init__(self, schema, config=None, _use_prebuilt=True):
         self._schema = schema
         self._config = config
+        # Extract & remove model class references BEFORE JSON serialization
+        self._model_classes = self._extract_model_classes(schema)
+
+        import json as _json
+
+        def _default_serializer(o):
+            """Handle non-JSON-serializable objects often embedded by pydantic."""
+            name = f'{type(o).__module__}.{type(o).__qualname__}'
+            return f'<{name}>'
+
         # Convert dict to JSON string if needed
         if isinstance(schema, dict):
-            import json
-            schema_str = json.dumps(schema)
+            schema_str = _json.dumps(schema, default=_default_serializer)
         elif isinstance(schema, str):
             schema_str = schema
         elif schema is None:
             schema_str = ""
         else:
-            import json
-            schema_str = json.dumps(schema)
+            schema_str = _json.dumps(schema, default=_default_serializer)
         if isinstance(config, dict):
-            import json
-            config_str = json.dumps(config)
+            config_str = _json.dumps(config, default=_default_serializer)
         elif config is None:
             config_str = None
         elif isinstance(config, str):
             config_str = config
         else:
-            import json
-            config_str = json.dumps(config)
+            config_str = _json.dumps(config, default=_default_serializer)
         self._base = _SchemaValidatorBase(schema_str, config_str, _use_prebuilt)
-        # Build a map of definition refs to model classes for recursive model construction
-        self._model_classes = self._extract_model_classes(schema)
 
     @staticmethod
     def _extract_model_classes(schema):
-        """Extract a map of definition-ref -> model class from the schema."""
+        """Extract and remove model class references from the schema dict.
+
+        Pydantic's schema generation embeds Python class objects under ``cls``
+        keys. These must be removed before JSON serialization.
+        """
         classes = {}
         if not isinstance(schema, dict):
             return classes
@@ -78,16 +86,19 @@ class SchemaValidator:
             for defn in schema.get("definitions", []):
                 ref = defn.get("ref")
                 if ref and defn.get("type") == "model":
-                    cls = defn.get("cls")
+                    cls = defn.pop("cls", None)
                     if cls is not None and callable(cls):
                         classes[ref] = cls
-        
+
         # Handle direct model schema
         if schema.get("type") == "model":
-            cls = schema.get("cls")
+            cls = schema.pop("cls", None)
             if cls is not None and callable(cls):
                 # Use a special key for the top-level model
                 classes["__root__"] = cls
+
+        # Recursively clean any remaining nested cls keys
+        _schema_clean_cls_keys(schema)
 
         return classes
 
@@ -285,6 +296,18 @@ class SchemaValidator:
 
     def __repr__(self):
         return self._base.__repr__()
+
+
+def _schema_clean_cls_keys(d):
+    """Recursively remove all ``cls`` keys from schema dicts."""
+    if isinstance(d, dict):
+        d.pop("cls", None)
+        for v in d.values():
+            _schema_clean_cls_keys(v)
+    elif isinstance(d, list):
+        for item in d:
+            _schema_clean_cls_keys(item)
+
 
 # ============================================================================
 # 2. C++ symbols that may be conditionally available
