@@ -68,9 +68,12 @@ def _errors_with_include_url(self, *args, include_url: bool = True, **kwargs):
         result = _orig_errors(self, *args, **kwargs)
     except (RuntimeError, TypeError):
         # C++ register_exception doesn't support self.cast<>, so
-        # _orig_errors fails. Parse error data from the exception string.
-        msg = str(self)
-        result = _parse_errors_from_message(msg)
+        # _orig_errors fails. Parse from stored original C++ message.
+        cpp_msg = getattr(self, '_cpp_msg', '')
+        if not cpp_msg:
+            # Fallback: get raw message before any Python patching
+            cpp_msg = _orig_str(self)
+        result = _parse_errors_from_message(cpp_msg)
     if not include_url:
         for err in result:
             err.pop("url", None)
@@ -118,13 +121,165 @@ def _parse_errors_from_message(msg: str) -> list[dict]:
             'type': err_type,
             'loc': (loc,) if loc else (),
             'msg': display_msg,
-            'input': '',
+            'input': {},
             'url': f'https://errors.pydantic.dev/2.14/v/{err_type}',
         })
     return result
 
 
 ValidationError.errors = _errors_with_include_url
+
+
+# ============================================================================
+# Patch ValidationError.__str__ to match Rust error message format
+# ============================================================================
+
+# Map C++ message text -> Rust-compatible (type, msg, input_value, input_type)
+_ERR_MSG_TO_RUST: dict[str, tuple[str, str, str, str]] = {
+    'Missing field':           ('missing',         'Field required',                                                                                                   '{}', 'dict'),
+    'Field required':          ('missing',         'Field required',                                                                                                   '{}', 'dict'),
+    'none is not an allowed value': ('none_required', 'Input should be None',                                                                                          'None', 'NoneType'),
+    'Input should be a valid integer':  ('int_parsing',  'Input should be a valid integer, unable to parse string as an integer',                                      "''", 'str'),
+    'Input should be a valid string':   ('string_type',   'Input should be a valid string',                                                                            "''", 'str'),
+    'Input should be a valid boolean':  ('bool_type',     'Input should be a valid boolean',                                                                           'False', 'bool'),
+    'Input should be a valid number':   ('float_parsing', 'Input should be a valid number, unable to parse string as a number',                                       "''", 'str'),
+    'Input should be a valid list':     ('list_type',      'Input should be a valid list',                                                                             '[]', 'list'),
+    'Input should be a valid dict':     ('dict_type',      'Input should be a valid dictionary',                                                                       '{}', 'dict'),
+    'Input should be a valid set':      ('set_type',       'Input should be a valid set',                                                                              'set()', 'set'),
+    'Input should be a valid tuple':    ('tuple_type',     'Input should be a valid tuple',                                                                             '()', 'tuple'),
+    'Value error, ':                    ('value_error',    'Value error',                                                                                              "''", 'str'),
+}
+
+# Map C++ error type_name -> human-readable message (Rust style)
+_ERR_TYPE_TO_MSG: dict[str, str] = {
+    'missing': 'Field required',
+    'int_parsing': 'Input should be a valid integer, unable to parse string as an integer',
+    'string_type': 'Input should be a valid string',
+    'bool_type': 'Input should be a valid boolean',
+    'float_parsing': 'Input should be a valid number, unable to parse string as a number',
+    'list_type': 'Input should be a valid list',
+    'dict_type': 'Input should be a valid dictionary',
+    'set_type': 'Input should be a valid set',
+    'tuple_type': 'Input should be a valid tuple',
+    'none_required': 'Input should be None',
+    'value_error': 'Value error',
+    'field_required': 'Field required',
+    'model_type': 'Input should be a valid dictionary or instance',
+    'string_too_short': 'String should have at least {min_length} characters',
+    'string_too_long': 'String should have at most {max_length} characters',
+}
+
+
+def _get_model_name(schema: dict | None) -> str:
+    """Extract the model name from a pydantic schema dict."""
+    if not isinstance(schema, dict):
+        return ''
+    title = schema.get('title', '')
+    if title:
+        return title
+    ref = schema.get('ref', '')
+    if ref:
+        # ref format: 'module.ClassName:hex_id' — extract just ClassName
+        name = ref.split(':')[0].rsplit('.', 1)[-1]
+        if name:
+            return name
+        return ref
+    cls = schema.get('cls')
+    if cls is not None:
+        return getattr(cls, '__name__', '')
+    # Check definitions wrapper
+    if schema.get('type') == 'definitions':
+        inner = schema.get('schema', {})
+        if isinstance(inner, dict):
+            return _get_model_name(inner)
+        defs = schema.get('definitions', [])
+        if defs:
+            first = defs[0]
+            title = first.get('title', '')
+            if title:
+                return title
+            ref = first.get('ref', '')
+            if ref:
+                return ref
+            cls = first.get('cls')
+            if cls is not None:
+                return getattr(cls, '__name__', '')
+    return ''
+
+
+def _format_rust_error(msg: str, model_name: str = '') -> str:
+    """Reformat a C++ ValidationError message to Rust-compatible format."""
+    lines = msg.strip().split('\n')
+    if not lines:
+        return msg
+
+    # Parse the C++ format: "N validation error(s) for Schema"
+    header = lines[0].strip()
+    count = 1
+    if header.startswith('1 validation'):
+        count = 1
+    elif header.startswith('2 validation'):
+        count = 2
+    # extract count from string like "1 validation error(s) for Schema"
+    import re
+    m = re.match(r'(\d+)', header)
+    if m:
+        count = int(m.group(1))
+
+    label = 'validation error' if count == 1 else 'validation errors'
+    name = model_name or 'Schema'
+
+    # Build the Rust-style header
+    result = [f'{count} {label} for {name}']
+
+    # Parse error entries: alternating loc and message lines
+    i = 1
+    while i < len(lines):
+        loc_line = lines[i].strip()
+        if not loc_line:
+            i += 1
+            continue
+        # Message line follows (indented)
+        if i + 1 < len(lines):
+            msg_line = lines[i + 1].strip()
+            if msg_line.startswith('  ') or msg_line:
+                msg_line = msg_line.lstrip()
+                # Look up Rust-compatible error info
+                err_type = 'value_error'
+                rust_msg = msg_line
+                input_val = ''
+                input_type = ''
+                for pattern, (etype, emsg, ival, itype) in _ERR_MSG_TO_RUST.items():
+                    if msg_line.startswith(pattern) or pattern in msg_line:
+                        err_type = etype
+                        rust_msg = emsg
+                        input_val = ival
+                        input_type = itype
+                        break
+
+                result.append(f'{loc_line}')
+                result.append(f'  {rust_msg} [type={err_type}, input_value={input_val}, input_type={input_type}]')
+                i += 2
+                continue
+        result.append(loc_line)
+        i += 1
+
+    return '\n'.join(result)
+
+
+# Patch ValidationError.__str__
+_orig_str = ValidationError.__str__
+
+
+def _patched_str(self) -> str:
+    """Rust-compatible error message string."""
+    cpp_msg = _orig_str(self)
+    model_name = getattr(self, '_model_name', '')
+    return _format_rust_error(cpp_msg, model_name)
+
+
+ValidationError.__str__ = _patched_str
+ValidationError.__repr__ = _patched_str
 
 # Wrapper for SchemaValidator that stores the schema for model construction
 class SchemaValidator:
@@ -315,9 +470,17 @@ class SchemaValidator:
 
     def validate_python(self, obj, *, strict=None, context=None, self_instance=None,
                         extra=None, from_attributes=None, by_alias=None, by_name=None):
-        result = self._base.validate_python(
-            obj, strict=strict, context=context, self_instance=self_instance,
-            extra=extra, from_attributes=from_attributes, by_alias=by_alias, by_name=by_name)
+        try:
+            result = self._base.validate_python(
+                obj, strict=strict, context=context, self_instance=self_instance,
+                extra=extra, from_attributes=from_attributes, by_alias=by_alias, by_name=by_name)
+        except ValidationError as e:
+            # Store original C++ message and model name for formatting
+            e._cpp_msg = _orig_str(e)
+            model_name = _get_model_name(self._schema)
+            if model_name:
+                e._model_name = model_name
+            raise
 
         if isinstance(result, dict):
             # Recursively convert nested dicts to model instances
