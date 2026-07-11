@@ -17,10 +17,19 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        // Accept any input - return a marker value
-        return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
+        // Accept any input - return a string representation.
+        // as_error_value().repr adds surrounding quotes for strings
+        // (e.g. "'foobar'"), so strip them if present.
+        std::string repr = input.as_error_value().repr;
+        // Strip surrounding single quotes added by as_error_value
+        if (repr.size() >= 2 && repr.front() == '\'' && repr.back() == '\'') {
+            repr = repr.substr(1, repr.size() - 2);
+        }
+        return ValResult<std::shared_ptr<void>>(
+            std::make_shared<std::string>(std::move(repr))
+        );
     }
-    
+
     std::string name() const override { return "any"; }
 };
 

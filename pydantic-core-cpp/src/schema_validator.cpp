@@ -419,6 +419,9 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
     // For "nullable", try all types since we don't know the inner type
     bool try_all = (type_name == "nullable");
 
+    // For "any", try specific type casts based on actual value content
+    bool is_any = (type_name == "any");
+
     // Helper: match base type name, including constrained- variants
     auto matches_type = [&](const std::string& base) -> bool {
         return type_name == base || type_name == ("constrained-" + base) ||
@@ -525,6 +528,25 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
                 return py::cast(*url_ptr);
             }
         } catch (...) {}
+    }
+
+    // "any" type — try all casts (numbers before strings)
+    if (is_any) {
+        // AnyValidator stores values as string*, parse the string
+        // to determine the correct Python type
+        try {
+            auto* s = static_cast<std::string*>(value.get());
+            if (s) {
+                std::string str_val = *s;
+                if (str_val == "null") return py::none();
+                if (str_val == "true") return py::bool_(true);
+                if (str_val == "false") return py::bool_(false);
+                try { size_t p = 0; int iv = std::stoi(str_val, &p); if (p == str_val.length()) return py::int_(iv); } catch (...) {}
+                try { double dv = std::stod(str_val); return py::float_(dv); } catch (...) {}
+                return py::str(str_val);
+            }
+        } catch (...) {}
+        return py::none();
     }
 
     // Fallback

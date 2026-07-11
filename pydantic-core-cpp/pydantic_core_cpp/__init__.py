@@ -36,6 +36,17 @@ from ._pydantic_core_cpp import (
     to_jsonable_python,
 )
 
+from typing import TypedDict as _TypedDict
+
+
+class MultiHostHost(_TypedDict):
+    """A host part of a multi-host URL."""
+    username: str | None
+    password: str | None
+    host: str | None
+    port: int | None
+
+
 # Patch ValidationError.errors() to support include_url parameter
 # (pybind11 register_exception doesn't support C++ cast for custom methods)
 _orig_errors = ValidationError.errors
