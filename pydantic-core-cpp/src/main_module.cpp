@@ -1172,7 +1172,7 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
         .def_property_readonly("path", &Url::path)
         .def_property_readonly("query", &Url::query)
         .def_property_readonly("fragment", &Url::fragment)
-        .def_property_readonly("user", [](const Url& u) -> py::object {
+        .def_property_readonly("username", [](const Url& u) -> py::object {
             auto user = u.user();
             return user && !user->empty() ? py::cast(*user) : py::none();
         })
@@ -1210,7 +1210,7 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
         .def_property_readonly("path", &MultiHostUrl::path)
         .def_property_readonly("query", &MultiHostUrl::query)
         .def_property_readonly("fragment", &MultiHostUrl::fragment)
-        .def_property_readonly("user", [](const MultiHostUrl& u) -> py::object {
+        .def_property_readonly("username", [](const MultiHostUrl& u) -> py::object {
             auto user = u.user();
             return user && !user->empty() ? py::cast(*user) : py::none();
         })

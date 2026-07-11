@@ -19,6 +19,7 @@ from ._pydantic_core_cpp import (
     ExtraBehavior,
     InfNanMode,
     InputType,
+    MultiHostUrl,
     PydanticOmit,
     PydanticUseDefault,
     SchemaError,
@@ -27,6 +28,7 @@ from ._pydantic_core_cpp import (
     SerializationInfo,
     StringCacheMode,
     TemporalMode,
+    Url,
     ValidationError,
     __version__,
     to_json,
@@ -315,10 +317,8 @@ MISSING = Sentinel('MISSING')
 # These are resolved lazily via __getattr__ to avoid importing
 # the Rust backend at module load time.
 _RUST_FALLBACKS = frozenset({
-    # Data types (from native extension)
-    'MultiHostUrl',
+    # Timezone info (from native extension, not used by pydantic directly)
     'TzInfo',
-    'Url',
     # Serializer (from native extension)
     'SchemaSerializer',
 })
