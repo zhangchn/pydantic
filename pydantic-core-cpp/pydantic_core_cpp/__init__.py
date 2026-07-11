@@ -317,8 +317,6 @@ MISSING = Sentinel('MISSING')
 # These are resolved lazily via __getattr__ to avoid importing
 # the Rust backend at module load time.
 _RUST_FALLBACKS = frozenset({
-    # Timezone info (from native extension, not used by pydantic directly)
-    'TzInfo',
     # Serializer (from native extension)
     'SchemaSerializer',
 })
@@ -649,6 +647,68 @@ class PydanticSerializationUnexpectedValue(PydanticSerializationError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
+
+
+import datetime as _datetime
+
+
+class TzInfo(_datetime.tzinfo):
+    """A fixed-offset timezone implementation.
+
+    Matches Rust's TzInfo pyclass. Provides a ``datetime.tzinfo`` subclass
+    with a fixed offset from UTC, similar to ``datetime.timezone`` but with
+    custom formatting (e.g. ``+05:30``, ``UTC``).
+
+    Arguments:
+        seconds: The offset from UTC in seconds. Defaults to 0.0 (UTC).
+    """
+
+    _seconds: int
+
+    def __init__(self, seconds: float = 0.0) -> None:
+        self._seconds = int(seconds)
+
+    def utcoffset(self, dt: _datetime.datetime | None) -> _datetime.timedelta | None:
+        """Return the fixed offset from UTC."""
+        return _datetime.timedelta(seconds=self._seconds)
+
+    def tzname(self, dt: _datetime.datetime | None) -> str | None:
+        """Return the timezone name."""
+        return str(self)
+
+    def dst(self, dt: _datetime.datetime | None) -> _datetime.timedelta | None:
+        """Return the DST adjustment (always None for fixed offset)."""
+        return None
+
+    def fromutc(self, dt: _datetime.datetime) -> _datetime.datetime:
+        """Return an equivalent datetime in the local timezone."""
+        return dt + self.utcoffset(None)  # type: ignore[operator]
+
+    def __repr__(self) -> str:
+        return f'TzInfo({self._seconds})'
+
+    def __str__(self) -> str:
+        seconds = self._seconds
+        if seconds == 0:
+            return 'UTC'
+        sign = '+' if seconds >= 0 else '-'
+        mins, secs = divmod(abs(seconds), 60)
+        hours, mins = divmod(mins, 60)
+        result = f'{sign}{hours:02d}:{mins:02d}'
+        if secs != 0:
+            result += f':{secs:02d}'
+        return result
+
+    def __hash__(self) -> int:
+        return hash(self._seconds)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, TzInfo):
+            return self._seconds == other._seconds
+        return NotImplemented
+
+    def __deepcopy__(self, memo: dict) -> 'TzInfo':
+        return TzInfo(self._seconds)
 
 
 # ============================================================================
