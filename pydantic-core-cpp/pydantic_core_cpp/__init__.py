@@ -23,6 +23,7 @@ from ._pydantic_core_cpp import (
     PydanticOmit,
     PydanticUseDefault,
     SchemaError,
+    SchemaSerializer,
     SchemaValidator as _SchemaValidatorBase,
     SerMode,
     SerializationInfo,
@@ -316,10 +317,7 @@ MISSING = Sentinel('MISSING')
 # Symbols implemented in Rust but not yet in C++.
 # These are resolved lazily via __getattr__ to avoid importing
 # the Rust backend at module load time.
-_RUST_FALLBACKS = frozenset({
-    # Serializer (from native extension)
-    'SchemaSerializer',
-})
+_RUST_FALLBACKS: frozenset[str] = frozenset()
 
 # Symbols that come from core_schema rather than the native extension
 _CORE_SCHEMA_FALLBACKS = frozenset({
