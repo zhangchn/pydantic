@@ -77,6 +77,9 @@ def _errors_with_include_url(self, *args, include_url: bool = True, **kwargs):
     """
     try:
         result = _orig_errors(self, *args, **kwargs)
+        # C++ register_exception may silently return empty list (cast failure)
+        if not result:
+            raise RuntimeError("C++ errors() returned empty list, likely cast failure")
     except (RuntimeError, TypeError):
         # C++ register_exception doesn't support self.cast<>, so
         # _orig_errors fails. Parse from stored original C++ message.
@@ -97,44 +100,68 @@ def _parse_errors_from_message(msg: str) -> list[dict]:
     Format::
         N validation error(s) for <title>
         <loc>
-          <message>
+          <msg> [type=<type>, input_value=<input>]
         <loc2>
-          <message2>
+          <msg2> [type=<type2>, input_value=<input2>]
     """
+    import re as _re
     result: list[dict] = []
     lines = msg.split('\n')
     if not lines:
         return result
 
-    for i in range(1, len(lines) - 1):
-        loc_line = lines[i].strip()
-        msg_line = lines[i + 1].strip() if i + 1 < len(lines) else ''
-        if not loc_line or not msg_line:
+    # Type name mapping: C++ -> Rust-compatible
+    _TYPE_MAP = {
+        'float_type': 'float_parsing',
+        'int_type': 'int_parsing',
+        'bool_type': 'bool_parsing',
+        'model_type': 'model_type',
+        'url_type': 'url_parsing',
+        'url_scheme': 'url_scheme',
+        'url_host': 'url_host',
+        'value_error': 'value_error',
+        'missing': 'missing',
+    }
+
+    i = 1
+    while i < len(lines):
+        line = lines[i].strip()
+        i += 1
+        if not line:
             continue
-        if msg_line.startswith('['):
-            # Location is embedded in the message like "[loc] msg"
-            loc = loc_line
-            msg_text = msg_line
-        else:
-            loc = loc_line
-            msg_text = msg_line
 
-        # Look up error type from message text
-        err_type = 'value_error'
-        display_msg = msg_text
-        for pattern, (etype, emsg) in _ERROR_MSG_MAP.items():
-            if pattern in msg_text or msg_text.startswith(pattern):
-                err_type = etype
-                display_msg = emsg
-                break
+        # Check if this line has a [type=...] suffix
+        match = _re.search(r'\[type=([^,\]]+)(?:,\s*input_value=([^\]]*))?\]$', line)
+        if match:
+            # Single-line error: just the message (no location or location on previous line)
+            err_type = _TYPE_MAP.get(match.group(1), match.group(1))
+            input_value = (match.group(2) or '').strip("'")
+            display_msg = line[:match.start()].strip()
+            result.append({
+                'type': err_type,
+                'loc': (),
+                'msg': display_msg,
+                'input': input_value,
+                'url': f'https://errors.pydantic.dev/2.14/v/{err_type}',
+            })
+        elif i < len(lines):
+            # Check if NEXT line is a message with [type=...]
+            next_line = lines[i].strip()
+            next_match = _re.search(r'\[type=([^,\]]+)(?:,\s*input_value=([^\]]*))?\]$', next_line)
+            if next_match:
+                # Two-line format: loc_line, then msg_line
+                err_type = _TYPE_MAP.get(next_match.group(1), next_match.group(1))
+                input_value = (next_match.group(2) or '').strip("'")
+                display_msg = next_line[:next_match.start()].strip()
+                result.append({
+                    'type': err_type,
+                    'loc': (line,),
+                    'msg': display_msg,
+                    'input': input_value,
+                    'url': f'https://errors.pydantic.dev/2.14/v/{err_type}',
+                })
+                i += 1
 
-        result.append({
-            'type': err_type,
-            'loc': (loc,) if loc else (),
-            'msg': display_msg,
-            'input': {},
-            'url': f'https://errors.pydantic.dev/2.14/v/{err_type}',
-        })
     return result
 
 

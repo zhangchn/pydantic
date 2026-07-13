@@ -19,6 +19,7 @@ namespace pydantic_core {
 class PythonInput;
 class JsonInput;
 class StringInput;
+class ValidationState;
 
 // Either types - union types for validated values
 // These represent the different possible representations of a value
@@ -179,8 +180,8 @@ public:
 };
 
 // Helper to create type error
-inline ValError type_error(ErrorType::Kind kind, const Input& input) {
-    return ValError::line_error(ErrorType(kind), Location(), input.as_error_value().repr);
+inline ValError type_error(ErrorType::Kind kind, const Input& input, const Location& loc = Location()) {
+    return ValError::line_error(ErrorType(kind), loc, input.as_error_value().repr);
 }
 
 } // namespace pydantic_core

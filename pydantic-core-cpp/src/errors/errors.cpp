@@ -19,7 +19,13 @@ ValidationError::ValidationError(const std::string& title, InputType input_type,
     std::ostringstream oss;
     oss << error_count() << " validation error(s) for " << title_ << "\n";
     for (const auto& err : errors_) {
-        oss << err.loc << "\n  " << err.msg << "\n";
+        if (!err.loc.empty()) {
+            oss << err.loc << "\n  ";
+        }
+        oss << err.msg
+            << " [type=" << err.type
+            << ", input_value=" << err.input
+            << "]\n";
     }
     what_message_ = oss.str();
 }
