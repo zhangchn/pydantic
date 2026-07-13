@@ -416,8 +416,8 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
     }
 
     // Use type_name to determine how to cast
-    // For "nullable", try all types since we don't know the inner type
-    bool try_all = (type_name == "nullable");
+    // For "nullable" and "function-after", try all types since we don't know the inner type
+    bool try_all = (type_name == "nullable" || type_name == "function-after");
 
     // For "any", try specific type casts based on actual value content
     bool is_any = (type_name == "any");

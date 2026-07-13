@@ -313,6 +313,12 @@ def _extract_enum_classes(schema: dict) -> dict[str, type]:
                     if isinstance(m, _Enum):
                         qualified_name = f'{type(m).__qualname__}.{m.name}'
                         enum_classes[qualified_name] = type(m)
+                        # Also store value -> class mapping for value-based matching
+                        value_key = str(m.value)
+                        if value_key not in enum_classes:
+                            enum_classes[value_key] = type(m)
+                        # Map value -> qualified_name for reverse lookup
+                        enum_classes[f'__value__:{value_key}'] = qualified_name
         for key, value in list(node.items()):
             if isinstance(value, dict):
                 _walk(value)
@@ -348,6 +354,9 @@ def _convert_enum_members(schema: dict) -> None:
                     # Enum member: use QualifiedName.name format
                     qualified_name = f'{type(m).__qualname__}.{m.name}'
                     converted.append(qualified_name)
+                    # Also add the raw value so both 'Foo.FOO' and 'foo' match
+                    if not isinstance(m.value, _Enum):
+                        converted.append(str(m.value))
                 else:
                     converted.append(m)
             schema['members'] = converted
@@ -454,18 +463,36 @@ class SchemaValidator:
             inner = schema.get("schema", {})
             return self._dict_to_model(data, inner)
 
+        # Unwrap function-wrapper types (function-before, function-after, function-wrap)
+        # These wrap the actual validator schema with a Python function
+        if schema.get("type") in ("function-after", "function-before", "function-wrap"):
+            inner = schema.get("schema", {})
+            if isinstance(inner, dict):
+                return self._dict_to_model(data, inner)
+            return data
+
         # Convert enum strings back to Python Enum instances
         if schema.get("type") == "enum":
             if isinstance(data, str) and self._enum_classes:
-                # data is e.g. "FooEnum.foo" — look up in _enum_classes
+                # Check if data is a qualified name like "Foo.FOO"
                 enum_cls = self._enum_classes.get(data)
-                if enum_cls is not None:
-                    # Extract member name after the dot
+                if enum_cls is not None and isinstance(enum_cls, type) and hasattr(enum_cls, '__members__'):
                     member_name = data.rsplit('.', 1)[-1]
                     try:
                         return enum_cls[member_name]
                     except (KeyError, TypeError):
                         pass
+                # Check if data is a value like "foo" — look up the qualified name first
+                value_key = f'__value__:{data}'
+                qualified_name = self._enum_classes.get(value_key)
+                if qualified_name:
+                    member_name = qualified_name.rsplit('.', 1)[-1]
+                    enum_cls = self._enum_classes.get(qualified_name)
+                    if enum_cls is not None and isinstance(enum_cls, type) and hasattr(enum_cls, '__members__'):
+                        try:
+                            return enum_cls[member_name]
+                        except (KeyError, TypeError):
+                            pass
 
         if schema.get("type") == "definitions":
             inner = schema.get("schema", {})
@@ -557,10 +584,17 @@ class SchemaValidator:
         for field_name, field_def in fields.items():
             if field_name not in result:
                 continue
-            
+
             field_schema = field_def.get("schema", {})
             if isinstance(field_schema, dict):
-                result[field_name] = self._dict_to_model(result[field_name], field_schema)
+                val = self._dict_to_model(result[field_name], field_schema)
+                # For function-after wrapping enum (use_enum_values), extract .value
+                if field_schema.get("type") == "function-after":
+                    inner = field_schema.get("schema", {})
+                    if isinstance(inner, dict) and inner.get("type") in ("enum", "literal"):
+                        if hasattr(val, 'value'):
+                            val = val.value
+                result[field_name] = val
 
         return result
 
