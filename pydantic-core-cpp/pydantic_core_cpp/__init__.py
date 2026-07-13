@@ -293,6 +293,77 @@ ValidationError.__str__ = _patched_str
 ValidationError.__repr__ = _patched_str
 
 # Wrapper for SchemaValidator that stores the schema for model construction
+def _extract_enum_classes(schema: dict) -> dict[str, type]:
+    """Extract Python Enum classes from enum-type schema nodes.
+
+    Returns a mapping ``{QualifiedName.name: EnumClass}`` for each enum member,
+    so that ``"FooEnum.foo"`` can be resolved back to ``FooEnum.foo`` later.
+    """
+    from enum import Enum as _Enum
+
+    enum_classes: dict[str, type] = {}
+
+    def _walk(node):
+        if not isinstance(node, dict):
+            return
+        if node.get('type') == 'enum':
+            members = node.get('members')
+            if isinstance(members, (list, tuple)):
+                for m in members:
+                    if isinstance(m, _Enum):
+                        qualified_name = f'{type(m).__qualname__}.{m.name}'
+                        enum_classes[qualified_name] = type(m)
+        for key, value in list(node.items()):
+            if isinstance(value, dict):
+                _walk(value)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        _walk(item)
+
+    _walk(schema)
+    return enum_classes
+
+
+def _convert_enum_members(schema: dict) -> None:
+    """Recursively convert Enum member objects in schema to their string names.
+
+    Pydantic's schema generation embeds Python Enum member objects (e.g.,
+    ``FooEnum.foo``) in the ``members`` list of enum-type schemas. These must
+    be converted to their qualified name representation (e.g. ``"FooEnum.foo"``)
+    before JSON serialization.
+    """
+    from enum import Enum as _Enum
+
+    if not isinstance(schema, dict):
+        return
+
+    # Handle this node
+    if schema.get('type') == 'enum':
+        members = schema.get('members')
+        if isinstance(members, (list, tuple)):
+            converted = []
+            for m in members:
+                if isinstance(m, _Enum):
+                    # Enum member: use QualifiedName.name format
+                    qualified_name = f'{type(m).__qualname__}.{m.name}'
+                    converted.append(qualified_name)
+                else:
+                    converted.append(m)
+            schema['members'] = converted
+
+    # Recurse into nested schema structures
+    for key, value in list(schema.items()):
+        if key == 'members':
+            continue  # Already handled above for enum
+        if isinstance(value, dict):
+            _convert_enum_members(value)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    _convert_enum_members(item)
+
+
 class SchemaValidator:
     def __init__(self, schema, config=None, _use_prebuilt=True):
         self._schema = schema
@@ -301,6 +372,11 @@ class SchemaValidator:
         self._model_classes = self._extract_model_classes(schema)
 
         import json as _json
+
+        # Extract enum classes BEFORE converting members to strings
+        self._enum_classes = _extract_enum_classes(schema)
+        # Convert enum member objects in schema to their string names
+        _convert_enum_members(schema)
 
         def _default_serializer(o):
             """Handle non-JSON-serializable objects often embedded by pydantic."""
@@ -378,6 +454,19 @@ class SchemaValidator:
             inner = schema.get("schema", {})
             return self._dict_to_model(data, inner)
 
+        # Convert enum strings back to Python Enum instances
+        if schema.get("type") == "enum":
+            if isinstance(data, str) and self._enum_classes:
+                # data is e.g. "FooEnum.foo" — look up in _enum_classes
+                enum_cls = self._enum_classes.get(data)
+                if enum_cls is not None:
+                    # Extract member name after the dot
+                    member_name = data.rsplit('.', 1)[-1]
+                    try:
+                        return enum_cls[member_name]
+                    except (KeyError, TypeError):
+                        pass
+
         if schema.get("type") == "definitions":
             inner = schema.get("schema", {})
             if inner.get("type") == "definition-ref":
@@ -416,12 +505,12 @@ class SchemaValidator:
 
         if schema.get("type") == "model":
             cls = schema.get("cls")
+            inner_schema = schema.get("schema", {})
+            if isinstance(inner_schema, dict) and inner_schema.get("type") in ("model-fields", "typed-dict"):
+                data = self._process_model_fields(data, inner_schema)
             if cls is not None and callable(cls):
                 # Direct model schema (not in definitions) — use schema's own inner schema
                 instance = object.__new__(cls)
-                inner_schema = schema.get("schema", {})
-                if isinstance(inner_schema, dict) and inner_schema.get("type") in ("model-fields", "typed-dict"):
-                    data = self._process_model_fields(data, inner_schema)
                 instance.__dict__ = data
                 object.__setattr__(instance, '__pydantic_private__', {})
                 object.__setattr__(instance, '__pydantic_extra__', None)

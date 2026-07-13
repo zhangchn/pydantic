@@ -398,7 +398,18 @@ static std::shared_ptr<Validator> build_from_element(
         return std::make_shared<LiteralValidator>();
     }
 
-    if (type == "enum") return std::make_shared<EnumValidator>();
+    if (type == "enum") {
+        std::unordered_set<std::string> members;
+        auto members_elem = elem["members"];
+        if (!members_elem.error() && members_elem.value().is_array()) {
+            for (auto m : members_elem.value().get_array().value()) {
+                if (m.is_string()) {
+                    members.insert(std::string(m.get_string().value()));
+                }
+            }
+        }
+        return std::make_shared<EnumValidator>(std::move(members));
+    }
     if (type == "date") return std::make_shared<DateValidator>();
     if (type == "time") return std::make_shared<TimeValidator>();
     if (type == "datetime") return std::make_shared<DatetimeValidator>();

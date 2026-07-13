@@ -549,6 +549,17 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
         return py::none();
     }
 
+    // "enum" type — return the matched string value
+    if (type_name == "enum" || type_name == "enum-constrained") {
+        try {
+            auto* s = static_cast<std::string*>(value.get());
+            if (s) {
+                return py::str(*s);
+            }
+        } catch (...) {}
+        return py::none();
+    }
+
     // Fallback
     return py::none();
 }

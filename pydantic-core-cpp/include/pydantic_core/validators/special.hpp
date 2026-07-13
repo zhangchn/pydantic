@@ -367,7 +367,7 @@ public:
         if (str_result.is_err()) {
             return str_result.error();
         }
-        const auto& es = str_result.value().value();
+        auto es = str_result.value().value();
         std::string str_val;
         if (auto* s = std::get_if<std::string>(&es.value)) {
             str_val = *s;
@@ -376,6 +376,17 @@ public:
         }
         if (valid_values_.count(str_val)) {
             return ValResult<std::shared_ptr<void>>(std::make_shared<std::string>(str_val));
+        }
+        // Also try matching against the short form (without class prefix)
+        for (const auto& vv : valid_values_) {
+            auto dot_pos = vv.rfind('.');
+            if (dot_pos != std::string::npos && dot_pos + 1 < vv.size()) {
+                auto short_name = vv.substr(dot_pos + 1);
+                if (short_name == str_val) {
+                    return ValResult<std::shared_ptr<void>>(
+                        std::make_shared<std::string>(vv));
+                }
+            }
         }
         return ValError::line_error(
             PydanticKnownError::enum_error(),
