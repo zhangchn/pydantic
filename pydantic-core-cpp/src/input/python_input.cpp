@@ -250,6 +250,10 @@ ValResult<ValMatch<EitherString>> PythonInput::validate_str(bool strict, bool co
         return ValMatch<EitherString>::exact(EitherString(as_str()));
     }
 
+    if (is_none()) {
+        return type_error(ErrorType::Kind::StringType, *this, this->current_location());
+    }
+
     if (!strict) {
         if (is_bytes()) {
             try {
