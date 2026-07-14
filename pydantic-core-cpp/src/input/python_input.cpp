@@ -255,7 +255,7 @@ ValResult<ValMatch<EitherString>> PythonInput::validate_str(bool strict, bool co
             try {
                 return ValMatch<EitherString>::lax(EitherString(as_str()));
             } catch (...) {
-                return type_error(ErrorType::Kind::StringType, *this);
+                return type_error(ErrorType::Kind::StringType, *this, this->current_location());
             }
         }
 
@@ -268,7 +268,7 @@ ValResult<ValMatch<EitherString>> PythonInput::validate_str(bool strict, bool co
         } catch (...) {}
     }
 
-    return type_error(ErrorType::Kind::StringType, *this);
+    return type_error(ErrorType::Kind::StringType, *this, this->current_location());
 }
 
 ValResult<ValMatch<EitherBytes>> PythonInput::validate_bytes(bool strict) const {
@@ -283,7 +283,7 @@ ValResult<ValMatch<EitherBytes>> PythonInput::validate_bytes(bool strict) const 
         );
     }
 
-    return type_error(ErrorType::Kind::BytesType, *this);
+    return type_error(ErrorType::Kind::BytesType, *this, this->current_location());
 }
 
 ValResult<ValMatch<bool>> PythonInput::validate_bool(bool strict) const {
@@ -308,7 +308,7 @@ ValResult<ValMatch<bool>> PythonInput::validate_bool(bool strict) const {
         }
     }
 
-    return type_error(ErrorType::Kind::BoolType, *this);
+    return type_error(ErrorType::Kind::BoolType, *this, this->current_location());
 }
 
 ValResult<ValMatch<EitherInt>> PythonInput::validate_int(bool strict) const {
@@ -321,7 +321,7 @@ ValResult<ValMatch<EitherInt>> PythonInput::validate_int(bool strict) const {
                 uint64_t v = obj_.cast<uint64_t>();
                 return ValMatch<EitherInt>::exact(EitherInt(v));
             } catch (...) {
-                return type_error(ErrorType::Kind::IntType, *this);
+                return type_error(ErrorType::Kind::IntType, *this, this->current_location());
             }
         }
     }
@@ -333,7 +333,7 @@ ValResult<ValMatch<EitherInt>> PythonInput::validate_int(bool strict) const {
                 int64_t iv = static_cast<int64_t>(v);
                 return ValMatch<EitherInt>::lax(EitherInt(iv));
             }
-            return type_error(ErrorType::Kind::IntType, *this);
+            return type_error(ErrorType::Kind::IntType, *this, this->current_location());
         }
 
         if (is_str()) {
@@ -342,7 +342,7 @@ ValResult<ValMatch<EitherInt>> PythonInput::validate_int(bool strict) const {
                 int64_t v = std::stoll(s);
                 return ValMatch<EitherInt>::lax(EitherInt(v));
             } catch (...) {
-                return type_error(ErrorType::Kind::IntType, *this);
+                return type_error(ErrorType::Kind::IntType, *this, this->current_location());
             }
         }
 
@@ -352,7 +352,7 @@ ValResult<ValMatch<EitherInt>> PythonInput::validate_int(bool strict) const {
         }
     }
 
-    return type_error(ErrorType::Kind::IntType, *this);
+    return type_error(ErrorType::Kind::IntType, *this, this->current_location());
 }
 
 ValResult<ValMatch<EitherFloat>> PythonInput::validate_float(bool strict) const {
@@ -371,7 +371,7 @@ ValResult<ValMatch<EitherFloat>> PythonInput::validate_float(bool strict) const 
                 double v = std::stod(s);
                 return ValMatch<EitherFloat>::lax(EitherFloat(v));
             } catch (...) {
-                return type_error(ErrorType::Kind::FloatType, *this);
+                return type_error(ErrorType::Kind::FloatType, *this, this->current_location());
             }
         }
 
@@ -380,7 +380,7 @@ ValResult<ValMatch<EitherFloat>> PythonInput::validate_float(bool strict) const 
         }
     }
 
-    return type_error(ErrorType::Kind::FloatType, *this);
+    return type_error(ErrorType::Kind::FloatType, *this, this->current_location());
 }
 
 ValResult<std::unique_ptr<ValidatedDict>> PythonInput::validate_dict(bool strict) const {
@@ -396,7 +396,7 @@ ValResult<std::unique_ptr<ValidatedDict>> PythonInput::validate_dict(bool strict
         return result;
     }
 
-    return type_error(ErrorType::Kind::DictType, *this);
+    return type_error(ErrorType::Kind::DictType, *this, this->current_location());
 }
 
 ValResult<std::unique_ptr<ValidatedDict>> PythonInput::validate_dict_from_attributes(bool strict) const {
@@ -423,7 +423,7 @@ ValResult<std::unique_ptr<ValidatedDict>> PythonInput::validate_dict_from_attrib
         } catch (...) {}
     }
     
-    return type_error(ErrorType::Kind::DictType, *this);
+    return type_error(ErrorType::Kind::DictType, *this, this->current_location());
 }
 
 // from_attributes support methods
@@ -538,7 +538,7 @@ ValResult<ValMatch<std::unique_ptr<ValidatedList>>> PythonInput::validate_list(b
         );
     }
 
-    return type_error(ErrorType::Kind::ListType, *this);
+    return type_error(ErrorType::Kind::ListType, *this, this->current_location());
 }
 
 ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> PythonInput::validate_tuple(bool strict) const {
@@ -548,5 +548,5 @@ ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> PythonInput::validate_tuple
         );
     }
 
-    return type_error(ErrorType::Kind::TupleType, *this);
+    return type_error(ErrorType::Kind::TupleType, *this, this->current_location());
 }

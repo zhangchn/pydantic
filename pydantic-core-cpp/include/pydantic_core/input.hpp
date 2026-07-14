@@ -20,6 +20,7 @@ class PythonInput;
 class JsonInput;
 class StringInput;
 class ValidationState;
+struct Location;
 
 // Either types - union types for validated values
 // These represent the different possible representations of a value
@@ -162,9 +163,16 @@ public:
     virtual InputType input_type() const = 0;
     virtual InputValue as_error_value() const = 0;
     virtual bool is_none() const { return false; }
-    
+
     // Get Python object representation (for function validators)
     virtual py::object as_python_object() const = 0;
+
+    /// Set the current validation location for error reporting.
+    void set_current_location(const Location& loc) { current_loc_ = &loc; }
+    const Location& current_location() const {
+        static const Location empty_loc{};
+        return current_loc_ ? *current_loc_ : empty_loc;
+    }
 
     // Type validation methods - return ValResult<ValMatch<T>>
     virtual ValResult<ValMatch<EitherString>> validate_str(bool strict, bool coerce_numbers = false) const = 0;
@@ -177,10 +185,14 @@ public:
     virtual ValResult<std::unique_ptr<ValidatedDict>> validate_dict(bool strict) const = 0;
     virtual ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_list(bool strict) const = 0;
     virtual ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> validate_tuple(bool strict) const = 0;
+
+protected:
+    /// Pointer to current validation location (set by validators before calling validate_*).
+    const Location* current_loc_ = nullptr;
 };
 
-// Helper to create type error
-inline ValError type_error(ErrorType::Kind kind, const Input& input, const Location& loc = Location()) {
+// Helper to create type error — use input.current_location() when available
+inline ValError type_error(ErrorType::Kind kind, const Input& input, const Location& loc) {
     return ValError::line_error(ErrorType(kind), loc, input.as_error_value().repr);
 }
 

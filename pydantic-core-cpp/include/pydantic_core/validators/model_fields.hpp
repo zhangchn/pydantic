@@ -115,7 +115,8 @@ public:
         ValError combined_errors(ValError::Kind::LineErrors);
         std::set<std::string> used_keys;
 
-        for (const auto& [name, field] : fields_) {
+        for (const auto& name : field_order_) {
+            const auto& field = fields_.at(name);
             state.push_loc(name);
 
             std::string lookup_key = field.alias.empty() ? name : field.alias;
@@ -206,6 +207,7 @@ public:
 
     void add_field(const std::string& name, FieldInfo info) {
         fields_[name] = std::move(info);
+        field_order_.push_back(name);
     }
 
     void set_extra_behavior(ExtraBehavior eb) { extra_behavior_ = eb; }
@@ -230,6 +232,7 @@ protected:
             auto py_obj_opt = py_dict->get_object(key);
             if (py_obj_opt) {
                 PythonInput field_input(*py_obj_opt);
+                field_input.set_current_location(state.location());
                 auto result = field.schema->validate(field_input, state);
                 if (result.is_ok()) {
                     return result.value();
@@ -433,6 +436,7 @@ protected:
     }
 
     std::unordered_map<std::string, FieldInfo> fields_;
+    std::vector<std::string> field_order_;  // Fields in declaration order
     ExtraBehavior extra_behavior_ = ExtraBehavior::Ignore;
     std::shared_ptr<Validator> extras_validator_;
     std::string model_name_;
