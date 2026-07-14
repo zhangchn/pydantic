@@ -66,6 +66,8 @@ struct SerNode {
     std::unordered_map<std::string, SerRef> tagged;
     // For model-fields: map from field_name -> serializer
     std::unordered_map<std::string, SerRef> fields;
+    // Fields in declaration order (matches Rust — iterate this, not fields directly)
+    std::vector<std::string> field_order;
     // Field aliases: map from field_name -> alias (for serialization)
     std::unordered_map<std::string, std::string> field_aliases;
     // Set of computed field names (excluded when round_trip=True)
@@ -84,6 +86,7 @@ struct SerNode {
         children = other.children;
         tagged = other.tagged;
         fields = other.fields;
+        field_order = other.field_order;
         field_aliases = other.field_aliases;
         computed_fields_ = other.computed_fields_;
         py_func = other.py_func;
@@ -229,7 +232,19 @@ struct SerNode {
             double d = value.cast<double>();
             if (std::isnan(d)) return "NaN";
             if (std::isinf(d)) return d > 0 ? "Infinity" : "-Infinity";
-            return std::to_string(d);
+            // Strip trailing zeros: 10.2 -> "10.2", not "10.200000"
+            std::string s = std::to_string(d);
+            auto dot = s.find('.');
+            if (dot != std::string::npos) {
+                auto last = s.find_last_not_of('0');
+                if (last > dot) {
+                    s.erase(last + 1);
+                } else {
+                    // Only zeros after decimal point, keep one trailing zero for "10.0"
+                    s.erase(dot + 2);
+                }
+            }
+            return s;
         }
         if (type == "str" || type == "string" || type == "str-constrained") {
             return json_escape(value.cast<std::string>(), ensure_ascii);
@@ -405,7 +420,8 @@ private:
         if (py::isinstance<py::dict>(value)) main = value.cast<py::dict>();
         else if (py::hasattr(value, "__dict__")) main = py::getattr(value, "__dict__").cast<py::dict>();
 
-        for (auto& [k, ser] : fields) {
+        for (const auto& k : field_order) {
+            const auto& ser = fields.at(k);
             // Skip internal metadata keys
             if (k == "__pydantic_fields_set__" || k == "__pydantic_defaults__") continue;
             
@@ -510,7 +526,8 @@ private:
         if (py::isinstance<py::dict>(value)) main = value.cast<py::dict>();
         else if (py::hasattr(value, "__dict__")) main = py::getattr(value, "__dict__").cast<py::dict>();
 
-        for (auto& [k, ser] : fields) {
+        for (const auto& k : field_order) {
+            const auto& ser = fields.at(k);
             // Skip internal metadata keys
             if (k == "__pydantic_fields_set__" || k == "__pydantic_defaults__") continue;
             
@@ -776,6 +793,7 @@ static SerRef build_ser_impl(const py::dict& schema,
                         }
                     }
                     node->fields[k] = build_ser(field_schema, defs);
+                    node->field_order.push_back(k);
                 }
             }
             // Collect computed field names (excluded when round_trip=True)
@@ -787,12 +805,14 @@ static SerRef build_ser_impl(const py::dict& schema,
                     node->computed_fields_.insert(prop);
                     try {
                         node->fields[prop] = build_ser(cf["return_schema"].cast<py::dict>(), defs);
+                        node->field_order.push_back(prop);
                     } catch (...) {
                         // If no return_schema, fall back to any
                         py::dict any_schema;
                         any_schema["type"] = "any";
                         node->fields[prop] = build_ser(any_schema, defs);
                     }
+                    node->field_order.push_back(prop);
                 }
             }
         } catch (const std::exception& e) {
