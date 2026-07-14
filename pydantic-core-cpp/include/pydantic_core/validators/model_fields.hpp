@@ -48,8 +48,9 @@ struct ValidatedModelFieldsOutput {
         std::string type_name;  // "str", "int", "float", "bool", "bytes", "dict", "list", etc.
     };
     std::unordered_map<std::string, FieldValue> fields;  // Validated field values
+    std::vector<std::string> field_order;                // Fields in declaration order
     std::unordered_map<std::string, FieldValue> extra;   // Extra fields (if allow)
-    std::set<std::string> fields_set;                                // Names of fields that were in input
+    std::set<std::string> fields_set;                    // Names of fields that were in input
 };
 
 // ============================================================================
@@ -148,6 +149,7 @@ public:
                     }
                     output.fields[name] = std::move(fv);
                     output.fields_set.insert(name);
+                    output.field_order.push_back(name);
                 }
             } else {
                 // Field not found
@@ -179,6 +181,7 @@ public:
                         fv.type_name = "str";
                     }
                     output.fields[name] = std::move(fv);
+                    output.field_order.push_back(name);
                 }
             }
 

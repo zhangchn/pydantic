@@ -483,7 +483,8 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
             auto* mfo = static_cast<ValidatedModelFieldsOutput*>(value.get());
             if (mfo) {
                 py::dict out;
-                for (const auto& [key, fv] : mfo->fields) {
+                for (const auto& key : mfo->field_order) {
+                    const auto& fv = mfo->fields.at(key);
                     out[py::str(key)] = result_to_python_with_type(fv.value, fv.type_name);
                 }
                 // Attach __pydantic_fields_set__ for exclude_unset support
@@ -495,7 +496,8 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
 
                 // Attach __pydantic_defaults__ for exclude_defaults support
                 py::dict defaults_dict;
-                for (const auto& [key, fv] : mfo->fields) {
+                for (const auto& key : mfo->field_order) {
+                    const auto& fv = mfo->fields.at(key);
                     if (mfo->fields_set.find(key) == mfo->fields_set.end()) {
                         defaults_dict[py::str(key)] = result_to_python_with_type(fv.value, fv.type_name);
                     }
@@ -581,7 +583,8 @@ py::object SchemaValidator::result_to_python(const std::shared_ptr<void>& result
             auto* mfo = static_cast<ValidatedModelFieldsOutput*>(result.get());
             if (mfo) {
                 py::dict out;
-                for (const auto& [key, fv] : mfo->fields) {
+                for (const auto& key : mfo->field_order) {
+                    const auto& fv = mfo->fields.at(key);
                     py::object py_val = result_to_python_with_type(fv.value, fv.type_name);
                     out[py::str(key)] = py_val;
                 }
@@ -595,7 +598,8 @@ py::object SchemaValidator::result_to_python(const std::shared_ptr<void>& result
                 // Attach __pydantic_defaults__ for exclude_defaults support
                 // (fields NOT in fields_set that have defaults)
                 py::dict defaults_dict;
-                for (const auto& [key, fv] : mfo->fields) {
+                for (const auto& key : mfo->field_order) {
+                    const auto& fv = mfo->fields.at(key);
                     if (mfo->fields_set.find(key) == mfo->fields_set.end()) {
                         // This field was NOT in the input — it came from a default
                         defaults_dict[py::str(key)] = result_to_python_with_type(fv.value, fv.type_name);
