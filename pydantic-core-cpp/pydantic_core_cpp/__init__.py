@@ -110,6 +110,23 @@ def _parse_errors_from_message(msg: str) -> list[dict]:
     if not lines:
         return result
 
+    # C++ message -> Rust-compatible message mapping
+    _MSG_MAP = {
+        'Field required': 'Field required',
+        'Missing field': 'Field required',
+    }
+
+    def _parse_input(raw: str):
+        """Try to parse input_value string as a Python literal (dict, list, etc.)."""
+        import ast as _ast
+        s = raw.strip().strip("'")
+        if not s:
+            return s
+        try:
+            return _ast.literal_eval(s)
+        except Exception:
+            return s
+
     # Type name mapping: C++ -> Rust-compatible
     _TYPE_MAP = {
         'float_type': 'float_parsing',
@@ -135,8 +152,10 @@ def _parse_errors_from_message(msg: str) -> list[dict]:
         if match:
             # Single-line error: just the message (no location or location on previous line)
             err_type = _TYPE_MAP.get(match.group(1), match.group(1))
-            input_value = (match.group(2) or '').strip("'")
-            display_msg = line[:match.start()].strip()
+            raw_input = (match.group(2) or '').strip()
+            input_value = _parse_input(raw_input)
+            cpp_msg = line[:match.start()].strip()
+            display_msg = _MSG_MAP.get(cpp_msg, cpp_msg)
             result.append({
                 'type': err_type,
                 'loc': (),
@@ -151,8 +170,10 @@ def _parse_errors_from_message(msg: str) -> list[dict]:
             if next_match:
                 # Two-line format: loc_line, then msg_line
                 err_type = _TYPE_MAP.get(next_match.group(1), next_match.group(1))
-                input_value = (next_match.group(2) or '').strip("'")
-                display_msg = next_line[:next_match.start()].strip()
+                raw_input = (next_match.group(2) or '').strip()
+                input_value = _parse_input(raw_input)
+                cpp_msg = next_line[:next_match.start()].strip()
+                display_msg = _MSG_MAP.get(cpp_msg, cpp_msg)
                 result.append({
                     'type': err_type,
                     'loc': (line,),
