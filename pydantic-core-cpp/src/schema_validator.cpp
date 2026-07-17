@@ -431,6 +431,15 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
                type_name == (base + "-constr");
     };
 
+    // For wrapper types with try_all, check list/container types first to avoid
+    // UB from static_cast<std::string*> on a py::list object
+    if (try_all && matches_type("list")) {
+        try {
+            auto* lst = static_cast<py::list*>(value.get());
+            if (lst) return *lst;
+        } catch (...) {}
+    }
+
     if (try_all || matches_type("str") || type_name == "string") {
         auto* s = static_cast<std::string*>(value.get());
         if (s) {
@@ -562,6 +571,16 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
             }
         } catch (...) {}
         return py::none();
+    }
+
+    // "list" type — return the py::list directly (for non-wrapper type_name)
+    if (matches_type("list")) {
+        try {
+            auto* lst = static_cast<py::list*>(value.get());
+            if (lst) {
+                return *lst;
+            }
+        } catch (...) {}
     }
 
     // Fallback

@@ -71,7 +71,8 @@ public:
     size_t size() const override { return arr_.size(); }
     bool empty() const override { return arr_.size() == 0; }
     std::vector<Entry> entries() const override;
-    
+    py::object get_item(size_t index) const override;
+
 private:
     simdjson::dom::array arr_;
 };
@@ -80,10 +81,11 @@ private:
 class JsonValidatedTuple : public ValidatedTuple {
 public:
     explicit JsonValidatedTuple(simdjson::dom::array arr) : arr_(arr) {}
-    
+
     size_t size() const override { return arr_.size(); }
     bool empty() const override { return arr_.size() == 0; }
     std::vector<Entry> entries() const override;
+    py::object get_item(size_t index) const override;
     
 private:
     simdjson::dom::array arr_;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pydantic_core/validator.hpp"
+#include "pydantic_core/python_input.hpp"
 #include <memory>
 #include <optional>
 #include <vector>
@@ -49,19 +50,54 @@ public:
         // Validate each item against items_schema
         if (items_schema) {
             auto entries = list->entries();
-            std::vector<std::shared_ptr<void>> validated_items;
-            validated_items.reserve(entries.size());
-
+            py::list result_list;
+            bool has_error = false;
             for (const auto& entry : entries) {
                 state.location().push(entry.index);
-                // Create a sub-input for this list item
-                // For now, we rely on the input's validate_list to have validated the structure
-                // In a full implementation, we'd extract each element and validate it
+                // Get the element and create a PythonInput for sub-validation
+                py::object element = list->get_item(entry.index);
+                PythonInput element_input(element);
+                element_input.set_current_location(state.location());
+                auto item_result = items_schema->validate(element_input, state);
+                if (item_result.is_err()) {
+                    if (fail_fast) {
+                        state.location().pop();
+                        return item_result.error();
+                    }
+                    // Collect errors in non-fail-fast mode
+                    has_error = true;
+                } else {
+                    // Convert validated result to Python object and add to list
+                    auto validated = item_result.value();
+                    auto* obj = static_cast<py::object*>(validated.get());
+                    if (obj) {
+                        result_list.append(*obj);
+                    } else {
+                        result_list.append(element);
+                    }
+                }
                 state.location().pop();
             }
+            if (has_error) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::CustomError),
+                    state.location(),
+                    "List validation failed for some items"
+                );
+            }
+            return ValResult<std::shared_ptr<void>>(std::make_shared<py::list>(std::move(result_list)));
         }
 
-        return ValResult<std::shared_ptr<void>>(std::make_shared<int>(static_cast<int>(list_size)));
+        // No items_schema: return the original items as a Python list
+        {
+            py::list result_list;
+            auto entries = list->entries();
+            for (const auto& entry : entries) {
+                py::object element = list->get_item(entry.index);
+                result_list.append(element);
+            }
+            return ValResult<std::shared_ptr<void>>(std::make_shared<py::list>(std::move(result_list)));
+        }
     }
 
     std::string name() const override { return "list"; }

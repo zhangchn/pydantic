@@ -356,6 +356,36 @@ std::vector<ValidatedList::Entry> JsonValidatedList::entries() const {
     return result;
 }
 
+py::object JsonValidatedList::get_item(size_t index) const {
+    size_t idx = 0;
+    for (const auto& item : arr_) {
+        if (idx == index) {
+            switch (item.type()) {
+                case simdjson::dom::element_type::STRING:
+                    return py::str(std::string(item.get_string().value_unsafe()));
+                case simdjson::dom::element_type::INT64:
+                    return py::int_(item.get_int64().value_unsafe());
+                case simdjson::dom::element_type::UINT64:
+                    return py::int_(item.get_uint64().value_unsafe());
+                case simdjson::dom::element_type::DOUBLE:
+                    return py::float_(item.get_double().value_unsafe());
+                case simdjson::dom::element_type::BOOL:
+                    return py::bool_(item.get_bool().value_unsafe());
+                case simdjson::dom::element_type::NULL_VALUE:
+                    return py::none();
+                case simdjson::dom::element_type::ARRAY:
+                    return py::list();
+                case simdjson::dom::element_type::OBJECT:
+                    return py::dict();
+                default:
+                    return py::str("unknown");
+            }
+        }
+        idx++;
+    }
+    return py::none();
+}
+
 // JsonValidatedTuple implementation
 std::vector<ValidatedList::Entry> JsonValidatedTuple::entries() const {
     std::vector<Entry> result;
@@ -373,6 +403,36 @@ std::vector<ValidatedList::Entry> JsonValidatedTuple::entries() const {
         result.push_back(e);
     }
     return result;
+}
+
+py::object JsonValidatedTuple::get_item(size_t index) const {
+    size_t idx = 0;
+    for (const auto& item : arr_) {
+        if (idx == index) {
+            switch (item.type()) {
+                case simdjson::dom::element_type::STRING:
+                    return py::str(std::string(item.get_string().value_unsafe()));
+                case simdjson::dom::element_type::INT64:
+                    return py::int_(item.get_int64().value_unsafe());
+                case simdjson::dom::element_type::UINT64:
+                    return py::int_(item.get_uint64().value_unsafe());
+                case simdjson::dom::element_type::DOUBLE:
+                    return py::float_(item.get_double().value_unsafe());
+                case simdjson::dom::element_type::BOOL:
+                    return py::bool_(item.get_bool().value_unsafe());
+                case simdjson::dom::element_type::NULL_VALUE:
+                    return py::none();
+                case simdjson::dom::element_type::ARRAY:
+                    return py::list();
+                case simdjson::dom::element_type::OBJECT:
+                    return py::dict();
+                default:
+                    return py::str("unknown");
+            }
+        }
+        idx++;
+    }
+    return py::none();
 }
 
 // JSON parsing function

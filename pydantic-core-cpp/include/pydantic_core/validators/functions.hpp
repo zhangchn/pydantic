@@ -3,6 +3,7 @@
 #include "pydantic_core/validator.hpp"
 #include "pydantic_core/validation_state.hpp"
 #include "pydantic_core/python_input.hpp"
+#include "pydantic_core/json_input.hpp"
 #include <memory>
 #include <functional>
 #include <pybind11/pybind11.h>
@@ -215,8 +216,8 @@ private:
 class WithDefaultValidator : public Validator {
 public:
     WithDefaultValidator() : inner_(nullptr), default_value_(nullptr) {}
-    WithDefaultValidator(std::shared_ptr<Validator> inner, std::shared_ptr<void> default_value)
-        : inner_(std::move(inner)), default_value_(std::move(default_value)) {}
+    WithDefaultValidator(std::shared_ptr<Validator> inner, std::shared_ptr<void> default_value, std::string default_value_str = "")
+        : inner_(std::move(inner)), default_value_(std::move(default_value)), default_value_str_(std::move(default_value_str)) {}
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -231,6 +232,16 @@ public:
 
     ValResult<std::shared_ptr<void>> default_value(ValidationState& state) override {
         if (default_value_) return ValResult<std::shared_ptr<void>>(default_value_);
+        if (!default_value_str_.empty()) {
+            // Parse complex default and validate through inner
+            auto parse_result = parse_json(default_value_str_);
+            if (parse_result.is_ok() && inner_) {
+                auto default_result = inner_->validate(*parse_result.value(), state);
+                if (default_result.is_ok()) {
+                    return default_result;
+                }
+            }
+        }
         if (inner_) return inner_->default_value(state);
         return ValError::omit();
     }
@@ -240,6 +251,7 @@ public:
 private:
     std::shared_ptr<Validator> inner_;
     std::shared_ptr<void> default_value_;
+    std::string default_value_str_;
 };
 
 // ChainValidator - runs validators in sequence until one succeeds

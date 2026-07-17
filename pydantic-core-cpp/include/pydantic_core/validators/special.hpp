@@ -68,7 +68,15 @@ public:
         );
     }
 
-    std::string name() const override { return "definition-ref"; }
+    std::string name() const override {
+        if (definitions_) {
+            auto def = definitions_->get_definition(schema_ref_);
+            if (def) {
+                return def->name();
+            }
+        }
+        return "definition-ref";
+    }
 
     const std::string& get_ref() const { return schema_ref_; }
 

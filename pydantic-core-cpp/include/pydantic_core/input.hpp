@@ -145,8 +145,9 @@ public:
         size_t index;
         std::string value_repr;  // String representation for error messages
     };
-    
+
     virtual std::vector<Entry> entries() const = 0;
+    virtual py::object get_item(size_t index) const = 0;
 };
 
 // Tuple iterator interface

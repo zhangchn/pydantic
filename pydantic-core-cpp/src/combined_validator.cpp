@@ -329,11 +329,13 @@ static std::shared_ptr<Validator> build_from_element(
 
         auto default_elem = elem["default"];
         std::shared_ptr<void> default_value;
+        std::string default_value_str;
         if (!default_elem.error()) {
             // Parse default value based on JSON type
             if (default_elem.value().is_string()) {
                 default_value = std::make_shared<std::string>(
                     std::string(default_elem.value().get_string().value()));
+                default_value_str = std::string(default_elem.value().get_string().value());
             } else if (default_elem.value().is_int64()) {
                 default_value = std::make_shared<int64_t>(default_elem.value().get_int64());
             } else if (default_elem.value().is_uint64()) {
@@ -344,14 +346,18 @@ static std::shared_ptr<Validator> build_from_element(
                 default_value = std::make_shared<bool>(default_elem.value().get_bool());
             } else if (default_elem.value().is_null()) {
                 default_value = nullptr;
+            } else if (default_elem.value().is_array() || default_elem.value().is_object()) {
+                // For complex defaults (arrays, objects), store as JSON string
+                // and parse at validation time
+                auto raw = simdjson::to_string(default_elem.value());
+                default_value_str = std::string(raw);
             }
         }
 
         if (inner) {
-            return std::make_shared<WithDefaultValidator>(inner, default_value);
+            return std::make_shared<WithDefaultValidator>(inner, default_value, default_value_str);
         }
-        return std::make_shared<WithDefaultValidator>(
-            std::make_shared<AnyValidator>(), default_value);
+        return std::make_shared<WithDefaultValidator>(nullptr, default_value, default_value_str);
     }
 
     // Chain
@@ -630,6 +636,10 @@ static std::shared_ptr<Validator> build_from_element(
                     info.default_value_str = default_elem.value().get_bool() ? "true" : "false";
                 } else if (default_elem.value().is_null()) {
                     info.default_value_str = "null";
+                    info.required = false;
+                } else if (default_elem.value().is_array() || default_elem.value().is_object()) {
+                    // For complex defaults, store as JSON string
+                    info.default_value_str = std::string(simdjson::to_string(default_elem.value()));
                     info.required = false;
                 }
             }
