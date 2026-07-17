@@ -340,7 +340,6 @@ def _patched_str(self) -> str:
 ValidationError.__str__ = _patched_str
 ValidationError.__repr__ = _patched_str
 
-# Wrapper for SchemaValidator that stores the schema for model construction
 def _extract_enum_classes(schema: dict) -> dict[str, type]:
     """Extract Python Enum classes from enum-type schema nodes.
 
@@ -419,6 +418,37 @@ def _convert_enum_members(schema: dict) -> None:
             for item in value:
                 if isinstance(item, dict):
                     _convert_enum_members(item)
+
+
+def _find_function_after_callable(schema: dict, callables: list | None = None, seen: set | None = None) -> list:
+    """Recursively find all ``function-after`` schemas and extract their callables.
+
+    Returns a list of unique callables (deduplicated by identity).
+    """
+    if callables is None:
+        callables = []
+        seen = set()
+    if not isinstance(schema, dict):
+        return callables
+    if schema.get('type') == 'function-after':
+        func_ref = schema.get('function', {})
+        if isinstance(func_ref, dict):
+            func = func_ref.get('function', func_ref)
+        else:
+            func = func_ref
+        if callable(func) and id(func) not in seen:
+            seen.add(id(func))
+            callables.append(func)
+        # Don't recurse into children — the callable is the only thing we need
+        return callables
+    for v in schema.values():
+        if isinstance(v, dict):
+            _find_function_after_callable(v, callables, seen)
+        elif isinstance(v, list):
+            for item in v:
+                if isinstance(item, dict):
+                    _find_function_after_callable(item, callables, seen)
+    return callables
 
 
 class SchemaValidator:
@@ -636,12 +666,34 @@ class SchemaValidator:
             field_schema = field_def.get("schema", {})
             if isinstance(field_schema, dict):
                 val = self._dict_to_model(result[field_name], field_schema)
-                # For function-after wrapping enum (use_enum_values), extract .value
+                # For function-after wrapping with Python callable (e.g. SecretStr, use_enum_values)
                 if field_schema.get("type") == "function-after":
                     inner = field_schema.get("schema", {})
                     if isinstance(inner, dict) and inner.get("type") in ("enum", "literal"):
+                        # use_enum_values: extract .value from Enum member
                         if hasattr(val, 'value'):
                             val = val.value
+                    else:
+                        # Generic function-after: apply the Python callable to the validated value
+                        func_ref = field_schema.get("function", {})
+                        if isinstance(func_ref, dict):
+                            func = func_ref.get("function", func_ref)
+                        else:
+                            func = func_ref
+                        if callable(func):
+                            try:
+                                val = func(val)
+                            except Exception:
+                                pass
+                # Also handle lax-or-strict -> json-or-python -> function-after chains
+                elif field_schema.get("type") == "lax-or-strict":
+                    callables = _find_function_after_callable(field_schema)
+                    for func in callables:
+                        if callable(func):
+                            try:
+                                val = func(val)
+                            except Exception:
+                                pass
                 result[field_name] = val
 
         return result
@@ -734,9 +786,12 @@ class SchemaValidator:
 
 
 def _schema_clean_cls_keys(d):
-    """Recursively remove all ``cls`` keys from schema dicts."""
+    """Recursively remove all ``cls`` keys from schema dicts,
+    except for ``is-instance`` schemas which need ``cls`` for class checking.
+    """
     if isinstance(d, dict):
-        d.pop("cls", None)
+        if d.get("type") != "is-instance":
+            d.pop("cls", None)
         for v in d.values():
             _schema_clean_cls_keys(v)
     elif isinstance(d, list):

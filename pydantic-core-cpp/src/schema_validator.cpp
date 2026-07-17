@@ -416,8 +416,10 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
     }
 
     // Use type_name to determine how to cast
-    // For "nullable" and "function-after", try all types since we don't know the inner type
-    bool try_all = (type_name == "nullable" || type_name == "function-after");
+    // For wrapper types, try all scalar types since we don't know the inner type
+    // (NOT for model/typed-dict/dataclass — those have their own handler below)
+    bool try_all = (type_name == "nullable" || type_name == "function-after"
+                    || type_name == "lax-or-strict" || type_name == "json-or-python");
 
     // For "any", try specific type casts based on actual value content
     bool is_any = (type_name == "any");
@@ -477,7 +479,7 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
             if (v) return py::bytes(reinterpret_cast<const char*>(v->data()), v->size());
         } catch (...) {}
     }
-    if (try_all || type_name == "model" || type_name == "model-fields" || type_name == "typed-dict" || type_name == "dataclass") {
+    if (!type_name.empty() && (type_name == "model" || type_name == "model-fields" || type_name == "typed-dict" || type_name == "dataclass")) {
         // Directly convert ValidatedModelFieldsOutput to dict
         try {
             auto* mfo = static_cast<ValidatedModelFieldsOutput*>(value.get());
