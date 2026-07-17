@@ -56,3 +56,6 @@ pydantic/*.so
 
 # Rust build files
 /target/
+
+# Scikit build folders
+/pydantic-core-cpp/_skbuild/

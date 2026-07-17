@@ -70,6 +70,8 @@ struct SerNode {
     std::vector<std::string> field_order;
     // Field aliases: map from field_name -> alias (for serialization)
     std::unordered_map<std::string, std::string> field_aliases;
+    // Exclude-if callables: field_name -> Python callable (for serialization)
+    std::unordered_map<std::string, py::object> field_exclude_if;
     // Set of computed field names (excluded when round_trip=True)
     std::unordered_set<std::string> computed_fields_;
     // For function serializers
@@ -88,6 +90,7 @@ struct SerNode {
         fields = other.fields;
         field_order = other.field_order;
         field_aliases = other.field_aliases;
+        field_exclude_if = other.field_exclude_if;
         computed_fields_ = other.computed_fields_;
         py_func = other.py_func;
         default_val = other.default_val;
@@ -493,6 +496,18 @@ private:
             }
             if (!has_value) continue;
             if (exc_none && fv.is_none()) continue;
+
+            // Apply exclude_if callable
+            {
+                auto eif_it = field_exclude_if.find(k);
+                if (eif_it != field_exclude_if.end() && !eif_it->second.is_none()) {
+                    try {
+                        py::object result = eif_it->second(fv);
+                        if (result.cast<bool>()) continue;
+                    } catch (...) {}
+                }
+            }
+
             result[py::str(output_key)] = ser->to_python(fv, false, exc_none, round_trip);
         }
         // Extra fields - also apply include/exclude if they match by name
@@ -599,6 +614,18 @@ private:
             }
             if (!has_value) continue;
             if (exc_none && fv.is_none()) continue;
+
+            // Apply exclude_if callable
+            {
+                auto eif_it = field_exclude_if.find(k);
+                if (eif_it != field_exclude_if.end() && !eif_it->second.is_none()) {
+                    try {
+                        py::object result = eif_it->second(fv);
+                        if (result.cast<bool>()) continue;
+                    } catch (...) {}
+                }
+            }
+
             if (!first) out += ",";
             first = false;
             out += json_escape(output_key, ensure_ascii) + ":" + ser->to_json(fv, ensure_ascii, -1, round_trip);
@@ -790,6 +817,13 @@ static SerRef build_ser_impl(const py::dict& schema,
                         // Check for alias directly in schema
                         if (field_schema.contains("alias")) {
                             node->field_aliases[k] = field_schema["alias"].cast<std::string>();
+                        }
+                    }
+                    // Extract serialization_exclude_if callable (for exclude_if support)
+                    if (fdef.contains("serialization_exclude_if")) {
+                        py::object eif = fdef["serialization_exclude_if"];
+                        if (py::isinstance<py::function>(eif) || py::hasattr(eif, "__call__")) {
+                            node->field_exclude_if[k] = eif;
                         }
                     }
                     node->fields[k] = build_ser(field_schema, defs);

@@ -485,7 +485,16 @@ public:
                 std::make_shared<py::object>(input_py)
             );
         }
-        // Fallback: accept if class not specified
+        // Fallback: if class name was specified but we don't have the Python class,
+        // return error so UnionValidator can try other choices
+        if (!class_name_.empty() && py_class_.is_none()) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::IsInstanceType),
+                state.location(),
+                "Python class not available: " + class_name_
+            );
+        }
+        // Accept if no class info at all
         return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
     }
 
