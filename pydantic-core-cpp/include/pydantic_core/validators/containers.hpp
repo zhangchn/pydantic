@@ -67,14 +67,9 @@ public:
                     // Collect errors in non-fail-fast mode
                     has_error = true;
                 } else {
-                    // Convert validated result to Python object and add to list
-                    auto validated = item_result.value();
-                    auto* obj = static_cast<py::object*>(validated.get());
-                    if (obj) {
-                        result_list.append(*obj);
-                    } else {
-                        result_list.append(element);
-                    }
+                    // Validation succeeded — use the original input element as the result
+                    // (validated result type differs per validator, but input is always py::object)
+                    result_list.append(element);
                 }
                 state.location().pop();
             }
