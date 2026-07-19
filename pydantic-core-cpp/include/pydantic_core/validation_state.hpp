@@ -31,7 +31,7 @@ public:
     
     // Create new validation state with config
     explicit ValidationState(const Config& config)
-        : config_(config), recursion_state_() {}
+        : config_(config) {}
     
     // Create with all parameters
     ValidationState(

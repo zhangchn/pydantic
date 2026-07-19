@@ -93,7 +93,17 @@ public:
             }
         }
         
-        // Regular dict validation
+        // Regular dict validation — recursion guard using unique depth tokens
+        char depth_unique_marker = 0;
+        auto rec_entry = state.enter_recursion(&depth_unique_marker);
+        if (!rec_entry.allowed()) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::RecursionError),
+                state.location(),
+                "Recursion error - cyclic reference detected"
+            );
+        }
+
         auto dict_result = input.validate_dict(state.strict_or(false));
         if (dict_result.is_err()) {
             return ValError::line_error(
