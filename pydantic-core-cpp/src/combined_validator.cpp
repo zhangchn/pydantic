@@ -1346,19 +1346,33 @@ static std::shared_ptr<Validator> build_from_py_dict(
                 
                 // Extract field schema
                 std::shared_ptr<Validator> field_validator;
-                if (field_def.contains("schema")) {
-                    field_validator = build_from_py_dict(field_def["schema"].cast<py::dict>(), config, definitions);
-                }
-                
-                // Extract default value
+                py::dict field_schema_dict;
                 std::string default_val_str;
-                bool required = !field_def.contains("default");
-                if (!required && field_def.contains("default")) {
-                    auto py_default = field_def["default"];
-                    if (py_default.is_none()) {
-                        default_val_str = "null";
+                bool required = true;
+                
+                if (field_def.contains("schema")) {
+                    field_schema_dict = field_def["schema"].cast<py::dict>();
+
+                    // Extract default from inner "default" type schema
+                    if (field_schema_dict.contains("type") &&
+                        py::str(field_schema_dict["type"]).cast<std::string>() == "default") {
+                        // Unwrap default schema: use inner validator and extract default value string
+                        if (field_schema_dict.contains("default")) {
+                            auto py_default = field_schema_dict["default"];
+                            if (py_default.is_none()) {
+                                default_val_str = "null";
+                            } else {
+                                default_val_str = py::module_::import("json").attr("dumps")(py_default).cast<std::string>();
+                            }
+                            required = false;
+                        }
+                        if (field_schema_dict.contains("schema")) {
+                            // Use the inner validator directly (skip the WithDefault wrapper)
+                            field_validator = build_from_py_dict(
+                                field_schema_dict["schema"].cast<py::dict>(), config, definitions);
+                        }
                     } else {
-                        default_val_str = py::module_::import("json").attr("dumps")(py_default).cast<std::string>();
+                        field_validator = build_from_py_dict(field_schema_dict, config, definitions);
                     }
                 }
                 

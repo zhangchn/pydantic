@@ -445,6 +445,8 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
     // For wrapper types, try all scalar types since we don't know the inner type
     // (NOT for model/typed-dict/dataclass — those have their own handler below)
     bool try_all = (type_name == "nullable" || type_name == "function-after"
+                    || type_name == "function-before" || type_name == "function-wrap"
+                    || type_name == "function-plain"
                     || type_name == "lax-or-strict" || type_name == "json-or-python");
 
     // For "any", try specific type casts based on actual value content
@@ -456,17 +458,6 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
                type_name == (base + "-constrained") || type_name == ("constr-" + base) ||
                type_name == (base + "-constr");
     };
-
-    // For wrapper types with try_all, check py::object first (function validators
-    // return shared_ptr<py::object>, and static_cast to string* would be UB)
-    if (try_all) {
-        try {
-            auto* obj = static_cast<py::object*>(value.get());
-            if (obj) {
-                return *obj;
-            }
-        } catch (...) {}
-    }
 
     // For wrapper types with try_all, check list/container types first to avoid
     // UB from static_cast<std::string*> on a py::list object
@@ -616,6 +607,18 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
             auto* lst = static_cast<py::list*>(value.get());
             if (lst) {
                 return *lst;
+            }
+        } catch (...) {}
+    }
+
+    // For function-after/before/wrap/plain validators, check py::object*
+    bool is_function_type = (type_name == "function-after" || type_name == "function-before" ||
+                             type_name == "function-wrap" || type_name == "function-plain");
+    if (is_function_type) {
+        try {
+            auto* obj = static_cast<py::object*>(value.get());
+            if (obj) {
+                return *obj;
             }
         } catch (...) {}
     }
