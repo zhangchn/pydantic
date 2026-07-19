@@ -1063,19 +1063,13 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
 
     // SchemaValidator
     py::class_<SchemaValidator>(m, "SchemaValidator")
-        .def(py::init([](const py::object& schema, const py::object& config) {
-            std::string sj = pyobj_to_json_str(schema);
-            std::string cj = config.is_none() ? "" : pyobj_to_json_str(config);
-            auto sv = std::make_unique<SchemaValidator>(sj, cj);
-            // Store schema as Python attribute for model construction
-            sv->repr();  // Force init
-            return sv;
+        // Primary constructor: takes Python dict directly (Rust-style)
+        .def(py::init([](const py::dict& schema, const py::dict& config) {
+            return std::make_unique<SchemaValidator>(schema, config);
         }), py::arg("schema"), py::arg("config") = py::none())
-        .def(py::init([](const py::object& schema, const py::object& config, bool) {
-            std::string sj = pyobj_to_json_str(schema);
-            std::string cj = config.is_none() ? "" : pyobj_to_json_str(config);
-            auto sv = std::make_unique<SchemaValidator>(sj, cj);
-            return sv;
+        // Legacy constructor with bool flag for backwards compat
+        .def(py::init([](const py::dict& schema, const py::dict& config, bool) {
+            return std::make_unique<SchemaValidator>(schema, config);
         }), py::arg("schema"), py::arg("config") = py::none(), py::arg("_use_prebuilt") = true)
         .def("validate_python", [](SchemaValidator& self, const py::object& input, py::object strict, py::object context, py::object self_instance,
                                     py::object extra, py::object from_attributes, py::object by_alias, py::object by_name) -> py::object {

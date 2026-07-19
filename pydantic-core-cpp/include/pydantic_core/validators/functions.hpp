@@ -92,7 +92,23 @@ public:
                 info_dict["context"] = state.context_py();
             }
 
-            py::object output = py_func_(input.as_python_object(), info_dict);
+            py::object output;
+            try {
+                // Try with info dict (general/no-info-wrapped functions)
+                output = py_func_(input.as_python_object(), info_dict);
+            } catch (py::error_already_set&) {
+                // If fails, try without info dict (no-info functions like class constructors)
+                try {
+                    PyErr_Clear();
+                    output = py_func_(input.as_python_object());
+                } catch (py::error_already_set& e2) {
+                    return ValError::line_error(
+                        ErrorType(ErrorType::Kind::CustomError),
+                        state.location(),
+                        "FunctionAfter validator failed: " + std::string(e2.what())
+                    );
+                }
+            }
             return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(output));
         } catch (py::error_already_set& e) {
             return ValError::line_error(
@@ -135,7 +151,23 @@ public:
                 info_dict["context"] = state.context_py();
             }
 
-            py::object output = py_func_(input.as_python_object(), info_dict);
+            py::object output;
+            try {
+                // Try with info dict (general/no-info-wrapped functions)
+                output = py_func_(input.as_python_object(), info_dict);
+            } catch (py::error_already_set&) {
+                // If fails, try without info dict (no-info functions like class constructors)
+                try {
+                    PyErr_Clear();
+                    output = py_func_(input.as_python_object());
+                } catch (py::error_already_set& e2) {
+                    return ValError::line_error(
+                        ErrorType(ErrorType::Kind::CustomError),
+                        state.location(),
+                        "FunctionPlain validator failed: " + std::string(e2.what())
+                    );
+                }
+            }
             return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(output));
         } catch (py::error_already_set& e) {
             return ValError::line_error(

@@ -392,7 +392,7 @@ public:
                 auto short_name = vv.substr(dot_pos + 1);
                 if (short_name == str_val) {
                     return ValResult<std::shared_ptr<void>>(
-                        std::make_shared<std::string>(vv));
+                        std::make_shared<std::string>(str_val));
                 }
             }
         }

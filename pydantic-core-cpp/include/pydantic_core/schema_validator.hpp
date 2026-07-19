@@ -21,9 +21,13 @@ namespace pydantic_core {
 // Matches Rust's SchemaValidator pyclass
 class SchemaValidator {
 public:
-    // Constructor from schema dict and optional config
+    // Constructor from JSON strings (legacy)
     SchemaValidator(const std::string& schema_json,
                    const std::string& config_json = "");
+
+    // Constructor from Python dicts directly (like Rust — no JSON round-trip)
+    SchemaValidator(const py::dict& schema,
+                   const py::dict& config);
 
     // Validate Python object (JSON string input) - legacy
     std::string validate_python(const std::string& input_json,

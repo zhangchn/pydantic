@@ -455,39 +455,22 @@ class SchemaValidator:
     def __init__(self, schema, config=None, _use_prebuilt=True):
         self._schema = schema
         self._config = config
-        # Extract & remove model class references BEFORE JSON serialization
+        # Extract & remove model class references BEFORE C++ construction
         self._model_classes = self._extract_model_classes(schema)
 
-        import json as _json
-
-        # Extract enum classes BEFORE converting members to strings
+        # Extract enum classes for later string→Enum member conversion
         self._enum_classes = _extract_enum_classes(schema)
-        # Convert enum member objects in schema to their string names
-        _convert_enum_members(schema)
 
-        def _default_serializer(o):
-            """Handle non-JSON-serializable objects often embedded by pydantic."""
-            name = f'{type(o).__module__}.{type(o).__qualname__}'
-            return f'<{name}>'
-
-        # Convert dict to JSON string if needed
-        if isinstance(schema, dict):
-            schema_str = _json.dumps(schema, default=_default_serializer)
-        elif isinstance(schema, str):
-            schema_str = schema
-        elif schema is None:
-            schema_str = ""
-        else:
-            schema_str = _json.dumps(schema, default=_default_serializer)
+        # Convert config to dict for C++ (which accepts py::dict directly)
         if isinstance(config, dict):
-            config_str = _json.dumps(config, default=_default_serializer)
+            config_dict = config
         elif config is None:
-            config_str = None
-        elif isinstance(config, str):
-            config_str = config
+            config_dict = {}
         else:
-            config_str = _json.dumps(config, default=_default_serializer)
-        self._base = _SchemaValidatorBase(schema_str, config_str, _use_prebuilt)
+            config_dict = dict(config) if hasattr(config, 'items') else {}
+
+        # Pass schema dict directly to C++ — no JSON serialization (like Rust!)
+        self._base = _SchemaValidatorBase(schema, config_dict)
 
     @staticmethod
     def _extract_model_classes(schema):

@@ -15,9 +15,35 @@ SchemaValidator::SchemaValidator(const std::string& schema_json,
     : schema_json_(schema_json), config_json_(config_json) {
     // Parse title from schema (placeholder)
     title_ = "Schema";
-    
+
     // Build validator from schema
     build_validator();
+}
+
+// NEW: Constructor from Python dict directly (like Rust — no JSON serialization)
+SchemaValidator::SchemaValidator(const py::dict& schema,
+                                const py::dict& config)
+    : schema_json_(""), config_json_("") {
+    // Extract title from schema
+    if (schema.contains("title")) {
+        title_ = py::str(schema["title"]).cast<std::string>();
+    } else {
+        title_ = "Schema";
+    }
+
+    try {
+        validator_ = SchemaBuilder::build_from_py(schema, config);
+    } catch (const std::exception& e) {
+        throw SchemaError(std::string("Error building \"") + 
+                          (schema.contains("type") ? py::str(schema["type"]).cast<std::string>() : "?") + 
+                          "\" validator:\n  " + e.what());
+    }
+
+    // Set up config defaults
+    config_.strict = std::nullopt;
+    config_.extra_behavior = std::nullopt;
+    config_.from_attributes = std::nullopt;
+    config_.cache_strings = StringCacheMode::All;
 }
 
 void SchemaValidator::build_validator() {
@@ -430,6 +456,17 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
                type_name == (base + "-constrained") || type_name == ("constr-" + base) ||
                type_name == (base + "-constr");
     };
+
+    // For wrapper types with try_all, check py::object first (function validators
+    // return shared_ptr<py::object>, and static_cast to string* would be UB)
+    if (try_all) {
+        try {
+            auto* obj = static_cast<py::object*>(value.get());
+            if (obj) {
+                return *obj;
+            }
+        } catch (...) {}
+    }
 
     // For wrapper types with try_all, check list/container types first to avoid
     // UB from static_cast<std::string*> on a py::list object
