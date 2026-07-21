@@ -128,10 +128,11 @@ def _parse_errors_from_message(msg: str) -> list[dict]:
             return s
 
     # Type name mapping: C++ -> Rust-compatible
+    # NOTE: float_type/int_type/bool_type should NOT be mapped to float_parsing/int_parsing/bool_parsing.
+    # The Rust backend uses float_type when None is passed (type mismatch), and float_parsing when
+    # a string fails to parse to a number. The C++ backend also produces float_type for None input,
+    # so it must remain float_type.
     _TYPE_MAP = {
-        'float_type': 'float_parsing',
-        'int_type': 'int_parsing',
-        'bool_type': 'bool_parsing',
         'model_type': 'model_type',
         'url_type': 'url_parsing',
         'url_scheme': 'url_scheme',
