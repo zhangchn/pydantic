@@ -726,7 +726,7 @@ class SchemaValidator:
                     if cls:
                         return self._build_model(result, cls, ref)
             elif schema_type == "model":
-                cls = self._schema.get("cls")
+                cls = self._model_classes.get("__root__") or self._schema.get("cls")
                 if cls is not None and callable(cls):
                     # Process nested models in the result dict
                     inner_schema = self._schema.get("schema", {})
@@ -765,8 +765,36 @@ class SchemaValidator:
             result = self._dict_to_model(result)
         return result
 
-    def validate_strings(self, string_data, *, strict=None):
-        return self._base.validate_strings(string_data, strict=strict)
+    def validate_strings(self, string_data, *, strict=None, extra=None, context=None, by_alias=None, by_name=None):
+        result = self._base.validate_strings(string_data, strict=strict)
+        if isinstance(result, dict):
+            result = self._dict_to_model(result)
+            if not isinstance(result, dict):
+                return result
+            schema_type = self._schema.get("type") if hasattr(self._schema, "get") else None
+            if schema_type == "definitions":
+                inner = self._schema.get("schema", {})
+                if inner.get("type") == "definition-ref":
+                    ref = inner.get("schema_ref", "__root__")
+                    cls = self._model_classes.get(ref)
+                    if cls:
+                        return self._build_model(result, cls, ref)
+            elif schema_type == "model":
+                cls = self._model_classes.get("__root__") or self._schema.get("cls")
+                if cls is not None and callable(cls):
+                    inner_schema = self._schema.get("schema", {})
+                    if isinstance(inner_schema, dict) and inner_schema.get("type") in ("model-fields", "typed-dict"):
+                        result = self._process_model_fields(result, inner_schema)
+                    extra_fields = result.pop('__pydantic_extra__', None)
+                    fields_set = result.pop('__pydantic_fields_set__', set(result.keys()))
+                    result.pop('__pydantic_defaults__', None)
+                    instance = object.__new__(cls)
+                    instance.__dict__ = result
+                    object.__setattr__(instance, '__pydantic_private__', {})
+                    object.__setattr__(instance, '__pydantic_extra__', extra_fields)
+                    object.__setattr__(instance, '__pydantic_fields_set__', fields_set)
+                    return instance
+        return result
 
     def isinstance_python(self, obj, *, strict=None):
         return self._base.isinstance_python(obj, strict=strict)
