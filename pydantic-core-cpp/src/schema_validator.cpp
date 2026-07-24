@@ -506,9 +506,7 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
     // Use type_name to determine how to cast
     // For wrapper types, try all scalar types since we don't know the inner type
     // (NOT for model/typed-dict/dataclass — those have their own handler below)
-    bool try_all = (type_name == "nullable" || type_name == "function-after"
-                    || type_name == "function-before" || type_name == "function-wrap"
-                    || type_name == "function-plain"
+    bool try_all = (type_name == "nullable"
                     || type_name == "lax-or-strict" || type_name == "json-or-python");
 
     // For "any", try specific type casts based on actual value content
