@@ -450,6 +450,59 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
         return py::none();
     }
 
+    // Handle date/time types
+    if (type_name == "date") {
+        try {
+            auto* ed = static_cast<EitherDate*>(value.get());
+            if (ed) {
+                auto& d = ed->value;
+                py::object datetime_mod = py::module_::import("datetime");
+                return datetime_mod.attr("date")(d.year, d.month, d.day);
+            }
+        } catch (...) {}
+        return py::none();
+    }
+    if (type_name == "time") {
+        try {
+            auto* et = static_cast<EitherTime*>(value.get());
+            if (et) {
+                auto& t = et->value;
+                if (t.tz_offset.has_value()) {
+                    py::object datetime_mod = py::module_::import("datetime");
+                    py::object timezone = py::module_::import("datetime").attr("timezone");
+                    py::object tz_delta = py::module_::import("datetime").attr("timedelta")(py::arg("minutes") = *t.tz_offset);
+                    py::object tz = timezone(tz_delta);
+                    return datetime_mod.attr("time")(t.hour, t.minute, t.second, t.microsecond, tz);
+                }
+                py::object datetime_mod = py::module_::import("datetime");
+                return datetime_mod.attr("time")(t.hour, t.minute, t.second, t.microsecond);
+            }
+        } catch (...) {}
+        return py::none();
+    }
+    if (type_name == "datetime") {
+        try {
+            auto* edt = static_cast<EitherDateTime*>(value.get());
+            if (edt) {
+                auto& dt = edt->value;
+                if (dt.time.tz_offset.has_value()) {
+                    py::object datetime_mod = py::module_::import("datetime");
+                    py::object timezone = py::module_::import("datetime").attr("timezone");
+                    py::object tz_delta = py::module_::import("datetime").attr("timedelta")(py::arg("minutes") = *dt.time.tz_offset);
+                    py::object tz = timezone(tz_delta);
+                    return datetime_mod.attr("datetime")(
+                        dt.date.year, dt.date.month, dt.date.day,
+                        dt.time.hour, dt.time.minute, dt.time.second, dt.time.microsecond, tz);
+                }
+                py::object datetime_mod = py::module_::import("datetime");
+                return datetime_mod.attr("datetime")(
+                    dt.date.year, dt.date.month, dt.date.day,
+                    dt.time.hour, dt.time.minute, dt.time.second, dt.time.microsecond);
+            }
+        } catch (...) {}
+        return py::none();
+    }
+
     // Use type_name to determine how to cast
     // For wrapper types, try all scalar types since we don't know the inner type
     // (NOT for model/typed-dict/dataclass — those have their own handler below)
@@ -475,6 +528,20 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
             auto* lst = static_cast<py::list*>(value.get());
             if (lst) return *lst;
         } catch (...) {}
+    }
+
+    // For wrapper types, check py::object* first (before scalar checks) to avoid
+    // trying to static_cast<py::object*> to std::string* which is UB.
+    // py::object is used by FunctionAfter/Before/Plain/Wrap validators.
+    if (try_all) {
+        try {
+            auto* obj_ptr = static_cast<py::object*>(value.get());
+            if (obj_ptr) {
+                return *obj_ptr;
+            }
+        } catch (...) {
+            // Not a py::object, fall through to scalar checks
+        }
     }
 
     if (try_all || matches_type("str") || type_name == "string") {

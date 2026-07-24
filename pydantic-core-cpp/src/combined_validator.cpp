@@ -1130,7 +1130,20 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("members")) {
             auto lst = schema["members"].cast<py::list>();
             for (auto item : lst) {
-                members.push_back(py::str(item).cast<std::string>());
+                // For Enum members like Foo.FOO, use .value instead of str()
+                std::string member_str;
+                try {
+                    py::object val_attr = item.attr("value");
+                    if (!val_attr.is_none() && py::isinstance<py::str>(val_attr)) {
+                        member_str = val_attr.cast<std::string>();
+                    } else {
+                        member_str = py::str(item).cast<std::string>();
+                    }
+                } catch (py::error_already_set&) {
+                    PyErr_Clear();
+                    member_str = py::str(item).cast<std::string>();
+                }
+                members.push_back(member_str);
             }
         }
         std::unordered_set<std::string> member_set(members.begin(), members.end());
@@ -1219,13 +1232,30 @@ static std::shared_ptr<Validator> build_from_py_dict(
             inner = build_from_py_dict(schema["schema"].cast<py::dict>(), config, definitions);
         }
         py::object func = py::none();
-        if (schema.contains("function")) func = schema["function"];
+        if (schema.contains("function")) {
+            func = schema["function"];
+            // function may be a dict like {'function': actual_callable, 'type': 'no-info'}
+            if (py::isinstance<py::dict>(func)) {
+                py::dict func_dict = func.cast<py::dict>();
+                if (func_dict.contains("function")) {
+                    func = func_dict["function"];
+                }
+            }
+        }
         return std::make_shared<FunctionAfterValidator>(inner, func);
     }
 
     if (type == "function-plain") {
         py::object func = py::none();
-        if (schema.contains("function")) func = schema["function"];
+        if (schema.contains("function")) {
+            func = schema["function"];
+            if (py::isinstance<py::dict>(func)) {
+                py::dict func_dict = func.cast<py::dict>();
+                if (func_dict.contains("function")) {
+                    func = func_dict["function"];
+                }
+            }
+        }
         return std::make_shared<FunctionPlainValidator>(func);
     }
 

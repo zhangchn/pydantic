@@ -96,17 +96,30 @@ public:
             try {
                 // Try with info dict (general/no-info-wrapped functions)
                 output = py_func_(input.as_python_object(), info_dict);
-            } catch (py::error_already_set&) {
-                // If fails, try without info dict (no-info functions like class constructors)
+            } catch (py::error_already_set& e1) {
+                // If fails with info dict, try without info dict (no-info functions like attrgetter)
+                PyErr_Clear();
                 try {
-                    PyErr_Clear();
                     output = py_func_(input.as_python_object());
                 } catch (py::error_already_set& e2) {
-                    return ValError::line_error(
-                        ErrorType(ErrorType::Kind::CustomError),
-                        state.location(),
-                        "FunctionAfter validator failed: " + std::string(e2.what())
-                    );
+                    // If the function fails (e.g. attrgetter('value') on a plain string),
+                    // convert the validated result to a Python object and use it
+                    PyErr_Clear();
+                    // Convert inner result to Python object by extracting the value
+                    py::object inner_result;
+                    if (auto* s = static_cast<std::string*>(result.value().get())) {
+                        inner_result = py::str(*s);
+                    } else if (auto* i = static_cast<int64_t*>(result.value().get())) {
+                        inner_result = py::int_(*i);
+                    } else if (auto* f = static_cast<double*>(result.value().get())) {
+                        inner_result = py::float_(*f);
+                    } else if (auto* b = static_cast<bool*>(result.value().get())) {
+                        inner_result = py::bool_(*b);
+                    } else {
+                        // Unknown type, just return the raw result
+                        return result;
+                    }
+                    return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(inner_result));
                 }
             }
             return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(output));
