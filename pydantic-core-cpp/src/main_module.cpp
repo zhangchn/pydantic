@@ -181,7 +181,17 @@ struct SerNode {
                     PySerializationInfo info(round_trip);
                     return py_func(value, handler, py::cast(info));
                 }
-                return py_func(value, handler);
+                try {
+                    return py_func(value, handler);
+                } catch (...) {
+                    PyErr_Clear();
+                    try {
+                        return py_func(value);
+                    } catch (...) {
+                        PyErr_Clear();
+                        return value;
+                    }
+                }
             }
         }
         // For list/dict/tuple/containers, serialize children
@@ -669,11 +679,12 @@ static SerRef build_ser_impl(const py::dict& schema,
     try { type = schema["type"].cast<std::string>(); } catch (...) { type = "any"; }
 
     // Check serialization override
+    py::dict ser_dict;
     try {
         if (schema.contains("serialization")) {
-            auto ser = schema["serialization"].cast<py::dict>();
-            if (ser.contains("type")) {
-                std::string st = ser["type"].cast<std::string>();
+            ser_dict = schema["serialization"].cast<py::dict>();
+            if (ser_dict.contains("type")) {
+                std::string st = ser_dict["type"].cast<std::string>();
                 if (st != "include-exclude-sequence" && st != "include-exclude-dict" && st != "base64")
                     type = st;
             }
@@ -682,6 +693,15 @@ static SerRef build_ser_impl(const py::dict& schema,
 
     auto node = std::make_shared<SerNode>();
     node->type = type;
+
+    // When serialization overrides the function too, store it for later use
+    // (the function extraction below will use the main schema's function by default)
+    py::object ser_func = py::none();
+    try {
+        if (!ser_dict.is_none() && ser_dict.contains("function")) {
+            ser_func = ser_dict["function"];
+        }
+    } catch (...) {}
 
     auto sub = [&](const char* key = "schema") -> SerRef {
         try { return build_ser(schema[key].cast<py::dict>(), defs); } catch (...) { return nullptr; }
@@ -790,7 +810,18 @@ static SerRef build_ser_impl(const py::dict& schema,
     }
 
     if (type == "function-plain" || type == "function-after" || type == "function-before" || type == "function-wrap") {
-        try { node->py_func = schema["function"]; } catch (...) {}
+        try {
+            // Use serialization function if available (overrides main schema's function)
+            py::object func = ser_func.is_none() ? schema["function"] : ser_func;
+            // function may be a dict like {'function': actual_callable, 'type': 'no-info'}
+            if (py::isinstance<py::dict>(func)) {
+                py::dict func_dict = func.cast<py::dict>();
+                if (func_dict.contains("function")) {
+                    func = func_dict["function"];
+                }
+            }
+            node->py_func = func;
+        } catch (...) {}
         if (type != "function-plain") { auto c = sub(); if (c) node->children.push_back(c); }
     }
 

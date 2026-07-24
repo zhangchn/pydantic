@@ -1130,12 +1130,13 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("members")) {
             auto lst = schema["members"].cast<py::list>();
             for (auto item : lst) {
-                // For Enum members like Foo.FOO, use .value instead of str()
+                // For Enum members, use .value instead of str() (which gives 'ClassName.MEMBER')
                 std::string member_str;
                 try {
                     py::object val_attr = item.attr("value");
-                    if (!val_attr.is_none() && py::isinstance<py::str>(val_attr)) {
-                        member_str = val_attr.cast<std::string>();
+                    if (!val_attr.is_none()) {
+                        // Use the string representation of the value
+                        member_str = py::str(val_attr).cast<std::string>();
                     } else {
                         member_str = py::str(item).cast<std::string>();
                     }

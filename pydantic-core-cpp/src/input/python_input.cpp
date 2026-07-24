@@ -192,7 +192,8 @@ bool PythonInput::is_callable() const {
 
 // Value extraction
 std::string PythonInput::as_str() const {
-    // For Enum str subclasses (e.g. class Foo(str, Enum)), use .value instead of str()
+    // For Enum members (both str subclass and regular Enum), use .value instead of str()
+    // str(Foo.FOO) gives 'Foo.FOO', but we want 'foo'
     if (py::isinstance<py::str>(obj_)) {
         try {
             py::object val_attr = obj_.attr("value");
@@ -202,6 +203,24 @@ std::string PythonInput::as_str() const {
         } catch (py::error_already_set&) {
             PyErr_Clear();
         }
+    }
+    // For non-string Enum members, check for .value attribute and convert to string
+    try {
+        py::object val_attr = obj_.attr("value");
+        if (!val_attr.is_none()) {
+            // Check if the value itself has a value (nested Enum)
+            try {
+                py::object inner_val = val_attr.attr("value");
+                if (!inner_val.is_none()) {
+                    return py::str(inner_val).cast<std::string>();
+                }
+            } catch (py::error_already_set&) {
+                PyErr_Clear();
+            }
+            return py::str(val_attr).cast<std::string>();
+        }
+    } catch (py::error_already_set&) {
+        PyErr_Clear();
     }
     return py::str(obj_).cast<std::string>();
 }
