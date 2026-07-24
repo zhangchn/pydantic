@@ -1087,20 +1087,37 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                     if (py::isinstance<py::dict>(validated)) {
                         py::dict d = self_instance.attr("__dict__");
                         py::dict validated_dict = validated.cast<py::dict>();
+
+                        // Extract special keys before copying to __dict__
+                        py::object extra_fields = py::none();
+                        py::object fields_set = py::set();
+                        py::object defaults = py::dict();
+
+                        if (validated_dict.contains("__pydantic_extra__")) {
+                            extra_fields = validated_dict["__pydantic_extra__"];
+                            validated_dict.attr("pop")("__pydantic_extra__");
+                        }
+                        if (validated_dict.contains("__pydantic_fields_set__")) {
+                            fields_set = validated_dict["__pydantic_fields_set__"];
+                            validated_dict.attr("pop")("__pydantic_fields_set__");
+                        }
+                        if (validated_dict.contains("__pydantic_defaults__")) {
+                            defaults = validated_dict["__pydantic_defaults__"];
+                            validated_dict.attr("pop")("__pydantic_defaults__");
+                        }
+
+                        // Copy only declared fields to __dict__
                         for (auto item : validated_dict) {
                             d[item.first] = item.second;
                         }
-                        // Initialize pydantic slot attributes expected by BaseModel
-                        // __pydantic_private__ is in BaseModel.__slots__ and must exist
+
+                        // Set pydantic slot attributes
                         if (!py::hasattr(self_instance, "__pydantic_private__")) {
                             py::setattr(self_instance, "__pydantic_private__", py::dict());
                         }
-                        if (!py::hasattr(self_instance, "__pydantic_extra__")) {
-                            py::setattr(self_instance, "__pydantic_extra__", py::none());
-                        }
-                        if (!py::hasattr(self_instance, "__pydantic_fields_set__")) {
-                            py::setattr(self_instance, "__pydantic_fields_set__", py::set());
-                        }
+                        py::setattr(self_instance, "__pydantic_extra__",
+                            extra_fields.is_none() ? py::none() : extra_fields);
+                        py::setattr(self_instance, "__pydantic_fields_set__", fields_set);
                     }
                 } catch (const std::exception& e) {
                     // If anything fails, just return validated as-is

@@ -1388,7 +1388,8 @@ static std::shared_ptr<Validator> build_from_py_dict(
         }
         
         // Extract extras behavior from config
-        std::string extra_str = py_str(config, "extra_behavior", py_str(config, "extra", "ignore"));
+        std::string extra_str = py_str(config, "extra_fields_behavior",
+            py_str(config, "extra_behavior", py_str(config, "extra", "ignore")));
         auto extra = extra_behavior_from_string(extra_str);
         v->set_extra_behavior(extra);
         

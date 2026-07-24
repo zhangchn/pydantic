@@ -30,6 +30,11 @@ public:
         UnionType,
         ModelType,
         DataclassType,
+
+        // Parsing errors - string/input could not be parsed to target type
+        BoolParsing,
+        IntParsing,
+        FloatParsing,
         
         // Integer constraint errors
         IntMultipleOf,

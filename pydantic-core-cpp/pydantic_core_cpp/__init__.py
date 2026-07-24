@@ -599,11 +599,14 @@ class SchemaValidator:
                 data = self._process_model_fields(data, inner_schema)
             if cls is not None and callable(cls):
                 # Direct model schema (not in definitions) — use schema's own inner schema
+                extra = data.pop('__pydantic_extra__', None)
+                fields_set = data.pop('__pydantic_fields_set__', set(data.keys()))
+                data.pop('__pydantic_defaults__', None)
                 instance = object.__new__(cls)
                 instance.__dict__ = data
                 object.__setattr__(instance, '__pydantic_private__', {})
-                object.__setattr__(instance, '__pydantic_extra__', None)
-                object.__setattr__(instance, '__pydantic_fields_set__', set(data.keys()))
+                object.__setattr__(instance, '__pydantic_extra__', extra)
+                object.__setattr__(instance, '__pydantic_fields_set__', fields_set)
                 return instance
             return data
 
@@ -629,11 +632,16 @@ class SchemaValidator:
                     data = self._process_model_fields(data, inner_schema)
                 break
 
+        # Extract __pydantic_extra__ from data if present
+        extra = data.pop('__pydantic_extra__', None)
+        fields_set = data.pop('__pydantic_fields_set__', set(data.keys()))
+        data.pop('__pydantic_defaults__', None)
+
         instance.__dict__ = data
         # Initialize pydantic slot attributes expected by BaseModel
         object.__setattr__(instance, '__pydantic_private__', {})
-        object.__setattr__(instance, '__pydantic_extra__', None)
-        object.__setattr__(instance, '__pydantic_fields_set__', set(data.keys()))
+        object.__setattr__(instance, '__pydantic_extra__', extra)
+        object.__setattr__(instance, '__pydantic_fields_set__', fields_set)
         return instance
 
     def _process_model_fields(self, data, fields_schema):
@@ -724,11 +732,15 @@ class SchemaValidator:
                     inner_schema = self._schema.get("schema", {})
                     if isinstance(inner_schema, dict) and inner_schema.get("type") in ("model-fields", "typed-dict"):
                         result = self._process_model_fields(result, inner_schema)
+                    # Extract special keys before setting __dict__
+                    extra = result.pop('__pydantic_extra__', None)
+                    fields_set = result.pop('__pydantic_fields_set__', set(result.keys()))
+                    result.pop('__pydantic_defaults__', None)
                     instance = object.__new__(cls)
                     instance.__dict__ = result
                     object.__setattr__(instance, '__pydantic_private__', {})
-                    object.__setattr__(instance, '__pydantic_extra__', None)
-                    object.__setattr__(instance, '__pydantic_fields_set__', set(result.keys()))
+                    object.__setattr__(instance, '__pydantic_extra__', extra)
+                    object.__setattr__(instance, '__pydantic_fields_set__', fields_set)
                     return instance
 
         elif self_instance is not None:

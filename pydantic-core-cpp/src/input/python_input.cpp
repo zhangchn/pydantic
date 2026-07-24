@@ -346,7 +346,7 @@ ValResult<ValMatch<EitherInt>> PythonInput::validate_int(bool strict) const {
                 int64_t v = std::stoll(s);
                 return ValMatch<EitherInt>::lax(EitherInt(v));
             } catch (...) {
-                return type_error(ErrorType::Kind::IntType, *this, this->current_location());
+                return type_error(ErrorType::Kind::IntParsing, *this, this->current_location());
             }
         }
 
@@ -375,7 +375,7 @@ ValResult<ValMatch<EitherFloat>> PythonInput::validate_float(bool strict) const 
                 double v = std::stod(s);
                 return ValMatch<EitherFloat>::lax(EitherFloat(v));
             } catch (...) {
-                return type_error(ErrorType::Kind::FloatType, *this, this->current_location());
+                return type_error(ErrorType::Kind::FloatParsing, *this, this->current_location());
             }
         }
 

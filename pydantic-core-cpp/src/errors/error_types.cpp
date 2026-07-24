@@ -22,6 +22,11 @@ std::string ErrorType::type_name() const {
         {Kind::DateType, "date_type"},
         {Kind::TimeType, "time_type"},
         {Kind::DateTimeType, "datetime_type"},
+
+        // Parsing errors
+        {Kind::BoolParsing, "bool_parsing"},
+        {Kind::IntParsing, "int_parsing"},
+        {Kind::FloatParsing, "float_parsing"},
         
         // Integer constraint errors
         {Kind::IntMultipleOf, "int_multiple_of"},
@@ -67,6 +72,7 @@ std::string ErrorType::type_name() const {
         {Kind::DictKeysUnexpected, "dict_keys_unexpected"},
         {Kind::FieldRequired, "field_required"},
         {Kind::Missing, "missing"},
+        {Kind::ExtraForbidden, "extra_forbidden"},
         
         // Other errors
         {Kind::JsonInvalid, "json_invalid"},
@@ -107,6 +113,11 @@ std::string ErrorType::message_template() const {
         {Kind::DateType, "Input should be a valid date in YYYY-MM-DD format"},
         {Kind::TimeType, "Input should be a valid time in HH:MM:SS format"},
         {Kind::DateTimeType, "Input should be a valid datetime"},
+
+        // Parsing errors
+        {Kind::BoolParsing, "Input should be a valid boolean, unable to interpret input"},
+        {Kind::IntParsing, "Input should be a valid integer, unable to parse string as an integer"},
+        {Kind::FloatParsing, "Input should be a valid number, unable to parse string as a number"},
         
         // Integer constraint errors
         {Kind::IntMultipleOf, "Input should be a multiple of {value}"},
@@ -152,6 +163,7 @@ std::string ErrorType::message_template() const {
         {Kind::DictKeysUnexpected, "Unexpected keys provided"},
         {Kind::FieldRequired, "Field required"},
         {Kind::Missing, "Missing field"},
+        {Kind::ExtraForbidden, "Extra inputs are not permitted"},
         
         // Other errors
         {Kind::JsonInvalid, "Invalid JSON"},

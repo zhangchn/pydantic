@@ -393,59 +393,118 @@ protected:
             return;
         }
 
+        // Try JsonValidatedDict path
         auto* json_dict = dynamic_cast<const JsonValidatedDict*>(&dict);
-        if (!json_dict) {
-            return;
-        }
-
-        for (const auto& key : json_dict->keys()) {
-            if (used_keys.count(key)) {
-                continue;
-            }
-
-            if (extra_behavior_ == ExtraBehavior::Forbid) {
-                auto element_opt = json_dict->get_element(key);
-                std::string input_repr = "...";
-                if (element_opt) {
-                    auto tmp_input = JsonInput::create_from_element(*element_opt);
-                    input_repr = tmp_input->as_error_value().repr;
+        if (json_dict) {
+            for (const auto& key : json_dict->keys()) {
+                if (used_keys.count(key)) {
+                    continue;
                 }
-                auto err = ValError::line_error(
-                    ErrorType(ErrorType::Kind::ExtraForbidden),
-                    state.location(),
-                    input_repr
-                );
-                combined_errors.merge(std::move(err));
-                continue;
-            }
 
-            // ExtraBehavior::Allow
-            auto element_opt = json_dict->get_element(key);
-            if (!element_opt) continue;
+                if (extra_behavior_ == ExtraBehavior::Forbid) {
+                    auto element_opt = json_dict->get_element(key);
+                    std::string input_repr = "...";
+                    if (element_opt) {
+                        auto tmp_input = JsonInput::create_from_element(*element_opt);
+                        input_repr = tmp_input->as_error_value().repr;
+                    }
+                    state.push_loc(key);
+                    auto err = ValError::line_error(
+                        ErrorType(ErrorType::Kind::ExtraForbidden),
+                        state.location(),
+                        input_repr
+                    );
+                    state.pop_loc();
+                    combined_errors.merge(std::move(err));
+                    continue;
+                }
 
-            auto field_input = JsonInput::create_from_element(*element_opt);
+                // ExtraBehavior::Allow
+                auto element_opt = json_dict->get_element(key);
+                if (!element_opt) continue;
 
-            if (extras_validator_) {
-                state.push_loc(key);
-                auto result = extras_validator_->validate(*field_input, state);
-                state.pop_loc();
-                if (result.is_ok()) {
+                auto field_input = JsonInput::create_from_element(*element_opt);
+
+                if (extras_validator_) {
+                    state.push_loc(key);
+                    auto result = extras_validator_->validate(*field_input, state);
+                    state.pop_loc();
+                    if (result.is_ok()) {
+                        ValidatedModelFieldsOutput::FieldValue fv;
+                        fv.value = result.value();
+                        fv.type_name = extras_validator_->name();
+                        output.extra[key] = std::move(fv);
+                        output.fields_set.insert(key);
+                    }
+                } else {
                     ValidatedModelFieldsOutput::FieldValue fv;
-                    fv.value = result.value();
-                    fv.type_name = extras_validator_->name();
+                    fv.value = std::make_shared<std::string>(
+                        field_input->as_error_value().repr
+                    );
+                    fv.type_name = "str";
                     output.extra[key] = std::move(fv);
                     output.fields_set.insert(key);
                 }
-            } else {
-                ValidatedModelFieldsOutput::FieldValue fv;
-                fv.value = std::make_shared<std::string>(
-                    field_input->as_error_value().repr
-                );
-                fv.type_name = "str";
-                output.extra[key] = std::move(fv);
-                output.fields_set.insert(key);
             }
+            return;
         }
+
+#ifdef HAS_PYBIND11
+        // Try PythonValidatedDict path
+        auto* py_dict = dynamic_cast<const PythonValidatedDict*>(&dict);
+        if (py_dict) {
+            for (const auto& key : py_dict->keys()) {
+                if (used_keys.count(key)) {
+                    continue;
+                }
+
+                if (extra_behavior_ == ExtraBehavior::Forbid) {
+                    auto py_obj_opt = py_dict->get_object(key);
+                    std::string input_repr = "...";
+                    if (py_obj_opt) {
+                        PythonInput tmp_input(*py_obj_opt);
+                        input_repr = tmp_input.as_error_value().repr;
+                    }
+                    state.push_loc(key);
+                    auto err = ValError::line_error(
+                        ErrorType(ErrorType::Kind::ExtraForbidden),
+                        state.location(),
+                        input_repr
+                    );
+                    state.pop_loc();
+                    combined_errors.merge(std::move(err));
+                    continue;
+                }
+
+                // ExtraBehavior::Allow
+                auto py_obj_opt = py_dict->get_object(key);
+                if (!py_obj_opt) continue;
+
+                PythonInput field_input(*py_obj_opt);
+
+                if (extras_validator_) {
+                    state.push_loc(key);
+                    auto result = extras_validator_->validate(field_input, state);
+                    state.pop_loc();
+                    if (result.is_ok()) {
+                        ValidatedModelFieldsOutput::FieldValue fv;
+                        fv.value = result.value();
+                        fv.type_name = extras_validator_->name();
+                        output.extra[key] = std::move(fv);
+                        output.fields_set.insert(key);
+                    }
+                } else {
+                    // Store the raw Python object wrapped in shared_ptr
+                    ValidatedModelFieldsOutput::FieldValue fv;
+                    fv.value = std::make_shared<py::object>(*py_obj_opt);
+                    fv.type_name = "py_object";
+                    output.extra[key] = std::move(fv);
+                    output.fields_set.insert(key);
+                }
+            }
+            return;
+        }
+#endif
     }
 
     std::unordered_map<std::string, FieldInfo> fields_;

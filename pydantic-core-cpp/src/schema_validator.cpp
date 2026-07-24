@@ -441,6 +441,15 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
         return py::none();
     }
 
+    // Handle raw Python object (used for extra fields from Python dict input)
+    if (type_name == "py_object") {
+        try {
+            auto* py_obj = static_cast<py::object*>(value.get());
+            if (py_obj) return *py_obj;
+        } catch (...) {}
+        return py::none();
+    }
+
     // Use type_name to determine how to cast
     // For wrapper types, try all scalar types since we don't know the inner type
     // (NOT for model/typed-dict/dataclass — those have their own handler below)
@@ -668,9 +677,13 @@ py::object SchemaValidator::result_to_python(const std::shared_ptr<void>& result
                 }
                 out[py::str("__pydantic_defaults__")] = std::move(defaults_dict);
 
-                // Include extra fields
-                for (const auto& [key, fv] : mfo->extra) {
-                    out[py::str(key)] = result_to_python_with_type(fv.value, fv.type_name);
+                // Include extra fields in separate __pydantic_extra__ dict
+                if (!mfo->extra.empty()) {
+                    py::dict extra_dict;
+                    for (const auto& [key, fv] : mfo->extra) {
+                        extra_dict[py::str(key)] = result_to_python_with_type(fv.value, fv.type_name);
+                    }
+                    out[py::str("__pydantic_extra__")] = std::move(extra_dict);
                 }
 
                 return std::move(out);
