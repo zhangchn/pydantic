@@ -73,7 +73,25 @@ std::string ErrorType::type_name() const {
         {Kind::FieldRequired, "field_required"},
         {Kind::Missing, "missing"},
         {Kind::ExtraForbidden, "extra_forbidden"},
-        
+
+        // Date/Time errors
+        {Kind::DateType, "date_type"},
+        {Kind::DateParsing, "date_parsing"},
+        {Kind::DateFromDatetimeInexact, "date_from_datetime_inexact"},
+        {Kind::DatePast, "date_past"},
+        {Kind::DateFuture, "date_future"},
+        {Kind::TimeType, "time_type"},
+        {Kind::TimeParsing, "time_parsing"},
+        {Kind::DateTimeType, "datetime_type"},
+        {Kind::DateTimeParsing, "datetime_parsing"},
+        {Kind::DatetimeFromDateParsing, "datetime_from_date_parsing"},
+        {Kind::DatetimeObjectInvalid, "datetime_object_invalid"},
+        {Kind::DatetimePast, "datetime_past"},
+        {Kind::DatetimeFuture, "datetime_future"},
+        {Kind::TimezoneAware, "timezone_aware"},
+        {Kind::TimezoneNaive, "timezone_naive"},
+        {Kind::TimezoneOffset, "timezone_offset"},
+
         // Other errors
         {Kind::JsonInvalid, "json_invalid"},
         {Kind::CustomError, "custom_error"},
@@ -179,7 +197,25 @@ std::string ErrorType::message_template() const {
         {Kind::FiniteNumber, "Input should be a finite number"},
         {Kind::TooShort, "Input should have at least {value} items"},
         {Kind::TooLong, "Input should have at most {value} items"},
-        {Kind::StringNotAscii, "Input should be ASCII"}
+        {Kind::StringNotAscii, "Input should be ASCII"},
+
+        // Date/Time errors
+        {Kind::DateType, "Input should be a valid date"},
+        {Kind::DateParsing, "Input should be a valid date in YYYY-MM-DD format"},
+        {Kind::DateFromDatetimeInexact, "Input should be a date with no time component"},
+        {Kind::DatePast, "Date should be in the past"},
+        {Kind::DateFuture, "Date should be in the future"},
+        {Kind::TimeType, "Input should be a valid time"},
+        {Kind::TimeParsing, "Input should be a valid time in HH:MM:SS format"},
+        {Kind::DateTimeType, "Input should be a valid datetime"},
+        {Kind::DateTimeParsing, "Input should be a valid datetime in ISO 8601 format"},
+        {Kind::DatetimeFromDateParsing, "Input should be a valid datetime, unable to parse date as datetime"},
+        {Kind::DatetimeObjectInvalid, "Invalid datetime object"},
+        {Kind::DatetimePast, "Datetime should be in the past"},
+        {Kind::DatetimeFuture, "Datetime should be in the future"},
+        {Kind::TimezoneAware, "Datetime should be timezone-aware"},
+        {Kind::TimezoneNaive, "Datetime should be timezone-naive"},
+        {Kind::TimezoneOffset, "Datetime should have timezone offset {tz_expected}, got {tz_actual}"},
     };
     auto it = templates.find(kind_);
     return it != templates.end() ? it->second : "Validation error";

@@ -107,10 +107,72 @@ struct EitherInt {
 // Float representation
 struct EitherFloat {
     double value;
-    
+
     EitherFloat(double f) : value(f) {}
-    
+
     double as_double() const { return value; }
+};
+
+// Date representation (year-month-day without timezone)
+struct Date {
+    int year;
+    int month;
+    int day;
+};
+
+// Time representation (hour-minute-second with optional microsecond and timezone offset)
+struct Time {
+    int hour;
+    int minute;
+    int second;
+    int microsecond = 0;
+    std::optional<int> tz_offset;  // UTC offset in minutes, None = unknown
+};
+
+// DateTime representation (Date + Time + optional timezone)
+struct DateTime {
+    Date date;
+    Time time;
+
+    int year() const { return date.year; }
+    int month() const { return date.month; }
+    int day() const { return date.day; }
+    int hour() const { return time.hour; }
+    int minute() const { return time.minute; }
+    int second() const { return time.second; }
+    int microsecond() const { return time.microsecond; }
+    std::optional<int> tz_offset() const { return time.tz_offset; }
+};
+
+// Either types for date/time validation results
+struct EitherDate {
+    Date value;
+    bool is_lax = false;
+
+    EitherDate() : value{0, 0, 0} {}
+    explicit EitherDate(Date d) : value(d) {}
+
+    Date as_raw() const { return value; }
+};
+
+struct EitherTime {
+    Time value;
+    bool is_lax = false;
+
+    EitherTime() : value{0, 0, 0} {}
+    explicit EitherTime(Time t) : value(t) {}
+
+    Time as_raw() const { return value; }
+};
+
+struct EitherDateTime {
+    DateTime value;
+    bool is_lax = false;
+
+    EitherDateTime() : value{{0, 0, 0}, {0, 0, 0}} {}
+    explicit EitherDateTime(DateTime dt) : value(dt) {}
+
+    DateTime as_raw() const { return value; }
 };
 
 // Dict iterator interface
@@ -181,6 +243,14 @@ public:
     virtual ValResult<ValMatch<bool>> validate_bool(bool strict) const = 0;
     virtual ValResult<ValMatch<EitherInt>> validate_int(bool strict) const = 0;
     virtual ValResult<ValMatch<EitherFloat>> validate_float(bool strict) const = 0;
+
+    // Date/time validation methods
+    virtual bool is_date() const { return false; }
+    virtual bool is_datetime() const { return false; }
+    virtual bool is_time() const { return false; }
+    virtual ValResult<ValMatch<EitherDate>> validate_date(bool strict) const = 0;
+    virtual ValResult<ValMatch<EitherDateTime>> validate_datetime(bool strict) const = 0;
+    virtual ValResult<ValMatch<EitherTime>> validate_time(bool strict) const = 0;
 
     // Container validation
     virtual ValResult<std::unique_ptr<ValidatedDict>> validate_dict(bool strict) const = 0;

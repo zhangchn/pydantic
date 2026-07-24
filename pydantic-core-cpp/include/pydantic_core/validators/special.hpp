@@ -88,43 +88,89 @@ private:
 // DateValidator - validates date values
 class DateValidator : public Validator {
 public:
+    explicit DateValidator(bool strict = false) : strict_(strict) {}
+
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
     ) override {
-        // In Phase 2, we'll parse date strings
-        return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
+        auto result = input.validate_date(state.strict_or(strict_));
+        if (result.is_err()) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::DateType),
+                state.location(),
+                input.as_error_value().repr
+            );
+        }
+        auto match = std::move(result.value());
+        // Store as internal Date value (will be converted to Python datetime.date by result_to_python)
+        return ValResult<std::shared_ptr<void>>(
+            std::make_shared<EitherDate>(std::move(match.value()))
+        );
     }
-    
+
     std::string name() const override { return "date"; }
+
+private:
+    bool strict_ = false;
 };
 
 // TimeValidator - validates time values
 class TimeValidator : public Validator {
 public:
+    explicit TimeValidator(bool strict = false) : strict_(strict) {}
+
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
     ) override {
-        // In Phase 2, we'll parse time strings
-        return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
+        auto result = input.validate_time(state.strict_or(strict_));
+        if (result.is_err()) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::TimeType),
+                state.location(),
+                input.as_error_value().repr
+            );
+        }
+        auto match = std::move(result.value());
+        return ValResult<std::shared_ptr<void>>(
+            std::make_shared<EitherTime>(std::move(match.value()))
+        );
     }
-    
+
     std::string name() const override { return "time"; }
+
+private:
+    bool strict_ = false;
 };
 
 // DatetimeValidator - validates datetime values
 class DatetimeValidator : public Validator {
 public:
+    explicit DatetimeValidator(bool strict = false) : strict_(strict) {}
+
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
     ) override {
-        // In Phase 2, we'll parse datetime strings
-        return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
+        auto result = input.validate_datetime(state.strict_or(strict_));
+        if (result.is_err()) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::DateTimeType),
+                state.location(),
+                input.as_error_value().repr
+            );
+        }
+        auto match = std::move(result.value());
+        return ValResult<std::shared_ptr<void>>(
+            std::make_shared<EitherDateTime>(std::move(match.value()))
+        );
     }
-    
+
     std::string name() const override { return "datetime"; }
+
+private:
+    bool strict_ = false;
 };
 
 // TimedeltaValidator - validates timedelta values

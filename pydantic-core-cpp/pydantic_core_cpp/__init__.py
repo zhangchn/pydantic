@@ -765,7 +765,7 @@ class SchemaValidator:
             result = self._dict_to_model(result)
         return result
 
-    def validate_strings(self, string_data, *, strict=None, extra=None, context=None, by_alias=None, by_name=None):
+    def validate_strings(self, string_data, *, strict=None, extra=None, context=None, by_alias=None, by_name=None, allow_partial=None):
         result = self._base.validate_strings(string_data, strict=strict)
         if isinstance(result, dict):
             result = self._dict_to_model(result)

@@ -89,8 +89,21 @@ public:
         
         // Date/Time errors
         DateType,
+        DateParsing,
+        DateFromDatetimeInexact,
+        DatePast,
+        DateFuture,
         TimeType,
+        TimeParsing,
         DateTimeType,
+        DateTimeParsing,
+        DatetimeFromDateParsing,
+        DatetimeObjectInvalid,
+        DatetimePast,
+        DatetimeFuture,
+        TimezoneAware,
+        TimezoneNaive,
+        TimezoneOffset,
         
         // URL errors
         UrlType,
@@ -144,7 +157,18 @@ public:
     ErrorType(Kind kind, double numeric_value) : kind_(kind) {
         context_["value"] = std::to_string(numeric_value);
     }
-    
+
+    // Constructor with string context (for datetime/timezone errors)
+    ErrorType(Kind kind, std::string key, std::string value) : kind_(kind) {
+        context_[std::move(key)] = std::move(value);
+    }
+
+    // Constructor with two string context values
+    ErrorType(Kind kind, std::string key1, std::string val1, std::string key2, std::string val2) : kind_(kind) {
+        context_[std::move(key1)] = std::move(val1);
+        context_[std::move(key2)] = std::move(val2);
+    }
+
     Kind kind() const { return kind_; }
     const std::unordered_map<std::string, std::string>& context() const { return context_; }
     

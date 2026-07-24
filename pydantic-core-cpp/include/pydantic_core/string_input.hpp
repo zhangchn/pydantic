@@ -35,6 +35,11 @@ public:
     ValResult<ValMatch<bool>> validate_bool(bool strict) const override;
     ValResult<ValMatch<EitherInt>> validate_int(bool strict) const override;
     ValResult<ValMatch<EitherFloat>> validate_float(bool strict) const override;
+
+    // Date/time validation
+    ValResult<ValMatch<EitherDate>> validate_date(bool strict) const override;
+    ValResult<ValMatch<EitherDateTime>> validate_datetime(bool strict) const override;
+    ValResult<ValMatch<EitherTime>> validate_time(bool strict) const override;
     
     ValResult<std::unique_ptr<ValidatedDict>> validate_dict(bool strict) const override;
     ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_list(bool strict) const override;

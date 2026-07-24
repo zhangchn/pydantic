@@ -168,4 +168,151 @@ std::optional<ValidatedDict::Entry> StringValidatedDict::get(const std::string& 
     return std::nullopt;
 }
 
+// ============================================================================
+// ISO 8601 parsing helper
+// ============================================================================
+
+static std::optional<DateTime> try_parse_iso8601(const std::string& s) {
+    try {
+        if (s.size() < 19) return std::nullopt;
+        if (s[4] != '-' || s[7] != '-' || s[10] != 'T' || s[13] != ':' || s[16] != ':') {
+            return std::nullopt;
+        }
+        int year = std::stoi(s.substr(0, 4));
+        int month = std::stoi(s.substr(5, 2));
+        int day = std::stoi(s.substr(8, 2));
+        int hour = std::stoi(s.substr(11, 2));
+        int minute = std::stoi(s.substr(14, 2));
+        int second = std::stoi(s.substr(17, 2));
+
+        int microsecond = 0;
+        size_t pos = 19;
+
+        if (pos < s.size() && s[pos] == '.') {
+            std::string frac;
+            pos++;
+            while (pos < s.size() && std::isdigit(s[pos])) {
+                frac += s[pos];
+                pos++;
+            }
+            if (frac.size() > 6) frac = frac.substr(0, 6);
+            while (frac.size() < 6) frac += '0';
+            if (!frac.empty()) microsecond = std::stoi(frac);
+        }
+
+        std::optional<int> tz_offset;
+        if (pos < s.size()) {
+            if (s[pos] == 'Z') {
+                tz_offset = 0;
+            } else if (s[pos] == '+' || s[pos] == '-') {
+                char sign = s[pos];
+                pos++;
+                if (pos + 4 < s.size() && s[pos + 2] == ':') {
+                    int tz_hour = std::stoi(s.substr(pos, 2));
+                    int tz_min = std::stoi(s.substr(pos + 3, 2));
+                    int offset = tz_hour * 60 + tz_min;
+                    tz_offset = (sign == '-') ? -offset : offset;
+                }
+            }
+        }
+
+        return DateTime{Date{year, month, day}, Time{hour, minute, second, microsecond, tz_offset}};
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+// ============================================================================
+// Date/time validation
+// ============================================================================
+
+ValResult<ValMatch<EitherDate>> StringInput::validate_date(bool strict) const {
+    if (!single_value_) {
+        return type_error(ErrorType::Kind::DateType, *this, this->current_location());
+    }
+    const std::string& s = *single_value_;
+
+    // Try to parse as ISO 8601 date
+    try {
+        if (s.size() >= 10 && s[4] == '-' && s[7] == '-') {
+            int year = std::stoi(s.substr(0, 4));
+            int month = std::stoi(s.substr(5, 2));
+            int day = std::stoi(s.substr(8, 2));
+            if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+                if (s.size() > 10) {
+                    // Has time component - check midnight
+                    auto dt = try_parse_iso8601(s);
+                    if (dt && dt->time.hour == 0 && dt->time.minute == 0 &&
+                        dt->time.second == 0 && dt->time.microsecond == 0) {
+                        return ValMatch<EitherDate>::lax(EitherDate(dt->date));
+                    }
+                    if (dt) {
+                        return ValError::line_error(
+                            ErrorType(ErrorType::Kind::DateFromDatetimeInexact),
+                            this->current_location(),
+                            this->as_error_value().repr
+                        );
+                    }
+                    return ValError::line_error(
+                        ErrorType(ErrorType::Kind::DateParsing),
+                        this->current_location(),
+                        this->as_error_value().repr
+                    );
+                }
+                return ValMatch<EitherDate>::lax(EitherDate(Date{year, month, day}));
+            }
+        }
+    } catch (...) {}
+    return ValError::line_error(
+        ErrorType(ErrorType::Kind::DateParsing),
+        this->current_location(),
+        this->as_error_value().repr
+    );
+}
+
+ValResult<ValMatch<EitherDateTime>> StringInput::validate_datetime(bool strict) const {
+    if (!single_value_) {
+        return type_error(ErrorType::Kind::DateTimeType, *this, this->current_location());
+    }
+    const std::string& s = *single_value_;
+
+    auto parsed = try_parse_iso8601(s);
+    if (parsed) {
+        return ValMatch<EitherDateTime>::lax(EitherDateTime(*parsed));
+    }
+    return ValError::line_error(
+        ErrorType(ErrorType::Kind::DateTimeParsing),
+        this->current_location(),
+        this->as_error_value().repr
+    );
+}
+
+ValResult<ValMatch<EitherTime>> StringInput::validate_time(bool strict) const {
+    if (!single_value_) {
+        return type_error(ErrorType::Kind::TimeType, *this, this->current_location());
+    }
+    const std::string& s = *single_value_;
+
+    try {
+        if (s.size() >= 8 && s[2] == ':' && s[5] == ':') {
+            int hour = std::stoi(s.substr(0, 2));
+            int minute = std::stoi(s.substr(3, 2));
+            int second = std::stoi(s.substr(6, 2));
+            int microsecond = 0;
+            if (s.size() > 8 && s[8] == '.') {
+                std::string frac = s.substr(9);
+                if (frac.size() > 6) frac = frac.substr(0, 6);
+                while (frac.size() < 6) frac += '0';
+                microsecond = std::stoi(frac);
+            }
+            return ValMatch<EitherTime>::lax(EitherTime(Time{hour, minute, second, microsecond, std::nullopt}));
+        }
+    } catch (...) {}
+    return ValError::line_error(
+        ErrorType(ErrorType::Kind::TimeParsing),
+        this->current_location(),
+        this->as_error_value().repr
+    );
+}
+
 } // namespace pydantic_core
