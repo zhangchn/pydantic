@@ -530,20 +530,6 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
         } catch (...) {}
     }
 
-    // For wrapper types, check py::object* first (before scalar checks) to avoid
-    // trying to static_cast<py::object*> to std::string* which is UB.
-    // py::object is used by FunctionAfter/Before/Plain/Wrap validators.
-    if (try_all) {
-        try {
-            auto* obj_ptr = static_cast<py::object*>(value.get());
-            if (obj_ptr) {
-                return *obj_ptr;
-            }
-        } catch (...) {
-            // Not a py::object, fall through to scalar checks
-        }
-    }
-
     if (try_all || matches_type("str") || type_name == "string") {
         auto* s = static_cast<std::string*>(value.get());
         if (s) {
