@@ -29,12 +29,19 @@ else()
 endif()
 
 # simdjson for JSON parsing (build-only dependency, don't install into wheel)
-FetchContent_Declare(
-    simdjson
-    GIT_REPOSITORY https://github.com/simdjson/simdjson.git
-    GIT_TAG v3.9.4
-    EXCLUDE_FROM_ALL
-)
+# Prefer the vendored git submodule (offline builds); fall back to fetching
+# from GitHub when the submodule has not been initialized.
+set(SIMDJSON_SUBMODULE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/simdjson)
+if(EXISTS ${SIMDJSON_SUBMODULE_DIR}/CMakeLists.txt)
+    FetchContent_Declare(simdjson SOURCE_DIR ${SIMDJSON_SUBMODULE_DIR})
+else()
+    FetchContent_Declare(
+        simdjson
+        GIT_REPOSITORY https://github.com/simdjson/simdjson.git
+        GIT_TAG v3.9.4
+        EXCLUDE_FROM_ALL
+    )
+endif()
 FetchContent_MakeAvailable(simdjson)
 
 # doctest for testing (only for standalone builds)

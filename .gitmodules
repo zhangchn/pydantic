@@ -1,0 +1,3 @@
+[submodule "pydantic-core-cpp/third_party/simdjson"]
+	path = pydantic-core-cpp/third_party/simdjson
+	url = https://github.com/simdjson/simdjson.git
