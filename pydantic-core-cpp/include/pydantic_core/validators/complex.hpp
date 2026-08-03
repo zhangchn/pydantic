@@ -24,7 +24,12 @@ public:
         return inner_->validate(input, state);
     }
     
-    std::string name() const override { return "nullable"; }
+    std::string name() const override {
+        // Delegate to the inner validator so result conversion uses the
+        // actual stored value type instead of the "nullable" wrapper name.
+        if (inner_) return inner_->name();
+        return "nullable";
+    }
     
 private:
     std::shared_ptr<Validator> inner_;

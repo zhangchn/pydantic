@@ -104,6 +104,8 @@ public:
         TimezoneAware,
         TimezoneNaive,
         TimezoneOffset,
+        TimedeltaType,
+        TimedeltaParsing,
         
         // URL errors
         UrlType,

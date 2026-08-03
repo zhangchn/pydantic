@@ -1105,12 +1105,12 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
         .def("validate_python", [](SchemaValidator& self, const py::object& input, py::object strict, py::object context, py::object self_instance,
                                     py::object extra, py::object from_attributes, py::object by_alias, py::object by_name) -> py::object {
             // NEW: Use native PythonInput - no JSON round-trip!
-            (void)by_alias; (void)by_name; (void)context;
+            (void)by_alias; (void)by_name;
             std::optional<bool> fa_opt;
             if (!from_attributes.is_none()) {
                 fa_opt = pyobj_to_bool(from_attributes);
             }
-            py::object validated = self.validate_python_object(input, pyobj_to_bool(strict), std::nullopt, fa_opt);
+            py::object validated = self.validate_python_object(input, pyobj_to_bool(strict), std::nullopt, fa_opt, context);
 
             // If self_instance provided, populate and return it
             if (!self_instance.is_none() && py::hasattr(self_instance, "__dict__")) {

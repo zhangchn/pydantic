@@ -94,6 +94,7 @@ public:
     ValResult<ValMatch<EitherDate>> validate_date(bool strict) const override;
     ValResult<ValMatch<EitherDateTime>> validate_datetime(bool strict) const override;
     ValResult<ValMatch<EitherTime>> validate_time(bool strict) const override;
+    ValResult<ValMatch<EitherTimedelta>> validate_timedelta(bool strict) const override;
 
     // Container validation
     ValResult<std::unique_ptr<ValidatedDict>> validate_dict(bool strict) const override;

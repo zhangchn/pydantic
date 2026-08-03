@@ -176,15 +176,30 @@ private:
 // TimedeltaValidator - validates timedelta values
 class TimedeltaValidator : public Validator {
 public:
+    explicit TimedeltaValidator(bool strict = false) : strict_(strict) {}
+
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
     ) override {
-        // In Phase 2, we'll parse timedelta strings
-        return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
+        auto result = input.validate_timedelta(state.strict_or(strict_));
+        if (result.is_err()) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::TimedeltaType),
+                state.location(),
+                input.as_error_value().repr
+            );
+        }
+        auto match = std::move(result.value());
+        return ValResult<std::shared_ptr<void>>(
+            std::make_shared<EitherTimedelta>(std::move(match.value()))
+        );
     }
-    
+
     std::string name() const override { return "timedelta"; }
+
+private:
+    bool strict_ = false;
 };
 
 // UrlValidator - validates URL values

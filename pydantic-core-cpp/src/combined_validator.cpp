@@ -10,6 +10,26 @@ namespace py = pybind11;
 
 namespace pydantic_core {
 
+// Helper: serialize a schema default value to a JSON string, handling
+// values that json.dumps cannot serialize directly (bytes, Enum members).
+static std::string py_default_to_json_str(const py::object& py_default) {
+    auto default_fn = py::cpp_function([](py::handle o) -> py::object {
+        if (py::isinstance<py::bytes>(o)) {
+            // Decode UTF-8 (matches ser_json_bytes='utf8' default)
+            return py::object(py::reinterpret_borrow<py::object>(o)).attr("decode")("utf-8");
+        }
+        if (py::hasattr(o, "_value_") && py::hasattr(o, "_name_")) {
+            // Enum member — use its name so the enum validator can rebuild it
+            return py::getattr(o, "name");
+        }
+        if (py::hasattr(o, "__dict__")) {
+            return py::getattr(o, "__dict__");
+        }
+        return py::str(py::repr(o));
+    });
+    return py::module_::import("json").attr("dumps")(py_default, py::arg("default") = default_fn).cast<std::string>();
+}
+
 // Helper: convert string to ExtraBehavior
 static ExtraBehavior extra_behavior_from_string(const std::string& s) {
     if (s == "allow") return ExtraBehavior::Allow;
@@ -1210,7 +1230,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
                 default_val = std::make_shared<bool>(py_default.cast<bool>());
             } else if (!py_default.is_none()) {
                 // Complex default (list, dict) — serialize to JSON string for later parsing
-                default_val_str = py::module_::import("json").attr("dumps")(py_default).cast<std::string>();
+                default_val_str = py_default_to_json_str(py_default);
             }
         }
         return std::make_shared<WithDefaultValidator>(inner, default_val, default_val_str);
@@ -1393,7 +1413,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
                             if (py_default.is_none()) {
                                 default_val_str = "null";
                             } else {
-                                default_val_str = py::module_::import("json").attr("dumps")(py_default).cast<std::string>();
+                                default_val_str = py_default_to_json_str(py_default);
                             }
                             required = false;
                         }

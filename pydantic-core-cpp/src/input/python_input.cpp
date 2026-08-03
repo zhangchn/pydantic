@@ -835,3 +835,65 @@ ValResult<ValMatch<EitherTime>> PythonInput::validate_time(bool strict) const {
 
     return type_error(ErrorType::Kind::TimeType, *this, this->current_location());
 }
+
+ValResult<ValMatch<EitherTimedelta>> PythonInput::validate_timedelta(bool strict) const {
+    if (is_timedelta()) {
+        // Extract from Python datetime.timedelta object
+        py::object py_td = obj_;
+        int days = py_td.attr("days").cast<int>();
+        int seconds = py_td.attr("seconds").cast<int>();
+        int microseconds = py_td.attr("microseconds").cast<int>();
+        return ValMatch<EitherTimedelta>::exact(EitherTimedelta(Timedelta{days, seconds, microseconds}));
+    }
+
+    if (is_int() && !strict) {
+        // Lax mode: treat int as number of seconds (Rust behavior)
+        long long seconds = py::int_(obj_).cast<long long>();
+        long long days = seconds / 86400;
+        long long rem = seconds % 86400;
+        return ValMatch<EitherTimedelta>::lax(
+            EitherTimedelta(Timedelta{static_cast<int>(days), static_cast<int>(rem), 0}));
+    }
+
+    if (is_float() && !strict) {
+        // Lax mode: treat float as number of seconds
+        double seconds = py::float_(obj_).cast<double>();
+        double days_f = seconds / 86400.0;
+        long long days = static_cast<long long>(days_f);
+        double rem = seconds - days * 86400.0;
+        long long whole = static_cast<long long>(rem);
+        long long micros = std::llround((rem - whole) * 1e6);
+        return ValMatch<EitherTimedelta>::lax(
+            EitherTimedelta(Timedelta{static_cast<int>(days), static_cast<int>(whole), static_cast<int>(micros)}));
+    }
+
+    if (is_str() && !strict) {
+        // Lax mode: try to parse ISO 8601 duration string
+        std::string s = as_str();
+        auto parsed = try_parse_timedelta_str(s);
+        if (parsed) {
+            return ValMatch<EitherTimedelta>::lax(EitherTimedelta(*parsed));
+        }
+        return ValError::line_error(
+            ErrorType(ErrorType::Kind::TimedeltaParsing),
+            this->current_location(),
+            this->as_error_value().repr
+        );
+    }
+
+    if (is_bytes() && !strict) {
+        // Lax mode: decode bytes as UTF-8 and try to parse a duration
+        std::string s = py::bytes(obj_).cast<std::string>();
+        auto parsed = try_parse_timedelta_str(s);
+        if (parsed) {
+            return ValMatch<EitherTimedelta>::lax(EitherTimedelta(*parsed));
+        }
+        return ValError::line_error(
+            ErrorType(ErrorType::Kind::TimedeltaParsing),
+            this->current_location(),
+            this->as_error_value().repr
+        );
+    }
+
+    return type_error(ErrorType::Kind::TimedeltaType, *this, this->current_location());
+}

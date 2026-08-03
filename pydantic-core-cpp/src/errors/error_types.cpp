@@ -91,6 +91,8 @@ std::string ErrorType::type_name() const {
         {Kind::TimezoneAware, "timezone_aware"},
         {Kind::TimezoneNaive, "timezone_naive"},
         {Kind::TimezoneOffset, "timezone_offset"},
+        {Kind::TimedeltaType, "timedelta_type"},
+        {Kind::TimedeltaParsing, "timedelta_parsing"},
 
         // Other errors
         {Kind::JsonInvalid, "json_invalid"},
@@ -216,6 +218,8 @@ std::string ErrorType::message_template() const {
         {Kind::TimezoneAware, "Datetime should be timezone-aware"},
         {Kind::TimezoneNaive, "Datetime should be timezone-naive"},
         {Kind::TimezoneOffset, "Datetime should have timezone offset {tz_expected}, got {tz_actual}"},
+        {Kind::TimedeltaType, "Input should be a valid timedelta"},
+        {Kind::TimedeltaParsing, "Input should be a valid timedelta, unable to parse string as an ISO 8601 duration"},
     };
     auto it = templates.find(kind_);
     return it != templates.end() ? it->second : "Validation error";

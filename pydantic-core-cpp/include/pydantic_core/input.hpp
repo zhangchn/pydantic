@@ -5,6 +5,7 @@
 #include <optional>
 #include <vector>
 #include <memory>
+#include <cmath>
 #include "types.hpp"
 #include "error_types.hpp"
 #include "errors.hpp"
@@ -175,6 +176,116 @@ struct EitherDateTime {
     DateTime as_raw() const { return value; }
 };
 
+// Timedelta representation (days/seconds/microseconds, like Python's timedelta)
+struct Timedelta {
+    int days = 0;
+    int seconds = 0;
+    int microseconds = 0;
+};
+
+struct EitherTimedelta {
+    Timedelta value;
+    bool is_lax = false;
+
+    EitherTimedelta() : value{} {}
+    explicit EitherTimedelta(Timedelta td) : value(td) {}
+
+    Timedelta as_raw() const { return value; }
+};
+
+// Parse a timedelta string: ISO 8601 duration (P4Y/P4M/P4W/P4D/P0.5D/PT5H...),
+// HH:MM:SS[.frac] with optional "[Nd,]HH:MM:SS" days prefix, or either form
+// with a leading '-'. Returns nullopt when the string is not a valid duration.
+inline std::optional<Timedelta> try_parse_timedelta_str(const std::string& input) {
+    std::string s = input;
+    bool negative = false;
+    if (!s.empty() && s[0] == '-') {
+        negative = true;
+        s = s.substr(1);
+    }
+    try {
+        long long total_seconds = 0;
+        long long micros = 0;
+        bool parsed_any = false;
+
+        // ISO 8601 duration: P[nY][nM][nD][T[nH][nM][nS]] / P[nW]
+        if (!s.empty() && s[0] == 'P') {
+            bool in_time = false;
+            std::string num;
+            size_t i = 1;
+            while (i < s.size()) {
+                char c = s[i];
+                if ((c >= '0' && c <= '9') || c == '.') {
+                    num += c;
+                } else if (c == 'T') {
+                    in_time = true;
+                    num.clear();
+                } else {
+                    if (num.empty()) return std::nullopt;
+                    double val = std::stod(num);
+                    switch (c) {
+                        case 'Y': if (!in_time) { total_seconds += static_cast<long long>(val * 365.0 * 86400.0); parsed_any = true; } break;
+                        case 'M': if (!in_time) { total_seconds += static_cast<long long>(val * 30.0 * 86400.0); parsed_any = true; } else { total_seconds += static_cast<long long>(val * 60.0); parsed_any = true; } break;
+                        case 'D': if (!in_time) { total_seconds += static_cast<long long>(val * 86400.0); parsed_any = true; } break;
+                        case 'H': if (in_time) { total_seconds += static_cast<long long>(val * 3600.0); parsed_any = true; } break;
+                        case 'S': if (in_time) { double whole = 0.0; double frac = std::modf(val, &whole); total_seconds += static_cast<long long>(whole); micros += std::llround(frac * 1e6); parsed_any = true; } break;
+                        case 'W': if (!in_time) { total_seconds += static_cast<long long>(val * 7.0 * 86400.0); parsed_any = true; } break;
+                        default: return std::nullopt;
+                    }
+                    num.clear();
+                }
+                i++;
+            }
+            if (!parsed_any) return std::nullopt;
+        } else {
+            // [Nd,]HH:MM:SS[.frac]
+            long long day_part = 0;
+            std::string hms = s;
+            size_t comma = s.find(',');
+            if (comma != std::string::npos) {
+                std::string daystr = s.substr(0, comma);
+                if (daystr.size() >= 2 && daystr.back() == 'd') {
+                    day_part = std::stoll(daystr.substr(0, daystr.size() - 1));
+                    hms = s.substr(comma + 1);
+                } else {
+                    return std::nullopt;
+                }
+            }
+            size_t c1 = hms.find(':');
+            if (c1 == std::string::npos) return std::nullopt;
+            size_t c2 = hms.find(':', c1 + 1);
+            if (c2 == std::string::npos) return std::nullopt;
+            // Third colon means seconds contain a ':' — not valid here
+            if (hms.find(':', c2 + 1) != std::string::npos) return std::nullopt;
+            long long h = std::stoll(hms.substr(0, c1));
+            long long m = std::stoll(hms.substr(c1 + 1, c2 - c1 - 1));
+            double sv = std::stod(hms.substr(c2 + 1));
+            double sw = 0.0;
+            double sf = std::modf(sv, &sw);
+            total_seconds = day_part * 86400LL + h * 3600LL + m * 60LL + static_cast<long long>(sw);
+            micros = std::llround(sf * 1e6);
+            parsed_any = true;
+        }
+
+        if (!parsed_any) return std::nullopt;
+        if (negative) {
+            total_seconds = -total_seconds;
+            micros = -micros;
+        }
+        // Normalize into days/seconds/microseconds
+        long long days = total_seconds / 86400;
+        long long rem = total_seconds % 86400;
+        if (micros < 0) {
+            // borrow one second for negative microseconds
+            rem -= 1;
+            micros += 1000000;
+        }
+        return Timedelta{static_cast<int>(days), static_cast<int>(rem), static_cast<int>(micros)};
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 // Dict iterator interface
 class ValidatedDict {
 public:
@@ -251,6 +362,7 @@ public:
     virtual ValResult<ValMatch<EitherDate>> validate_date(bool strict) const = 0;
     virtual ValResult<ValMatch<EitherDateTime>> validate_datetime(bool strict) const = 0;
     virtual ValResult<ValMatch<EitherTime>> validate_time(bool strict) const = 0;
+    virtual ValResult<ValMatch<EitherTimedelta>> validate_timedelta(bool strict) const = 0;
 
     // Container validation
     virtual ValResult<std::unique_ptr<ValidatedDict>> validate_dict(bool strict) const = 0;

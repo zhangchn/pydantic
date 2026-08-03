@@ -315,4 +315,20 @@ ValResult<ValMatch<EitherTime>> StringInput::validate_time(bool strict) const {
     );
 }
 
+ValResult<ValMatch<EitherTimedelta>> StringInput::validate_timedelta(bool strict) const {
+    if (!single_value_) {
+        return type_error(ErrorType::Kind::TimedeltaType, *this, this->current_location());
+    }
+    const std::string& s = *single_value_;
+    auto parsed = try_parse_timedelta_str(s);
+    if (parsed) {
+        return ValMatch<EitherTimedelta>::lax(EitherTimedelta(*parsed));
+    }
+    return ValError::line_error(
+        ErrorType(ErrorType::Kind::TimedeltaParsing),
+        this->current_location(),
+        this->as_error_value().repr
+    );
+}
+
 } // namespace pydantic_core

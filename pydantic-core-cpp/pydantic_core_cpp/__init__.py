@@ -8,7 +8,9 @@ Provides the same public API as pydantic_core (Rust) by combining:
 """
 from __future__ import annotations
 
+import ast as _ast
 import copy as _copy
+import re as _re
 import sys as _sys
 from typing import Any as _Any
 
@@ -132,6 +134,8 @@ def _parse_errors_from_message(msg: str) -> list[dict]:
     _MSG_MAP = {
         'Field required': 'Field required',
         'Missing field': 'Field required',
+        'Input should be a valid date in YYYY-MM-DD format': 'Input should be a valid date',
+        'Input should be a valid time in HH:MM:SS format': 'Input should be a valid time',
     }
 
     def _parse_input(raw: str):
@@ -167,7 +171,7 @@ def _parse_errors_from_message(msg: str) -> list[dict]:
             continue
 
         # Check if this line has a [type=...] suffix
-        match = _re.search(r'\[type=([^,\]]+)(?:,\s*input_value=([^\]]*))?\]$', line)
+        match = _re.search(r'\[type=([^,\]]+)(?:,\s*input_value=(.*))?\]$', line)
         if match:
             # Single-line error: just the message (no location or location on previous line)
             err_type = _TYPE_MAP.get(match.group(1), match.group(1))
@@ -185,7 +189,7 @@ def _parse_errors_from_message(msg: str) -> list[dict]:
         elif i < len(lines):
             # Check if NEXT line is a message with [type=...]
             next_line = lines[i].strip()
-            next_match = _re.search(r'\[type=([^,\]]+)(?:,\s*input_value=([^\]]*))?\]$', next_line)
+            next_match = _re.search(r'\[type=([^,\]]+)(?:,\s*input_value=(.*))?\]$', next_line)
             if next_match:
                 # Two-line format: loc_line, then msg_line
                 err_type = _TYPE_MAP.get(next_match.group(1), next_match.group(1))
@@ -334,6 +338,19 @@ def _format_rust_error(msg: str, model_name: str = '') -> str:
                         input_val = ival
                         input_type = itype
                         break
+                else:
+                    # Unmapped message: strip the trailing [type=..., input_value=...]
+                    # segment so it is not duplicated when we append a new one.
+                    seg = _re.search(r'\s*\[type=([^,\]]+),\s*input_value=(.*)\]$', msg_line)
+                    if seg:
+                        err_type = seg.group(1)
+                        raw_input = seg.group(2).strip().strip("'")
+                        input_val = raw_input
+                        try:
+                            input_type = type(_ast.literal_eval(raw_input)).__name__
+                        except Exception:
+                            input_type = 'str'
+                        rust_msg = msg_line[:seg.start()].strip()
 
                 result.append(f'{loc_line}')
                 result.append(f'  {rust_msg} [type={err_type}, input_value={input_val}, input_type={input_type}]')

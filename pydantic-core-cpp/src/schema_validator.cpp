@@ -404,7 +404,8 @@ ValidationError SchemaValidator::prepare_error(const ValError& err, InputType in
 py::object SchemaValidator::validate_python_object(const py::object& input,
                                                    std::optional<bool> strict,
                                                    std::optional<ExtraBehavior> extra,
-                                                   std::optional<bool> from_attributes) {
+                                                   std::optional<bool> from_attributes,
+                                                   py::object context) {
     if (!validator_) {
         throw std::runtime_error("Validator not initialized");
     }
@@ -422,6 +423,9 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
     }
     if (from_attributes.has_value()) {
         state.set_from_attributes(*from_attributes);
+    }
+    if (!context.is_none()) {
+        state.set_context_py(context);
     }
 
     // Validate using the unified Input interface
@@ -498,6 +502,20 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
                 return datetime_mod.attr("datetime")(
                     dt.date.year, dt.date.month, dt.date.day,
                     dt.time.hour, dt.time.minute, dt.time.second, dt.time.microsecond);
+            }
+        } catch (...) {}
+        return py::none();
+    }
+    if (type_name == "timedelta") {
+        try {
+            auto* etd = static_cast<EitherTimedelta*>(value.get());
+            if (etd) {
+                auto& td = etd->value;
+                py::object datetime_mod = py::module_::import("datetime");
+                return datetime_mod.attr("timedelta")(
+                    py::arg("days") = td.days,
+                    py::arg("seconds") = td.seconds,
+                    py::arg("microseconds") = td.microseconds);
             }
         } catch (...) {}
         return py::none();

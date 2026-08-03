@@ -424,6 +424,25 @@ ValResult<ValMatch<EitherTime>> JsonInput::validate_time(bool strict) const {
     );
 }
 
+ValResult<ValMatch<EitherTimedelta>> JsonInput::validate_timedelta(bool strict) const {
+    if (!element_.is_string()) {
+        return type_error(ErrorType::Kind::TimedeltaType, *this, this->current_location());
+    }
+    std::string_view sv;
+    if (element_.get_string().get(sv)) {
+        return type_error(ErrorType::Kind::TimedeltaType, *this, this->current_location());
+    }
+    std::string s(sv);
+    auto parsed = try_parse_timedelta_str(s);
+    if (parsed) {
+        return ValMatch<EitherTimedelta>::lax(EitherTimedelta(*parsed));
+    }
+    return ValError::line_error(
+        ErrorType(ErrorType::Kind::TimedeltaParsing),
+        this->current_location(), this->as_error_value().repr
+    );
+}
+
 // JsonValidatedDict implementation
 std::vector<ValidatedDict::Entry> JsonValidatedDict::entries() const {
     std::vector<Entry> result;

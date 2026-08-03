@@ -38,7 +38,8 @@ public:
     py::object validate_python_object(const py::object& input,
                                       std::optional<bool> strict = std::nullopt,
                                       std::optional<ExtraBehavior> extra = std::nullopt,
-                                      std::optional<bool> from_attributes = std::nullopt);
+                                      std::optional<bool> from_attributes = std::nullopt,
+                                      py::object context = py::none());
 
     // isinstance check on Python object directly (NEW - no JSON round-trip)
     bool isinstance_python_object(const py::object& input,

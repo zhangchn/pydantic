@@ -94,8 +94,19 @@ public:
 
             py::object output;
             try {
-                // Try with info dict (general/no-info-wrapped functions)
-                output = py_func_(input.as_python_object(), info_dict);
+                // Convert info_dict to an object with attribute access (like ValidationInfo)
+                // pydantic's field_validator accesses info.context, info.field_name via attributes
+                // Missing attributes should return None (not raise AttributeError)
+                py::object info_obj;
+                try {
+                    // Create a dict subclass that returns None for missing attribute access
+                    py::object info_cls = py::module_::import("pydantic_core_cpp").attr("_ValidationInfo");
+                    info_obj = info_cls(info_dict);
+                } catch (...) {
+                    info_obj = info_dict;
+                }
+                // Try with info object (general/no-info-wrapped functions)
+                output = py_func_(input.as_python_object(), info_obj);
             } catch (py::error_already_set& e1) {
                 // If fails with info dict, try without info dict (no-info functions like attrgetter)
                 PyErr_Clear();
@@ -291,7 +302,12 @@ public:
         return ValError::omit();
     }
 
-    std::string name() const override { return "with-default"; }
+    std::string name() const override {
+        // Delegate to the inner validator so result conversion uses the
+        // actual stored value type instead of the "with-default" wrapper name.
+        if (inner_) return inner_->name();
+        return "with-default";
+    }
 
 private:
     std::shared_ptr<Validator> inner_;
