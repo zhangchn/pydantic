@@ -8,6 +8,7 @@ Provides the same public API as pydantic_core (Rust) by combining:
 """
 from __future__ import annotations
 
+import copy as _copy
 import sys as _sys
 from typing import Any as _Any
 
@@ -37,6 +38,23 @@ from ._pydantic_core_cpp import (
 )
 
 from typing import TypedDict as _TypedDict
+
+
+class _ValidationInfo:
+    """Helper class that wraps a dict with attribute access.
+
+    Used by C++ FunctionAfterValidator/FunctionBeforeValidator to pass
+    validation info to Python callable validators. Missing attributes
+    return None instead of raising AttributeError.
+    """
+
+    def __init__(self, info_dict: dict):
+        self._info_dict = dict(info_dict) if info_dict else {}
+
+    def __getattr__(self, name: str) -> object:
+        if name.startswith('_'):
+            raise AttributeError(name)
+        return self._info_dict.get(name, None)
 
 
 class MultiHostHost(_TypedDict):
@@ -454,6 +472,11 @@ def _find_function_after_callable(schema: dict, callables: list | None = None, s
 
 class SchemaValidator:
     def __init__(self, schema, config=None, _use_prebuilt=True):
+        # Do NOT mutate the caller's schema dict: model `__pydantic_core_schema__`
+        # dicts are shared and re-read by pydantic when the model appears as a
+        # nested field of another model. Removing ``cls`` in place would lose the
+        # nested model class for later validators, so class/enum extraction is
+        # read-only and C++ receives a cls-free deep copy instead.
         self._schema = schema
         self._config = config
         # Extract & remove model class references BEFORE C++ construction
@@ -471,37 +494,42 @@ class SchemaValidator:
             config_dict = dict(config) if hasattr(config, 'items') else {}
 
         # Pass schema dict directly to C++ — no JSON serialization (like Rust!)
-        self._base = _SchemaValidatorBase(schema, config_dict)
+        cpp_schema = _copy.deepcopy(schema)
+        _schema_clean_cls_keys(cpp_schema)
+        self._base = _SchemaValidatorBase(cpp_schema, config_dict)
 
     @staticmethod
     def _extract_model_classes(schema):
         """Extract and remove model class references from the schema dict.
 
         Pydantic's schema generation embeds Python class objects under ``cls``
-        keys. These must be removed before JSON serialization.
+        keys both for the top-level model and for nested inline model schemas.
+        They are indexed by ``ref`` (the top-level model also under ``__root__``)
+        so later dict-to-model conversion can reconstruct model instances.
         """
         classes = {}
         if not isinstance(schema, dict):
             return classes
 
-        # Handle definitions wrapper
-        if schema.get("type") == "definitions":
-            for defn in schema.get("definitions", []):
-                ref = defn.get("ref")
-                if ref and defn.get("type") == "model":
-                    cls = defn.pop("cls", None)
-                    if cls is not None and callable(cls):
+        def _collect(d):
+            if isinstance(d, dict):
+                if d.get("type") == "model":
+                    ref = d.get("ref")
+                    cls = d.get("cls")
+                    if ref and cls is not None and callable(cls):
                         classes[ref] = cls
+                for v in d.values():
+                    _collect(v)
+            elif isinstance(d, list):
+                for item in d:
+                    _collect(item)
 
-        # Handle direct model schema
-        if schema.get("type") == "model":
-            cls = schema.pop("cls", None)
-            if cls is not None and callable(cls):
-                # Use a special key for the top-level model
-                classes["__root__"] = cls
+        _collect(schema)
 
-        # Recursively clean any remaining nested cls keys
-        _schema_clean_cls_keys(schema)
+        # Use a special key for the top-level model
+        top_cls = schema.get("cls")
+        if top_cls is not None and callable(top_cls):
+            classes["__root__"] = top_cls
 
         return classes
 
@@ -594,6 +622,10 @@ class SchemaValidator:
 
         if schema.get("type") == "model":
             cls = schema.get("cls")
+            if cls is None:
+                # Nested inline model schemas have their cls removed during
+                # extraction; recover it via the schema ref
+                cls = self._model_classes.get(schema.get("ref"))
             inner_schema = schema.get("schema", {})
             if isinstance(inner_schema, dict) and inner_schema.get("type") in ("model-fields", "typed-dict"):
                 data = self._process_model_fields(data, inner_schema)
