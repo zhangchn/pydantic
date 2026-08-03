@@ -572,6 +572,13 @@ static std::shared_ptr<Validator> build_from_element(
         validator->set_model_name(model_name);
         validator->set_from_attributes(from_attributes);
 
+        // Parse extras_schema (value validator for extra fields)
+        auto es_val = elem["extras_schema"];
+        if (!es_val.error()) {
+            auto es_validator = build_from_element(es_val.value(), config, definitions);
+            validator->set_extras_validator(es_validator);
+        }
+
         if (fields_elem.error() || !fields_elem.value().is_object()) {
             // Empty fields
             return validator;
@@ -1437,7 +1444,14 @@ static std::shared_ptr<Validator> build_from_py_dict(
             py_str(config, "extra_behavior", py_str(config, "extra", "ignore")));
         auto extra = extra_behavior_from_string(extra_str);
         v->set_extra_behavior(extra);
-        
+
+        // Extract extras_schema (value validator applied to extra fields)
+        if (schema.contains("extras_schema")) {
+            auto extras_schema = schema["extras_schema"].cast<py::dict>();
+            auto extras_validator = build_from_py_dict(extras_schema, config, definitions);
+            v->set_extras_validator(extras_validator);
+        }
+
         return v;
     }
 

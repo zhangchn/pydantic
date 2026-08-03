@@ -427,6 +427,7 @@ protected:
 
                 if (extras_validator_) {
                     state.push_loc(key);
+                    field_input->set_current_location(state.location());
                     auto result = extras_validator_->validate(*field_input, state);
                     state.pop_loc();
                     if (result.is_ok()) {
@@ -435,6 +436,8 @@ protected:
                         fv.type_name = extras_validator_->name();
                         output.extra[key] = std::move(fv);
                         output.fields_set.insert(key);
+                    } else {
+                        combined_errors.merge(std::move(result.error()));
                     }
                 } else {
                     ValidatedModelFieldsOutput::FieldValue fv;
@@ -484,6 +487,7 @@ protected:
 
                 if (extras_validator_) {
                     state.push_loc(key);
+                    field_input.set_current_location(state.location());
                     auto result = extras_validator_->validate(field_input, state);
                     state.pop_loc();
                     if (result.is_ok()) {
@@ -492,6 +496,8 @@ protected:
                         fv.type_name = extras_validator_->name();
                         output.extra[key] = std::move(fv);
                         output.fields_set.insert(key);
+                    } else {
+                        combined_errors.merge(std::move(result.error()));
                     }
                 } else {
                     // Store the raw Python object wrapped in shared_ptr
