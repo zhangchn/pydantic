@@ -5,6 +5,7 @@
 #include "pydantic_core/python_input.hpp"
 #include "pydantic_core/url_types.hpp"
 #include "pydantic_core/validators/model_fields.hpp"
+#include "pydantic_core/validators/complex.hpp"
 #include <pybind11/stl.h>
 
 namespace py = pybind11;
@@ -34,13 +35,16 @@ SchemaValidator::SchemaValidator(const py::dict& schema,
     try {
         validator_ = SchemaBuilder::build_from_py(schema, config);
     } catch (const std::exception& e) {
-        throw SchemaError(std::string("Error building \"") + 
-                          (schema.contains("type") ? py::str(schema["type"]).cast<std::string>() : "?") + 
+        throw SchemaError(std::string("Error building \"") +
+                          (schema.contains("type") ? py::str(schema["type"]).cast<std::string>() : "?") +
                           "\" validator:\n  " + e.what());
     }
 
     // Set up config defaults
     config_.strict = std::nullopt;
+    if (config.contains("strict") && !config["strict"].is_none()) {
+        config_.strict = config["strict"].cast<bool>();
+    }
     config_.extra_behavior = std::nullopt;
     config_.from_attributes = std::nullopt;
     config_.cache_strings = StringCacheMode::All;

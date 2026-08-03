@@ -432,6 +432,37 @@ public:
                 input.as_error_value().repr
             );
         }
+
+        // Accept Enum member instances directly (matches Rust's exact-instance check),
+        // e.g. `MyEnum.val` passed as input regardless of strict mode.
+        try {
+            py::object py_in = input.as_python_object();
+            if (!py_in.is_none() && py::hasattr(py_in, "_name_") && py::hasattr(py_in, "_value_")) {
+                std::string name = py::str(py_in).cast<std::string>();
+                if (valid_values_.count(name)) {
+                    return ValResult<std::shared_ptr<void>>(std::make_shared<std::string>(name));
+                }
+                auto dot_pos = name.rfind('.');
+                std::string short_name = (dot_pos != std::string::npos) ? name.substr(dot_pos + 1) : name;
+                if (valid_values_.count(short_name)) {
+                    return ValResult<std::shared_ptr<void>>(std::make_shared<std::string>(short_name));
+                }
+                // Value-based match (e.g. int/str-valued enums whose names differ from values)
+                py::object val = py::getattr(py_in, "_value_");
+                if (py::isinstance<py::str>(val)) {
+                    std::string v = val.cast<std::string>();
+                    if (valid_values_.count(v)) {
+                        return ValResult<std::shared_ptr<void>>(std::make_shared<std::string>(v));
+                    }
+                }
+                return ValError::line_error(
+                    PydanticKnownError::enum_error(),
+                    state.location(),
+                    input.as_error_value().repr
+                );
+            }
+        } catch (...) {}
+
         auto str_result = input.validate_str(state.strict_or(false), false);
         if (str_result.is_err()) {
             return str_result.error();

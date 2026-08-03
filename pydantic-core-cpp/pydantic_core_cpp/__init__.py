@@ -141,7 +141,7 @@ def _parse_errors_from_message(msg: str) -> list[dict]:
     def _parse_input(raw: str):
         """Try to parse input_value string as a Python literal (dict, list, etc.)."""
         import ast as _ast
-        s = raw.strip().strip("'")
+        s = raw.strip()
         if not s:
             return s
         try:
@@ -221,10 +221,15 @@ _ERR_MSG_TO_RUST: dict[str, tuple[str, str, str, str]] = {
     'Missing field':           ('missing',         'Field required',                                                                                                   '{}', 'dict'),
     'Field required':          ('missing',         'Field required',                                                                                                   '{}', 'dict'),
     'none is not an allowed value': ('none_required', 'Input should be None',                                                                                          'None', 'NoneType'),
-    'Input should be a valid integer':  ('int_parsing',  'Input should be a valid integer, unable to parse string as an integer',                                      "''", 'str'),
+    'Input should be a valid integer, unable to parse string as an integer':
+                                                                    ('int_parsing', 'Input should be a valid integer, unable to parse string as an integer', "''", 'str'),
+    'Input should be a valid integer':
+                                                                    ('int_type', 'Input should be a valid integer', '', 'str'),
     'Input should be a valid string':   ('string_type',   'Input should be a valid string',                                                                            "''", 'str'),
     'Input should be a valid boolean':  ('bool_type',     'Input should be a valid boolean',                                                                           'False', 'bool'),
-    'Input should be a valid number':   ('float_parsing', 'Input should be a valid number, unable to parse string as a number',                                       "''", 'str'),
+    'Input should be a valid number, unable to parse string as a number':
+                                                                    ('float_parsing', 'Input should be a valid number, unable to parse string as a number', "''", 'str'),
+    'Input should be a valid number':   ('float_type',     'Input should be a valid number',                                                                           '', 'float'),
     'Input should be a valid list':     ('list_type',      'Input should be a valid list',                                                                             '[]', 'list'),
     'Input should be a valid dict':     ('dict_type',      'Input should be a valid dictionary',                                                                       '{}', 'dict'),
     'Input should be a valid set':      ('set_type',       'Input should be a valid set',                                                                              'set()', 'set'),
@@ -337,6 +342,16 @@ def _format_rust_error(msg: str, model_name: str = '') -> str:
                         rust_msg = emsg
                         input_val = ival
                         input_type = itype
+                        # Use the real input value from the message's
+                        # [type=..., input_value=...] segment when present
+                        seg = _re.search(r'\s*\[type=([^,\]]+),\s*input_value=(.*)\]$', msg_line)
+                        if seg:
+                            raw_input = seg.group(2).strip()
+                            input_val = raw_input
+                            try:
+                                input_type = type(_ast.literal_eval(raw_input)).__name__
+                            except Exception:
+                                pass
                         break
                 else:
                     # Unmapped message: strip the trailing [type=..., input_value=...]
@@ -344,7 +359,7 @@ def _format_rust_error(msg: str, model_name: str = '') -> str:
                     seg = _re.search(r'\s*\[type=([^,\]]+),\s*input_value=(.*)\]$', msg_line)
                     if seg:
                         err_type = seg.group(1)
-                        raw_input = seg.group(2).strip().strip("'")
+                        raw_input = seg.group(2).strip()
                         input_val = raw_input
                         try:
                             input_type = type(_ast.literal_eval(raw_input)).__name__
@@ -620,6 +635,13 @@ class SchemaValidator:
         if schema.get("type") == "union":
             for choice in schema.get("choices", []):
                 if isinstance(choice, dict):
+                    # Skip function-wrapper choices: the function (e.g.
+                    # attrgetter('value') for use_enum_values) has already
+                    # produced the final value during C++ validation, and
+                    # unwrapping to the inner schema would wrongly re-convert
+                    # it (e.g. turning an enum value back into a member).
+                    if choice.get("type") in ("function-after", "function-before", "function-wrap"):
+                        continue
                     result = self._dict_to_model(data, choice)
                     if result != data:
                         return result

@@ -49,6 +49,10 @@ public:
         for (auto& validator : validators_) {
             auto result = validator->validate(input, state);
             if (result.is_ok()) {
+                // Record which inner validator matched so result conversion
+                // can dispatch on the real value type (avoiding unsafe
+                // blind casts of the type-erased shared_ptr<void>).
+                last_type_name_ = validator->name();
                 return result;
             }
         }
@@ -58,11 +62,17 @@ public:
             "No union variant matched"
         );
     }
-    
-    std::string name() const override { return "union"; }
-    
+
+    std::string name() const override {
+        // After validation, report the inner validator that matched so result
+        // conversion dispatches on the real value type instead of falling
+        // into the unsafe try_all casts for "union".
+        return last_type_name_.empty() ? "union" : last_type_name_;
+    }
+
 private:
     std::vector<std::shared_ptr<Validator>> validators_;
+    mutable std::string last_type_name_;
 };
 
 // TaggedUnionValidator - union with discriminator tag

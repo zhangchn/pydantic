@@ -1079,8 +1079,57 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             }, py::is_method(ve_cls))
         );
         py::setattr(ve_cls, "errors",
-            py::cpp_function([](py::object self) {
-                return self.cast<const ValidationError&>().errors();
+            py::cpp_function([](py::object self) -> py::list {
+                // Build the error dicts manually: ErrorDetails is not a bound
+                // type, so casting std::vector<ErrorDetails> to a list would be
+                // undefined behavior.
+                const auto& errors = self.cast<const ValidationError&>().errors();
+                py::list result;
+                for (const auto& err : errors) {
+                    py::dict d;
+                    d["type"] = err.type;
+                    // loc: "x" / "x.0" / "a.b" -> ('x',) / ('x', 0) / ('a', 'b')
+                    py::list loc_list;
+                    std::string cur;
+                    auto flush = [&]() {
+                        if (cur.empty()) return;
+                        bool is_index = !cur.empty();
+                        for (char c : cur) {
+                            if (!(c >= '0' && c <= '9') && c != '-') { is_index = false; break; }
+                        }
+                        if (is_index) {
+                            try { loc_list.append(py::int_(std::stoll(cur))); }
+                            catch (...) { loc_list.append(cur); }
+                        } else {
+                            loc_list.append(cur);
+                        }
+                        cur.clear();
+                    };
+                    for (char c : err.loc) {
+                        if (c == '.') { flush(); } else { cur += c; }
+                    }
+                    flush();
+                    d["loc"] = py::tuple(loc_list);
+                    d["msg"] = err.msg;
+                    // input: parse the stored repr into a real Python value
+                    py::object input_val;
+                    try {
+                        input_val = py::module_::import("ast").attr("literal_eval")(err.input);
+                    } catch (...) {
+                        input_val = py::str(err.input);
+                    }
+                    d["input"] = input_val;
+                    if (!err.ctx.empty()) {
+                        py::dict ctx;
+                        for (const auto& [k, v] : err.ctx) {
+                            ctx[py::str(k)] = v;
+                        }
+                        d["ctx"] = ctx;
+                    }
+                    d["url"] = "https://errors.pydantic.dev/2.14/v/" + err.type;
+                    result.append(d);
+                }
+                return result;
             }, py::is_method(ve_cls))
         );
         py::setattr(ve_cls, "to_json",
