@@ -79,17 +79,28 @@ public:
         // Check from_attributes setting from state or schema
         bool use_from_attributes = state.from_attributes_or(from_attributes_);
         
-        // Get dict - if from_attributes is true, try to get attributes from object
+        // Get dict - if from_attributes is true, extract only known field attributes
         if (use_from_attributes) {
-            // For Python input with from_attributes, use validate_dict_from_attributes
             auto* py_input = dynamic_cast<const PythonInput*>(&input);
             if (py_input) {
-                auto dict_result = py_input->validate_dict_from_attributes(state.strict_or(false));
-                if (dict_result.is_ok()) {
-                    auto dict = std::move(dict_result.value());
-                    return validate_dict(std::move(dict), input, state);
+                const py::object& obj = py_input->py_object();
+                py::dict filtered;
+                for (const auto& name : field_order_) {
+                    const auto& field = fields_.at(name);
+                    std::string lookup_key = field.alias.empty() ? name : field.alias;
+                    try {
+                        py::object value = obj.attr(lookup_key.c_str());
+                        filtered[py::str(lookup_key)] = value;
+                    } catch (...) {}
+                    if (!field.alias.empty() && lookup_key != name) {
+                        try {
+                            py::object value = obj.attr(name.c_str());
+                            filtered[py::str(name)] = value;
+                        } catch (...) {}
+                    }
                 }
-                // If validate_dict_from_attributes failed, fall back to regular validate_dict
+                auto dict = std::make_unique<PythonValidatedDict>(filtered);
+                return validate_dict(std::move(dict), input, state);
             }
         }
         

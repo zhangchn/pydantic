@@ -560,11 +560,16 @@ static std::shared_ptr<Validator> build_from_element(
             model_name = std::string(mn_val.value().get_string().value());
         }
 
-        // Parse from_attributes from schema
+        // Parse from_attributes from schema or config
         bool from_attributes = false;
         auto fa_val = elem["from_attributes"];
         if (!fa_val.error() && fa_val.value().is_bool()) {
             from_attributes = fa_val.value().get_bool();
+        } else {
+            auto it = config.find("from_attributes");
+            if (it != config.end()) {
+                from_attributes = (it->second == "true");
+            }
         }
 
         auto validator = std::make_shared<ModelFieldsValidator>();
@@ -1485,6 +1490,15 @@ static std::shared_ptr<Validator> build_from_py_dict(
             py_str(config, "extra_behavior", py_str(config, "extra", "ignore")));
         auto extra = extra_behavior_from_string(extra_str);
         v->set_extra_behavior(extra);
+
+        // Extract from_attributes from schema or config
+        bool from_attributes = false;
+        if (schema.contains("from_attributes")) {
+            from_attributes = schema["from_attributes"].cast<bool>();
+        } else if (config.contains("from_attributes")) {
+            from_attributes = config["from_attributes"].cast<bool>();
+        }
+        v->set_from_attributes(from_attributes);
 
         // Extract extras_schema (value validator applied to extra fields)
         if (schema.contains("extras_schema")) {

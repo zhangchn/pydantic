@@ -47,6 +47,9 @@ SchemaValidator::SchemaValidator(const py::dict& schema,
     }
     config_.extra_behavior = std::nullopt;
     config_.from_attributes = std::nullopt;
+    if (config.contains("from_attributes") && !config["from_attributes"].is_none()) {
+        config_.from_attributes = config["from_attributes"].cast<bool>();
+    }
     config_.cache_strings = StringCacheMode::All;
 }
 
@@ -56,12 +59,24 @@ void SchemaValidator::build_validator() {
     } catch (const std::exception& e) {
         throw SchemaError(std::string("Failed to build validator: ") + e.what());
     }
-    
+
     // Set up config defaults
     config_.strict = std::nullopt;
     config_.extra_behavior = std::nullopt;
     config_.from_attributes = std::nullopt;
     config_.cache_strings = StringCacheMode::All;
+
+    // Parse from_attributes from JSON config if available
+    if (!config_json_.empty()) {
+        simdjson::dom::parser parser;
+        auto doc = parser.parse(config_json_);
+        if (!doc.error()) {
+            auto fa = doc["from_attributes"];
+            if (!fa.error() && fa.value().is_bool()) {
+                config_.from_attributes = fa.value().get_bool();
+            }
+        }
+    }
 }
 
 std::string SchemaValidator::validate_python(const std::string& input_json,
