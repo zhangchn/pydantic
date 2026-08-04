@@ -579,6 +579,13 @@ static std::shared_ptr<Validator> build_from_element(
             validator->set_extras_validator(es_validator);
         }
 
+        // Parse extras_keys_schema (key validator for extra fields)
+        auto eks_val = elem["extras_keys_schema"];
+        if (!eks_val.error()) {
+            auto eks_validator = build_from_element(eks_val.value(), config, definitions);
+            validator->set_extras_keys_validator(eks_validator);
+        }
+
         if (fields_elem.error() || !fields_elem.value().is_object()) {
             // Empty fields
             return validator;
@@ -1107,6 +1114,29 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("max_length") || schema.contains("min_length") ||
             schema.contains("pattern") || schema.contains("strip_whitespace")) {
             auto v = std::make_shared<StrConstrainedValidator>();
+            auto ps = [&](const char* k) -> std::optional<size_t> {
+                if (!schema.contains(k)) return std::nullopt;
+                py::object val = schema[k];
+                if (py::isinstance<py::int_>(val)) {
+                    long long i = val.cast<long long>();
+                    if (i >= 0) return static_cast<size_t>(i);
+                }
+                return std::nullopt;
+            };
+            if (auto mv = ps("min_length")) v->min_length = *mv;
+            if (auto mv = ps("max_length")) v->max_length = *mv;
+            if (schema.contains("pattern") && py::isinstance<py::str>(schema["pattern"])) {
+                v->pattern = schema["pattern"].cast<std::string>();
+            }
+            if (schema.contains("strip_whitespace") && py::isinstance<py::bool_>(schema["strip_whitespace"])) {
+                v->strip_whitespace = schema["strip_whitespace"].cast<bool>();
+            }
+            if (schema.contains("to_lower") && py::isinstance<py::bool_>(schema["to_lower"])) {
+                v->to_lower = schema["to_lower"].cast<bool>();
+            }
+            if (schema.contains("to_upper") && py::isinstance<py::bool_>(schema["to_upper"])) {
+                v->to_upper = schema["to_upper"].cast<bool>();
+            }
             return v;
         }
         return std::make_shared<StringValidator>();
@@ -1115,6 +1145,17 @@ static std::shared_ptr<Validator> build_from_py_dict(
     if (type == "bytes" || type == "bytes-constrained" || type == "constr-bytes") {
         if (schema.contains("max_length") || schema.contains("min_length")) {
             auto v = std::make_shared<BytesConstrainedValidator>();
+            auto ps = [&](const char* k) -> std::optional<size_t> {
+                if (!schema.contains(k)) return std::nullopt;
+                py::object val = schema[k];
+                if (py::isinstance<py::int_>(val)) {
+                    long long i = val.cast<long long>();
+                    if (i >= 0) return static_cast<size_t>(i);
+                }
+                return std::nullopt;
+            };
+            if (auto mv = ps("min_length")) v->min_length = *mv;
+            if (auto mv = ps("max_length")) v->max_length = *mv;
             return v;
         }
         return std::make_shared<BytesValidator>();
@@ -1450,6 +1491,13 @@ static std::shared_ptr<Validator> build_from_py_dict(
             auto extras_schema = schema["extras_schema"].cast<py::dict>();
             auto extras_validator = build_from_py_dict(extras_schema, config, definitions);
             v->set_extras_validator(extras_validator);
+        }
+
+        // Extract extras_keys_schema (validator applied to extra field keys)
+        if (schema.contains("extras_keys_schema")) {
+            auto extras_keys_schema = schema["extras_keys_schema"].cast<py::dict>();
+            auto extras_keys_validator = build_from_py_dict(extras_keys_schema, config, definitions);
+            v->set_extras_keys_validator(extras_keys_validator);
         }
 
         return v;

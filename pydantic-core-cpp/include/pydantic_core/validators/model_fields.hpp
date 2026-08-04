@@ -226,6 +226,7 @@ public:
     void set_extra_behavior(ExtraBehavior eb) { extra_behavior_ = eb; }
     void set_model_name(const std::string& name) { model_name_ = name; }
     void set_extras_validator(std::shared_ptr<Validator> v) { extras_validator_ = std::move(v); }
+    void set_extras_keys_validator(std::shared_ptr<Validator> v) { extras_keys_validator_ = std::move(v); }
     void set_from_attributes(bool value) { from_attributes_ = value; }
     bool from_attributes() const { return from_attributes_; }
 
@@ -425,6 +426,19 @@ protected:
 
                 auto field_input = JsonInput::create_from_element(*element_opt);
 
+                if (extras_keys_validator_) {
+                    // Validate the extra key itself (e.g. max_length on str keys)
+                    StringInput key_input(key);
+                    state.push_loc(key);
+                    key_input.set_current_location(state.location());
+                    auto key_result = extras_keys_validator_->validate(key_input, state);
+                    state.pop_loc();
+                    if (key_result.is_err()) {
+                        combined_errors.merge(std::move(key_result.error()));
+                        continue;
+                    }
+                }
+
                 if (extras_validator_) {
                     state.push_loc(key);
                     field_input->set_current_location(state.location());
@@ -485,6 +499,19 @@ protected:
 
                 PythonInput field_input(*py_obj_opt);
 
+                if (extras_keys_validator_) {
+                    // Validate the extra key itself (e.g. max_length on str keys)
+                    PythonInput key_input{py::str(key)};
+                    state.push_loc(py::str(key));
+                    key_input.set_current_location(state.location());
+                    auto key_result = extras_keys_validator_->validate(key_input, state);
+                    state.pop_loc();
+                    if (key_result.is_err()) {
+                        combined_errors.merge(std::move(key_result.error()));
+                        continue;
+                    }
+                }
+
                 if (extras_validator_) {
                     state.push_loc(key);
                     field_input.set_current_location(state.location());
@@ -517,6 +544,7 @@ protected:
     std::vector<std::string> field_order_;  // Fields in declaration order
     ExtraBehavior extra_behavior_ = ExtraBehavior::Ignore;
     std::shared_ptr<Validator> extras_validator_;
+    std::shared_ptr<Validator> extras_keys_validator_;
     std::string model_name_;
     bool from_attributes_ = false;  // from_attributes setting from schema
 };
