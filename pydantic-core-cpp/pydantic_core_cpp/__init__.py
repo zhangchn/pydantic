@@ -718,6 +718,7 @@ class SchemaValidator:
     def _process_model_fields(self, data, fields_schema):
         """Process model fields, recursively converting nested dicts to models."""
         fields = fields_schema.get("fields", {})
+        extras_schema = fields_schema.get("extras_schema")
         if not isinstance(fields, dict):
             return data
 
@@ -758,6 +759,14 @@ class SchemaValidator:
                             except Exception:
                                 pass
                 result[field_name] = val
+
+        # Convert extra field values (values in __pydantic_extra__) using extras_schema,
+        # e.g. __pydantic_extra__: dict[str, Foo] -> extra values become Foo instances
+        if isinstance(extras_schema, dict):
+            extra_dict = result.get('__pydantic_extra__')
+            if isinstance(extra_dict, dict):
+                for key, val in list(extra_dict.items()):
+                    extra_dict[key] = self._dict_to_model(val, extras_schema)
 
         return result
 
@@ -826,6 +835,17 @@ class SchemaValidator:
                 if hasattr(processed, '__dict__'):
                     self_instance.__dict__.clear()
                     self_instance.__dict__.update(processed.__dict__)
+
+            # Convert extra field values set by C++ (they live on the instance,
+            # not in __dict__, e.g. __pydantic_extra__: dict[str, Foo])
+            extra = getattr(self_instance, '__pydantic_extra__', None)
+            if isinstance(extra, dict):
+                inner = self._schema.get('schema', {}) if hasattr(self._schema, 'get') else {}
+                extras_schema = inner.get('extras_schema') if isinstance(inner, dict) else None
+                if isinstance(extras_schema, dict):
+                    for key, val in list(extra.items()):
+                        extra[key] = self._dict_to_model(val, extras_schema)
+                object.__setattr__(self_instance, '__pydantic_extra__', extra)
 
         return result
 
