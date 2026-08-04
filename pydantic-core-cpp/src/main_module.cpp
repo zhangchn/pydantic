@@ -20,7 +20,8 @@ std::string get_version() { return "2.47.0"; }
 // ---------------------------------------------------------------------------
 struct PySerializationInfo {
     bool round_trip;
-    PySerializationInfo(bool round_trip_) : round_trip(round_trip_) {}
+    std::string mode;
+    PySerializationInfo(bool round_trip_, std::string mode_ = "python") : round_trip(round_trip_), mode(std::move(mode_)) {}
 };
 
 // ---------------------------------------------------------------------------
@@ -76,6 +77,7 @@ struct SerNode {
     std::unordered_set<std::string> computed_fields_;
     // For function serializers
     py::object py_func;
+    bool info_arg = false;
     // For default
     py::object default_val;
     bool has_default_val = false;
@@ -93,6 +95,7 @@ struct SerNode {
         field_exclude_if = other.field_exclude_if;
         computed_fields_ = other.computed_fields_;
         py_func = other.py_func;
+        info_arg = other.info_arg;
         default_val = other.default_val;
         has_default_val = other.has_default_val;
         format_str = other.format_str;
@@ -105,6 +108,12 @@ struct SerNode {
                          bool exclude_unset = false,
                          bool exclude_defaults = false) const {
         // Type-specific logic
+        if (type == "lax-or-strict") {
+            if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+        }
+        if (type == "is-instance" || type == "is-subclass") {
+            return value;
+        }
         if (type == "nullable" || type == "nullable-union") {
             if (value.is_none()) return py::none();
             if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
@@ -171,14 +180,20 @@ struct SerNode {
             return children[0]->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
         }
         if (!py_func.is_none()) {
-            if (type == "function-plain") return py_func(value);
+            if (type == "function-plain") {
+                if (info_arg) {
+                    PySerializationInfo info(round_trip, json_mode ? "json" : "python");
+                    return py_func(value, py::cast(info));
+                }
+                return py_func(value);
+            }
             if (type == "function-after" || type == "function-before" || type == "function-wrap") {
                 py::object handler = py::cpp_function([this, value, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults](const py::object& v) -> py::object {
                     if (!children.empty()) return children[0]->to_python(v, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
                     return v;
                 });
                 if (type == "function-wrap") {
-                    PySerializationInfo info(round_trip);
+                    PySerializationInfo info(round_trip, json_mode ? "json" : "python");
                     return py_func(value, handler, py::cast(info));
                 }
                 try {
@@ -233,6 +248,12 @@ struct SerNode {
                          bool by_alias = false,
                          bool exclude_unset = false,
                          bool exclude_defaults = false) const {
+        if (type == "lax-or-strict") {
+            if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+        }
+        if (type == "is-instance" || type == "is-subclass") {
+            return infer_json(value, ensure_ascii, indent);
+        }
         if (type == "none" || type == "is-none") return "null";
         if (type == "bool" || py::isinstance<py::bool_>(value)) {
             return value.cast<bool>() ? "true" : "false";
@@ -263,18 +284,13 @@ struct SerNode {
             return json_escape(value.cast<std::string>(), ensure_ascii);
         }
         if (type == "bytes") {
-            std::string b = value.cast<std::string>();
-            std::string enc;
-            static const char* b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-            for (size_t i = 0; i < b.size(); i += 3) {
-                uint32_t n = ((uint8_t)b[i] << 16);
-                if (i+1 < b.size()) n |= ((uint8_t)b[i+1] << 8);
-                if (i+2 < b.size()) n |= (uint8_t)b[i+2];
-                enc += b64[(n>>18)&0x3F]; enc += b64[(n>>12)&0x3F];
-                enc += (i+1<b.size()) ? b64[(n>>6)&0x3F] : '=';
-                enc += (i+2<b.size()) ? b64[n&0x3F] : '=';
+            // Default: decode bytes as UTF-8 string (matching Rust pydantic-core behavior)
+            try {
+                std::string b = value.cast<std::string>();
+                return json_escape(b, ensure_ascii);
+            } catch (...) {
+                return "\"<bytes>\"";
             }
-            return "\"" + enc + "\"";
         }
         if (type == "json") {
             if (round_trip) {
@@ -306,6 +322,94 @@ struct SerNode {
             py::object inner = !children.empty() ? children[0]->to_python(value, false, false, round_trip) : value;
             return json_escape(py::str(inner).cast<std::string>(), ensure_ascii);
         }
+        // Types that serialize as their str() representation
+        if (type == "uuid" || type == "decimal" || type == "ipaddress" ||
+            type == "ipv4address" || type == "ipv6address" ||
+            type == "ipv4interface" || type == "ipv6interface" ||
+            type == "ipv4network" || type == "ipv6network") {
+            return json_escape(py::str(value).cast<std::string>(), ensure_ascii);
+        }
+        // datetime/time: call .isoformat()
+        if (type == "datetime" || type == "time") {
+            try {
+                py::object iso = value.attr("isoformat")();
+                std::string s = py::str(iso).cast<std::string>();
+                // Replace +00:00 with Z for UTC datetimes
+                if (s.size() >= 6 && s.substr(s.size() - 6) == "+00:00") {
+                    s = s.substr(0, s.size() - 6) + "Z";
+                }
+                return json_escape(s, ensure_ascii);
+            } catch (...) {
+                return json_escape(py::str(value).cast<std::string>(), ensure_ascii);
+            }
+        }
+        // timedelta: ISO 8601 duration format
+        if (type == "timedelta") {
+            try {
+                long days = value.attr("days").cast<long>();
+                long seconds = value.attr("seconds").cast<long>();
+                long microseconds = value.attr("microseconds").cast<long>();
+                // Compute total seconds to determine sign
+                double total_seconds = days * 86400.0 + seconds + microseconds / 1000000.0;
+                bool negative = total_seconds < 0;
+                if (negative) {
+                    days = -days;
+                    seconds = -seconds;
+                    microseconds = -microseconds;
+                    // Normalize: borrow from days to make seconds/microseconds positive
+                    if (microseconds < 0) { microseconds += 1000000; seconds--; }
+                    if (seconds < 0) { seconds += 86400; days--; }
+                    if (days < 0) { days = 0; seconds = 0; microseconds = 0; }
+                }
+                std::string result = negative ? "-P" : "P";
+                if (days > 0) result += std::to_string(days) + "D";
+                if (seconds > 0 || microseconds > 0) {
+                    result += "T";
+                    if (seconds > 0) {
+                        if (microseconds > 0) {
+                            char buf[32];
+                            snprintf(buf, sizeof(buf), "%ld.%06ld", seconds, microseconds);
+                            std::string s(buf);
+                            auto last = s.find_last_not_of('0');
+                            if (last != std::string::npos) s.erase(last + 1);
+                            if (s.back() == '.') s.pop_back();
+                            result += s + "S";
+                        } else {
+                            result += std::to_string(seconds) + "S";
+                        }
+                    } else if (microseconds > 0) {
+                        char buf[32];
+                        snprintf(buf, sizeof(buf), "0.%06ld", microseconds);
+                        std::string s(buf);
+                        auto last = s.find_last_not_of('0');
+                        if (last != std::string::npos) s.erase(last + 1);
+                        if (s.back() == '.') s.pop_back();
+                        result += s + "S";
+                    }
+                }
+                if (result == "P" || result == "-P") result = "PT0S";
+                return json_escape(result, ensure_ascii);
+            } catch (...) {
+                return json_escape(py::str(value).cast<std::string>(), ensure_ascii);
+            }
+        }
+        // set/frozenset: serialize as JSON array
+        if (type == "set" || type == "frozenset") {
+            std::string out = "[";
+            bool first = true;
+            for (auto item : py::reinterpret_borrow<py::iterable>(value)) {
+                if (!first) out += ",";
+                first = false;
+                py::object obj = py::reinterpret_borrow<py::object>(item);
+                if (!children.empty()) {
+                    out += children[0]->to_json(obj, ensure_ascii, -1, round_trip);
+                } else {
+                    out += infer_json(obj, ensure_ascii, -1);
+                }
+            }
+            out += "]";
+            return out;
+        }
         if (!fields.empty()) {
             return serialize_fields_json(value, ensure_ascii, indent, false, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
         }
@@ -314,7 +418,17 @@ struct SerNode {
             return children[0]->to_json(value, ensure_ascii, indent, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
         }
         if (!py_func.is_none()) {
-            auto result = type == "function-plain" ? py_func(value) : to_python(value, false, false, round_trip);
+            py::object result;
+            if (type == "function-plain") {
+                if (info_arg) {
+                    PySerializationInfo info(round_trip, "json");
+                    result = py_func(value, py::cast(info));
+                } else {
+                    result = py_func(value);
+                }
+            } else {
+                result = to_python(value, false, false, round_trip);
+            }
             return infer_json(result, ensure_ascii, indent);
         }
         return infer_json(value, ensure_ascii, indent);
@@ -697,9 +811,13 @@ static SerRef build_ser_impl(const py::dict& schema,
     // When serialization overrides the function too, store it for later use
     // (the function extraction below will use the main schema's function by default)
     py::object ser_func = py::none();
+    bool ser_info_arg = false;
     try {
         if (!ser_dict.is_none() && ser_dict.contains("function")) {
             ser_func = ser_dict["function"];
+        }
+        if (!ser_dict.is_none() && ser_dict.contains("info_arg")) {
+            ser_info_arg = ser_dict["info_arg"].cast<bool>();
         }
     } catch (...) {}
 
@@ -739,6 +857,15 @@ static SerRef build_ser_impl(const py::dict& schema,
         } catch (...) {}
         return node;
     }
+
+    // lax-or-strict: parse both schemas, use lax for serialization
+    if (type == "lax-or-strict") {
+        try { node->children.push_back(build_ser(schema["lax_schema"].cast<py::dict>(), defs)); } catch (...) {}
+        try { node->children.push_back(build_ser(schema["strict_schema"].cast<py::dict>(), defs)); } catch (...) {}
+    }
+
+    // is-instance: no-op for serialization (passthrough)
+    // No children to build — type stays as-is
 
     // Types with inner schema (schema key)
     if (type == "nullable" || type == "nullable-union" || type == "default" || type == "with-default" ||
@@ -821,6 +948,7 @@ static SerRef build_ser_impl(const py::dict& schema,
                 }
             }
             node->py_func = func;
+            node->info_arg = ser_info_arg;
         } catch (...) {}
         if (type != "function-plain") { auto c = sub(); if (c) node->children.push_back(c); }
     }
@@ -1056,8 +1184,9 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
 
     // SerializationInfo - passed to custom serializer functions
     py::class_<PySerializationInfo>(m, "SerializationInfo")
-        .def(py::init<bool>(), py::arg("round_trip"))
-        .def_readonly("round_trip", &PySerializationInfo::round_trip);
+        .def(py::init<bool, std::string>(), py::arg("round_trip"), py::arg("mode") = "python")
+        .def_readonly("round_trip", &PySerializationInfo::round_trip)
+        .def_readonly("mode", &PySerializationInfo::mode);
 
     // Register ValidationError as a proper Python exception (inherits from ValueError like Rust)
     py::register_exception<ValidationError>(m, "ValidationError", PyExc_ValueError);
