@@ -1239,6 +1239,9 @@ static std::shared_ptr<Validator> build_from_py_dict(
             auto cls = schema["cls"];
             if (py::isinstance<py::str>(cls)) {
                 v->set_class_name(cls.cast<std::string>());
+            } else if (py::isinstance<py::type>(cls)) {
+                v->set_py_class(cls);
+                v->set_class_name(py::str(cls).cast<std::string>());
             }
         }
         return v;

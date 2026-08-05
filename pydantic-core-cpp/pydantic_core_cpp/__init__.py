@@ -902,10 +902,10 @@ class SchemaValidator:
 
 def _schema_clean_cls_keys(d):
     """Recursively remove all ``cls`` keys from schema dicts,
-    except for ``is-instance`` schemas which need ``cls`` for class checking.
+    except for ``is-instance`` and ``is-subclass`` schemas which need ``cls`` for class checking.
     """
     if isinstance(d, dict):
-        if d.get("type") != "is-instance":
+        if d.get("type") not in ("is-instance", "is-subclass"):
             d.pop("cls", None)
         for v in d.values():
             _schema_clean_cls_keys(v)

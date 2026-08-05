@@ -464,11 +464,20 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
         return py::none();
     }
 
-    // Handle raw Python object (used for extra fields from Python dict input)
+    // Handle raw Python object (used for extra fields, is-instance, is-subclass)
     if (type_name == "py_object") {
         try {
             auto* py_obj = static_cast<py::object*>(value.get());
             if (py_obj) return *py_obj;
+        } catch (...) {}
+        return py::none();
+    }
+
+    // py_raw_object: PyObject* stored by is-instance/is-subclass validators
+    if (type_name == "py_raw_object") {
+        try {
+            auto* raw = static_cast<PyObject*>(value.get());
+            if (raw) return py::reinterpret_borrow<py::object>(raw);
         } catch (...) {}
         return py::none();
     }

@@ -481,8 +481,10 @@ public:
                     "Input is not an instance of " + class_name_
                 );
             }
+            // Store as PyObject* — leak the reference to avoid GIL issues
+            PyObject* raw = input_py.inc_ref().ptr();
             return ValResult<std::shared_ptr<void>>(
-                std::make_shared<py::object>(input_py)
+                std::shared_ptr<void>(raw, [](void*){})
             );
         }
         // Fallback: if class name was specified but we don't have the Python class,
@@ -498,7 +500,7 @@ public:
         return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
     }
 
-    std::string name() const override { return "is-instance"; }
+    std::string name() const override { return "py_raw_object"; }
 
 private:
     std::string class_name_;
@@ -542,8 +544,12 @@ public:
                         "Input is not a subclass of " + class_name_
                     );
                 }
+                // Store as PyObject* — leak the reference to avoid GIL issues
+                // during shared_ptr destruction. The py::object returned by
+                // result_to_python_with_type will hold its own reference.
+                PyObject* raw = input_py.inc_ref().ptr();
                 return ValResult<std::shared_ptr<void>>(
-                    std::make_shared<py::object>(input_py)
+                    std::shared_ptr<void>(raw, [](void*){})
                 );
             } catch (py::error_already_set& e) {
                 return ValError::line_error(
@@ -556,7 +562,7 @@ public:
         return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
     }
 
-    std::string name() const override { return "is-subclass"; }
+    std::string name() const override { return "py_raw_object"; }
 
 private:
     std::string class_name_;
