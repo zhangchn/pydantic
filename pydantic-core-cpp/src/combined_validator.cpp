@@ -1075,7 +1075,13 @@ static std::shared_ptr<DefinitionsRegistry> build_definitions_from_py(
         auto def_dict = item.cast<py::dict>();
         std::string ref = py_str(def_dict, "ref");
         if (ref.empty()) continue;
-        auto inner = def_dict["schema"].cast<py::dict>();
+        // Some definitions (like enum) are the schema directly; others wrap it in "schema"
+        py::dict inner;
+        if (def_dict.contains("schema")) {
+            inner = def_dict["schema"].cast<py::dict>();
+        } else {
+            inner = def_dict;
+        }
         auto validator = build_from_py_dict(inner, config, registry);
         registry->add_definition(ref, validator);
     }
