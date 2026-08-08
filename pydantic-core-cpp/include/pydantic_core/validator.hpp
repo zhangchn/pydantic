@@ -73,6 +73,13 @@ public:
     // For root models: return the inner validator's name.
     // Default: not a root model.
     virtual std::string root_model_inner_name() const { return ""; }
+
+    // Expected Python class for this validator (models only).  Used by unions
+    // to prefer the exact-class branch for instance inputs.
+    virtual const py::object& expected_class() const {
+        static const py::object none = py::none();
+        return none;
+    }
     
     // Validate assignment (for model field assignment)
     virtual ValResult<std::shared_ptr<void>> validate_assignment(

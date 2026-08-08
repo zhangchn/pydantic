@@ -1002,8 +1002,8 @@ std::shared_ptr<CombinedValidator> SchemaBuilder::build_from_dict(
     }
 
     // For complex types, rebuild JSON and use recursive parser
-    if (type == "model-fields" || type == "typed-dict" || type == "model" ||
-        type == "dataclass" || type == "nullable" || type == "union" ||
+    if (type == "model-fields" || type == "typed-dict" ||
+        type == "dataclass" || type == "nullable" ||
         type == "chain" || type == "default" || type == "json" ||
         type == "lax-or-strict") {
 
@@ -1448,7 +1448,11 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("root_model")) {
             root_model = schema["root_model"].cast<bool>();
         }
-        auto v = std::make_shared<ModelValidator>(inner, model_name, /*frozen=*/false, /*custom_init=*/false, root_model);
+        py::object model_cls = py::none();
+        if (schema.contains("cls")) {
+            try { model_cls = schema["cls"].cast<py::object>(); } catch (...) {}
+        }
+        auto v = std::make_shared<ModelValidator>(inner, model_name, /*frozen=*/false, /*custom_init=*/false, root_model, model_cls);
         return v;
     }
 

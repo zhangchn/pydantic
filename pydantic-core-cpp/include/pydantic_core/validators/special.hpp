@@ -78,6 +78,19 @@ public:
         return "definition-ref";
     }
 
+    // Delegate expected-class lookup to the resolved definition (e.g. unions
+    // use this to prefer the exact-class branch for model instance inputs).
+    const py::object& expected_class() const override {
+        if (definitions_) {
+            auto def = definitions_->get_definition(schema_ref_);
+            if (def) {
+                return def->expected_class();
+            }
+        }
+        static const py::object none = py::none();
+        return none;
+    }
+
     const std::string& get_ref() const { return schema_ref_; }
 
 private:

@@ -85,6 +85,8 @@ struct SerNode {
     std::string format_str;
     // For root models
     bool root_model = false;
+    // For model/dataclass serializers: expected Python class (union discrimination)
+    py::object class_;
     // For inf/nan serialization mode: "constants" (default) or "strings"
     std::string inf_nan_mode = "constants";
 
@@ -104,6 +106,7 @@ struct SerNode {
         has_default_val = other.has_default_val;
         format_str = other.format_str;
         root_model = other.root_model;
+        class_ = other.class_;
         inf_nan_mode = other.inf_nan_mode;
     }
 
@@ -183,6 +186,11 @@ struct SerNode {
         }
         // Delegate model/dataclass/typed-dict to inner serializer
         if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
+            // Union discrimination: a model serializer only accepts instances of
+            // its expected class; otherwise raise so the union tries next branch
+            if (!class_.is_none() && !py::isinstance(value, class_)) {
+                throw std::runtime_error("Value is not an instance of the expected model class");
+            }
             // For root models, extract the 'root' attribute before delegating
             if (root_model && py::hasattr(value, "root")) {
                 auto root_val = py::getattr(value, "root");
@@ -432,6 +440,11 @@ struct SerNode {
         }
         // Delegate model/dataclass/typed-dict to inner serializer
         if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
+            // Union discrimination: a model serializer only accepts instances of
+            // its expected class; otherwise raise so the union tries next branch
+            if (!class_.is_none() && !py::isinstance(value, class_)) {
+                throw std::runtime_error("Value is not an instance of the expected model class");
+            }
             // For root models, extract the 'root' attribute before delegating
             if (root_model && py::hasattr(value, "root")) {
                 auto root_val = py::getattr(value, "root");
@@ -1047,6 +1060,10 @@ static SerRef build_ser_impl(const py::dict& schema,
         // Check for root_model flag
         if (schema.contains("root_model")) {
             try { node->root_model = schema["root_model"].cast<bool>(); } catch (...) {}
+        }
+        // Store expected class for union discrimination
+        if (schema.contains("cls")) {
+            try { node->class_ = schema["cls"].cast<py::object>(); } catch (...) {}
         }
         auto c = sub();
         if (c) node->children.push_back(c);

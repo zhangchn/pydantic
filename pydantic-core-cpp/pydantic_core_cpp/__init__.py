@@ -642,6 +642,11 @@ class SchemaValidator:
                     # it (e.g. turning an enum value back into a member).
                     if choice.get("type") in ("function-after", "function-before", "function-wrap"):
                         continue
+                    # If the C++ validator reused an existing instance (exact
+                    # union-class match), keep it as-is
+                    cls = choice.get("cls")
+                    if cls is not None and isinstance(data, cls):
+                        return data
                     result = self._dict_to_model(data, choice)
                     if result != data:
                         return result
@@ -965,10 +970,11 @@ class SchemaValidator:
 
 def _schema_clean_cls_keys(d):
     """Recursively remove all ``cls`` keys from schema dicts,
-    except for ``is-instance`` and ``is-subclass`` schemas which need ``cls`` for class checking.
+    except for ``is-instance``/``is-subclass``/``model``/``dataclass`` schemas
+    which need ``cls`` for class checking / union discrimination.
     """
     if isinstance(d, dict):
-        if d.get("type") not in ("is-instance", "is-subclass"):
+        if d.get("type") not in ("is-instance", "is-subclass", "model", "dataclass"):
             d.pop("cls", None)
         for v in d.values():
             _schema_clean_cls_keys(v)

@@ -661,13 +661,15 @@ public:
         std::string class_name = "Model",
         bool frozen = false,
         bool custom_init = false,
-        bool root_model = false
+        bool root_model = false,
+        py::object class_ = py::none()
     )
         : fields_validator_(std::move(fields_validator))
         , class_name_(std::move(class_name))
         , frozen_(frozen)
         , custom_init_(custom_init)
         , root_model_(root_model)
+        , class_(std::move(class_))
     {}
 
     ValResult<std::shared_ptr<void>> validate(
@@ -683,6 +685,10 @@ public:
         }
         return fields_validator_->validate(input, state);
     }
+
+    // Expected Python class for this model (used by unions to prefer the
+    // exact-class branch when the input is already a model instance).
+    const py::object& expected_class() const { return class_; }
 
     ValResult<std::shared_ptr<void>> validate_assignment(
         const Input& input,
@@ -728,6 +734,7 @@ private:
     bool frozen_ = false;
     bool custom_init_ = false;
     bool root_model_ = false;
+    py::object class_ = py::none();
 };
 
 // ============================================================================

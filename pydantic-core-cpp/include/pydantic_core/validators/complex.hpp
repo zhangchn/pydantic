@@ -46,6 +46,21 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
+        // If the input is a Python model instance, prefer the branch whose
+        // expected class matches (smart union exact match).  The instance is
+        // reused as-is (it is already valid), matching Rust's model validator
+        // behavior.  Fall back to left-to-right validation otherwise.
+        if (input.input_type() == InputType::Python) {
+            const auto& py_input = static_cast<const PythonInput&>(input);
+            for (auto& v : validators_) {
+                const py::object& cls = v->expected_class();
+                if (!cls.is_none() && py::isinstance(py_input.py_object(), cls)) {
+                    last_type_name_ = "py_object";
+                    return ValResult<std::shared_ptr<void>>(
+                        std::make_shared<py::object>(py_input.py_object()));
+                }
+            }
+        }
         for (auto& validator : validators_) {
             auto result = validator->validate(input, state);
             if (result.is_ok()) {
