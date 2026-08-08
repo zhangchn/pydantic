@@ -55,6 +55,42 @@ if(NOT SKBUILD)
 endif()
 
 # ---------------------------------------------------------------------------
+# macOS: strip binary symbols into a .dSYM bundle
+# ---------------------------------------------------------------------------
+# On Apple platforms, dsymutil extracts the DWARF debug info into a
+# <binary>.dSYM bundle and strip removes local symbols from the shipped
+# binary (exported symbols such as PyInit_* are kept).  Compile with -g so
+# the dSYM contains usable debug info for symbolication (lldb, atos,
+# CrashReporter).  Disable with -DPDC_STRIP_TO_DSYM=OFF; Debug builds are
+# left untouched so they stay debuggable.
+option(PDC_STRIP_TO_DSYM "Strip binary symbols into a .dSYM bundle (macOS)" ON)
+
+if(APPLE AND PDC_STRIP_TO_DSYM)
+    find_program(PDC_DSYMUTIL_EXECUTABLE dsymutil)
+    find_program(PDC_STRIP_EXECUTABLE strip)
+    if(PDC_DSYMUTIL_EXECUTABLE AND PDC_STRIP_EXECUTABLE)
+        # Ensure DWARF debug info exists for dsymutil to extract
+        add_compile_options(-g)
+        # Skip stripping in single-config Debug builds so they stay debuggable
+        if(NOT CMAKE_CONFIGURATION_TYPES AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+            set(PDC_STRIP_ENABLED OFF)
+        else()
+            set(PDC_STRIP_ENABLED ON)
+        endif()
+        if(PDC_STRIP_ENABLED)
+            function(pdc_strip_to_dsym target)
+                add_custom_command(TARGET ${target} POST_BUILD
+                    COMMAND ${PDC_DSYMUTIL_EXECUTABLE} "$<TARGET_FILE:${target}>" -o "$<TARGET_FILE:${target}>.dSYM"
+                    COMMAND ${PDC_STRIP_EXECUTABLE} -x "$<TARGET_FILE:${target}>"
+                    COMMENT "Stripped ${target} symbols into ${target}.dSYM"
+                    VERBATIM
+                )
+            endfunction()
+        endif()
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
 # Python extension module
 # ---------------------------------------------------------------------------
 
@@ -92,6 +128,11 @@ target_compile_options(_pydantic_core_cpp PRIVATE
     -Wpedantic
     -O3
 )
+
+# Strip symbols into a .dSYM bundle (macOS, non-Debug builds)
+if(COMMAND pdc_strip_to_dsym)
+    pdc_strip_to_dsym(_pydantic_core_cpp)
+endif()
 
 # Install the extension into the Python package directory for wheel building
 install(TARGETS _pydantic_core_cpp LIBRARY DESTINATION pydantic_core_cpp)
