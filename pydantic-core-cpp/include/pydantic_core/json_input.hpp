@@ -64,6 +64,8 @@ public:
     bool has_key(const std::string& key) const override;
     std::optional<Entry> get(const std::string& key) const override;
     std::optional<simdjson::dom::element> get_element(const std::string& key) const;
+    std::optional<py::object> get_value(const std::string& key) const override;
+    std::optional<py::object> get_key(const std::string& key) const override;
     
 private:
     simdjson::dom::object obj_;

@@ -39,7 +39,8 @@ public:
                                       std::optional<bool> strict = std::nullopt,
                                       std::optional<ExtraBehavior> extra = std::nullopt,
                                       std::optional<bool> from_attributes = std::nullopt,
-                                      py::object context = py::none());
+                                      py::object context = py::none(),
+                                      bool coerce_strings = false);
 
     // isinstance check on Python object directly (NEW - no JSON round-trip)
     bool isinstance_python_object(const py::object& input,
@@ -55,7 +56,8 @@ public:
 
     // Validate strings on Python object directly (NEW - no JSON round-trip)
     py::object validate_strings_object(const py::object& input,
-                                       std::optional<bool> strict = std::nullopt);
+                                       std::optional<bool> strict = std::nullopt,
+                                       std::optional<ExtraBehavior> extra = std::nullopt);
 
     // isinstance check - returns bool instead of raising
     bool isinstance_python(const std::string& input_json,
@@ -76,6 +78,9 @@ public:
 
     // Properties
     const std::string& title() const { return title_; }
+
+    // Whether the top-level schema is a root model (RootModel[T])
+    bool is_root_model() const;
 
     // Representation
     std::string repr() const;

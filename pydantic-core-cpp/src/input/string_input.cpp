@@ -78,7 +78,7 @@ ValResult<ValMatch<bool>> StringInput::validate_bool(bool strict) const {
         }
     }
     
-    return ValError::line_error(PydanticKnownError::bool_type(),
+    return ValError::line_error(ErrorType(ErrorType::Kind::BoolParsing),
                                Location(), as_error_value().repr);
 }
 
@@ -93,8 +93,8 @@ ValResult<ValMatch<EitherInt>> StringInput::validate_int(bool strict) const {
             }
         } catch (...) {}
     }
-    
-    return ValError::line_error(PydanticKnownError::int_type(),
+
+    return ValError::line_error(ErrorType(ErrorType::Kind::IntParsing),
                                Location(), as_error_value().repr);
 }
 
@@ -106,8 +106,8 @@ ValResult<ValMatch<EitherFloat>> StringInput::validate_float(bool strict) const 
             return ValMatch<EitherFloat>::lax(EitherFloat(d));
         } catch (...) {}
     }
-    
-    return ValError::line_error(PydanticKnownError::float_type(),
+
+    return ValError::line_error(ErrorType(ErrorType::Kind::FloatParsing),
                                Location(), as_error_value().repr);
 }
 
@@ -164,6 +164,14 @@ std::optional<ValidatedDict::Entry> StringValidatedDict::get(const std::string& 
         e.key = key;
         e.value_repr = "'" + it->second + "'";
         return e;
+    }
+    return std::nullopt;
+}
+
+std::optional<py::object> StringValidatedDict::get_value(const std::string& key) const {
+    auto it = mapping_.find(key);
+    if (it != mapping_.end()) {
+        return py::str(it->second);
     }
     return std::nullopt;
 }
@@ -240,7 +248,16 @@ ValResult<ValMatch<EitherDate>> StringInput::validate_date(bool strict) const {
             int day = std::stoi(s.substr(8, 2));
             if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
                 if (s.size() > 10) {
-                    // Has time component - check midnight
+                    // Has time component: not a pure date string.
+                    // Strict mode rejects datetime strings entirely.
+                    if (strict) {
+                        return ValError::line_error(
+                            ErrorType(ErrorType::Kind::DateParsing),
+                            this->current_location(),
+                            this->as_error_value().repr
+                        );
+                    }
+                    // Lax mode: midnight datetimes coerce to date; others are inexact
                     auto dt = try_parse_iso8601(s);
                     if (dt && dt->time.hour == 0 && dt->time.minute == 0 &&
                         dt->time.second == 0 && dt->time.microsecond == 0) {

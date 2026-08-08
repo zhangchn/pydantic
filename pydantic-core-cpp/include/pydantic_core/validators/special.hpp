@@ -96,11 +96,8 @@ public:
     ) override {
         auto result = input.validate_date(state.strict_or(strict_));
         if (result.is_err()) {
-            return ValError::line_error(
-                ErrorType(ErrorType::Kind::DateType),
-                state.location(),
-                input.as_error_value().repr
-            );
+            // Preserve the specific error kind (date_parsing, date_from_datetime_inexact, etc.)
+            return result.error();
         }
         auto match = std::move(result.value());
         // Store as internal Date value (will be converted to Python datetime.date by result_to_python)
@@ -126,11 +123,7 @@ public:
     ) override {
         auto result = input.validate_time(state.strict_or(strict_));
         if (result.is_err()) {
-            return ValError::line_error(
-                ErrorType(ErrorType::Kind::TimeType),
-                state.location(),
-                input.as_error_value().repr
-            );
+            return result.error();
         }
         auto match = std::move(result.value());
         return ValResult<std::shared_ptr<void>>(
@@ -155,11 +148,7 @@ public:
     ) override {
         auto result = input.validate_datetime(state.strict_or(strict_));
         if (result.is_err()) {
-            return ValError::line_error(
-                ErrorType(ErrorType::Kind::DateTimeType),
-                state.location(),
-                input.as_error_value().repr
-            );
+            return result.error();
         }
         auto match = std::move(result.value());
         return ValResult<std::shared_ptr<void>>(
@@ -184,11 +173,7 @@ public:
     ) override {
         auto result = input.validate_timedelta(state.strict_or(strict_));
         if (result.is_err()) {
-            return ValError::line_error(
-                ErrorType(ErrorType::Kind::TimedeltaType),
-                state.location(),
-                input.as_error_value().repr
-            );
+            return result.error();
         }
         auto match = std::move(result.value());
         return ValResult<std::shared_ptr<void>>(

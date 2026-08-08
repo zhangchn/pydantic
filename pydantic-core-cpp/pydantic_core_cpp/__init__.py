@@ -655,6 +655,31 @@ class SchemaValidator:
                 return [self._dict_to_model(item, items_schema) for item in data]
             return data
 
+        # Root models: wrap the validated value (scalar or nested model dict)
+        # in the model class as the 'root' attribute.
+        if schema.get("type") == "model" and schema.get("root_model"):
+            cls = schema.get("cls") or self._model_classes.get(schema.get("ref"))
+            if cls is not None and callable(cls):
+                inner_schema = schema.get("schema", {})
+                if isinstance(data, dict) and 'root' in data:
+                    # self_instance representation: {'root': <value>}
+                    root_val = self._dict_to_model(data['root'], inner_schema)
+                elif isinstance(data, dict) and isinstance(inner_schema, dict):
+                    # Inner schema is a model/typed-dict: build the inner instance
+                    root_val = self._dict_to_model(data, inner_schema)
+                elif isinstance(inner_schema, dict):
+                    # Scalar: recurse through inner schema (handles nested root models)
+                    root_val = self._dict_to_model(data, inner_schema)
+                else:
+                    root_val = data
+                instance = object.__new__(cls)
+                instance.__dict__["root"] = root_val
+                object.__setattr__(instance, "__pydantic_private__", {})
+                object.__setattr__(instance, "__pydantic_extra__", None)
+                object.__setattr__(instance, "__pydantic_fields_set__", {"root"})
+                return instance
+            return data
+
         # Handle non-dict data (return as-is for non-list schemas)
         if not isinstance(data, dict):
             return data
@@ -698,6 +723,9 @@ class SchemaValidator:
         # Find the definition by ref in the top-level definitions list
         for defn in self._schema.get("definitions", []):
             if defn.get("ref") == ref:
+                # Root model definitions wrap the value via _dict_to_model
+                if defn.get("type") == "model" and defn.get("root_model"):
+                    return self._dict_to_model(data, defn)
                 inner_schema = defn.get("schema", {})
                 if isinstance(inner_schema, dict) and inner_schema.get("type") in ("model-fields", "typed-dict"):
                     data = self._process_model_fields(data, inner_schema)
@@ -835,6 +863,10 @@ class SchemaValidator:
                 if hasattr(processed, '__dict__'):
                     self_instance.__dict__.clear()
                     self_instance.__dict__.update(processed.__dict__)
+                # NOTE: __pydantic_private__/__pydantic_extra__/__pydantic_fields_set__
+                # are slot attributes already set by the C++ binding; do NOT copy
+                # them from `processed` (a freshly built instance would clobber
+                # C++-populated extras/fields_set with None/default values).
 
             # Convert extra field values set by C++ (they live on the instance,
             # not in __dict__, e.g. __pydantic_extra__: dict[str, Foo])
@@ -847,6 +879,22 @@ class SchemaValidator:
                         extra[key] = self._dict_to_model(val, extras_schema)
                 object.__setattr__(self_instance, '__pydantic_extra__', extra)
 
+        else:
+            # No self_instance and non-dict result: wrap scalar results for
+            # root models (e.g. MyRootModel.model_validate(1) -> MyRootModel(root=1))
+            inner = self._schema
+            if hasattr(inner, "get"):
+                # Unwrap the definitions wrapper to find the actual model schema
+                if inner.get("type") == "definitions":
+                    ref_schema = inner.get("schema", {})
+                    ref = ref_schema.get("schema_ref", "__root__") if ref_schema.get("type") == "definition-ref" else None
+                    for defn in inner.get("definitions", []):
+                        if defn.get("ref") == ref:
+                            inner = defn
+                            break
+                if inner.get("type") == "model" and inner.get("root_model"):
+                    return self._dict_to_model(result, inner)
+
         return result
 
     def validate_json(self, json_data, *, strict=None, context=None, extra=None,
@@ -854,10 +902,17 @@ class SchemaValidator:
         result = self._base.validate_json(json_data, strict=strict)
         if isinstance(result, dict):
             result = self._dict_to_model(result)
+        else:
+            # For root models, the result is a scalar value — wrap it in the model class
+            schema_type = self._schema.get("type") if hasattr(self._schema, "get") else None
+            if schema_type == "model" and self._schema.get("root_model"):
+                wrapped = self._dict_to_model(result, self._schema)
+                if wrapped is not result:
+                    return wrapped
         return result
 
     def validate_strings(self, string_data, *, strict=None, extra=None, context=None, by_alias=None, by_name=None, allow_partial=None):
-        result = self._base.validate_strings(string_data, strict=strict)
+        result = self._base.validate_strings(string_data, strict=strict, extra=extra)
         if isinstance(result, dict):
             result = self._dict_to_model(result)
             if not isinstance(result, dict):
@@ -885,6 +940,14 @@ class SchemaValidator:
                     object.__setattr__(instance, '__pydantic_extra__', extra_fields)
                     object.__setattr__(instance, '__pydantic_fields_set__', fields_set)
                     return instance
+        elif not isinstance(result, (dict, list, tuple, set)):
+            # Root models with scalar results (e.g. RootModel[int].model_validate_strings('1'),
+            # RootModel[date].model_validate_strings('2017-01-01'))
+            schema_type = self._schema.get("type") if hasattr(self._schema, "get") else None
+            if schema_type == "model" and self._schema.get("root_model"):
+                wrapped = self._dict_to_model(result, self._schema)
+                if wrapped is not result:
+                    return wrapped
         return result
 
     def isinstance_python(self, obj, *, strict=None):

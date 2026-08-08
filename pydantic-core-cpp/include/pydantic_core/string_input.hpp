@@ -70,10 +70,15 @@ public:
     
     std::vector<Entry> entries() const override;
     std::vector<std::string> keys() const override;
-    
+
     bool has_key(const std::string& key) const override;
     std::optional<Entry> get(const std::string& key) const override;
-    
+
+    std::optional<py::object> get_value(const std::string& key) const override;
+    std::optional<py::object> get_key(const std::string& key) const override {
+        return py::str(key);
+    }
+
 private:
     std::unordered_map<std::string, std::string> mapping_;
 };

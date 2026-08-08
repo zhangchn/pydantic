@@ -60,6 +60,20 @@ class ModelFieldsValidator : public Validator {
 public:
     ModelFieldsValidator() = default;
 
+    // For a field schema that is a root model, use the inner validator's name
+    // so result conversion dispatches on the actual value type (e.g. "int"
+    // instead of "model").  Otherwise use the validator's own name.
+    static std::string field_type_name(const std::shared_ptr<Validator>& schema) {
+        if (schema) {
+            auto inner = schema->root_model_inner_name();
+            if (!inner.empty()) {
+                return inner;
+            }
+            return schema->name();
+        }
+        return "null_schema";
+    }
+
     ModelFieldsValidator(
         std::unordered_map<std::string, FieldInfo> fields,
         ExtraBehavior extra_behavior = ExtraBehavior::Ignore,
@@ -163,11 +177,7 @@ public:
                     ValidatedModelFieldsOutput::FieldValue fv;
                     fv.value = val;
                     // Determine type name from field validator
-                    if (field.schema) {
-                        fv.type_name = field.schema->name();
-                    } else {
-                        fv.type_name = "null_schema";
-                    }
+                    fv.type_name = field_type_name(field.schema);
                     output.fields[name] = std::move(fv);
                     output.fields_set.insert(name);
                     output.field_order.push_back(name);
@@ -192,7 +202,7 @@ public:
                         auto default_result = field.schema->validate(*json_input, state);
                         if (default_result.is_ok()) {
                             fv.value = default_result.value();
-                            fv.type_name = field.schema->name();
+                            fv.type_name = field_type_name(field.schema);
                         } else {
                             fv.value = std::make_shared<std::string>(field.default_value_str);
                             fv.type_name = "str";
@@ -256,6 +266,31 @@ protected:
         if (py_dict) {
             auto py_obj_opt = py_dict->get_object(key);
             if (py_obj_opt) {
+                // In strings mode (validate_strings), string values always coerce
+                // regardless of strict — match Rust's StringInput semantics.
+                if (state.coerce_strings() && py::isinstance<py::str>(*py_obj_opt)) {
+                    StringInput str_input(py::str(*py_obj_opt).cast<std::string>());
+                    str_input.set_current_location(state.location());
+                    auto result = field.schema->validate(str_input, state);
+                    if (result.is_ok()) {
+                        return result.value();
+                    }
+                    auto& err = result.error();
+                    if (err.is_omit()) {
+                        return std::nullopt;
+                    } else if (err.has_line_errors()) {
+                        auto mutable_err = const_cast<ValError*>(&err);
+                        combined_errors.merge(std::move(*mutable_err));
+                    } else if (err.is_internal()) {
+                        auto new_err = ValError::line_error(
+                            ErrorType(ErrorType::Kind::CustomError),
+                            state.location(),
+                            err.internal_message()
+                        );
+                        combined_errors.merge(std::move(new_err));
+                    }
+                    return std::nullopt;
+                }
                 PythonInput field_input(*py_obj_opt);
                 field_input.set_current_location(state.location());
                 auto result = field.schema->validate(field_input, state);
@@ -401,7 +436,10 @@ protected:
         ValidationState& state,
         ValError& combined_errors
     ) {
-        if (extra_behavior_ == ExtraBehavior::Ignore) {
+        // Call-level extra setting (e.g. validate_strings(extra='allow')) overrides
+        // the validator's build-time behavior.
+        ExtraBehavior behavior = state.extra_behavior_or(extra_behavior_);
+        if (behavior == ExtraBehavior::Ignore) {
             return;
         }
 
@@ -413,7 +451,7 @@ protected:
                     continue;
                 }
 
-                if (extra_behavior_ == ExtraBehavior::Forbid) {
+                if (behavior == ExtraBehavior::Forbid) {
                     auto element_opt = json_dict->get_element(key);
                     std::string input_repr = "...";
                     if (element_opt) {
@@ -486,7 +524,7 @@ protected:
                     continue;
                 }
 
-                if (extra_behavior_ == ExtraBehavior::Forbid) {
+                if (behavior == ExtraBehavior::Forbid) {
                     auto py_obj_opt = py_dict->get_object(key);
                     std::string input_repr = "...";
                     if (py_obj_opt) {
@@ -508,7 +546,13 @@ protected:
                 auto py_obj_opt = py_dict->get_object(key);
                 if (!py_obj_opt) continue;
 
-                PythonInput field_input(*py_obj_opt);
+                // In strings mode (validate_strings), string values always coerce
+                std::unique_ptr<Input> field_input;
+                if (state.coerce_strings() && py::isinstance<py::str>(*py_obj_opt)) {
+                    field_input = std::make_unique<StringInput>(py::str(*py_obj_opt).cast<std::string>());
+                } else {
+                    field_input = std::make_unique<PythonInput>(*py_obj_opt);
+                }
 
                 if (extras_keys_validator_) {
                     // Validate the extra key itself (e.g. max_length on str keys)
@@ -525,8 +569,8 @@ protected:
 
                 if (extras_validator_) {
                     state.push_loc(key);
-                    field_input.set_current_location(state.location());
-                    auto result = extras_validator_->validate(field_input, state);
+                    field_input->set_current_location(state.location());
+                    auto result = extras_validator_->validate(*field_input, state);
                     state.pop_loc();
                     if (result.is_ok()) {
                         ValidatedModelFieldsOutput::FieldValue fv;
@@ -662,6 +706,18 @@ public:
     bool frozen() const { return frozen_; }
     bool root_model() const { return root_model_; }
 
+    std::string root_model_inner_name() const override {
+        if (root_model_ && fields_validator_) {
+            // Resolve recursively through nested root models
+            auto inner = fields_validator_->root_model_inner_name();
+            if (!inner.empty()) {
+                return inner;
+            }
+            return fields_validator_->name();
+        }
+        return "";
+    }
+
     void set_fields_validator(std::shared_ptr<Validator> v) { fields_validator_ = std::move(v); }
     void set_class_name(const std::string& name) { class_name_ = name; }
     void set_frozen(bool f) { frozen_ = f; }
@@ -783,7 +839,8 @@ public:
                 ValidatedModelFieldsOutput::FieldValue fv;
                 fv.value = validated_value;
                 if (field.schema) {
-                    fv.type_name = field.schema->name();
+                    auto inner = field.schema->root_model_inner_name();
+                    fv.type_name = inner.empty() ? field.schema->name() : inner;
                 }
                 output.fields[field.name] = std::move(fv);
                 fields_set.insert(field.name);
@@ -793,7 +850,8 @@ public:
         }
 
         // Handle extra fields
-        if (json_dict && extra_behavior_ == ExtraBehavior::Forbid) {
+        ExtraBehavior behavior = state.extra_behavior_or(extra_behavior_);
+        if (json_dict && behavior == ExtraBehavior::Forbid) {
             for (const auto& key : json_dict->keys()) {
                 if (used_keys.count(key)) continue;
                 auto element_opt = json_dict->get_element(key);

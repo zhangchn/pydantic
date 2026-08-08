@@ -83,6 +83,10 @@ struct SerNode {
     bool has_default_val = false;
     // For format
     std::string format_str;
+    // For root models
+    bool root_model = false;
+    // For inf/nan serialization mode: "constants" (default) or "strings"
+    std::string inf_nan_mode = "constants";
 
     // Copy content from another node into this one (preserves shared_ptr identity)
     void copy_from(const SerNode& other) {
@@ -99,6 +103,8 @@ struct SerNode {
         default_val = other.default_val;
         has_default_val = other.has_default_val;
         format_str = other.format_str;
+        root_model = other.root_model;
+        inf_nan_mode = other.inf_nan_mode;
     }
 
     py::object to_python(const py::object& value, bool json_mode, bool exc_none, bool round_trip = false,
@@ -177,6 +183,11 @@ struct SerNode {
         }
         // Delegate model/dataclass/typed-dict to inner serializer
         if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
+            // For root models, extract the 'root' attribute before delegating
+            if (root_model && py::hasattr(value, "root")) {
+                auto root_val = py::getattr(value, "root");
+                return children[0]->to_python(root_val, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+            }
             return children[0]->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
         }
         if (!py_func.is_none()) {
@@ -264,8 +275,14 @@ struct SerNode {
         }
         if (type == "float" || type == "float-constrained") {
             double d = value.cast<double>();
-            if (std::isnan(d)) return "NaN";
-            if (std::isinf(d)) return d > 0 ? "Infinity" : "-Infinity";
+            if (std::isnan(d)) {
+                if (inf_nan_mode == "strings") return "\"NaN\"";
+                return "NaN";
+            }
+            if (std::isinf(d)) {
+                if (inf_nan_mode == "strings") return d > 0 ? "\"Infinity\"" : "\"-Infinity\"";
+                return d > 0 ? "Infinity" : "-Infinity";
+            }
             // Strip trailing zeros: 10.2 -> "10.2", not "10.200000"
             std::string s = std::to_string(d);
             auto dot = s.find('.');
@@ -415,6 +432,11 @@ struct SerNode {
         }
         // Delegate model/dataclass/typed-dict to inner serializer
         if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
+            // For root models, extract the 'root' attribute before delegating
+            if (root_model && py::hasattr(value, "root")) {
+                auto root_val = py::getattr(value, "root");
+                return children[0]->to_json(root_val, ensure_ascii, indent, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+            }
             return children[0]->to_json(value, ensure_ascii, indent, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
         }
         if (!py_func.is_none()) {
@@ -1018,8 +1040,31 @@ static SerRef build_ser_impl(const py::dict& schema,
 
     // model, typed-dict, dataclass — wrap inner
     if (type == "model" || type == "typed-dict" || type == "dataclass") {
+        // Check for root_model flag
+        if (schema.contains("root_model")) {
+            try { node->root_model = schema["root_model"].cast<bool>(); } catch (...) {}
+        }
         auto c = sub();
         if (c) node->children.push_back(c);
+    }
+
+    // Extract ser_json_inf_nan from config and propagate to all descendants
+    if (schema.contains("config")) {
+        try {
+            py::dict config = schema["config"].cast<py::dict>();
+            if (config.contains("ser_json_inf_nan")) {
+                std::string mode = config["ser_json_inf_nan"].cast<std::string>();
+                // Set on this node and all children recursively
+                std::function<void(SerRef)> set_mode = [&](SerRef n) {
+                    if (!n) return;
+                    n->inf_nan_mode = mode;
+                    for (auto& child : n->children) set_mode(child);
+                    for (auto& [k, v] : n->fields) set_mode(v);
+                    for (auto& [k, v] : n->tagged) set_mode(v);
+                };
+                set_mode(node);
+            }
+        } catch (...) {}
     }
 
     return node;
@@ -1288,12 +1333,28 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             if (!from_attributes.is_none()) {
                 fa_opt = pyobj_to_bool(from_attributes);
             }
-            py::object validated = self.validate_python_object(input, pyobj_to_bool(strict), std::nullopt, fa_opt, context);
+            std::optional<ExtraBehavior> extra_opt;
+            if (!extra.is_none()) {
+                std::string e = extra.cast<std::string>();
+                if (e == "allow") extra_opt = ExtraBehavior::Allow;
+                else if (e == "forbid") extra_opt = ExtraBehavior::Forbid;
+                else extra_opt = ExtraBehavior::Ignore;
+            }
+            py::object validated = self.validate_python_object(input, pyobj_to_bool(strict), extra_opt, fa_opt, context);
 
             // If self_instance provided, populate and return it
             if (!self_instance.is_none() && py::hasattr(self_instance, "__dict__")) {
                 try {
-                    if (py::isinstance<py::dict>(validated)) {
+                    if (self.is_root_model()) {
+                        // Root model: store the whole validated value as 'root'
+                        py::dict d = self_instance.attr("__dict__");
+                        d[py::str("root")] = validated;
+                        if (!py::hasattr(self_instance, "__pydantic_private__")) {
+                            py::setattr(self_instance, "__pydantic_private__", py::dict());
+                        }
+                        py::setattr(self_instance, "__pydantic_extra__", py::none());
+                        py::setattr(self_instance, "__pydantic_fields_set__", py::set(py::make_tuple(py::str("root"))));
+                    } else if (py::isinstance<py::dict>(validated)) {
                         py::dict d = self_instance.attr("__dict__");
                         py::dict validated_dict = validated.cast<py::dict>();
 
@@ -1345,12 +1406,21 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
              py::arg("extra") = py::none(), py::arg("from_attributes") = py::none(), py::arg("by_alias") = py::none(), py::arg("by_name") = py::none())
         .def("validate_json", [](SchemaValidator& self, const py::object& jd, py::object strict) {
             std::string js = py::isinstance<py::bytes>(jd) ? jd.cast<std::string>() : jd.cast<std::string>();
-            return json_to_pyobj(self.validate_json(js, pyobj_to_bool(strict)));
+            // Parse JSON to Python object first, then validate as Python
+            // This ensures proper type coercion (e.g., "Infinity" string -> float inf)
+            py::object py_input = json_to_pyobj(js);
+            return self.validate_python_object(py_input, pyobj_to_bool(strict), std::nullopt, std::nullopt, py::none());
         }, py::arg("json_data"), py::arg("strict") = py::none())
-        .def("validate_strings", [](SchemaValidator& self, const py::object& sd, py::object strict) {
-            // NEW: Use native PythonInput - no JSON round-trip!
-            return self.validate_strings_object(sd, pyobj_to_bool(strict));
-        }, py::arg("string_data"), py::arg("strict") = py::none())
+        .def("validate_strings", [](SchemaValidator& self, const py::object& sd, py::object strict, py::object extra) {
+            std::optional<ExtraBehavior> extra_opt;
+            if (!extra.is_none()) {
+                std::string e = extra.cast<std::string>();
+                if (e == "allow") extra_opt = ExtraBehavior::Allow;
+                else if (e == "forbid") extra_opt = ExtraBehavior::Forbid;
+                else extra_opt = ExtraBehavior::Ignore;
+            }
+            return self.validate_strings_object(sd, pyobj_to_bool(strict), extra_opt);
+        }, py::arg("string_data"), py::arg("strict") = py::none(), py::arg("extra") = py::none())
         .def("isinstance_python", [](SchemaValidator& self, const py::object& input, py::object strict) {
             // NEW: Use native PythonInput - no JSON round-trip!
             return self.isinstance_python_object(input, pyobj_to_bool(strict));

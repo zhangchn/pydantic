@@ -1422,6 +1422,12 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("values_schema")) {
             v->values_schema = build_from_py_dict(schema["values_schema"].cast<py::dict>(), config, definitions);
         }
+        if (schema.contains("min_length")) {
+            v->min_length = schema["min_length"].cast<size_t>();
+        }
+        if (schema.contains("max_length")) {
+            v->max_length = schema["max_length"].cast<size_t>();
+        }
         return v;
     }
 
@@ -1438,7 +1444,11 @@ static std::shared_ptr<Validator> build_from_py_dict(
             inner = build_from_py_dict(schema["schema"].cast<py::dict>(), config, definitions);
         }
         std::string model_name = py_str(schema, "title", py_str(schema, "model_name", py_str(schema, "cls", "")));
-        auto v = std::make_shared<ModelValidator>(inner, model_name);
+        bool root_model = false;
+        if (schema.contains("root_model")) {
+            root_model = schema["root_model"].cast<bool>();
+        }
+        auto v = std::make_shared<ModelValidator>(inner, model_name, /*frozen=*/false, /*custom_init=*/false, root_model);
         return v;
     }
 

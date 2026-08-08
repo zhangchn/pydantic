@@ -54,6 +54,27 @@ std::optional<py::object> PythonValidatedDict::get_object(const std::string& key
     }
 }
 
+// Match keys by string representation so non-string keys (int, etc.) work too
+std::optional<py::object> PythonValidatedDict::get_value(const std::string& key) const {
+    for (auto item : dict_) {
+        py::object k = py::reinterpret_borrow<py::object>(item.first);
+        if (py::str(k).cast<std::string>() == key) {
+            return py::reinterpret_borrow<py::object>(item.second);
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<py::object> PythonValidatedDict::get_key(const std::string& key) const {
+    for (auto item : dict_) {
+        py::object k = py::reinterpret_borrow<py::object>(item.first);
+        if (py::str(k).cast<std::string>() == key) {
+            return k;
+        }
+    }
+    return std::nullopt;
+}
+
 // ============================================================================
 // PythonValidatedList implementation
 // ============================================================================

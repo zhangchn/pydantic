@@ -69,6 +69,10 @@ public:
     
     // Get validator name for error messages
     virtual std::string name() const = 0;
+
+    // For root models: return the inner validator's name.
+    // Default: not a root model.
+    virtual std::string root_model_inner_name() const { return ""; }
     
     // Validate assignment (for model field assignment)
     virtual ValResult<std::shared_ptr<void>> validate_assignment(

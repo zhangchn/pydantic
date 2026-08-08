@@ -119,6 +119,19 @@ public:
         return variant_.index() != 0 || std::holds_alternative<std::shared_ptr<AnyValidator>>(variant_);
     }
 
+    // For root models: return the inner validator's name; otherwise return nullopt
+    std::optional<std::string> root_model_inner_name() const {
+        return std::visit([](const auto& v) -> std::optional<std::string> {
+            if (v) {
+                std::string inner = v->root_model_inner_name();
+                if (!inner.empty()) {
+                    return inner;
+                }
+            }
+            return std::nullopt;
+        }, variant_);
+    }
+
 private:
     VariantType variant_;
 };

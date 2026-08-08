@@ -301,9 +301,15 @@ public:
     
     virtual std::vector<Entry> entries() const = 0;
     virtual std::vector<std::string> keys() const = 0;
-    
+
     virtual bool has_key(const std::string& key) const = 0;
     virtual std::optional<Entry> get(const std::string& key) const = 0;
+
+    // Get the actual value object for a key (for nested validation)
+    virtual std::optional<py::object> get_value(const std::string& key) const = 0;
+
+    // Get the actual key object (for key validation; JSON keys are strings)
+    virtual std::optional<py::object> get_key(const std::string& key) const = 0;
 };
 
 // List iterator interface

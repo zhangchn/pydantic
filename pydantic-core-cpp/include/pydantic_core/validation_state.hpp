@@ -87,6 +87,34 @@ public:
     // Input type
     InputType input_type() const { return input_type_; }
     void set_input_type(InputType type) { input_type_ = type; }
+
+    // Strings mode (validate_strings): string values always coerce regardless
+    // of strict, matching Rust's StringInput semantics.
+    bool coerce_strings() const { return coerce_strings_; }
+    void set_coerce_strings(bool v) { coerce_strings_ = v; }
+
+    // Return a copy of this state (fresh construction, since the implicit copy
+    // constructor is deleted).  When force_lax is set, strict is disabled.
+    // Container validators use this for sub-validation in strings mode.
+    ValidationState sub_copy(bool force_lax = false) const {
+        ValidationState s(config_);
+        if (force_lax) {
+            s.config_.strict = false;
+        }
+        s.recursion_state_ = recursion_state_;
+        s.allow_partial_ = allow_partial_;
+        s.field_name_ = field_name_;
+        s.self_instance_ = self_instance_;
+        s.input_type_ = input_type_;
+        s.exactness_ = exactness_;
+        s.context_ = context_;
+        s.coerce_strings_ = coerce_strings_;
+        s.location_ = location_;
+#ifdef HAS_PYBIND11
+        s.context_py_ = context_py_;
+#endif
+        return s;
+    }
     
     // Exactness tracking
     Exactness exactness() const { return exactness_; }
@@ -135,9 +163,10 @@ public:
         child.input_type_ = input_type_;
         child.exactness_ = exactness_;
         child.context_ = context_;
+        child.coerce_strings_ = coerce_strings_;
         return child;
     }
-    
+
     ValidationState child(const std::string& key) {
         ValidationState child(config_);
         child.recursion_state_ = recursion_state_;
@@ -149,20 +178,22 @@ public:
         child.input_type_ = input_type_;
         child.exactness_ = exactness_;
         child.context_ = context_;
+        child.coerce_strings_ = coerce_strings_;
         return child;
     }
-    
+
 private:
     Config config_;
     RecursionState* recursion_state_ = &default_recursion_;
     RecursionState default_recursion_;
-    
+
     PartialMode allow_partial_ = PartialMode::Off;
     std::optional<std::string> field_name_;
     const void* self_instance_ = nullptr;
     InputType input_type_ = InputType::Python;
     Exactness exactness_ = Exactness::Unknown;
     void* context_ = nullptr;
+    bool coerce_strings_ = false;
 #ifdef HAS_PYBIND11
     py::object context_py_ = py::none();
 #endif

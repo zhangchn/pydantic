@@ -212,25 +212,25 @@ std::string SchemaValidator::validate_python(const std::string& input_json,
 std::string SchemaValidator::validate_json(const std::string& json_data,
                                           std::optional<bool> strict) {
     (void)strict;
-    
+
     if (!validator_) {
         throw std::runtime_error("Validator not initialized");
     }
-    
+
     // Parse input JSON
     auto json_input_result = parse_json(json_data);
     if (json_input_result.is_err()) {
         throw std::runtime_error("Invalid input JSON");
     }
-    
+
     auto json_input = std::move(json_input_result.value());
-    
+
     // Create validation state
     ValidationState state(config_);
-    
+
     // Validate
     auto result = validator_->validate(*json_input, state);
-    
+
     if (result.is_ok()) {
         return json_data;
     } else {
@@ -246,63 +246,39 @@ std::string SchemaValidator::validate_strings(const std::string& string_data,
 }
 
 // NEW: Native Python object validate_strings (no JSON round-trip)
-// Converts string values to their Python types (int, float, bool, etc.) before validation
+// Validates in "strings mode": string values always coerce regardless of
+// strict (matching Rust's StringInput semantics) and extras keep raw strings.
 py::object SchemaValidator::validate_strings_object(const py::object& input,
-                                                    std::optional<bool> strict) {
+                                                    std::optional<bool> strict,
+                                                    std::optional<ExtraBehavior> extra) {
     if (!validator_) {
         throw std::runtime_error("Validator not initialized");
     }
 
-    // Convert string values in the input to their Python types
-    py::dict typed_dict;
-
-    if (py::isinstance<py::dict>(input)) {
-        for (auto item : input.cast<py::dict>()) {
-            py::str key = py::reinterpret_borrow<py::str>(item.first);
-            py::object val = py::reinterpret_borrow<py::object>(item.second);
-
-            if (py::isinstance<py::str>(val)) {
-                std::string s = val.cast<std::string>();
-                // Try to parse as bool
-                if (s == "true") {
-                    typed_dict[key] = py::bool_(true);
-                } else if (s == "false") {
-                    typed_dict[key] = py::bool_(false);
-                } else if (s == "null" || s == "None") {
-                    typed_dict[key] = py::none();
-                } else {
-                    // Try int
-                    bool parsed = false;
-                    try {
-                        typed_dict[key] = py::int_(py::str(s));
-                        parsed = true;
-                    } catch (...) {}
-
-                    // Try float
-                    if (!parsed) {
-                        try {
-                            typed_dict[key] = py::float_(py::str(s));
-                            parsed = true;
-                        } catch (...) {}
-                    }
-
-                    // Keep as string
-                    if (!parsed) {
-                        typed_dict[key] = val;
-                    }
-                }
-            } else {
-                // Non-string value, keep as-is
-                typed_dict[key] = val;
-            }
+    if (py::isinstance<py::str>(input)) {
+        // Single string value: validate via StringInput so string values
+        // always coerce regardless of strict (Rust StringInput semantics)
+        StringInput str_input(input.cast<std::string>());
+        ValidationState state(config_);
+        if (strict.has_value()) {
+            state.set_strict(*strict);
         }
-    } else {
-        // Not a dict, validate as-is
-        return validate_python_object(input, strict);
+        if (extra.has_value()) {
+            state.set_extra_behavior(*extra);
+        }
+        state.set_coerce_strings(true);
+        auto result = validator_->validate(str_input, state);
+        if (result.is_ok()) {
+            return result_to_python(result.value());
+        }
+        auto err = prepare_error(result.error(), InputType::String);
+        throw err;
     }
 
-    // Validate the typed dict
-    return validate_python_object(typed_dict, strict);
+    // Dict (or any other) input: validate as-is in strings mode.  Declared
+    // fields coerce string values via StringInput; extra fields keep the raw
+    // string value.
+    return validate_python_object(input, strict, extra, std::nullopt, py::none(), /*coerce_strings=*/true);
 }
 
 bool SchemaValidator::isinstance_python(const std::string& input_json,
@@ -412,6 +388,14 @@ std::string SchemaValidator::repr() const {
     return "SchemaValidator(title='" + title_ + "')";
 }
 
+bool SchemaValidator::is_root_model() const {
+    if (validator_) {
+        auto inner_name = validator_->root_model_inner_name();
+        return inner_name.has_value();
+    }
+    return false;
+}
+
 ValidationError SchemaValidator::prepare_error(const ValError& err, InputType input_type) {
     return ValidationError(title_, input_type, err);
 }
@@ -424,7 +408,8 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
                                                    std::optional<bool> strict,
                                                    std::optional<ExtraBehavior> extra,
                                                    std::optional<bool> from_attributes,
-                                                   py::object context) {
+                                                   py::object context,
+                                                   bool coerce_strings) {
     if (!validator_) {
         throw std::runtime_error("Validator not initialized");
     }
@@ -446,6 +431,7 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
     if (!context.is_none()) {
         state.set_context_py(context);
     }
+    state.set_coerce_strings(coerce_strings);
 
     // Validate using the unified Input interface
     auto result = validator_->validate(py_input, state);
@@ -717,6 +703,16 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
         } catch (...) {}
     }
 
+    // "dict" type — return the py::dict directly
+    if (matches_type("dict")) {
+        try {
+            auto* dct = static_cast<py::dict*>(value.get());
+            if (dct) {
+                return *dct;
+            }
+        } catch (...) {}
+    }
+
     // For function-after/before/wrap/plain validators, check py::object*
     bool is_function_type = (type_name == "function-after" || type_name == "function-before" ||
                              type_name == "function-wrap" || type_name == "function-plain");
@@ -742,6 +738,15 @@ py::object SchemaValidator::result_to_python(const std::shared_ptr<void>& result
     std::string vname;
     if (validator_) {
         vname = validator_->name();
+    }
+
+    // For root models, the result is the inner validator's output, not a
+    // ValidatedModelFieldsOutput.  Use the inner validator's name for dispatch.
+    if (vname == "model") {
+        auto inner_name = validator_->root_model_inner_name();
+        if (inner_name) {
+            vname = *inner_name;
+        }
     }
 
     // For model-like validators, try ValidatedModelFieldsOutput

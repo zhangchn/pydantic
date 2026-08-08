@@ -28,6 +28,9 @@ public:
     // Get raw PyObject for a key (for nested validation)
     std::optional<py::object> get_object(const std::string& key) const;
 
+    std::optional<py::object> get_value(const std::string& key) const override;
+    std::optional<py::object> get_key(const std::string& key) const override;
+
     // Access underlying dict
     const py::dict& dict() const { return dict_; }
 

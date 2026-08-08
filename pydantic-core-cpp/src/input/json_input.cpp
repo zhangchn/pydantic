@@ -505,6 +505,19 @@ std::optional<simdjson::dom::element> JsonValidatedDict::get_element(const std::
     return std::nullopt;
 }
 
+std::optional<py::object> JsonValidatedDict::get_value(const std::string& key) const {
+    auto elem = get_element(key);
+    if (elem) {
+        return json_element_to_py(*elem);
+    }
+    return std::nullopt;
+}
+
+std::optional<py::object> JsonValidatedDict::get_key(const std::string& key) const {
+    // JSON object keys are always strings
+    return py::str(key);
+}
+
 // JsonValidatedList implementation
 std::vector<ValidatedList::Entry> JsonValidatedList::entries() const {
     std::vector<Entry> result;
