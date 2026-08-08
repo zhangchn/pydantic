@@ -989,14 +989,18 @@ static SerRef build_ser_impl(const py::dict& schema,
                     py::dict field_schema;
                     if (fdef.contains("schema")) {
                         field_schema = fdef["schema"].cast<py::dict>();
-                        // Check for alias in field definition (pydantic-core format)
-                        if (fdef.contains("alias")) {
+                        // Check for serialization alias (pydantic-core format)
+                        if (fdef.contains("serialization_alias")) {
+                            node->field_aliases[k] = fdef["serialization_alias"].cast<std::string>();
+                        } else if (fdef.contains("alias")) {
                             node->field_aliases[k] = fdef["alias"].cast<std::string>();
                         }
                     } else {
                         field_schema = fdef;  // Use fdef directly as schema
                         // Check for alias directly in schema
-                        if (field_schema.contains("alias")) {
+                        if (field_schema.contains("serialization_alias")) {
+                            node->field_aliases[k] = field_schema["serialization_alias"].cast<std::string>();
+                        } else if (field_schema.contains("alias")) {
                             node->field_aliases[k] = field_schema["alias"].cast<std::string>();
                         }
                     }
