@@ -469,6 +469,30 @@ ValResult<std::unique_ptr<ValidatedDict>> PythonInput::validate_dict_from_attrib
     return type_error(ErrorType::Kind::DictType, *this, this->current_location());
 }
 
+ValResult<ArgumentsInput> PythonInput::validate_args() const {
+    // ArgsKwargs container (pydantic_core.ArgsKwargs): has args + kwargs attributes
+    if (py::hasattr(obj_, "args") && py::hasattr(obj_, "kwargs")) {
+        try {
+            py::object cls = py::getattr(obj_, "__class__");
+            std::string cls_name = py::str(py::getattr(cls, "__name__")).cast<std::string>();
+            if (cls_name == "ArgsKwargs") {
+                py::tuple args = py::cast<py::tuple>(obj_.attr("args"));
+                py::dict kwargs = py::cast<py::dict>(obj_.attr("kwargs"));
+                return ValResult<ArgumentsInput>(ArgumentsInput{std::move(args), std::move(kwargs)});
+            }
+        } catch (py::error_already_set&) {
+            PyErr_Clear();
+        }
+    }
+
+    // Plain dict input is treated as kwargs-only
+    if (is_dict()) {
+        return ValResult<ArgumentsInput>(ArgumentsInput{py::tuple(), as_dict()});
+    }
+
+    return type_error(ErrorType::Kind::ArgumentsType, *this, this->current_location());
+}
+
 // from_attributes support methods
 bool PythonInput::has_attributes() const {
     // Check if object has __dict__ or is not a built-in type
@@ -784,6 +808,31 @@ ValResult<ValMatch<EitherDateTime>> PythonInput::validate_datetime(bool strict) 
         int day = py_date.attr("day").cast<int>();
         DateTime dt = {Date{year, month, day}, Time{0, 0, 0, 0, std::nullopt}};
         return ValMatch<EitherDateTime>::lax(EitherDateTime(dt));
+    }
+
+    if ((is_int() || is_float()) && !strict) {
+        // Lax mode: unix timestamp -> UTC datetime
+        double ts = is_int() ? static_cast<double>(as_int()) : as_float();
+        try {
+            py::object dt_mod = py::module_::import("datetime");
+            py::object utc = dt_mod.attr("timezone").attr("utc");
+            py::object py_dt = dt_mod.attr("datetime").attr("fromtimestamp")(ts, utc);
+            int year = py_dt.attr("year").cast<int>();
+            int month = py_dt.attr("month").cast<int>();
+            int day = py_dt.attr("day").cast<int>();
+            int hour = py_dt.attr("hour").cast<int>();
+            int minute = py_dt.attr("minute").cast<int>();
+            int second = py_dt.attr("second").cast<int>();
+            int microsecond = py_dt.attr("microsecond").cast<int>();
+            DateTime dt = {Date{year, month, day}, Time{hour, minute, second, microsecond, 0}};
+            return ValMatch<EitherDateTime>::lax(EitherDateTime(dt));
+        } catch (py::error_already_set&) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::DateTimeParsing),
+                this->current_location(),
+                this->as_error_value().repr
+            );
+        }
     }
 
     if (is_str() && !strict) {

@@ -52,7 +52,7 @@ public:
         if (items_schema) {
             auto entries = list->entries();
             py::list result_list;
-            bool has_error = false;
+            std::vector<std::shared_ptr<ValLineError>> errors;
             // In strings mode (validate_strings), items always coerce regardless of strict
             ValidationState item_state = state.sub_copy(state.coerce_strings());
             for (const auto& entry : entries) {
@@ -72,8 +72,15 @@ public:
                         state.location().pop();
                         return item_result.error();
                     }
-                    // Collect errors in non-fail-fast mode
-                    has_error = true;
+                    // Collect errors in non-fail-fast mode (Rust aggregates them)
+                    if (item_result.error().has_line_errors()) {
+                        for (auto& le : item_result.error().line_errors()) {
+                            errors.push_back(le);
+                        }
+                    } else {
+                        errors.push_back(std::make_shared<ValLineError>(ValLineError{
+                            ErrorType(ErrorType::Kind::CustomError), state.location(), "Item validation failed"}));
+                    }
                 } else {
                     // Validation succeeded — use the original input element as the result
                     // (validated result type differs per validator, but input is always py::object)
@@ -81,12 +88,8 @@ public:
                 }
                 state.location().pop();
             }
-            if (has_error) {
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::CustomError),
-                    state.location(),
-                    "List validation failed for some items"
-                );
+            if (!errors.empty()) {
+                return ValError::line_errors(std::move(errors));
             }
             return ValResult<std::shared_ptr<void>>(std::make_shared<py::list>(std::move(result_list)));
         }
@@ -243,7 +246,7 @@ public:
         // Validate keys and values if schemas provided
         if (keys_schema || values_schema) {
             py::dict result_dict;
-            bool has_error = false;
+            std::vector<std::shared_ptr<ValLineError>> errors;
             for (const auto& entry : entries) {
                 state.location().push(entry.key);
                 py::object key_obj = dict->get_key(entry.key).value_or(py::str(entry.key));
@@ -259,7 +262,11 @@ public:
                             state.location().pop();
                             return key_result.error();
                         }
-                        has_error = true;
+                        if (key_result.error().has_line_errors()) {
+                            for (auto& le : key_result.error().line_errors()) {
+                                errors.push_back(le);
+                            }
+                        }
                     } else {
                         auto converted = validated_to_py(key_result.value(), keys_schema->name());
                         if (converted) key_obj = *converted;
@@ -275,7 +282,11 @@ public:
                             state.location().pop();
                             return val_result.error();
                         }
-                        has_error = true;
+                        if (val_result.error().has_line_errors()) {
+                            for (auto& le : val_result.error().line_errors()) {
+                                errors.push_back(le);
+                            }
+                        }
                     } else {
                         auto converted = validated_to_py(val_result.value(), values_schema->name());
                         if (converted) val_obj = *converted;
@@ -284,12 +295,8 @@ public:
                 result_dict[key_obj] = val_obj;
                 state.location().pop();
             }
-            if (has_error) {
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::CustomError),
-                    state.location(),
-                    "Dict validation failed for some items"
-                );
+            if (!errors.empty()) {
+                return ValError::line_errors(std::move(errors));
             }
             return ValResult<std::shared_ptr<void>>(std::make_shared<py::dict>(std::move(result_dict)));
         }

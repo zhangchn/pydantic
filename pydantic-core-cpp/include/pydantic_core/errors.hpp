@@ -31,10 +31,16 @@ public:
     
     explicit ValError(Kind kind) : kind_(kind) {}
     
-    static ValError line_error(const ErrorType& error_type, const Location& location, 
+    static ValError line_error(const ErrorType& error_type, const Location& location,
                                const std::string& input_value) {
         ValError err(Kind::LineErrors);
         err.line_errors_.push_back(std::make_shared<ValLineError>(ValLineError{error_type, location, input_value}));
+        return err;
+    }
+
+    static ValError line_errors(std::vector<std::shared_ptr<ValLineError>> errors) {
+        ValError err(Kind::LineErrors);
+        err.line_errors_ = std::move(errors);
         return err;
     }
     
@@ -80,6 +86,7 @@ public:
     struct ErrorDetails {
         std::string type;
         std::string loc;
+        std::vector<LocItem> loc_items;  // raw location items (preserves empty-string keys)
         std::string msg;
         std::string input;
         std::unordered_map<std::string, std::string> ctx;
@@ -92,6 +99,11 @@ public:
     
     std::string error_count_message() const;
     std::string to_json_string() const;
+
+    // Serialize error details (type/loc/msg/input/ctx) as a JSON list, used to
+    // carry structured error info across the register_exception boundary where
+    // the C++ object cannot be cast back from Python.
+    std::string errors_to_json() const;
     
 private:
     std::string title_;

@@ -107,11 +107,74 @@ def _errors_with_include_url(self, *args, include_url: bool = True, **kwargs):
         if not cpp_msg:
             # Fallback: get raw message before any Python patching
             cpp_msg = _orig_str(self)
-        result = _parse_errors_from_message(cpp_msg)
+        result = _parse_structured_errors(cpp_msg)
+        if result is None:
+            result = _parse_errors_from_message(cpp_msg)
     if not include_url:
         for err in result:
             err.pop("url", None)
     return result
+
+
+def _parse_input(raw: str):
+    """Try to parse an input_value string as a Python literal (dict, list, etc.)."""
+    import ast as _ast
+    s = raw.strip()
+    if not s:
+        return s
+    # Reconstruct ArgsKwargs from its repr: ArgsKwargs((...)) or ArgsKwargs((...), {...})
+    if s.startswith('ArgsKwargs(') and s.endswith(')'):
+        try:
+            inner = _ast.literal_eval(s[len('ArgsKwargs('):-1])
+            if isinstance(inner, tuple) and len(inner) == 2 and isinstance(inner[0], tuple) and isinstance(inner[1], dict):
+                return ArgsKwargs(inner[0], inner[1])
+            if isinstance(inner, tuple):
+                return ArgsKwargs(inner)
+        except Exception:
+            pass
+    try:
+        return _ast.literal_eval(s)
+    except Exception:
+        return s
+
+
+# C++ message -> Rust-compatible message mapping
+_ERR_MSG_MAP = {
+    'Field required': 'Field required',
+    'Missing field': 'Field required',
+    'Input should be a valid date in YYYY-MM-DD format': 'Input should be a valid date',
+    'Input should be a valid time in HH:MM:SS format': 'Input should be a valid time',
+    'Input should be a valid list or array': 'Input should be a valid list',
+    'Input should be a valid dictionary or mapping': 'Input should be a valid dictionary',
+}
+
+
+def _parse_structured_errors(msg: str) -> list[dict] | None:
+    """Parse the structured ``__PYDANTIC_ERRORS__:<json>`` section appended to
+    the C++ message, which carries full error details (typed loc items, ctx).
+    Returns None when the section is absent or malformed.
+    """
+    marker = '__PYDANTIC_ERRORS__:'
+    if marker not in msg:
+        return None
+    try:
+        import json as _json
+        raw = _json.loads(msg.split(marker, 1)[1].strip())
+        result = []
+        for err in raw:
+            d = {
+                'type': err['type'],
+                'loc': tuple(err['loc']),
+                'msg': _ERR_MSG_MAP.get(err['msg'], err['msg']),
+                'input': _parse_input(err['input']),
+                'url': f'https://errors.pydantic.dev/2.14/v/{err["type"]}',
+            }
+            if err.get('ctx'):
+                d['ctx'] = {k: _parse_input(v) for k, v in err['ctx'].items()}
+            result.append(d)
+        return result
+    except Exception:
+        return None
 
 
 def _parse_errors_from_message(msg: str) -> list[dict]:
@@ -131,23 +194,18 @@ def _parse_errors_from_message(msg: str) -> list[dict]:
         return result
 
     # C++ message -> Rust-compatible message mapping
-    _MSG_MAP = {
-        'Field required': 'Field required',
-        'Missing field': 'Field required',
-        'Input should be a valid date in YYYY-MM-DD format': 'Input should be a valid date',
-        'Input should be a valid time in HH:MM:SS format': 'Input should be a valid time',
-    }
+    _MSG_MAP = _ERR_MSG_MAP
 
-    def _parse_input(raw: str):
-        """Try to parse input_value string as a Python literal (dict, list, etc.)."""
-        import ast as _ast
-        s = raw.strip()
-        if not s:
-            return s
-        try:
-            return _ast.literal_eval(s)
-        except Exception:
-            return s
+    def _parse_loc(loc_line: str):
+        """Convert a loc line like 'a' / '1' / 'a.0' into a tuple ('a',) / (1,) / ('a', 0)."""
+        parts = loc_line.split('.')
+        converted = []
+        for part in parts:
+            if part and (part.isdigit() or (part.startswith('-') and part[1:].isdigit())):
+                converted.append(int(part))
+            else:
+                converted.append(part)
+        return tuple(converted)
 
     # Type name mapping: C++ -> Rust-compatible
     # NOTE: float_type/int_type/bool_type should NOT be mapped to float_parsing/int_parsing/bool_parsing.
@@ -199,7 +257,7 @@ def _parse_errors_from_message(msg: str) -> list[dict]:
                 display_msg = _MSG_MAP.get(cpp_msg, cpp_msg)
                 result.append({
                     'type': err_type,
-                    'loc': (line,),
+                    'loc': _parse_loc(line),
                     'msg': display_msg,
                     'input': input_value,
                     'url': f'https://errors.pydantic.dev/2.14/v/{err_type}',
@@ -324,6 +382,10 @@ def _format_rust_error(msg: str, model_name: str = '') -> str:
     while i < len(lines):
         loc_line = lines[i].strip()
         if not loc_line:
+            i += 1
+            continue
+        # Skip the structured error-details marker (internal, not user-facing)
+        if loc_line.startswith('__PYDANTIC_ERRORS__:'):
             i += 1
             continue
         # Message line follows (indented)

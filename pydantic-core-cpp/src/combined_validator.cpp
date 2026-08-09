@@ -1107,18 +1107,55 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("multiple_of") || schema.contains("le") || schema.contains("ge") ||
             schema.contains("lt") || schema.contains("gt")) {
             auto v = std::make_shared<ConstrainedIntValidator>();
+            if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
+                v->strict = schema["strict"].cast<bool>();
+            }
+            auto get_i64 = [&](const char* k) -> std::optional<int64_t> {
+                if (!schema.contains(k)) return std::nullopt;
+                py::object val = schema[k];
+                if (py::isinstance<py::int_>(val)) return val.cast<int64_t>();
+                return std::nullopt;
+            };
+            v->gt = get_i64("gt");
+            v->ge = get_i64("ge");
+            v->lt = get_i64("lt");
+            v->le = get_i64("le");
+            v->multiple_of = get_i64("multiple_of");
             return v;
         }
-        return std::make_shared<IntValidator>();
+        auto v = std::make_shared<IntValidator>();
+        if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
+            v->strict = schema["strict"].cast<bool>();
+        }
+        return v;
     }
 
     if (type == "float" || type == "float-constrained" || type == "constr-float") {
         if (schema.contains("multiple_of") || schema.contains("le") || schema.contains("ge") ||
             schema.contains("lt") || schema.contains("gt")) {
             auto v = std::make_shared<ConstrainedFloatValidator>();
+            if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
+                v->strict = schema["strict"].cast<bool>();
+            }
+            auto get_f = [&](const char* k) -> std::optional<double> {
+                if (!schema.contains(k)) return std::nullopt;
+                py::object val = schema[k];
+                if (py::isinstance<py::int_>(val)) return val.cast<double>();
+                if (py::isinstance<py::float_>(val)) return val.cast<double>();
+                return std::nullopt;
+            };
+            v->gt = get_f("gt");
+            v->ge = get_f("ge");
+            v->lt = get_f("lt");
+            v->le = get_f("le");
+            v->multiple_of = get_f("multiple_of");
             return v;
         }
-        return std::make_shared<FloatValidator>();
+        auto v = std::make_shared<FloatValidator>();
+        if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
+            v->strict = schema["strict"].cast<bool>();
+        }
+        return v;
     }
 
     if (type == "str" || type == "string" || type == "str-constrained" || type == "constr-str") {
@@ -1150,7 +1187,11 @@ static std::shared_ptr<Validator> build_from_py_dict(
             }
             return v;
         }
-        return std::make_shared<StringValidator>();
+        auto v = std::make_shared<StringValidator>();
+        if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
+            v->strict = schema["strict"].cast<bool>();
+        }
+        return v;
     }
 
     if (type == "bytes" || type == "bytes-constrained" || type == "constr-bytes") {
@@ -1232,6 +1273,12 @@ static std::shared_ptr<Validator> build_from_py_dict(
             // Type is stored as string or as Python class
             if (py::isinstance<py::type>(cls)) {
                 v->set_py_class(cls);
+                // Rust uses the class qualname (no module prefix) for the error ctx
+                try {
+                    v->set_class_name(py::str(py::getattr(cls, "__qualname__")).cast<std::string>());
+                } catch (...) {
+                    v->set_class_name(py::str(cls).cast<std::string>());
+                }
             } else if (py::isinstance<py::str>(cls)) {
                 v->set_class_name(cls.cast<std::string>());
             }
@@ -1274,22 +1321,50 @@ static std::shared_ptr<Validator> build_from_py_dict(
         // Default value is stored directly as Python object
         std::shared_ptr<void> default_val;
         std::string default_val_str;
+        std::string default_type;
         if (schema.contains("default")) {
             auto py_default = schema["default"];
             if (py::isinstance<py::str>(py_default)) {
                 default_val = std::make_shared<std::string>(py_default.cast<std::string>());
+                default_type = "str";
             } else if (py::isinstance<py::int_>(py_default)) {
                 default_val = std::make_shared<int64_t>(py_default.cast<int64_t>());
+                default_type = "int";
             } else if (py::isinstance<py::float_>(py_default)) {
                 default_val = std::make_shared<double>(py_default.cast<double>());
+                default_type = "float";
             } else if (py::isinstance<py::bool_>(py_default)) {
                 default_val = std::make_shared<bool>(py_default.cast<bool>());
+                default_type = "bool";
             } else if (!py_default.is_none()) {
                 // Complex default (list, dict) — serialize to JSON string for later parsing
                 default_val_str = py_default_to_json_str(py_default);
             }
         }
-        return std::make_shared<WithDefaultValidator>(inner, default_val, default_val_str);
+        auto wd = std::make_shared<WithDefaultValidator>(inner, default_val, default_val_str);
+        if (!default_type.empty()) {
+            wd->set_default_type(default_type);
+        }
+        if (schema.contains("default") && schema["default"].is_none()) {
+            // Explicit None default — distinguishable from "no default" so
+            // default_value() returns None instead of omitting the field
+            wd->set_default_is_none(true);
+        }
+        if (schema.contains("default_factory") && !schema["default_factory"].is_none()) {
+            wd->set_default_factory(schema["default_factory"]);
+        }
+        // validate_default comes from the schema or the top-level config
+        bool validate_default = false;
+        if (schema.contains("validate_default") && py::isinstance<py::bool_>(schema["validate_default"])) {
+            validate_default = schema["validate_default"].cast<bool>();
+        }
+        if (config.contains("validate_default") && py::isinstance<py::bool_>(config["validate_default"])) {
+            validate_default = config["validate_default"].cast<bool>();
+        }
+        if (validate_default) {
+            wd->set_validate_default(true);
+        }
+        return wd;
     }
 
     // --- Function validators (Before / After / Wrap / Plain) ---
@@ -1299,7 +1374,16 @@ static std::shared_ptr<Validator> build_from_py_dict(
             inner = build_from_py_dict(schema["schema"].cast<py::dict>(), config, definitions);
         }
         py::object func = py::none();
-        if (schema.contains("function")) func = schema["function"];
+        if (schema.contains("function")) {
+            func = schema["function"];
+            // function may be a dict like {'function': actual_callable, 'type': 'no-info'}
+            if (py::isinstance<py::dict>(func)) {
+                py::dict func_dict = func.cast<py::dict>();
+                if (func_dict.contains("function")) {
+                    func = func_dict["function"];
+                }
+            }
+        }
         return std::make_shared<FunctionBeforeValidator>(inner, func);
     }
 
@@ -1342,7 +1426,15 @@ static std::shared_ptr<Validator> build_from_py_dict(
             inner = build_from_py_dict(schema["schema"].cast<py::dict>(), config, definitions);
         }
         py::object func = py::none();
-        if (schema.contains("function")) func = schema["function"];
+        if (schema.contains("function")) {
+            func = schema["function"];
+            if (py::isinstance<py::dict>(func)) {
+                py::dict func_dict = func.cast<py::dict>();
+                if (func_dict.contains("function")) {
+                    func = func_dict["function"];
+                }
+            }
+        }
         return std::make_shared<FunctionWrapValidator>(inner, func);
     }
 
@@ -1470,7 +1562,12 @@ static std::shared_ptr<Validator> build_from_py_dict(
                 py::dict field_schema_dict;
                 std::string default_val_str;
                 bool required = true;
-                
+
+                // typed-dict fields declare requiredness explicitly
+                if (field_def.contains("required") && py::isinstance<py::bool_>(field_def["required"])) {
+                    required = field_def["required"].cast<bool>();
+                }
+
                 if (field_def.contains("schema")) {
                     field_schema_dict = field_def["schema"].cast<py::dict>();
 
@@ -1508,9 +1605,11 @@ static std::shared_ptr<Validator> build_from_py_dict(
             }
         }
         
-        // Extract extras behavior from config
-        std::string extra_str = py_str(config, "extra_fields_behavior",
-            py_str(config, "extra_behavior", py_str(config, "extra", "ignore")));
+        // Extract extras behavior from the schema (typed-dicts embed their own
+        // extra_behavior) or the top-level config
+        std::string extra_str = py_str(schema, "extra_behavior",
+            py_str(config, "extra_fields_behavior",
+                py_str(config, "extra_behavior", py_str(config, "extra", "ignore"))));
         auto extra = extra_behavior_from_string(extra_str);
         v->set_extra_behavior(extra);
 
@@ -1607,6 +1706,83 @@ static std::shared_ptr<Validator> build_from_py_dict(
             inner = build_from_py_dict(schema["schema"].cast<py::dict>(), config, definitions);
         }
         return std::make_shared<JsonValidator>(inner);
+    }
+
+    // --- Arguments (function parameter validation) ---
+    if (type == "arguments") {
+        auto v = std::make_shared<ArgumentsValidator>();
+        if (schema.contains("arguments_schema")) {
+            auto args_list = schema["arguments_schema"].cast<py::list>();
+            for (auto item : args_list) {
+                auto arg = item.cast<py::dict>();
+                ArgumentsValidator::Parameter p;
+                p.name = py_str(arg, "name");
+                std::string mode = py_str(arg, "mode", "positional_or_keyword");
+                p.positional = (mode == "positional_only" || mode == "positional_or_keyword");
+                p.positional_only = (mode == "positional_only");
+                if (arg.contains("alias") && !arg["alias"].is_none()) {
+                    // alias: plain string, or AliasChoices as a nested list of
+                    // strings ([["d"], ["e"]]); look up each candidate in order
+                    py::object alias = arg["alias"];
+                    if (py::isinstance<py::str>(alias)) {
+                        p.validation_aliases.push_back(alias.cast<std::string>());
+                    } else if (py::isinstance<py::list>(alias)) {
+                        for (auto choice : alias.cast<py::list>()) {
+                            if (py::isinstance<py::str>(choice)) {
+                                p.validation_aliases.push_back(choice.cast<std::string>());
+                            } else if (py::isinstance<py::list>(choice)) {
+                                for (auto inner : choice.cast<py::list>()) {
+                                    p.validation_aliases.push_back(py::str(inner).cast<std::string>());
+                                }
+                            }
+                        }
+                    }
+                }
+                if (arg.contains("schema")) {
+                    p.validator = build_from_py_dict(arg["schema"].cast<py::dict>(), config, definitions);
+                }
+                v->parameters.push_back(std::move(p));
+            }
+        }
+        for (size_t i = 0; i < v->parameters.size(); ++i) {
+            if (v->parameters[i].positional) v->positional_params_count = i + 1;
+        }
+        if (schema.contains("var_args_schema")) {
+            v->var_args_validator = build_from_py_dict(schema["var_args_schema"].cast<py::dict>(), config, definitions);
+        }
+        v->var_kwargs_mode = py_str(schema, "var_kwargs_mode", "uniform");
+        if (schema.contains("var_kwargs_schema")) {
+            v->var_kwargs_validator = build_from_py_dict(schema["var_kwargs_schema"].cast<py::dict>(), config, definitions);
+        }
+        // Keyword lookup mode (default: by alias only)
+        if (schema.contains("validate_by_alias") && py::isinstance<py::bool_>(schema["validate_by_alias"])) {
+            v->validate_by_alias = schema["validate_by_alias"].cast<bool>();
+        }
+        if (schema.contains("validate_by_name") && py::isinstance<py::bool_>(schema["validate_by_name"])) {
+            v->validate_by_name = schema["validate_by_name"].cast<bool>();
+        }
+        std::string extra_str = py_str(schema, "extra",
+            py_str(config, "extra_fields_behavior",
+                py_str(config, "extra_behavior", py_str(config, "extra", "forbid"))));
+        v->extra = extra_behavior_from_string(extra_str);
+        return v;
+    }
+
+    // --- Call (validate function call: arguments + return value) ---
+    if (type == "call") {
+        std::shared_ptr<Validator> arguments_validator;
+        if (schema.contains("arguments_schema")) {
+            arguments_validator = build_from_py_dict(schema["arguments_schema"].cast<py::dict>(), config, definitions);
+        }
+        py::object function = py::none();
+        if (schema.contains("function")) {
+            function = schema["function"];
+        }
+        std::shared_ptr<Validator> return_validator;
+        if (schema.contains("return_schema")) {
+            return_validator = build_from_py_dict(schema["return_schema"].cast<py::dict>(), config, definitions);
+        }
+        return std::make_shared<CallValidator>(arguments_validator, function, return_validator);
     }
 
     throw SchemaError("Unknown schema type: " + type);

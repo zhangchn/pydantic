@@ -6,6 +6,8 @@
 #include "pydantic_core/json_input.hpp"
 #include <memory>
 #include <functional>
+#include <optional>
+#include <unordered_set>
 #include <pybind11/pybind11.h>
 
 namespace py = pybind11;
@@ -43,8 +45,30 @@ public:
                 info_dict["context"] = state.context_py();
             }
 
-            py::object transformed = py_func_(input.as_python_object(), info_dict);
-            
+            py::object transformed;
+            try {
+                // Try with info dict (general/no-info-wrapped functions)
+                transformed = py_func_(input.as_python_object(), info_dict);
+            } catch (py::error_already_set& e1) {
+                // If fails, try without info dict (no-info functions like
+                // BeforeValidator lambdas).  restore() + PyErr_Clear() swallows
+                // the error so the destructor's restore is a no-op.
+                e1.restore();
+                PyErr_Clear();
+                try {
+                    transformed = py_func_(input.as_python_object());
+                } catch (py::error_already_set& e2) {
+                    std::string msg = e2.what();
+                    e2.restore();
+                    PyErr_Clear();
+                    return ValError::line_error(
+                        ErrorType(ErrorType::Kind::CustomError),
+                        state.location(),
+                        "FunctionBefore validator failed: " + msg
+                    );
+                }
+            }
+
             if (inner_) {
                 auto py_input = std::make_unique<PythonInput>(transformed);
                 return inner_->validate(*py_input, state);
@@ -67,6 +91,13 @@ public:
     }
 
     std::string name() const override { return "function-before"; }
+
+    // The result comes from the inner validator when one is present
+    std::string effective_result_name() const override {
+        if (inner_) return inner_->effective_result_name();
+        return "function-before";
+    }
+
     void set_py_func(py::object func) { py_func_ = std::move(func); }
 
 private:
@@ -159,6 +190,14 @@ public:
     }
 
     std::string name() const override { return "function-after"; }
+
+    // When the after-function is applied the result is a Python object;
+    // otherwise it is the inner validator's result type.
+    std::string effective_result_name() const override {
+        if (py_func_.is_none() && inner_) return inner_->effective_result_name();
+        return "function-after";
+    }
+
     void set_py_func(py::object func) { py_func_ = std::move(func); }
 
 private:
@@ -264,14 +303,34 @@ public:
                     if (result.is_err()) {
                         throw py::value_error("Inner validator failed");
                     }
-                    // Extract validated result - try py::object first
-                    auto* obj = static_cast<py::object*>(result.value().get());
-                    if (obj) return *obj;
+                    // Convert the validated result to a Python object by its
+                    // actual stored type (e.g. EitherDate for date fields).
+                    return value_to_python_with_type(result.value(), inner_->effective_result_name());
                 }
                 return v;
             });
             
-            py::object output = py_func_(input.as_python_object(), handler, info_dict);
+            py::object output;
+            try {
+                // Try with info dict (general wrap functions)
+                output = py_func_(input.as_python_object(), handler, info_dict);
+            } catch (py::error_already_set& e1) {
+                // If fails, try without info dict (no-info wrap functions)
+                e1.restore();
+                PyErr_Clear();
+                try {
+                    output = py_func_(input.as_python_object(), handler);
+                } catch (py::error_already_set& e2) {
+                    std::string msg = e2.what();
+                    e2.restore();
+                    PyErr_Clear();
+                    return ValError::line_error(
+                        ErrorType(ErrorType::Kind::CustomError),
+                        state.location(),
+                        "FunctionWrap validator failed: " + msg
+                    );
+                }
+            }
             return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(output));
         } catch (py::error_already_set& e) {
             std::string msg = e.what();
@@ -286,6 +345,14 @@ public:
     }
 
     std::string name() const override { return "function-wrap"; }
+
+    // When the wrap-function is applied the result is a Python object;
+    // otherwise it is the inner validator's result type.
+    std::string effective_result_name() const override {
+        if (py_func_.is_none() && inner_) return inner_->effective_result_name();
+        return "function-wrap";
+    }
+
     void set_py_func(py::object func) { py_func_ = std::move(func); }
 
 private:
@@ -312,19 +379,47 @@ public:
     }
 
     ValResult<std::shared_ptr<void>> default_value(ValidationState& state) override {
-        if (default_value_) return ValResult<std::shared_ptr<void>>(default_value_);
-        if (!default_value_str_.empty()) {
-            // Parse complex default and validate through inner
+        // Compute the raw default as a Python object (Rust returns defaults raw
+        // unless validate_default is set)
+        py::object raw;
+        bool has_raw = false;
+        if (default_is_none_) {
+            raw = py::none();
+            has_raw = true;
+        } else if (!default_factory_.is_none()) {
+            try {
+                raw = default_factory_();
+                has_raw = true;
+            } catch (py::error_already_set& e) {
+                e.restore();
+                PyErr_Clear();
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::CustomError),
+                    state.location(),
+                    "Default factory failed: " + std::string(e.what())
+                );
+            }
+        } else if (default_value_) {
+            raw = typed_default_to_py(default_value_, default_type_);
+            has_raw = true;
+        } else if (!default_value_str_.empty()) {
             auto parse_result = parse_json(default_value_str_);
-            if (parse_result.is_ok() && inner_) {
-                auto default_result = inner_->validate(*parse_result.value(), state);
-                if (default_result.is_ok()) {
-                    return default_result;
-                }
+            if (parse_result.is_ok()) {
+                raw = parse_result.value()->as_python_object();
+                has_raw = true;
             }
         }
-        if (inner_) return inner_->default_value(state);
-        return ValError::omit();
+
+        if (!has_raw) {
+            if (inner_) return inner_->default_value(state);
+            return ValError::omit();
+        }
+
+        if (validate_default_ && inner_) {
+            PythonInput in(raw);
+            return inner_->validate(in, state);
+        }
+        return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(std::move(raw)));
     }
 
     std::string name() const override {
@@ -334,10 +429,37 @@ public:
         return "with-default";
     }
 
+    void set_default_is_none(bool v) { default_is_none_ = v; }
+    bool has_none_default() const { return default_is_none_; }
+    void set_default_factory(py::object f) { default_factory_ = std::move(f); }
+    bool has_default_factory() const { return !default_factory_.is_none(); }
+    void set_default_type(const std::string& t) { default_type_ = t; }
+    void set_validate_default(bool v) { validate_default_ = v; }
+    bool validate_default() const { return validate_default_; }
+
 private:
     std::shared_ptr<Validator> inner_;
     std::shared_ptr<void> default_value_;
     std::string default_value_str_;
+    std::string default_type_;
+    bool default_is_none_ = false;
+    bool validate_default_ = false;
+    py::object default_factory_ = py::none();
+
+    static py::object typed_default_to_py(const std::shared_ptr<void>& value, const std::string& type) {
+        if (!value) return py::none();
+        if (type == "str") {
+            if (auto* s = static_cast<std::string*>(value.get())) return py::str(*s);
+        } else if (type == "int") {
+            if (auto* i = static_cast<int64_t*>(value.get())) return py::int_(*i);
+            if (auto* i = static_cast<int*>(value.get())) return py::int_(*i);
+        } else if (type == "float") {
+            if (auto* d = static_cast<double*>(value.get())) return py::float_(*d);
+        } else if (type == "bool") {
+            if (auto* b = static_cast<bool*>(value.get())) return py::bool_(*b);
+        }
+        return py::none();
+    }
 };
 
 // ChainValidator - runs validators in sequence until one succeeds
@@ -388,6 +510,13 @@ public:
 
     std::string name() const override { return "lax-or-strict"; }
 
+    // Both branches produce the same result type (that's the point)
+    std::string effective_result_name() const override {
+        if (lax_) return lax_->effective_result_name();
+        if (strict_) return strict_->effective_result_name();
+        return "lax-or-strict";
+    }
+
 private:
     std::shared_ptr<Validator> lax_;
     std::shared_ptr<Validator> strict_;
@@ -410,6 +539,13 @@ public:
 
     std::string name() const override { return "json-or-python"; }
 
+    // The result comes from whichever branch handled the input
+    std::string effective_result_name() const override {
+        if (python_) return python_->effective_result_name();
+        if (json_) return json_->effective_result_name();
+        return "json-or-python";
+    }
+
 private:
     std::shared_ptr<Validator> json_;
     std::shared_ptr<Validator> python_;
@@ -427,7 +563,7 @@ public:
     ) override {
         // Convert JSON to Python object (handled by as_python_object)
         py::object parsed = input.as_python_object();
-        
+
         if (inner_) {
             auto py_input = std::make_unique<PythonInput>(parsed);
             return inner_->validate(*py_input, state);
@@ -439,6 +575,388 @@ public:
 
 private:
     std::shared_ptr<Validator> inner_;
+};
+
+// ArgumentsValidator - validates function arguments (positional + keyword).
+// Matches Rust's ArgumentsValidator (arguments.rs).  Produces a Python tuple
+// of (validated_args, validated_kwargs) ready for a function call.
+class ArgumentsValidator : public Validator {
+public:
+    struct Parameter {
+        bool positional = false;       // accepts positional input (positional_only | positional_or_keyword)
+        bool positional_only = false;  // positional_only mode
+        std::string name;
+        std::vector<std::string> validation_aliases;
+        std::shared_ptr<Validator> validator;
+    };
+
+    std::vector<Parameter> parameters;
+    size_t positional_params_count = 0;
+    std::shared_ptr<Validator> var_args_validator;   // *args
+    std::string var_kwargs_mode = "uniform";          // "uniform" | "unpacked-typed-dict"
+    std::shared_ptr<Validator> var_kwargs_validator;  // **kwargs
+    ExtraBehavior extra = ExtraBehavior::Forbid;
+    bool validate_by_alias = true;
+    bool validate_by_name = false;
+
+    std::string name() const override { return "arguments"; }
+
+    ValResult<std::shared_ptr<void>> validate(
+        const Input& input,
+        ValidationState& state
+    ) override {
+        auto args_result = input.validate_args();
+        if (args_result.is_err()) {
+            return ValResult<std::shared_ptr<void>>(args_result.error());
+        }
+        ArgumentsInput args_in = std::move(args_result.value());
+        py::tuple pos_args = std::move(args_in.args);
+        py::dict kw_args = std::move(args_in.kwargs);
+
+        py::list output_args;
+        py::dict output_kwargs;
+        std::vector<std::shared_ptr<ValLineError>> line_errors;
+        std::unordered_set<std::string> used_kwargs;
+        py::ssize_t n_pos = py::len(pos_args);
+
+        auto add_error = [&](const ErrorType& et, const Location& loc, const std::string& input_repr) {
+            line_errors.push_back(std::make_shared<ValLineError>(ValLineError{et, loc, input_repr}));
+        };
+
+        for (size_t index = 0; index < parameters.size(); ++index) {
+            const Parameter& p = parameters[index];
+
+            // Value from positional args (by index)
+            std::optional<py::object> pos_value;
+            if (p.positional && (py::ssize_t)index < n_pos) {
+                pos_value = py::reinterpret_borrow<py::object>(pos_args[index]);
+            }
+
+            // Value from keyword args.  Matches Rust's LookupPathCollection:
+            // aliases are looked up when validate_by_alias; the name is a
+            // lookup key only when there is no alias or validate_by_name.
+            // positional_only parameters never accept keyword input.
+            std::optional<py::object> kw_value;
+            if (!p.positional_only) {
+                std::vector<std::string> lookup_keys;
+                bool has_alias = !p.validation_aliases.empty();
+                if (validate_by_alias) {
+                    for (const auto& a : p.validation_aliases) {
+                        lookup_keys.push_back(a);
+                    }
+                }
+                if (!has_alias || validate_by_name) {
+                    lookup_keys.push_back(p.name);
+                }
+                std::unordered_set<std::string> seen_keys;
+                for (const auto& key : lookup_keys) {
+                    if (!seen_keys.insert(key).second) continue;
+                    if (kw_args.contains(py::str(key))) {
+                        kw_value = py::reinterpret_borrow<py::object>(kw_args[py::str(key)]);
+                        used_kwargs.insert(key);
+                        break;
+                    }
+                }
+            }
+
+            if (pos_value && kw_value) {
+                add_error(ErrorType(ErrorType::Kind::MultipleArgumentValues),
+                          param_loc(p), py::repr(*kw_value).cast<std::string>());
+            } else if (pos_value) {
+                state.location().push(static_cast<int64_t>(index));
+                PythonInput py_in(*pos_value);
+                py_in.set_current_location(state.location());
+                auto result = p.validator->validate(py_in, state);
+                state.location().pop();
+                if (result.is_ok()) {
+                    output_args.append(value_to_python(result.value(), p.validator->effective_result_name(), &*pos_value));
+                } else {
+                    collect_line_errors(result.error(), line_errors);
+                }
+            } else if (kw_value) {
+                state.location().push(p.name);
+                PythonInput py_in(*kw_value);
+                py_in.set_current_location(state.location());
+                auto result = p.validator->validate(py_in, state);
+                state.location().pop();
+                if (result.is_ok()) {
+                    output_kwargs[py::str(p.name)] = value_to_python(result.value(), p.validator->effective_result_name(), &*kw_value);
+                } else {
+                    collect_line_errors(result.error(), line_errors);
+                }
+            } else {
+                // No value supplied — use default or report missing
+                ValResult<std::shared_ptr<void>> def = p.validator->default_value(state);
+                if (def.is_ok()) {
+                    py::object val = default_to_python(p.validator, def.value());
+                    if (p.positional_only) {
+                        output_args.append(val);
+                    } else {
+                        output_kwargs[py::str(p.name)] = val;
+                    }
+                } else if (p.positional_only) {
+                    add_error(ErrorType(ErrorType::Kind::MissingPositionalOnlyArgument),
+                              loc_of_index(static_cast<int64_t>(index)), input.as_error_value().repr);
+                } else if (p.positional) {
+                    add_error(ErrorType(ErrorType::Kind::MissingArgument),
+                              param_loc(p), input.as_error_value().repr);
+                } else {
+                    add_error(ErrorType(ErrorType::Kind::MissingKeywordOnlyArgument),
+                              param_loc(p), input.as_error_value().repr);
+                }
+            }
+        }
+
+        // Extra positional args beyond the declared parameters
+        if (n_pos > (py::ssize_t)positional_params_count) {
+            for (py::ssize_t i = (py::ssize_t)positional_params_count; i < n_pos; ++i) {
+                py::object item = py::reinterpret_borrow<py::object>(pos_args[i]);
+                if (var_args_validator) {
+                    state.location().push(i);
+                    PythonInput py_in(item);
+                    py_in.set_current_location(state.location());
+                    auto result = var_args_validator->validate(py_in, state);
+                    state.location().pop();
+                    if (result.is_ok()) {
+                        output_args.append(value_to_python(result.value(), var_args_validator->effective_result_name(), &item));
+                    } else {
+                        collect_line_errors(result.error(), line_errors);
+                    }
+                } else {
+                    add_error(ErrorType(ErrorType::Kind::UnexpectedPositionalArgument),
+                              loc_of_index(i), py::repr(item).cast<std::string>());
+                }
+            }
+        }
+
+        // Remaining kwargs: var_kwargs validation or forbid/allow handling
+        py::dict remaining_kwargs;
+        for (auto item : kw_args) {
+            std::string key = py::str(item.first).cast<std::string>();
+            if (used_kwargs.count(key)) continue;
+            py::object value = py::reinterpret_borrow<py::object>(item.second);
+
+            if (var_kwargs_mode == "unpacked-typed-dict") {
+                remaining_kwargs[py::str(key)] = value;
+            } else if (var_kwargs_validator) {
+                state.location().push(key);
+                PythonInput py_in(value);
+                py_in.set_current_location(state.location());
+                auto result = var_kwargs_validator->validate(py_in, state);
+                state.location().pop();
+                if (result.is_ok()) {
+                    output_kwargs[py::str(key)] = value_to_python(result.value(), var_kwargs_validator->effective_result_name(), &value);
+                } else {
+                    collect_line_errors(result.error(), line_errors);
+                }
+            } else if (extra == ExtraBehavior::Forbid) {
+                add_error(ErrorType(ErrorType::Kind::UnexpectedKeywordArgument),
+                          loc_of_name(key), py::repr(value).cast<std::string>());
+            }
+        }
+
+        if (var_kwargs_mode == "unpacked-typed-dict" && var_kwargs_validator) {
+            // Validate the remaining kwargs as a single dict against the
+            // typed-dict schema.  No location prefix: the typed-dict validator
+            // reports field names directly (loc ('a',), ('b',), ...).
+            PythonInput py_in(py::cast<py::object>(remaining_kwargs));
+            auto result = var_kwargs_validator->validate(py_in, state);
+            if (result.is_ok()) {
+                py::object validated = value_to_python(result.value(), var_kwargs_validator->effective_result_name(), nullptr);
+                if (py::isinstance<py::dict>(validated)) {
+                    for (auto kv : validated.cast<py::dict>()) {
+                        std::string key = py::str(kv.first).cast<std::string>();
+                        if (key == "__pydantic_extra__") {
+                            // Extra items (extra_items=... on the typed dict)
+                            // are collected under __pydantic_extra__ — spread
+                            // them into the real kwargs.
+                            py::object extra_val = py::reinterpret_borrow<py::object>(kv.second);
+                            if (py::isinstance<py::dict>(extra_val)) {
+                                for (auto ekv : extra_val.cast<py::dict>()) {
+                                    output_kwargs[py::str(ekv.first)] = py::reinterpret_borrow<py::object>(ekv.second);
+                                }
+                            }
+                            continue;
+                        }
+                        // Skip other internal metadata keys — they are not real kwargs
+                        if (key.rfind("__pydantic_", 0) == 0) continue;
+                        output_kwargs[py::str(key)] = py::reinterpret_borrow<py::object>(kv.second);
+                    }
+                }
+            } else {
+                collect_line_errors(result.error(), line_errors);
+            }
+        }
+
+        if (!line_errors.empty()) {
+            return ValError::line_errors(std::move(line_errors));
+        }
+        return ValResult<std::shared_ptr<void>>(
+            std::make_shared<py::object>(py::make_tuple(py::tuple(output_args), output_kwargs))
+        );
+    }
+
+private:
+    static Location loc_of_name(const std::string& name) {
+        Location loc;
+        loc.push(name);
+        return loc;
+    }
+
+    static Location loc_of_index(int64_t index) {
+        Location loc;
+        loc.push(index);
+        return loc;
+    }
+
+    // Error location for keyword arguments: the first validation alias when
+    // present, otherwise the parameter name (matches Rust's error_loc with
+    // loc_by_alias).
+    static Location param_loc(const Parameter& p) {
+        if (!p.validation_aliases.empty()) {
+            return loc_of_name(p.validation_aliases.front());
+        }
+        return loc_of_name(p.name);
+    }
+
+    static void collect_line_errors(const ValError& err, std::vector<std::shared_ptr<ValLineError>>& out) {
+        for (auto& le : err.line_errors()) {
+            out.push_back(le);
+        }
+    }
+
+    // Convert a default value to a Python object.  WithDefaultValidator
+    // returns the raw default as a py::object (unless validate_default is set,
+    // in which case the result is the inner validator's validated type).
+    static py::object default_to_python(const std::shared_ptr<Validator>& validator,
+                                        const std::shared_ptr<void>& value) {
+        if (auto* wd = dynamic_cast<WithDefaultValidator*>(validator.get())) {
+            if (!wd->validate_default()) {
+                try {
+                    auto* obj = static_cast<py::object*>(value.get());
+                    if (obj) return *obj;
+                } catch (...) {}
+                return py::none();
+            }
+        }
+        return value_to_python(value, validator->effective_result_name(), nullptr);
+    }
+
+    // Convert a validated value to a Python object.  "any"-typed values pass
+    // through the original input object (matching Rust's AnyValidator) because
+    // the C++ AnyValidator round-trips through a string repr, which loses
+    // arbitrary objects (classes, instances, ...).  Defaults for "any" params
+    // have no raw input, so fall back to generic typed casts.
+    static py::object value_to_python(const std::shared_ptr<void>& value, const std::string& type_name,
+                                      const py::object* raw) {
+        if (type_name == "any") {
+            if (raw != nullptr) {
+                return *raw;
+            }
+            if (value) {
+                // AnyValidator round-trips through a string repr ("null", "true",
+                // numbers, ...) — map the JSON-ish literals back to Python values.
+                try {
+                    auto* s = static_cast<std::string*>(value.get());
+                    if (s) {
+                        if (*s == "null") return py::none();
+                        if (*s == "true") return py::bool_(true);
+                        if (*s == "false") return py::bool_(false);
+                        return py::str(*s);
+                    }
+                } catch (...) {}
+                try { return py::int_(*static_cast<int64_t*>(value.get())); } catch (...) {}
+                try { return py::float_(*static_cast<double*>(value.get())); } catch (...) {}
+                try { return py::bool_(*static_cast<bool*>(value.get())); } catch (...) {}
+                try { return *static_cast<py::object*>(value.get()); } catch (...) {}
+            }
+            return py::none();
+        }
+        return value_to_python_with_type(value, type_name);
+    }
+};
+
+// CallValidator - validates function arguments, calls the function, and
+// optionally validates the return value.  Matches Rust's CallValidator (call.rs).
+class CallValidator : public Validator {
+public:
+    CallValidator() : function_(py::none()) {}
+    CallValidator(std::shared_ptr<Validator> arguments_validator, py::object function,
+                  std::shared_ptr<Validator> return_validator)
+        : arguments_validator_(std::move(arguments_validator)),
+          function_(std::move(function)),
+          return_validator_(std::move(return_validator)) {}
+
+    ValResult<std::shared_ptr<void>> validate(
+        const Input& input,
+        ValidationState& state
+    ) override {
+        if (!arguments_validator_) {
+            return ValError::line_error(ErrorType(ErrorType::Kind::CustomError),
+                                        state.location(), "Call validator missing arguments validator");
+        }
+
+        auto args_result = arguments_validator_->validate(input, state);
+        if (args_result.is_err()) return args_result;
+
+        py::object validated;
+        try {
+            validated = value_to_python_with_type(args_result.value(), arguments_validator_->name());
+        } catch (...) {
+            validated = py::none();
+        }
+
+        py::object result;
+        if (py::isinstance<py::tuple>(validated) && py::len(validated) == 2) {
+            py::tuple args_tuple = py::reinterpret_borrow<py::tuple>(validated[py::int_(0)]);
+            py::dict kwargs_dict = py::reinterpret_borrow<py::dict>(validated[py::int_(1)]);
+            PyObject* res = PyObject_Call(function_.ptr(), args_tuple.ptr(), kwargs_dict.ptr());
+            if (res == nullptr) {
+                throw py::error_already_set();
+            }
+            result = py::reinterpret_steal<py::object>(res);
+        } else if (py::isinstance<py::dict>(validated)) {
+            py::dict kwargs_dict = validated.cast<py::dict>();
+            PyObject* res = PyObject_Call(function_.ptr(), nullptr, kwargs_dict.ptr());
+            if (res == nullptr) {
+                throw py::error_already_set();
+            }
+            result = py::reinterpret_steal<py::object>(res);
+        } else {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::CustomError),
+                state.location(),
+                "Arguments validator should return a tuple of (args, kwargs) or a dict of kwargs"
+            );
+        }
+
+        if (return_validator_) {
+            PythonInput ret_input(result);
+            state.location().push("return");
+            auto ret_result = return_validator_->validate(ret_input, state);
+            state.location().pop();
+            return ret_result;
+        }
+        return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(result));
+    }
+
+    std::string name() const override { return "call"; }
+
+    // The result type matches the return validator when one is present;
+    // otherwise the function's own return value (a Python object).
+    std::string effective_result_name() const override {
+        if (return_validator_) return return_validator_->effective_result_name();
+        return "call";
+    }
+
+    void set_arguments_validator(std::shared_ptr<Validator> v) { arguments_validator_ = std::move(v); }
+    void set_function(py::object f) { function_ = std::move(f); }
+    void set_return_validator(std::shared_ptr<Validator> v) { return_validator_ = std::move(v); }
+
+private:
+    std::shared_ptr<Validator> arguments_validator_;
+    py::object function_;
+    std::shared_ptr<Validator> return_validator_;
 };
 
 } // namespace pydantic_core

@@ -105,6 +105,9 @@ public:
     ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_list(bool strict) const override;
     ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> validate_tuple(bool strict) const override;
 
+    // Arguments validation: accepts ArgsKwargs instances and plain dicts (kwargs-only)
+    ValResult<ArgumentsInput> validate_args() const override;
+
     // Access underlying PyObject
     const py::object& py_object() const { return obj_; }
     

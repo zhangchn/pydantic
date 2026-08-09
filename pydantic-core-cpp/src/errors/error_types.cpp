@@ -74,6 +74,15 @@ std::string ErrorType::type_name() const {
         {Kind::Missing, "missing"},
         {Kind::ExtraForbidden, "extra_forbidden"},
 
+        // Arguments errors
+        {Kind::ArgumentsType, "arguments_type"},
+        {Kind::MissingArgument, "missing_argument"},
+        {Kind::MissingKeywordOnlyArgument, "missing_keyword_only_argument"},
+        {Kind::MissingPositionalOnlyArgument, "missing_positional_only_argument"},
+        {Kind::UnexpectedPositionalArgument, "unexpected_positional_argument"},
+        {Kind::UnexpectedKeywordArgument, "unexpected_keyword_argument"},
+        {Kind::MultipleArgumentValues, "multiple_argument_values"},
+
         // Date/Time errors
         {Kind::DateType, "date_type"},
         {Kind::DateParsing, "date_parsing"},
@@ -93,6 +102,11 @@ std::string ErrorType::type_name() const {
         {Kind::TimezoneOffset, "timezone_offset"},
         {Kind::TimedeltaType, "timedelta_type"},
         {Kind::TimedeltaParsing, "timedelta_parsing"},
+
+        // Type checking errors
+        {Kind::IsInstanceType, "is_instance_of"},
+        {Kind::IsSubclassType, "is_subclass_of"},
+        {Kind::CallableType, "callable_type"},
 
         // Other errors
         {Kind::JsonInvalid, "json_invalid"},
@@ -184,6 +198,15 @@ std::string ErrorType::message_template() const {
         {Kind::FieldRequired, "Field required"},
         {Kind::Missing, "Missing field"},
         {Kind::ExtraForbidden, "Extra inputs are not permitted"},
+
+        // Arguments errors
+        {Kind::ArgumentsType, "Arguments must be a tuple, list or a dictionary"},
+        {Kind::MissingArgument, "Missing required argument"},
+        {Kind::MissingKeywordOnlyArgument, "Missing required keyword only argument"},
+        {Kind::MissingPositionalOnlyArgument, "Missing required positional only argument"},
+        {Kind::UnexpectedPositionalArgument, "Unexpected positional argument"},
+        {Kind::UnexpectedKeywordArgument, "Unexpected keyword argument"},
+        {Kind::MultipleArgumentValues, "Got multiple values for argument"},
         
         // Other errors
         {Kind::JsonInvalid, "Invalid JSON"},
@@ -191,11 +214,11 @@ std::string ErrorType::message_template() const {
         {Kind::RecursionError, "Recursion depth exceeded"},
         
         // Generic constraint errors
-        {Kind::GreaterThan, "Input should be greater than {value}"},
-        {Kind::LessThan, "Input should be less than {value}"},
-        {Kind::GreaterThanEqual, "Input should be greater than or equal to {value}"},
-        {Kind::LessThanEqual, "Input should be less than or equal to {value}"},
-        {Kind::MultipleOf, "Input should be a multiple of {value}"},
+        {Kind::GreaterThan, "Input should be greater than {gt}"},
+        {Kind::LessThan, "Input should be less than {lt}"},
+        {Kind::GreaterThanEqual, "Input should be greater than or equal to {ge}"},
+        {Kind::LessThanEqual, "Input should be less than or equal to {le}"},
+        {Kind::MultipleOf, "Input should be a multiple of {multiple_of}"},
         {Kind::FiniteNumber, "Input should be a finite number"},
         {Kind::TooShort, "Input should have at least {value} items"},
         {Kind::TooLong, "Input should have at most {value} items"},
@@ -220,6 +243,11 @@ std::string ErrorType::message_template() const {
         {Kind::TimezoneOffset, "Datetime should have timezone offset {tz_expected}, got {tz_actual}"},
         {Kind::TimedeltaType, "Input should be a valid timedelta"},
         {Kind::TimedeltaParsing, "Input should be a valid timedelta, unable to parse string as an ISO 8601 duration"},
+
+        // Type checking errors
+        {Kind::IsInstanceType, "Input should be an instance of {class}"},
+        {Kind::IsSubclassType, "Input should be a subclass of {class}"},
+        {Kind::CallableType, "Input should be callable"},
     };
     auto it = templates.find(kind_);
     return it != templates.end() ? it->second : "Validation error";

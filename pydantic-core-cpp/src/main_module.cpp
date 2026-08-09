@@ -1270,15 +1270,23 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
         );
         py::setattr(ve_cls, "error_count",
             py::cpp_function([](py::object self) -> int {
-                return self.cast<const ValidationError&>().error_count();
+                const ValidationError* ve = py::cast<const ValidationError*>(self.ptr());
+                if (ve == nullptr) {
+                    throw std::runtime_error("Unable to access ValidationError");
+                }
+                return ve->error_count();
             }, py::is_method(ve_cls))
         );
         py::setattr(ve_cls, "errors",
             py::cpp_function([](py::object self) -> py::list {
+                const ValidationError* ve = py::cast<const ValidationError*>(self.ptr());
+                if (ve == nullptr) {
+                    throw std::runtime_error("Unable to access ValidationError");
+                }
                 // Build the error dicts manually: ErrorDetails is not a bound
                 // type, so casting std::vector<ErrorDetails> to a list would be
                 // undefined behavior.
-                const auto& errors = self.cast<const ValidationError&>().errors();
+                const auto& errors = ve->errors();
                 py::list result;
                 for (const auto& err : errors) {
                     py::dict d;
@@ -1417,8 +1425,9 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                 return self_instance;
             }
 
-            // If validated result is a simple value (like int for dict size), return original input
-            if (py::isinstance<py::int_>(validated) && !py::isinstance<py::bool_>(input)) {
+            // If validated result is a simple value (like int for dict size), return original input.
+            // Call validators produce real function results which may be ints — exclude them.
+            if (py::isinstance<py::int_>(validated) && !py::isinstance<py::bool_>(input) && !self.is_call()) {
                 return input;
             }
 

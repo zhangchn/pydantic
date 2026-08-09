@@ -82,6 +82,11 @@ public:
     // Whether the top-level schema is a root model (RootModel[T])
     bool is_root_model() const;
 
+    // Whether the top-level schema is a "call" validator (validate_call).
+    // Call validators produce real function results which may be plain ints,
+    // so the int-result input passthrough heuristic must not apply to them.
+    bool is_call() const { return validator_ && validator_->name() == "call"; }
+
     // Representation
     std::string repr() const;
 

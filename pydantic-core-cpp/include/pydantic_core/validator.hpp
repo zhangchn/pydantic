@@ -48,6 +48,8 @@ class ChainValidator;
 class LaxOrStrictValidator;
 class JsonOrPythonValidator;
 class JsonValidator;
+class ArgumentsValidator;
+class CallValidator;
 
 // Validator base trait - matches Rust's Validator trait
 class Validator {

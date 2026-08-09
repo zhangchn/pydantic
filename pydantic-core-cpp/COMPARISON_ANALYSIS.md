@@ -37,7 +37,7 @@
 | 23 | `FunctionAfter` | `function.rs` | ✅ Implemented | `functions.hpp` | Calls the Python callable (1-arg and inner-result fallbacks) |
 | 24 | `FunctionPlain` | `function.rs` | ✅ Implemented | `functions.hpp` | Calls the Python callable; returns `py::object` |
 | 25 | `FunctionWrap` | `function.rs` | ✅ Implemented | `functions.hpp` | Calls the Python callable with a handler lambda that invokes the inner validator |
-| 26 | `FunctionCall` | `call.rs` | ❌ Missing | — | No call/argument validation |
+| 26 | `FunctionCall` | `call.rs` | ✅ Implemented | `functions.hpp` | `CallValidator`; validates args via `arguments` schema, calls the function, validates the return value |
 | 27 | `Literal` | `literal.rs` | ✅ Implemented | `special.hpp` | `LiteralValidator`; string-matches against expected list, returns `literal_mismatch` |
 | 28 | `MissingSentinel` | `missing_sentinel.rs` | ❌ Missing | — | No MISSING sentinel type |
 | 29 | `IntEnum` | `enum_.rs` | ✅ Implemented | `special.hpp` | `EnumValidator`; short-name (`Foo.BAR`→`BAR`) and value-based matching |
@@ -55,7 +55,7 @@
 | 41 | `IsInstance` | `is_instance.rs` | ✅ Implemented | `basic.hpp` | `IsInstanceValidator`; real `py::isinstance` check |
 | 42 | `IsSubclass` | `is_subclass.rs` | ✅ Implemented | `basic.hpp` | `IsSubclassValidator`; real `issubclass` check |
 | 43 | `Callable` | `callable.rs` | ✅ Implemented | `basic.hpp` | `CallableValidator`; checks `__call__` attribute |
-| 44 | `Arguments` | `arguments.rs` | ❌ Missing | — | No argument validation (positional+keyword) |
+| 44 | `Arguments` | `arguments.rs` | ✅ Implemented | `functions.hpp` | `ArgumentsValidator`; positional/keyword/positional-only/keyword-only params, aliases, defaults, varargs, varkwargs (incl. unpacked-typed-dict) |
 | 45 | `ArgumentsV3` | `arguments_v3.rs` | ❌ Missing | — | New argument validation |
 | 46 | `WithDefault` | `with_default.rs` | ✅ Implemented | `functions.hpp` | `WithDefaultValidator`; returns stored default; complex defaults parsed via `parse_json()` |
 | 47 | `Chain` | `chain.rs` | ✅ Implemented | `functions.hpp` | `ChainValidator`; tries steps in order |

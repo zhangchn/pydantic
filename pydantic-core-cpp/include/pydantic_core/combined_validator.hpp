@@ -65,6 +65,8 @@ public:
         std::shared_ptr<LaxOrStrictValidator>,
         std::shared_ptr<JsonOrPythonValidator>,
         std::shared_ptr<JsonValidator>,
+        std::shared_ptr<ArgumentsValidator>,
+        std::shared_ptr<CallValidator>,
         std::shared_ptr<DefinitionRefValidator>,
         std::shared_ptr<Validator>  // Fallback for base-class pointers
     >;

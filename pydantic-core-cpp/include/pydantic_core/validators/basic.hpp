@@ -75,11 +75,13 @@ public:
 // IntValidator - validates integer values
 class IntValidator : public Validator {
 public:
+    bool strict = false;
+
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
     ) override {
-        auto result = input.validate_int(state.strict_or(false));
+        auto result = input.validate_int(state.strict_or(strict));
         if (result.is_err()) {
             return result.error();
         }
@@ -89,7 +91,7 @@ public:
             std::make_shared<int64_t>(either_int.as_i64().value_or(0))
         );
     }
-    
+
     std::string name() const override { return "int"; }
 };
 
@@ -118,28 +120,28 @@ public:
 
         if (gt.has_value() && int_value <= gt.value()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::GreaterThan, gt.value()),
+                ErrorType(ErrorType::Kind::GreaterThan, "gt", std::to_string(gt.value())),
                 state.location(),
                 std::to_string(int_value)
             );
         }
         if (ge.has_value() && int_value < ge.value()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::GreaterThanEqual, ge.value()),
+                ErrorType(ErrorType::Kind::GreaterThanEqual, "ge", std::to_string(ge.value())),
                 state.location(),
                 std::to_string(int_value)
             );
         }
         if (lt.has_value() && int_value >= lt.value()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::LessThan, lt.value()),
+                ErrorType(ErrorType::Kind::LessThan, "lt", std::to_string(lt.value())),
                 state.location(),
                 std::to_string(int_value)
             );
         }
         if (le.has_value() && int_value > le.value()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::LessThanEqual, le.value()),
+                ErrorType(ErrorType::Kind::LessThanEqual, "le", std::to_string(le.value())),
                 state.location(),
                 std::to_string(int_value)
             );
@@ -147,7 +149,7 @@ public:
         if (multiple_of.has_value() && multiple_of.value() != 0) {
             if (int_value % multiple_of.value() != 0) {
                 return ValError::line_error(
-                    ErrorType(ErrorType::Kind::MultipleOf, multiple_of.value()),
+                    ErrorType(ErrorType::Kind::MultipleOf, "multiple_of", std::to_string(multiple_of.value())),
                     state.location(),
                     std::to_string(int_value)
                 );
@@ -224,28 +226,28 @@ public:
         }
         if (gt.has_value() && f <= gt.value()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::GreaterThan, static_cast<int64_t>(gt.value())),
+                ErrorType(ErrorType::Kind::GreaterThan, "gt", std::to_string(gt.value())),
                 state.location(),
                 std::to_string(f)
             );
         }
         if (ge.has_value() && f < ge.value()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::GreaterThanEqual, static_cast<int64_t>(ge.value())),
+                ErrorType(ErrorType::Kind::GreaterThanEqual, "ge", std::to_string(ge.value())),
                 state.location(),
                 std::to_string(f)
             );
         }
         if (lt.has_value() && f >= lt.value()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::LessThan, static_cast<int64_t>(lt.value())),
+                ErrorType(ErrorType::Kind::LessThan, "lt", std::to_string(lt.value())),
                 state.location(),
                 std::to_string(f)
             );
         }
         if (le.has_value() && f > le.value()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::LessThanEqual, static_cast<int64_t>(le.value())),
+                ErrorType(ErrorType::Kind::LessThanEqual, "le", std::to_string(le.value())),
                 state.location(),
                 std::to_string(f)
             );
@@ -256,7 +258,7 @@ public:
             double diff = std::abs(f - (rounded_div * multiple_of.value()));
             if (diff > tolerance) {
                 return ValError::line_error(
-                    ErrorType(ErrorType::Kind::MultipleOf, static_cast<int64_t>(multiple_of.value())),
+                    ErrorType(ErrorType::Kind::MultipleOf, "multiple_of", std::to_string(multiple_of.value())),
                     state.location(),
                     std::to_string(f)
                 );
@@ -476,9 +478,9 @@ public:
             py::object input_py = input.as_python_object();
             if (!py::isinstance(input_py, py_class_)) {
                 return ValError::line_error(
-                    ErrorType(ErrorType::Kind::IsInstanceType),
+                    ErrorType(ErrorType::Kind::IsInstanceType, "class", class_name_),
                     state.location(),
-                    "Input is not an instance of " + class_name_
+                    input.as_error_value().repr
                 );
             }
             // Store as PyObject* — leak the reference to avoid GIL issues
@@ -491,9 +493,9 @@ public:
         // return error so UnionValidator can try other choices
         if (!class_name_.empty() && py_class_.is_none()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::IsInstanceType),
+                ErrorType(ErrorType::Kind::IsInstanceType, "class", class_name_),
                 state.location(),
-                "Python class not available: " + class_name_
+                input.as_error_value().repr
             );
         }
         // Accept if no class info at all

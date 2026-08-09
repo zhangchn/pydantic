@@ -335,6 +335,12 @@ public:
     // Tuple is same as list but with positional semantics
 };
 
+// Validated function arguments (result of Input::validate_args)
+struct ArgumentsInput {
+    py::tuple args;
+    py::dict kwargs;
+};
+
 // Input trait - abstract interface for different input sources
 class Input {
 public:
@@ -374,6 +380,16 @@ public:
     virtual ValResult<std::unique_ptr<ValidatedDict>> validate_dict(bool strict) const = 0;
     virtual ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_list(bool strict) const = 0;
     virtual ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> validate_tuple(bool strict) const = 0;
+
+    // Arguments validation (ArgsKwargs or dict input).  Only implemented for
+    // PythonInput; other input kinds report an arguments_type error.
+    virtual ValResult<ArgumentsInput> validate_args() const {
+        return ValError::line_error(
+            ErrorType(ErrorType::Kind::ArgumentsType),
+            current_location(),
+            as_error_value().repr
+        );
+    }
 
 protected:
     /// Pointer to current validation location (set by validators before calling validate_*).

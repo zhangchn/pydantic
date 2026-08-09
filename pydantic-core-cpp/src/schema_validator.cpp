@@ -720,7 +720,8 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
 
     // For function-after/before/wrap/plain validators, check py::object*
     bool is_function_type = (type_name == "function-after" || type_name == "function-before" ||
-                             type_name == "function-wrap" || type_name == "function-plain");
+                             type_name == "function-wrap" || type_name == "function-plain" ||
+                             type_name == "call" || type_name == "arguments");
     if (is_function_type) {
         try {
             auto* obj = static_cast<py::object*>(value.get());
@@ -739,17 +740,12 @@ py::object SchemaValidator::result_to_python(const std::shared_ptr<void>& result
         return py::none();
     }
 
-    // Determine the type from the validator name
+    // Determine the type from the validator name.  The effective result name
+    // reflects the ACTUAL stored value type: models may wrap function
+    // validators (producing py::object), and call validators with a return
+    // validator produce that validator's result type rather than a py::object.
     std::string vname;
     if (validator_) {
-        vname = validator_->name();
-    }
-
-    // A model's ACTUAL result may not be ValidatedModelFieldsOutput: root
-    // models produce their inner value, models wrapping function-after/wrap/
-    // plain validators produce the Python callable's py::object.  Use the
-    // model's effective result type for dispatch.
-    if (vname == "model") {
         vname = validator_->effective_result_name();
     }
 

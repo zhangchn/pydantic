@@ -62,14 +62,16 @@ public:
 
     // For a field schema that is a root model, use the inner validator's name
     // so result conversion dispatches on the actual value type (e.g. "int"
-    // instead of "model").  Otherwise use the validator's own name.
+    // instead of "model").  Otherwise use the validator's effective result
+    // name — function-wrapper validators produce their inner validator's
+    // result type, so the stored type name must match the actual value.
     static std::string field_type_name(const std::shared_ptr<Validator>& schema) {
         if (schema) {
             auto inner = schema->root_model_inner_name();
             if (!inner.empty()) {
                 return inner;
             }
-            return schema->name();
+            return schema->effective_result_name();
         }
         return "null_schema";
     }

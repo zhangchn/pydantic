@@ -30,6 +30,12 @@ public:
         if (inner_) return inner_->name();
         return "nullable";
     }
+
+    // The result comes straight from the inner validator
+    std::string effective_result_name() const override {
+        if (inner_) return inner_->effective_result_name();
+        return "nullable";
+    }
     
 private:
     std::shared_ptr<Validator> inner_;
@@ -67,7 +73,7 @@ public:
                 // Record which inner validator matched so result conversion
                 // can dispatch on the real value type (avoiding unsafe
                 // blind casts of the type-erased shared_ptr<void>).
-                last_type_name_ = validator->name();
+                last_type_name_ = validator->effective_result_name();
                 return result;
             }
         }
@@ -82,6 +88,10 @@ public:
         // After validation, report the inner validator that matched so result
         // conversion dispatches on the real value type instead of falling
         // into the unsafe try_all casts for "union".
+        return last_type_name_.empty() ? "union" : last_type_name_;
+    }
+
+    std::string effective_result_name() const override {
         return last_type_name_.empty() ? "union" : last_type_name_;
     }
 

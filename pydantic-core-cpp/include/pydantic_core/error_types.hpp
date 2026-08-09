@@ -86,6 +86,15 @@ public:
         ExtraForbidden,
         InvalidKey,
         NoSuchAttribute,
+
+        // Arguments errors (function parameter validation)
+        ArgumentsType,
+        MissingArgument,
+        MissingKeywordOnlyArgument,
+        MissingPositionalOnlyArgument,
+        UnexpectedPositionalArgument,
+        UnexpectedKeywordArgument,
+        MultipleArgumentValues,
         
         // Date/Time errors
         DateType,
