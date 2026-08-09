@@ -78,13 +78,19 @@ if(APPLE AND PDC_STRIP_TO_DSYM)
             set(PDC_STRIP_ENABLED ON)
         endif()
         if(PDC_STRIP_ENABLED)
-            function(pdc_strip_to_dsym target)
+            function(pdc_strip_to_dsym target destination)
                 add_custom_command(TARGET ${target} POST_BUILD
                     COMMAND ${PDC_DSYMUTIL_EXECUTABLE} "$<TARGET_FILE:${target}>" -o "$<TARGET_FILE:${target}>.dSYM"
                     COMMAND ${PDC_STRIP_EXECUTABLE} -x "$<TARGET_FILE:${target}>"
                     COMMENT "Stripped ${target} symbols into ${target}.dSYM"
                     VERBATIM
                 )
+                # Ship the dSYM bundle next to the installed binary so macOS
+                # symbolication (lldb, atos, CrashReporter) finds it.  The
+                # source path must NOT end in a slash, otherwise install
+                # copies the bundle contents instead of the named directory.
+                install(DIRECTORY "$<TARGET_FILE:${target}>.dSYM"
+                        DESTINATION "${destination}")
             endfunction()
         endif()
     endif()
@@ -129,9 +135,10 @@ target_compile_options(_pydantic_core_cpp PRIVATE
     -O3
 )
 
-# Strip symbols into a .dSYM bundle (macOS, non-Debug builds)
+# Strip symbols into a .dSYM bundle (macOS, non-Debug builds) and ship the
+# bundle next to the .so in the installed package (site-packages).
 if(COMMAND pdc_strip_to_dsym)
-    pdc_strip_to_dsym(_pydantic_core_cpp)
+    pdc_strip_to_dsym(_pydantic_core_cpp "pydantic_core_cpp")
 endif()
 
 # Install the extension into the Python package directory for wheel building
