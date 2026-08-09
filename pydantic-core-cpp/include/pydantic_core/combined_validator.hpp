@@ -132,6 +132,27 @@ public:
         }, variant_);
     }
 
+    // For validators whose actual result type differs from name() (e.g. a
+    // model wrapping a function-after/wrap/plain validator).
+    std::string result_dispatch_name() const {
+        return std::visit([](const auto& v) -> std::string {
+            if (v) {
+                return v->result_dispatch_name();
+            }
+            return "";
+        }, variant_);
+    }
+
+    // The type name matching the validator's actual result value.
+    std::string effective_result_name() const {
+        return std::visit([](const auto& v) -> std::string {
+            if (v) {
+                return v->effective_result_name();
+            }
+            return "unknown";
+        }, variant_);
+    }
+
 private:
     VariantType variant_;
 };

@@ -552,10 +552,13 @@ public:
                     std::shared_ptr<void>(raw, [](void*){})
                 );
             } catch (py::error_already_set& e) {
+                std::string msg = e.what();
+                e.restore();
+                PyErr_Clear();
                 return ValError::line_error(
                     ErrorType(ErrorType::Kind::IsSubclassType),
                     state.location(),
-                    "Subclass check failed: " + std::string(e.what())
+                    "Subclass check failed: " + msg
                 );
             }
         }

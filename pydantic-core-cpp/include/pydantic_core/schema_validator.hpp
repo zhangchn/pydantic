@@ -106,9 +106,13 @@ private:
     ValidationError prepare_error(const ValError& err, InputType input_type);
 
     // Convert validated result to Python object
-    py::object result_to_python_with_type(const std::shared_ptr<void>& value, const std::string& type_name);
     py::object result_to_python(const std::shared_ptr<void>& result, bool check_model = true);
 };
+
+// Convert a validated result (shared_ptr<void>) to a Python object by type
+// name.  Free function so validators (e.g. function-after needs the validated
+// inner result as a Python object for the Python callable) can use it too.
+py::object value_to_python_with_type(const std::shared_ptr<void>& value, const std::string& type_name);
 
 // Some type - wrapper for optional values
 // Matches Rust's PySome pyclass

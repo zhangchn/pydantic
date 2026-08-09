@@ -12,6 +12,10 @@ namespace py = pybind11;
 
 namespace pydantic_core {
 
+// Defined in schema_validator.cpp; converts a validated result to a Python
+// object by type name (used here to pass the validated value to after-functions).
+py::object value_to_python_with_type(const std::shared_ptr<void>& value, const std::string& type_name);
+
 // FunctionBeforeValidator - runs Python function before validation
 // Python signature: func(input, info) -> transformed_input
 class FunctionBeforeValidator : public Validator {
@@ -47,10 +51,17 @@ public:
             }
             return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(transformed));
         } catch (py::error_already_set& e) {
+            // Extract the message, then swallow the error: restore() releases
+            // the fetched refs so the destructor's restore is a no-op and the
+            // error indicator stays clear (avoids a stale-indicator double
+            // fetch that corrupts pybind11's error state).
+            std::string msg = e.what();
+            e.restore();
+            PyErr_Clear();
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::CustomError),
                 state.location(),
-                "FunctionBefore validator failed: " + std::string(e.what())
+                "FunctionBefore validator failed: " + msg
             );
         }
     }
@@ -79,9 +90,20 @@ public:
         }
         auto result = inner_->validate(input, state);
         if (result.is_err()) return result;
-        
+
         if (py_func_.is_none()) return result;
-        
+
+        // Convert the validated inner result to a Python object — Rust passes
+        // the validated value to the after-function (model validators receive
+        // the validated fields dict, field validators the coerced value).
+        py::object validated_obj;
+        try {
+            validated_obj = value_to_python_with_type(result.value(), inner_->effective_result_name());
+        } catch (...) {
+            // Unknown inner result type: pass through the raw input
+            validated_obj = input.as_python_object();
+        }
+
         try {
             py::dict info_dict;
             if (state.field_name().has_value()) {
@@ -106,39 +128,32 @@ public:
                     info_obj = info_dict;
                 }
                 // Try with info object (general/no-info-wrapped functions)
-                output = py_func_(input.as_python_object(), info_obj);
+                output = py_func_(validated_obj, info_obj);
             } catch (py::error_already_set& e1) {
-                // If fails with info dict, try without info dict (no-info functions like attrgetter)
+                // If fails with info dict, try without info dict (no-info
+                // functions like attrgetter).  restore() + PyErr_Clear()
+                // swallows the error so the destructor's restore is a no-op.
+                e1.restore();
                 PyErr_Clear();
                 try {
-                    output = py_func_(input.as_python_object());
+                    output = py_func_(validated_obj);
                 } catch (py::error_already_set& e2) {
                     // If the function fails (e.g. attrgetter('value') on a plain string),
-                    // convert the validated result to a Python object and use it
+                    // use the validated inner result as the output
+                    e2.restore();
                     PyErr_Clear();
-                    // Convert inner result to Python object by extracting the value
-                    py::object inner_result;
-                    if (auto* s = static_cast<std::string*>(result.value().get())) {
-                        inner_result = py::str(*s);
-                    } else if (auto* i = static_cast<int64_t*>(result.value().get())) {
-                        inner_result = py::int_(*i);
-                    } else if (auto* f = static_cast<double*>(result.value().get())) {
-                        inner_result = py::float_(*f);
-                    } else if (auto* b = static_cast<bool*>(result.value().get())) {
-                        inner_result = py::bool_(*b);
-                    } else {
-                        // Unknown type, just return the raw result
-                        return result;
-                    }
-                    return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(inner_result));
+                    return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(validated_obj));
                 }
             }
             return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(output));
         } catch (py::error_already_set& e) {
+            std::string msg = e.what();
+            e.restore();
+            PyErr_Clear();
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::CustomError),
                 state.location(),
-                "FunctionAfter validator failed: " + std::string(e.what())
+                "FunctionAfter validator failed: " + msg
             );
         }
     }
@@ -179,25 +194,32 @@ public:
             try {
                 // Try with info dict (general/no-info-wrapped functions)
                 output = py_func_(input.as_python_object(), info_dict);
-            } catch (py::error_already_set&) {
+            } catch (py::error_already_set& e1) {
                 // If fails, try without info dict (no-info functions like class constructors)
+                e1.restore();
+                PyErr_Clear();
                 try {
-                    PyErr_Clear();
                     output = py_func_(input.as_python_object());
                 } catch (py::error_already_set& e2) {
+                    std::string msg = e2.what();
+                    e2.restore();
+                    PyErr_Clear();
                     return ValError::line_error(
                         ErrorType(ErrorType::Kind::CustomError),
                         state.location(),
-                        "FunctionPlain validator failed: " + std::string(e2.what())
+                        "FunctionPlain validator failed: " + msg
                     );
                 }
             }
             return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(output));
         } catch (py::error_already_set& e) {
+            std::string msg = e.what();
+            e.restore();
+            PyErr_Clear();
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::CustomError),
                 state.location(),
-                "FunctionPlain validator failed: " + std::string(e.what())
+                "FunctionPlain validator failed: " + msg
             );
         }
     }
@@ -252,10 +274,13 @@ public:
             py::object output = py_func_(input.as_python_object(), handler, info_dict);
             return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(output));
         } catch (py::error_already_set& e) {
+            std::string msg = e.what();
+            e.restore();
+            PyErr_Clear();
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::CustomError),
                 state.location(),
-                "FunctionWrap validator failed: " + std::string(e.what())
+                "FunctionWrap validator failed: " + msg
             );
         }
     }

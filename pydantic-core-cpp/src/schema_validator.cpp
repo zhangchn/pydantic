@@ -445,7 +445,7 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
 }
 
 // Helper: convert shared_ptr<void> to Python object using type name
-py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<void>& value, const std::string& type_name) {
+py::object value_to_python_with_type(const std::shared_ptr<void>& value, const std::string& type_name) {
     if (!value) {
         return py::none();
     }
@@ -616,7 +616,7 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
                 py::dict out;
                 for (const auto& key : mfo->field_order) {
                     const auto& fv = mfo->fields.at(key);
-                    out[py::str(key)] = result_to_python_with_type(fv.value, fv.type_name);
+                    out[py::str(key)] = value_to_python_with_type(fv.value, fv.type_name);
                 }
                 // Attach __pydantic_fields_set__ for exclude_unset support
                 py::set fields_set;
@@ -630,13 +630,18 @@ py::object SchemaValidator::result_to_python_with_type(const std::shared_ptr<voi
                 for (const auto& key : mfo->field_order) {
                     const auto& fv = mfo->fields.at(key);
                     if (mfo->fields_set.find(key) == mfo->fields_set.end()) {
-                        defaults_dict[py::str(key)] = result_to_python_with_type(fv.value, fv.type_name);
+                        defaults_dict[py::str(key)] = value_to_python_with_type(fv.value, fv.type_name);
                     }
                 }
                 out[py::str("__pydantic_defaults__")] = std::move(defaults_dict);
 
-                for (const auto& [key, fv] : mfo->extra) {
-                    out[py::str(key)] = result_to_python_with_type(fv.value, fv.type_name);
+                // Include extra fields in separate __pydantic_extra__ dict
+                if (!mfo->extra.empty()) {
+                    py::dict extra_dict;
+                    for (const auto& [key, fv] : mfo->extra) {
+                        extra_dict[py::str(key)] = value_to_python_with_type(fv.value, fv.type_name);
+                    }
+                    out[py::str("__pydantic_extra__")] = std::move(extra_dict);
                 }
                 return std::move(out);
             }
@@ -740,13 +745,12 @@ py::object SchemaValidator::result_to_python(const std::shared_ptr<void>& result
         vname = validator_->name();
     }
 
-    // For root models, the result is the inner validator's output, not a
-    // ValidatedModelFieldsOutput.  Use the inner validator's name for dispatch.
+    // A model's ACTUAL result may not be ValidatedModelFieldsOutput: root
+    // models produce their inner value, models wrapping function-after/wrap/
+    // plain validators produce the Python callable's py::object.  Use the
+    // model's effective result type for dispatch.
     if (vname == "model") {
-        auto inner_name = validator_->root_model_inner_name();
-        if (inner_name) {
-            vname = *inner_name;
-        }
+        vname = validator_->effective_result_name();
     }
 
     // For model-like validators, try ValidatedModelFieldsOutput
@@ -757,7 +761,7 @@ py::object SchemaValidator::result_to_python(const std::shared_ptr<void>& result
                 py::dict out;
                 for (const auto& key : mfo->field_order) {
                     const auto& fv = mfo->fields.at(key);
-                    py::object py_val = result_to_python_with_type(fv.value, fv.type_name);
+                    py::object py_val = value_to_python_with_type(fv.value, fv.type_name);
                     out[py::str(key)] = py_val;
                 }
                 // Attach __pydantic_fields_set__ for exclude_unset support
@@ -774,7 +778,7 @@ py::object SchemaValidator::result_to_python(const std::shared_ptr<void>& result
                     const auto& fv = mfo->fields.at(key);
                     if (mfo->fields_set.find(key) == mfo->fields_set.end()) {
                         // This field was NOT in the input — it came from a default
-                        defaults_dict[py::str(key)] = result_to_python_with_type(fv.value, fv.type_name);
+                        defaults_dict[py::str(key)] = value_to_python_with_type(fv.value, fv.type_name);
                     }
                 }
                 out[py::str("__pydantic_defaults__")] = std::move(defaults_dict);
@@ -783,7 +787,7 @@ py::object SchemaValidator::result_to_python(const std::shared_ptr<void>& result
                 if (!mfo->extra.empty()) {
                     py::dict extra_dict;
                     for (const auto& [key, fv] : mfo->extra) {
-                        extra_dict[py::str(key)] = result_to_python_with_type(fv.value, fv.type_name);
+                        extra_dict[py::str(key)] = value_to_python_with_type(fv.value, fv.type_name);
                     }
                     out[py::str("__pydantic_extra__")] = std::move(extra_dict);
                 }
@@ -795,7 +799,7 @@ py::object SchemaValidator::result_to_python(const std::shared_ptr<void>& result
 
     // Use result_to_python_with_type with the validator's name for proper type dispatch
     if (!vname.empty()) {
-        return result_to_python_with_type(result, vname);
+        return value_to_python_with_type(result, vname);
     }
 
     // Fallback

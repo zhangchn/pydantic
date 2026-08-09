@@ -80,6 +80,17 @@ public:
         static const py::object none = py::none();
         return none;
     }
+
+    // For validators whose actual result type differs from name() (e.g. a
+    // model whose inner is a function-after/wrap/plain validator producing a
+    // py::object instead of model fields).  Returns "" when name() is accurate.
+    virtual std::string result_dispatch_name() const { return ""; }
+
+    // The type name that matches the validator's ACTUAL result value, for
+    // result-to-Python dispatch.  Defaults to name(); models override it
+    // (root models report their inner value type, models wrapping function
+    // validators report "py_object").
+    virtual std::string effective_result_name() const { return name(); }
     
     // Validate assignment (for model field assignment)
     virtual ValResult<std::shared_ptr<void>> validate_assignment(

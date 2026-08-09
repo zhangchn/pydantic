@@ -690,6 +690,40 @@ public:
     // exact-class branch when the input is already a model instance).
     const py::object& expected_class() const { return class_; }
 
+    // The type name matching this model's actual result value:
+    // - models wrapping a function-after/wrap/plain validator produce a
+    //   py::object (the Python callable's output)
+    // - root models produce their inner validator's value type
+    // - regular models produce ValidatedModelFieldsOutput ("model")
+    std::string result_dispatch_name() const override {
+        if (fields_validator_) {
+            std::string n = fields_validator_->name();
+            if (n == "function-after" || n == "function-wrap" || n == "function-plain") {
+                return "py_object";
+            }
+        }
+        return "";
+    }
+
+    std::string effective_result_name() const override {
+        if (fields_validator_) {
+            std::string n = fields_validator_->name();
+            if (n == "function-after" || n == "function-wrap" || n == "function-plain") {
+                return "py_object";
+            }
+            if (root_model_) {
+                // Root model result is the inner validator's value type
+                // (recursively resolved for nested root models)
+                auto inner = fields_validator_->root_model_inner_name();
+                if (!inner.empty()) {
+                    return inner;
+                }
+                return n;
+            }
+        }
+        return name();
+    }
+
     ValResult<std::shared_ptr<void>> validate_assignment(
         const Input& input,
         const std::string& field_name,

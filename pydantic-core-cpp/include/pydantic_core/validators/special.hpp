@@ -252,10 +252,13 @@ public:
                 std::static_pointer_cast<void>(url_obj)
             );
         } catch (py::error_already_set& e) {
+            std::string msg = e.what();
+            e.restore();
+            PyErr_Clear();
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::UrlType),
                 state.location(),
-                "URL parsing failed: " + std::string(e.what())
+                "URL parsing failed: " + msg
             );
         }
     }
@@ -347,6 +350,10 @@ public:
                     std::make_shared<std::string>(uuid_str)
                 );
             } catch (py::error_already_set& e) {
+                // Swallow the error: restore() releases the fetched refs so
+                // the destructor is a no-op and the error indicator stays clear
+                e.restore();
+                PyErr_Clear();
                 return ValError::line_error(
                     ErrorType(ErrorType::Kind::UuidType),
                     state.location(),
