@@ -60,6 +60,219 @@ static std::optional<bool> pyobj_to_bool(const py::object& obj) {
 struct SerNode;
 using SerRef = std::shared_ptr<SerNode>;
 
+// ============================================================================
+// include/exclude filter helpers (mirror pydantic-core serializers/filter.rs)
+// ============================================================================
+
+// Whether a filter value is Ellipsis or True (pydantic V1 compat)
+static bool is_ellipsis_like(const py::object& v) {
+    if (v.is(py::ellipsis())) return true;
+    if (py::isinstance<py::bool_>(v)) return v.cast<bool>();
+    return false;
+}
+
+// Convert a filter value (dict or set) to a dict: {item: Ellipsis} for sets
+static py::dict filter_as_dict(const py::object& v) {
+    if (py::isinstance<py::dict>(v)) {
+        return v.cast<py::dict>().attr("copy")().cast<py::dict>();
+    }
+    if (py::isinstance<py::set>(v)) {
+        py::dict d;
+        for (auto item : v) {
+            d[item] = py::ellipsis();
+        }
+        return d;
+    }
+    throw py::type_error(
+        "`include` and `exclude` must be of type `dict[str | int, <recursive> | ...] | set[str | int | ...]`");
+}
+
+// Merge an item-specific filter with the "__all__" filter (pydantic V1 rules)
+static py::object merge_dicts(const py::object& item_value, const py::object& all_value);
+
+// Look up `key` and "__all__" in a filter dict, merging per V1 rules.
+// Returns py::none() when neither key is present.  Note: avoid ternaries
+// between py::object and py::none — py::none's implicit object ctor throws
+// on non-None values, and ternary common-type resolution can pick it.
+static py::object merge_all_value(const py::dict& d, const py::object& key) {
+    bool has_item = d.contains(key);
+    bool has_all = d.contains(py::str("__all__"));
+    if (!has_item && !has_all) return py::none();
+
+    py::object item_value;
+    if (has_item) {
+        item_value = d[key];
+    } else {
+        item_value = py::none();
+    }
+    py::object all_value;
+    if (has_all) {
+        all_value = d[py::str("__all__")];
+    } else {
+        all_value = py::none();
+    }
+
+    if (has_item && has_all) {
+        if (is_ellipsis_like(item_value) || is_ellipsis_like(all_value)) {
+            return item_value;
+        }
+        return merge_dicts(item_value, all_value);
+    }
+    if (has_item) return item_value;
+    return all_value;
+}
+
+static py::object merge_dicts(const py::object& item_value, const py::object& all_value) {
+    py::dict item_dict = filter_as_dict(item_value);
+    if (py::isinstance<py::dict>(all_value)) {
+        for (auto kv : all_value.cast<py::dict>()) {
+            py::object all_key = py::reinterpret_borrow<py::object>(kv.first);
+            py::object all_val = py::reinterpret_borrow<py::object>(kv.second);
+            if (item_dict.contains(all_key)) {
+                py::object iv = item_dict[all_key];
+                if (is_ellipsis_like(iv)) continue;
+                if (!is_ellipsis_like(all_val)) {
+                    item_dict[all_key] = merge_dicts(iv, all_val);
+                }
+            } else {
+                item_dict[all_key] = all_val;
+            }
+        }
+    } else if (py::isinstance<py::set>(all_value)) {
+        for (auto item : all_value) {
+            if (!item_dict.contains(item)) {
+                item_dict[item] = py::ellipsis();
+            }
+        }
+    } else {
+        throw py::type_error(
+            "'__all__' key of `include` and `exclude` must be of type `dict[str | int, <recursive> | ...] | set[str | int | ...]`");
+    }
+    return item_dict;
+}
+
+// Result of applying an include/exclude filter to a key/index
+struct SerFilterResult {
+    bool omit = false;                 // true = drop the field/item
+    py::object include = py::none();   // sub-filter for the nested value
+    py::object exclude = py::none();   // sub-filter for the nested value
+};
+
+// Map a negative index to a positive one: key % len (Python mod semantics)
+static py::object map_negative_index(const py::object& key, py::ssize_t len) {
+    if (py::isinstance<py::int_>(key)) {
+        py::ssize_t i = key.cast<py::ssize_t>();
+        if (i < 0) return py::int_(((i % len) + len) % len);
+    }
+    return key;
+}
+
+// Map all negative keys/items in an include/exclude object (dict or set)
+static py::object map_negative_indices(const py::object& obj, py::ssize_t len) {
+    if (py::isinstance<py::dict>(obj)) {
+        py::dict out;
+        for (auto kv : obj.cast<py::dict>()) {
+            py::object k = py::reinterpret_borrow<py::object>(kv.first);
+            py::object v = py::reinterpret_borrow<py::object>(kv.second);
+            out[map_negative_index(k, len)] = v;
+        }
+        return out;
+    }
+    if (py::isinstance<py::set>(obj)) {
+        py::set out;
+        for (auto item : obj) {
+            out.add(map_negative_index(py::reinterpret_borrow<py::object>(item), len));
+        }
+        return out;
+    }
+    return obj;
+}
+
+// Apply call-time include/exclude to a key (or index).  Mirrors the Rust
+// FilterLogic::filter with default_filter = true (no schema-level filter).
+static SerFilterResult apply_ser_filter(const py::object& key, const py::object& include,
+                                        const py::object& exclude) {
+    SerFilterResult out;
+    py::object next_exclude = py::none();
+
+    // Exclude handling
+    if (!exclude.is_none()) {
+        if (py::isinstance<py::dict>(exclude)) {
+            py::object exc_value = merge_all_value(exclude.cast<py::dict>(), key);
+            if (!exc_value.is_none()) {
+                if (is_ellipsis_like(exc_value)) {
+                    out.omit = true;
+                    return out;
+                }
+                next_exclude = exc_value;
+            }
+        } else if (py::isinstance<py::set>(exclude)) {
+            py::set eset = exclude.cast<py::set>();
+            if (eset.contains(key) || eset.contains(py::str("__all__"))) {
+                out.omit = true;
+                return out;
+            }
+        } else if (py::hasattr(exclude, "__contains__")) {
+            bool c1 = false, c2 = false;
+            try { c1 = py::cast<bool>(exclude.attr("__contains__")(key)); } catch (...) {}
+            try { c2 = py::cast<bool>(exclude.attr("__contains__")(py::str("__all__"))); } catch (...) {}
+            if (c1 || c2) {
+                out.omit = true;
+                return out;
+            }
+        } else {
+            throw py::type_error("`exclude` argument must be a set or dict.");
+        }
+    }
+
+    // Include handling
+    if (!include.is_none()) {
+        if (py::isinstance<py::dict>(include)) {
+            py::object inc_value = merge_all_value(include.cast<py::dict>(), key);
+            if (!inc_value.is_none()) {
+                if (is_ellipsis_like(inc_value)) {
+                    out.include = py::none();
+                } else {
+                    out.include = inc_value;
+                }
+                out.exclude = next_exclude;
+                return out;
+            }
+            out.omit = true;  // key not in include
+            return out;
+        }
+        if (py::isinstance<py::set>(include)) {
+            py::set iset = include.cast<py::set>();
+            if (iset.contains(key) || iset.contains(py::str("__all__"))) {
+                out.include = py::none();
+                out.exclude = next_exclude;
+                return out;
+            }
+            out.omit = true;  // key not in include
+            return out;
+        }
+        if (py::hasattr(include, "__contains__")) {
+            bool c1 = false, c2 = false;
+            try { c1 = py::cast<bool>(include.attr("__contains__")(key)); } catch (...) {}
+            try { c2 = py::cast<bool>(include.attr("__contains__")(py::str("__all__"))); } catch (...) {}
+            if (c1 || c2) {
+                out.include = py::none();
+                out.exclude = next_exclude;
+                return out;
+            }
+            out.omit = true;
+            return out;
+        }
+        throw py::type_error("`include` argument must be a set or dict.");
+    }
+
+    // No include filter: keep the item, propagate the exclude sub-filter
+    if (!next_exclude.is_none()) {
+        out.exclude = next_exclude;
+    }
+    return out;
+}
+
 struct SerNode {
     std::string type;
     std::vector<SerRef> children;
@@ -73,6 +286,8 @@ struct SerNode {
     std::unordered_map<std::string, std::string> field_aliases;
     // Exclude-if callables: field_name -> Python callable (for serialization)
     std::unordered_map<std::string, py::object> field_exclude_if;
+    // Fields excluded at schema level (Field(exclude=True))
+    std::unordered_set<std::string> field_excluded;
     // Set of computed field names (excluded when round_trip=True)
     std::unordered_set<std::string> computed_fields_;
     // For function serializers
@@ -99,6 +314,7 @@ struct SerNode {
         field_order = other.field_order;
         field_aliases = other.field_aliases;
         field_exclude_if = other.field_exclude_if;
+        field_excluded = other.field_excluded;
         computed_fields_ = other.computed_fields_;
         py_func = other.py_func;
         info_arg = other.info_arg;
@@ -111,25 +327,25 @@ struct SerNode {
     }
 
     py::object to_python(const py::object& value, bool json_mode, bool exc_none, bool round_trip = false,
-                         const std::optional<std::unordered_set<std::string>>& include_fields = std::nullopt,
-                         const std::optional<std::unordered_set<std::string>>& exclude_fields = std::nullopt,
+                         const py::object& include = py::none(),
+                         const py::object& exclude = py::none(),
                          bool by_alias = false,
                          bool exclude_unset = false,
                          bool exclude_defaults = false) const {
         // Type-specific logic
         if (type == "lax-or-strict") {
-            if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+            if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
         }
         if (type == "is-instance" || type == "is-subclass") {
             return value;
         }
         if (type == "nullable" || type == "nullable-union") {
             if (value.is_none()) return py::none();
-            if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+            if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
         }
         if (type == "union") {
             for (auto& c : children) {
-                try { return c->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults); } catch (...) {}
+                try { return c->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults); } catch (...) {}
             }
         }
         if (type == "tagged-union" && !tagged.empty()) {
@@ -141,18 +357,18 @@ struct SerNode {
                     if (ks == "type" || ks == "discriminator") {
                         std::string tag = py::str(item.second).cast<std::string>();
                         auto it = tagged.find(tag);
-                        if (it != tagged.end()) return it->second->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+                        if (it != tagged.end()) return it->second->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
                         break;
                     }
                 }
             }
             for (auto& [t, c] : tagged) {
-                try { return c->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults); } catch (...) {}
+                try { return c->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults); } catch (...) {}
             }
         }
         if (type == "default" || type == "with-default") {
             if (value.is_none() && has_default_val) return default_val;
-            if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+            if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
         }
         if (type == "json") {
             if (round_trip) {
@@ -167,22 +383,22 @@ struct SerNode {
             }
             // Non-round-trip: delegate to inner serializer
             if (!children.empty()) {
-                return children[0]->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+                return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
             }
         }
         if (type == "json-or-python") {
-            if (json_mode && !children.empty()) return children[0]->to_python(value, true, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
-            if (children.size() > 1) return children[1]->to_python(value, false, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+            if (json_mode && !children.empty()) return children[0]->to_python(value, true, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
+            if (children.size() > 1) return children[1]->to_python(value, false, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
         }
         if (type == "enum") {
             if (py::hasattr(value, "value")) {
                 auto ev = py::getattr(value, "value");
-                if (!children.empty()) return children[0]->to_python(ev, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+                if (!children.empty()) return children[0]->to_python(ev, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
                 return ev;
             }
         }
         if (!fields.empty()) {
-            return serialize_fields(value, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+            return serialize_fields(value, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
         }
         // Delegate model/dataclass/typed-dict to inner serializer
         if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
@@ -194,9 +410,9 @@ struct SerNode {
             // For root models, extract the 'root' attribute before delegating
             if (root_model && py::hasattr(value, "root")) {
                 auto root_val = py::getattr(value, "root");
-                return children[0]->to_python(root_val, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+                return children[0]->to_python(root_val, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
             }
-            return children[0]->to_python(value, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+            return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
         }
         if (!py_func.is_none()) {
             if (type == "function-plain") {
@@ -207,8 +423,8 @@ struct SerNode {
                 return py_func(value);
             }
             if (type == "function-after" || type == "function-before" || type == "function-wrap") {
-                py::object handler = py::cpp_function([this, value, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults](const py::object& v) -> py::object {
-                    if (!children.empty()) return children[0]->to_python(v, json_mode, exc_none, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+                py::object handler = py::cpp_function([this, value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults](const py::object& v) -> py::object {
+                    if (!children.empty()) return children[0]->to_python(v, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
                     return v;
                 });
                 if (type == "function-wrap") {
@@ -231,8 +447,27 @@ struct SerNode {
         // For list/dict/tuple/containers, serialize children
         if ((type == "list" || type == "set" || type == "frozenset") && !children.empty()) {
             py::list result;
-            for (auto item : py::reinterpret_borrow<py::sequence>(value)) {
-                result.append(children[0]->to_python(py::reinterpret_borrow<py::object>(item), json_mode, exc_none, round_trip));
+            auto seq = py::reinterpret_borrow<py::sequence>(value);
+            py::ssize_t len = py::len(seq);
+            py::object inc;
+            if (include.is_none()) {
+                inc = py::none();
+            } else {
+                inc = map_negative_indices(include, len);
+            }
+            py::object exc;
+            if (exclude.is_none()) {
+                exc = py::none();
+            } else {
+                exc = map_negative_indices(exclude, len);
+            }
+            py::ssize_t idx = 0;
+            for (auto item : seq) {
+                auto next = apply_ser_filter(py::int_(idx), inc, exc);
+                if (!next.omit) {
+                    result.append(children[0]->to_python(py::reinterpret_borrow<py::object>(item), json_mode, exc_none, round_trip, next.include, next.exclude));
+                }
+                idx++;
             }
             return std::move(result);
         }
@@ -242,18 +477,37 @@ struct SerNode {
             for (auto item : d) {
                 auto k = py::reinterpret_borrow<py::object>(item.first);
                 auto v = py::reinterpret_borrow<py::object>(item.second);
-                auto out_k = children[0]->to_python(k, json_mode, exc_none, round_trip);
-                auto out_v = children.size() > 1 ? children[1]->to_python(v, json_mode, exc_none, round_trip) : v;
+                auto next = apply_ser_filter(k, include, exclude);
+                if (next.omit) continue;
+                auto out_k = children[0]->to_python(k, json_mode, exc_none, round_trip, next.include, next.exclude);
+                auto out_v = children.size() > 1 ? children[1]->to_python(v, json_mode, exc_none, round_trip, next.include, next.exclude) : v;
                 result[out_k] = out_v;
             }
             return std::move(result);
         }
         if (type == "tuple" && !children.empty()) {
             py::list result;
+            auto seq = py::reinterpret_borrow<py::sequence>(value);
+            py::ssize_t len = py::len(seq);
+            py::object inc;
+            if (include.is_none()) {
+                inc = py::none();
+            } else {
+                inc = map_negative_indices(include, len);
+            }
+            py::object exc;
+            if (exclude.is_none()) {
+                exc = py::none();
+            } else {
+                exc = map_negative_indices(exclude, len);
+            }
             size_t i = 0;
-            for (auto item : py::reinterpret_borrow<py::sequence>(value)) {
-                auto v = py::reinterpret_borrow<py::object>(item);
-                result.append(i < children.size() ? children[i]->to_python(v, json_mode, exc_none, round_trip) : children.back()->to_python(v, json_mode, exc_none, round_trip));
+            for (auto item : seq) {
+                auto next = apply_ser_filter(py::int_(static_cast<py::ssize_t>(i)), inc, exc);
+                if (!next.omit) {
+                    auto v = py::reinterpret_borrow<py::object>(item);
+                    result.append(i < children.size() ? children[i]->to_python(v, json_mode, exc_none, round_trip, next.include, next.exclude) : children.back()->to_python(v, json_mode, exc_none, round_trip, next.include, next.exclude));
+                }
                 i++;
             }
             return std::move(result);
@@ -262,13 +516,13 @@ struct SerNode {
     }
 
     std::string to_json(const py::object& value, bool ensure_ascii, int indent, bool round_trip = false,
-                         const std::optional<std::unordered_set<std::string>>& include_fields = std::nullopt,
-                         const std::optional<std::unordered_set<std::string>>& exclude_fields = std::nullopt,
+                         const py::object& include = py::none(),
+                         const py::object& exclude = py::none(),
                          bool by_alias = false,
                          bool exclude_unset = false,
                          bool exclude_defaults = false) const {
         if (type == "lax-or-strict") {
-            if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+            if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
         }
         if (type == "is-instance" || type == "is-subclass") {
             return infer_json(value, ensure_ascii, indent);
@@ -322,26 +576,26 @@ struct SerNode {
                 // round_trip: serialize value to JSON, wrap as escaped JSON string
                 std::string inner_json;
                 if (!children.empty()) {
-                    inner_json = children[0]->to_json(value, ensure_ascii, indent, round_trip, include_fields, exclude_fields, by_alias);
+                    inner_json = children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias);
                 } else {
                     inner_json = infer_json(value, ensure_ascii, indent);
                 }
                 return json_escape(inner_json, ensure_ascii);
             }
             if (!children.empty()) {
-                return children[0]->to_json(value, ensure_ascii, indent, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+                return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
             }
         }
         if (type == "nullable" || type == "nullable-union") {
             if (value.is_none()) return "null";
-            if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+            if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
         }
         if (type == "default" || type == "with-default") {
             if (value.is_none() && has_default_val) {
-                if (!children.empty()) return children[0]->to_json(default_val, ensure_ascii, indent, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+                if (!children.empty()) return children[0]->to_json(default_val, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
                 return infer_json(default_val, ensure_ascii, indent);
             }
-            if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+            if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
         }
         if (type == "to-string") {
             py::object inner = !children.empty() ? children[0]->to_python(value, false, false, round_trip) : value;
@@ -436,7 +690,7 @@ struct SerNode {
             return out;
         }
         if (!fields.empty()) {
-            return serialize_fields_json(value, ensure_ascii, indent, false, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+            return serialize_fields_json(value, ensure_ascii, indent, false, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
         }
         // Delegate model/dataclass/typed-dict to inner serializer
         if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
@@ -448,9 +702,9 @@ struct SerNode {
             // For root models, extract the 'root' attribute before delegating
             if (root_model && py::hasattr(value, "root")) {
                 auto root_val = py::getattr(value, "root");
-                return children[0]->to_json(root_val, ensure_ascii, indent, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+                return children[0]->to_json(root_val, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
             }
-            return children[0]->to_json(value, ensure_ascii, indent, round_trip, include_fields, exclude_fields, by_alias, exclude_unset, exclude_defaults);
+            return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
         }
         if (!py_func.is_none()) {
             py::object result;
@@ -572,8 +826,8 @@ private:
     }
 
     py::object serialize_fields(const py::object& value, bool exc_none, bool round_trip = false,
-                                 const std::optional<std::unordered_set<std::string>>& include_fields = std::nullopt,
-                                 const std::optional<std::unordered_set<std::string>>& exclude_fields = std::nullopt,
+                                 const py::object& include = py::none(),
+                                 const py::object& exclude = py::none(),
                                  bool by_alias = false,
                                  bool exclude_unset = false,
                                  bool exclude_defaults = false) const {
@@ -586,14 +840,17 @@ private:
             const auto& ser = fields.at(k);
             // Skip internal metadata keys
             if (k == "__pydantic_fields_set__" || k == "__pydantic_defaults__") continue;
-            
+
+            // Skip fields excluded at schema level (Field(exclude=True))
+            if (field_excluded.count(k)) continue;
+
             // Skip computed fields when round_trip=True
             if (round_trip && computed_fields_.count(k)) continue;
-            
-            // Apply include/exclude filters
-            if (include_fields && !include_fields->count(k)) continue;
-            if (exclude_fields && exclude_fields->count(k)) continue;
-            
+
+            // Apply include/exclude filters (supports nested dict filters)
+            auto next = apply_ser_filter(py::str(k), include, exclude);
+            if (next.omit) continue;
+
             // exclude_unset: skip fields that were not explicitly set in input
             if (exclude_unset) {
                 py::object fs = py::none();
@@ -608,7 +865,7 @@ private:
                     if (!fs.cast<py::set>().contains(py::str(k))) continue;
                 }
             }
-            
+
             // exclude_defaults: skip fields whose value equals their default
             if (exclude_defaults) {
                 py::object defaults = py::none();
@@ -633,7 +890,7 @@ private:
                     }
                 }
             }
-            
+
             // Determine output key name
             std::string output_key = k;
             if (by_alias) {
@@ -642,7 +899,7 @@ private:
                     output_key = alias_it->second;
                 }
             }
-            
+
             py::str key(k);
             py::object fv;
             bool has_value = true;
@@ -667,7 +924,7 @@ private:
                 }
             }
 
-            result[py::str(output_key)] = ser->to_python(fv, false, exc_none, round_trip);
+            result[py::str(output_key)] = ser->to_python(fv, false, exc_none, round_trip, next.include, next.exclude);
         }
         // Extra fields - also apply include/exclude if they match by name
         if (py::hasattr(value, "__pydantic_extra__")) {
@@ -677,8 +934,8 @@ private:
                     std::string k = py::str(item.first).cast<std::string>();
                     if (fields.find(k) != fields.end()) continue;
                     // Apply include/exclude filters to extra fields too
-                    if (include_fields && !include_fields->count(k)) continue;
-                    if (exclude_fields && exclude_fields->count(k)) continue;
+                    auto next = apply_ser_filter(py::str(k), include, exclude);
+                    if (next.omit) continue;
                     py::object v = py::reinterpret_borrow<py::object>(item.second);
                     if (exc_none && v.is_none()) continue;
                     result[py::str(k)] = v;
@@ -689,8 +946,8 @@ private:
     }
 
     std::string serialize_fields_json(const py::object& value, bool ensure_ascii, int indent, bool exc_none, bool round_trip = false,
-                                       const std::optional<std::unordered_set<std::string>>& include_fields = std::nullopt,
-                                       const std::optional<std::unordered_set<std::string>>& exclude_fields = std::nullopt,
+                                       const py::object& include = py::none(),
+                                       const py::object& exclude = py::none(),
                                        bool by_alias = false,
                                        bool exclude_unset = false,
                                        bool exclude_defaults = false) const {
@@ -704,13 +961,16 @@ private:
             const auto& ser = fields.at(k);
             // Skip internal metadata keys
             if (k == "__pydantic_fields_set__" || k == "__pydantic_defaults__") continue;
-            
+
+            // Skip fields excluded at schema level (Field(exclude=True))
+            if (field_excluded.count(k)) continue;
+
             // Skip computed fields when round_trip=True
             if (round_trip && computed_fields_.count(k)) continue;
-            
-            // Apply include/exclude filters
-            if (include_fields && !include_fields->count(k)) continue;
-            if (exclude_fields && exclude_fields->count(k)) continue;
+
+            // Apply include/exclude filters (supports nested dict filters)
+            auto next = apply_ser_filter(py::str(k), include, exclude);
+            if (next.omit) continue;
             
             // exclude_unset: skip fields that were not explicitly set in input
             if (exclude_unset) {
@@ -787,7 +1047,7 @@ private:
 
             if (!first) out += ",";
             first = false;
-            out += json_escape(output_key, ensure_ascii) + ":" + ser->to_json(fv, ensure_ascii, -1, round_trip);
+            out += json_escape(output_key, ensure_ascii) + ":" + ser->to_json(fv, ensure_ascii, -1, round_trip, next.include, next.exclude);
         }
         if (py::hasattr(value, "__pydantic_extra__")) {
             auto extra = py::getattr(value, "__pydantic_extra__");
@@ -796,8 +1056,8 @@ private:
                     std::string k = py::str(item.first).cast<std::string>();
                     if (fields.find(k) != fields.end()) continue;
                     // Apply include/exclude filters to extra fields too
-                    if (include_fields && !include_fields->count(k)) continue;
-                    if (exclude_fields && exclude_fields->count(k)) continue;
+                    auto next = apply_ser_filter(py::str(k), include, exclude);
+                    if (next.omit) continue;
                     py::object v = py::reinterpret_borrow<py::object>(item.second);
                     if (exc_none && v.is_none()) continue;
                     if (!first) out += ",";
@@ -1024,6 +1284,13 @@ static SerRef build_ser_impl(const py::dict& schema,
                             node->field_exclude_if[k] = eif;
                         }
                     }
+                    // Schema-level field exclusion (Field(exclude=True))
+                    if (fdef.contains("serialization_exclude")) {
+                        py::object se = fdef["serialization_exclude"];
+                        if (py::isinstance<py::bool_>(se) && se.cast<bool>()) {
+                            node->field_excluded.insert(k);
+                        }
+                    }
                     node->fields[k] = build_ser(field_schema, defs);
                     node->field_order.push_back(k);
                 }
@@ -1119,40 +1386,12 @@ public:
                          bool, std::optional<bool>, std::optional<py::object>) const {
         if (!ser_) throw std::runtime_error("Serializer not initialized");
 
-        // Parse include/exclude from Python objects to C++ sets
-        std::optional<std::unordered_set<std::string>> include_fields;
-        std::optional<std::unordered_set<std::string>> exclude_fields;
+        // Pass include/exclude through as-is (nested dict/set filters supported)
+        py::object inc = (include && !include->is_none()) ? *include : py::none();
+        py::object exc = (exclude && !exclude->is_none()) ? *exclude : py::none();
         bool use_alias = by_alias.value_or(false);
-        
-        if (include && !include->is_none()) {
-            include_fields = std::unordered_set<std::string>();
-            py::object inc_obj = *include;  // Get the actual py::object
-            if (py::isinstance<py::set>(inc_obj) || py::isinstance<py::list>(inc_obj) || py::isinstance<py::tuple>(inc_obj)) {
-                for (auto item : inc_obj) {
-                    include_fields->insert(py::str(item).cast<std::string>());
-                }
-            } else if (py::isinstance<py::dict>(inc_obj)) {
-                for (auto item : inc_obj.cast<py::dict>()) {
-                    include_fields->insert(py::str(item.first).cast<std::string>());
-                }
-            }
-        }
-        
-        if (exclude && !exclude->is_none()) {
-            exclude_fields = std::unordered_set<std::string>();
-            py::object exc_obj = *exclude;  // Get the actual py::object
-            if (py::isinstance<py::set>(exc_obj) || py::isinstance<py::list>(exc_obj) || py::isinstance<py::tuple>(exc_obj)) {
-                for (auto item : exc_obj) {
-                    exclude_fields->insert(py::str(item).cast<std::string>());
-                }
-            } else if (py::isinstance<py::dict>(exc_obj)) {
-                for (auto item : exc_obj.cast<py::dict>()) {
-                    exclude_fields->insert(py::str(item.first).cast<std::string>());
-                }
-            }
-        }
-        
-        return ser_->to_python(value, mode && *mode == "json", exc_none, round_trip, include_fields, exclude_fields, use_alias, exclude_unset, exclude_defaults);
+
+        return ser_->to_python(value, mode && *mode == "json", exc_none, round_trip, inc, exc, use_alias, exclude_unset, exclude_defaults);
     }
 
     py::bytes to_json(const py::object& value, std::optional<size_t>, std::optional<bool> ea,
@@ -1161,42 +1400,14 @@ public:
                       bool, bool round_trip, py::object, std::optional<py::object>,
                       bool, std::optional<bool>, std::optional<py::object>) const {
         if (!ser_) throw std::runtime_error("Serializer not initialized");
-        
-        // Parse include/exclude from Python objects to C++ sets
-        std::optional<std::unordered_set<std::string>> include_fields;
-        std::optional<std::unordered_set<std::string>> exclude_fields;
+
+        // Pass include/exclude through as-is (nested dict/set filters supported)
+        py::object inc = (include && !include->is_none()) ? *include : py::none();
+        py::object exc = (exclude && !exclude->is_none()) ? *exclude : py::none();
         bool use_alias = by_alias.value_or(false);
-        
-        if (include && !include->is_none()) {
-            include_fields = std::unordered_set<std::string>();
-            py::object inc_obj = *include;
-            if (py::isinstance<py::set>(inc_obj) || py::isinstance<py::list>(inc_obj) || py::isinstance<py::tuple>(inc_obj)) {
-                for (auto item : inc_obj) {
-                    include_fields->insert(py::str(item).cast<std::string>());
-                }
-            } else if (py::isinstance<py::dict>(inc_obj)) {
-                for (auto item : inc_obj.cast<py::dict>()) {
-                    include_fields->insert(py::str(item.first).cast<std::string>());
-                }
-            }
-        }
-        
-        if (exclude && !exclude->is_none()) {
-            exclude_fields = std::unordered_set<std::string>();
-            py::object exc_obj = *exclude;
-            if (py::isinstance<py::set>(exc_obj) || py::isinstance<py::list>(exc_obj) || py::isinstance<py::tuple>(exc_obj)) {
-                for (auto item : exc_obj) {
-                    exclude_fields->insert(py::str(item).cast<std::string>());
-                }
-            } else if (py::isinstance<py::dict>(exc_obj)) {
-                for (auto item : exc_obj.cast<py::dict>()) {
-                    exclude_fields->insert(py::str(item.first).cast<std::string>());
-                }
-            }
-        }
-        
+
         bool e = ea.value_or(false);
-        std::string json = ser_->to_json(value, e, -1, round_trip, include_fields, exclude_fields, use_alias, exclude_unset, exclude_defaults);
+        std::string json = ser_->to_json(value, e, -1, round_trip, inc, exc, use_alias, exclude_unset, exclude_defaults);
         return py::bytes(json);
     }
 
