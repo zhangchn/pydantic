@@ -188,8 +188,10 @@ public:
                     py::arg("microseconds") = td.microseconds);
             }
         }
-        // Validators that store py::object results
-        if (name == "any" || name == "function-after" || name == "function-before" ||
+        // Validators that store py::object results.  Note: "any" results are
+        // NOT py::object — the C++ AnyValidator stores a string repr — so "any"
+        // falls through and callers keep the original input object.
+        if (name == "function-after" || name == "function-before" ||
             name == "function-wrap" || name == "function-plain" || name == "json-or-python" ||
             name == "py_object" || name == "is-instance" || name == "is-subclass") {
             if (auto* o = static_cast<py::object*>(value.get())) return *o;
@@ -268,7 +270,7 @@ public:
                             }
                         }
                     } else {
-                        auto converted = validated_to_py(key_result.value(), keys_schema->name());
+                        auto converted = validated_to_py(key_result.value(), keys_schema->effective_result_name());
                         if (converted) key_obj = *converted;
                     }
                 }
@@ -288,7 +290,7 @@ public:
                             }
                         }
                     } else {
-                        auto converted = validated_to_py(val_result.value(), values_schema->name());
+                        auto converted = validated_to_py(val_result.value(), values_schema->effective_result_name());
                         if (converted) val_obj = *converted;
                     }
                 }
