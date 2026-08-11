@@ -884,6 +884,12 @@ class SchemaValidator:
                 object.__setattr__(instance, "__pydantic_private__", {})
                 object.__setattr__(instance, "__pydantic_extra__", None)
                 object.__setattr__(instance, "__pydantic_fields_set__", {"root"})
+                # Call model_post_init if defined
+                if hasattr(instance, 'model_post_init'):
+                    try:
+                        instance.model_post_init(None)
+                    except Exception:
+                        pass
                 return instance
             return data
 
@@ -910,6 +916,12 @@ class SchemaValidator:
                 object.__setattr__(instance, '__pydantic_private__', {})
                 object.__setattr__(instance, '__pydantic_extra__', extra)
                 object.__setattr__(instance, '__pydantic_fields_set__', fields_set)
+                # Call model_post_init if defined
+                if hasattr(instance, 'model_post_init'):
+                    try:
+                        instance.model_post_init(None)
+                    except Exception:
+                        pass
                 return instance
             return data
 
@@ -948,6 +960,12 @@ class SchemaValidator:
         object.__setattr__(instance, '__pydantic_private__', {})
         object.__setattr__(instance, '__pydantic_extra__', extra)
         object.__setattr__(instance, '__pydantic_fields_set__', fields_set)
+        # Call model_post_init if defined
+        if hasattr(instance, 'model_post_init'):
+            try:
+                instance.model_post_init(None)
+            except Exception:
+                pass
         return instance
 
     def _process_model_fields(self, data, fields_schema):
