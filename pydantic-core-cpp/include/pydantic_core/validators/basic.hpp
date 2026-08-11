@@ -443,7 +443,7 @@ public:
         }
         if (max_length.has_value() && len > max_length.value()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::BytesTooLong, static_cast<int64_t>(max_length.value())),
+                ErrorType(ErrorType::Kind::BytesTooLong, "max_length", std::to_string(max_length.value())),
                 state.location(),
                 bytes_repr(bytes)
             );

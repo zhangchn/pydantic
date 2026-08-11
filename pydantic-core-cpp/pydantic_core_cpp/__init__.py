@@ -1080,14 +1080,15 @@ class SchemaValidator:
         return result
 
     def validate_python(self, obj, *, strict=None, context=None, self_instance=None,
-                        extra=None, from_attributes=None, by_alias=None, by_name=None):
+                        extra=None, from_attributes=None, by_alias=None, by_name=None,
+                        allow_partial=None):
         # Extract field defaults before validation
         field_defaults = {}
         if isinstance(obj, dict) and hasattr(self, '_schema'):
             field_defaults = self._get_field_defaults(self._schema)
             # For fields with defaults, we need to make them not required
             # We'll do this by catching validation errors for missing fields with defaults
-        
+
         try:
             result = self._base.validate_python(
                 obj, strict=strict, context=context, self_instance=self_instance,

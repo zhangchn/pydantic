@@ -321,10 +321,10 @@ struct BytesValidator {
         EitherBytes either_bytes = result.value().value();
         
         if (min_length && either_bytes.size() < *min_length) {
-            return ValError::line_error(ErrorType(ErrorType::Kind::BytesTooShort, static_cast<int64_t>(*min_length)), Location(), input.as_error_value().repr);
+            return ValError::line_error(ErrorType(ErrorType::Kind::BytesTooShort, "min_length", std::to_string(*min_length)), Location(), input.as_error_value().repr);
         }
         if (max_length && either_bytes.size() > *max_length) {
-            return ValError::line_error(ErrorType(ErrorType::Kind::BytesTooLong, static_cast<int64_t>(*max_length)), Location(), input.as_error_value().repr);
+            return ValError::line_error(ErrorType(ErrorType::Kind::BytesTooLong, "max_length", std::to_string(*max_length)), Location(), input.as_error_value().repr);
         }
         
         return ValidatedValue(either_bytes.to_vector());

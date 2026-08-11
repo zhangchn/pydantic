@@ -174,8 +174,8 @@ std::string ErrorType::message_template() const {
         {Kind::StringPatternMismatch, "String should match pattern"},
         
         // Bytes constraint errors
-        {Kind::BytesTooShort, "Bytes should have at least {value} bytes"},
-        {Kind::BytesTooLong, "Bytes should have at most {value} bytes"},
+        {Kind::BytesTooShort, "Data should have at least {min_length} bytes"},
+        {Kind::BytesTooLong, "Data should have at most {max_length} bytes"},
         
         // List/Set constraint errors
         {Kind::ListTooShort, "List should have at least {value} items"},
