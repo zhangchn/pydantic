@@ -504,7 +504,23 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        if (state.strict_or(false)) return strict_->validate(input, state);
+        if (state.strict_or(false)) {
+            if (!strict_) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::CustomError),
+                    state.location(),
+                    "lax-or-strict: strict validator is null"
+                );
+            }
+            return strict_->validate(input, state);
+        }
+        if (!lax_) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::CustomError),
+                state.location(),
+                "lax-or-strict: lax validator is null"
+            );
+        }
         return lax_->validate(input, state);
     }
 
@@ -533,7 +549,23 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        if (input.input_type() == InputType::Json) return json_->validate(input, state);
+        if (input.input_type() == InputType::Json) {
+            if (!json_) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::CustomError),
+                    state.location(),
+                    "json-or-python: json validator is null"
+                );
+            }
+            return json_->validate(input, state);
+        }
+        if (!python_) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::CustomError),
+                state.location(),
+                "json-or-python: python validator is null"
+            );
+        }
         return python_->validate(input, state);
     }
 

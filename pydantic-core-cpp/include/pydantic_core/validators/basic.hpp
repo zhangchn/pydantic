@@ -477,19 +477,40 @@ public:
     ) override {
         // Check if input is an instance of the specified Python class
         if (!py_class_.is_none()) {
-            py::object input_py = input.as_python_object();
-            if (!py::isinstance(input_py, py_class_)) {
+            try {
+                py::object input_py = input.as_python_object();
+                if (!input_py) {
+                    return ValError::line_error(
+                        ErrorType(ErrorType::Kind::IsInstanceType, "class", class_name_),
+                        state.location(),
+                        input.as_error_value().repr
+                    );
+                }
+                if (!py::isinstance(input_py, py_class_)) {
+                    return ValError::line_error(
+                        ErrorType(ErrorType::Kind::IsInstanceType, "class", class_name_),
+                        state.location(),
+                        input.as_error_value().repr
+                    );
+                }
+                // Store as PyObject* — leak the reference to avoid GIL issues
+                PyObject* raw = input_py.inc_ref().ptr();
+                return ValResult<std::shared_ptr<void>>(
+                    std::shared_ptr<void>(raw, [](void*){})
+                );
+            } catch (const std::exception& e) {
                 return ValError::line_error(
                     ErrorType(ErrorType::Kind::IsInstanceType, "class", class_name_),
                     state.location(),
-                    input.as_error_value().repr
+                    std::string("Error checking isinstance: ") + e.what()
+                );
+            } catch (...) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::IsInstanceType, "class", class_name_),
+                    state.location(),
+                    "Unknown error checking isinstance"
                 );
             }
-            // Store as PyObject* — leak the reference to avoid GIL issues
-            PyObject* raw = input_py.inc_ref().ptr();
-            return ValResult<std::shared_ptr<void>>(
-                std::shared_ptr<void>(raw, [](void*){})
-            );
         }
         // Fallback: if class name was specified but we don't have the Python class,
         // return error so UnionValidator can try other choices
