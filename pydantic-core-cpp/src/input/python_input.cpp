@@ -493,6 +493,18 @@ ValResult<ArgumentsInput> PythonInput::validate_args() const {
     return type_error(ErrorType::Kind::ArgumentsType, *this, this->current_location());
 }
 
+bool PythonInput::is_args_kwargs() const {
+    if (!py::hasattr(obj_, "args") || !py::hasattr(obj_, "kwargs")) return false;
+    try {
+        py::object cls = py::getattr(obj_, "__class__");
+        std::string cls_name = py::str(py::getattr(cls, "__name__")).cast<std::string>();
+        return cls_name == "ArgsKwargs";
+    } catch (py::error_already_set&) {
+        PyErr_Clear();
+        return false;
+    }
+}
+
 // from_attributes support methods
 bool PythonInput::has_attributes() const {
     // Check if object has __dict__ or is not a built-in type

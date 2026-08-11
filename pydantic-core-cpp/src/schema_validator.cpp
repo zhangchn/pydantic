@@ -122,7 +122,7 @@ std::string SchemaValidator::validate_python(const std::string& input_json,
         // We'll check by looking at the validator name.
         if (validator_) {
             auto vname = validator_->name();
-            if (vname == "model" || vname == "model-fields" || vname == "typed-dict" || vname == "dataclass") {
+            if (vname == "model" || vname == "model-fields" || vname == "typed-dict") {
                 // This is a model-like validator, try to apply defaults
                 auto* mfo = static_cast<ValidatedModelFieldsOutput*>(validated.get());
                 if (mfo && (!mfo->fields.empty() || !mfo->fields_set.empty() || !mfo->extra.empty())) {
@@ -608,8 +608,10 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
             if (v) return py::bytes(reinterpret_cast<const char*>(v->data()), v->size());
         } catch (...) {}
     }
-    if (!type_name.empty() && (type_name == "model" || type_name == "model-fields" || type_name == "typed-dict" || type_name == "dataclass")) {
-        // Directly convert ValidatedModelFieldsOutput to dict
+    if (!type_name.empty() && (type_name == "model" || type_name == "model-fields" || type_name == "typed-dict")) {
+        // Directly convert ValidatedModelFieldsOutput to dict.
+        // Note: "dataclass" is NOT included — the dataclass validator returns
+        // a py::object (fields dict or constructed instance), not fields output.
         try {
             auto* mfo = static_cast<ValidatedModelFieldsOutput*>(value.get());
             if (mfo) {
@@ -721,7 +723,7 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
     // For function-after/before/wrap/plain validators, check py::object*
     bool is_function_type = (type_name == "function-after" || type_name == "function-before" ||
                              type_name == "function-wrap" || type_name == "function-plain" ||
-                             type_name == "call" || type_name == "arguments");
+                             type_name == "call" || type_name == "arguments" || type_name == "dataclass");
     if (is_function_type) {
         try {
             auto* obj = static_cast<py::object*>(value.get());
@@ -749,8 +751,10 @@ py::object SchemaValidator::result_to_python(const std::shared_ptr<void>& result
         vname = validator_->effective_result_name();
     }
 
-    // For model-like validators, try ValidatedModelFieldsOutput
-    if (!vname.empty() && (vname == "model" || vname == "model-fields" || vname == "typed-dict" || vname == "dataclass")) {
+    // For model-like validators, try ValidatedModelFieldsOutput.
+    // Note: "dataclass" is NOT included — the dataclass validator returns a
+    // py::object (fields dict or constructed instance), not fields output.
+    if (!vname.empty() && (vname == "model" || vname == "model-fields" || vname == "typed-dict")) {
         try {
             auto* mfo = static_cast<ValidatedModelFieldsOutput*>(result.get());
             if (mfo) {

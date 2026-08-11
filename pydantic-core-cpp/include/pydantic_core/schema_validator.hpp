@@ -87,6 +87,9 @@ public:
     // so the int-result input passthrough heuristic must not apply to them.
     bool is_call() const { return validator_ && validator_->name() == "call"; }
 
+    // Whether the top-level schema is a dataclass validator
+    bool is_dataclass() const { return validator_ && validator_->name() == "dataclass"; }
+
     // Representation
     std::string repr() const;
 

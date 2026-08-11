@@ -50,6 +50,7 @@ class JsonOrPythonValidator;
 class JsonValidator;
 class ArgumentsValidator;
 class CallValidator;
+class PyDataclassValidator;
 
 // Validator base trait - matches Rust's Validator trait
 class Validator {

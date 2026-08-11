@@ -1629,9 +1629,29 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                             extra_fields.is_none() ? py::none() : extra_fields);
                         py::setattr(self_instance, "__pydantic_fields_set__", fields_set);
                     }
+                    // Dataclass __init__: call __post_init__ after fields are set
+                    if (self.is_dataclass() && py::hasattr(self_instance, "__post_init__")) {
+                        self_instance.attr("__post_init__")();
+                    }
                 } catch (const std::exception& e) {
                     // If anything fails, just return validated as-is
                     py::print("validate_python self_instance error:", py::str(e.what()));
+                }
+                return self_instance;
+            }
+            // Slots dataclasses have no __dict__ — populate via object.__setattr__
+            if (!self_instance.is_none() && self.is_dataclass() && py::isinstance<py::dict>(validated)) {
+                try {
+                    py::dict validated_dict = validated.cast<py::dict>();
+                    auto setattr = py::module_::import("builtins").attr("object").attr("__setattr__");
+                    for (auto item : validated_dict) {
+                        setattr(self_instance, item.first, item.second);
+                    }
+                    if (py::hasattr(self_instance, "__post_init__")) {
+                        self_instance.attr("__post_init__")();
+                    }
+                } catch (const std::exception& e) {
+                    py::print("validate_python slots dataclass error:", py::str(e.what()));
                 }
                 return self_instance;
             }

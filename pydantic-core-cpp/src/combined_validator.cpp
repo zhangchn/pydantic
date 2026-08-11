@@ -1548,8 +1548,10 @@ static std::shared_ptr<Validator> build_from_py_dict(
         return v;
     }
 
-    // --- ModelFields / TypedDict / Dataclass ---
-    if (type == "model-fields" || type == "typed-dict" || type == "dataclass-args") {
+    // --- ModelFields / TypedDict ---
+    // (dataclass-args is handled separately below — its fields are a list,
+    // not a dict, so the model-fields path must not intercept it)
+    if (type == "model-fields" || type == "typed-dict") {
         auto v = std::make_shared<ModelFieldsValidator>();
         if (schema.contains("fields")) {
             auto fields_dict = schema["fields"].cast<py::dict>();
@@ -1783,6 +1785,63 @@ static std::shared_ptr<Validator> build_from_py_dict(
             return_validator = build_from_py_dict(schema["return_schema"].cast<py::dict>(), config, definitions);
         }
         return std::make_shared<CallValidator>(arguments_validator, function, return_validator);
+    }
+
+    // --- Dataclass args (validates dataclass fields from ArgsKwargs/dict) ---
+    if (type == "dataclass-args") {
+        auto v = std::make_shared<ArgumentsValidator>();
+        if (schema.contains("fields")) {
+            auto fields_list = schema["fields"].cast<py::list>();
+            size_t positional_count = 0;
+            for (auto item : fields_list) {
+                auto f = item.cast<py::dict>();
+                ArgumentsValidator::Parameter p;
+                p.name = py_str(f, "name");
+                bool kw_only = f.contains("kw_only") && py::isinstance<py::bool_>(f["kw_only"]) &&
+                               f["kw_only"].cast<bool>();
+                p.positional = !kw_only;
+                p.positional_only = false;
+                if (f.contains("schema")) {
+                    p.validator = build_from_py_dict(f["schema"].cast<py::dict>(), config, definitions);
+                }
+                v->parameters.push_back(std::move(p));
+                if (!kw_only) positional_count++;
+            }
+            v->positional_params_count = positional_count;
+        }
+        // Dataclasses default to extra=ignore
+        std::string extra_str = py_str(schema, "extra_behavior",
+            py_str(config, "extra_fields_behavior",
+                py_str(config, "extra_behavior", py_str(config, "extra", "ignore"))));
+        v->extra = extra_behavior_from_string(extra_str);
+        return v;
+    }
+
+    // --- Dataclass (validate + construct a pydantic dataclass instance) ---
+    if (type == "dataclass") {
+        auto v = std::make_shared<PyDataclassValidator>();
+        // Dataclasses ignore the parent config and use their own embedded config
+        py::dict inner_config = config;
+        if (schema.contains("config") && py::isinstance<py::dict>(schema["config"])) {
+            inner_config = schema["config"].cast<py::dict>();
+        }
+        if (schema.contains("schema")) {
+            v->set_args_validator(build_from_py_dict(schema["schema"].cast<py::dict>(), inner_config, definitions));
+        }
+        if (schema.contains("cls") && !schema["cls"].is_none()) {
+            v->set_class(schema["cls"]);
+        }
+        if (schema.contains("post_init")) {
+            try { v->set_post_init(schema["post_init"].cast<bool>()); } catch (...) {}
+        }
+        if (schema.contains("fields")) {
+            std::vector<std::string> names;
+            for (auto f : schema["fields"].cast<py::list>()) {
+                names.push_back(py::str(f).cast<std::string>());
+            }
+            v->set_field_names(std::move(names));
+        }
+        return v;
     }
 
     throw SchemaError("Unknown schema type: " + type);

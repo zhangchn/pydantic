@@ -391,6 +391,11 @@ public:
         );
     }
 
+    // Whether the input is an ArgsKwargs container (vs a plain dict) — used by
+    // the dataclass validator to distinguish the __init__ self_instance path
+    // from nested dict validation.
+    virtual bool is_args_kwargs() const { return false; }
+
 protected:
     /// Pointer to current validation location (set by validators before calling validate_*).
     const Location* current_loc_ = nullptr;

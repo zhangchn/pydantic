@@ -959,4 +959,100 @@ private:
     std::shared_ptr<Validator> return_validator_;
 };
 
+// PyDataclassValidator - validates pydantic dataclasses.
+// Matches Rust's DataclassValidator (dataclass.rs).  The args (an
+// ArgumentsValidator built from the dataclass-args schema) validates the
+// input; positional args are merged back into the keyword dict by field
+// order, then either the fields dict is returned (for the self_instance
+// path used by the dataclass __init__) or a dataclass instance is
+// constructed directly (nested / dict input).
+class PyDataclassValidator : public Validator {
+public:
+    ValResult<std::shared_ptr<void>> validate(
+        const Input& input,
+        ValidationState& state
+    ) override {
+        if (!args_validator_) {
+            return ValError::line_error(ErrorType(ErrorType::Kind::CustomError),
+                                        state.location(), "Dataclass validator missing arguments validator");
+        }
+
+        auto args_result = args_validator_->validate(input, state);
+        if (args_result.is_err()) {
+            return ValResult<std::shared_ptr<void>>(args_result.error());
+        }
+
+        py::object validated;
+        try {
+            validated = value_to_python_with_type(args_result.value(), args_validator_->effective_result_name());
+        } catch (...) {
+            validated = py::none();
+        }
+
+        py::dict kwargs_dict;
+        if (py::isinstance<py::tuple>(validated) && py::len(validated) == 2) {
+            py::tuple args_tuple = py::reinterpret_borrow<py::tuple>(validated[py::int_(0)]);
+            kwargs_dict = py::reinterpret_borrow<py::dict>(validated[py::int_(1)]);
+            // Merge positional args into the kwargs dict by field order
+            py::ssize_t n = py::len(args_tuple);
+            for (py::ssize_t i = 0; i < n; ++i) {
+                if (i >= (py::ssize_t)field_names_.size()) break;
+                kwargs_dict[py::str(field_names_[static_cast<size_t>(i)])] =
+                    py::reinterpret_borrow<py::object>(args_tuple[i]);
+            }
+        } else if (py::isinstance<py::dict>(validated)) {
+            kwargs_dict = validated.cast<py::dict>();
+        } else {
+            return ValError::line_error(ErrorType(ErrorType::Kind::CustomError),
+                                        state.location(), "Arguments validator returned unexpected type");
+        }
+
+        // Construct the instance when validating a dict input (nested
+        // dataclass fields, JSON input).  Top-level calls from the dataclass
+        // __init__ pass ArgsKwargs and rely on the binding's self_instance
+        // path to populate the instance, so return the fields dict there.
+        if (!input.is_args_kwargs() && !class_.is_none()) {
+            py::object instance;
+            try {
+                instance = class_.attr("__new__")(class_);
+            } catch (py::error_already_set& e) {
+                e.restore();
+                PyErr_Clear();
+                return ValError::line_error(ErrorType(ErrorType::Kind::CustomError),
+                                            state.location(), "Dataclass __new__ failed: " + std::string(e.what()));
+            }
+            auto setattr = py::module_::import("builtins").attr("object").attr("__setattr__");
+            for (auto kv : kwargs_dict) {
+                setattr(instance, kv.first, kv.second);
+            }
+            if (post_init_) {
+                try {
+                    instance.attr("__post_init__")();
+                } catch (py::error_already_set& e) {
+                    e.restore();
+                    PyErr_Clear();
+                    return ValError::line_error(ErrorType(ErrorType::Kind::CustomError),
+                                                state.location(), "Dataclass __post_init__ failed: " + std::string(e.what()));
+                }
+            }
+            return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(instance));
+        }
+
+        return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(kwargs_dict));
+    }
+
+    std::string name() const override { return "dataclass"; }
+
+    void set_args_validator(std::shared_ptr<Validator> v) { args_validator_ = std::move(v); }
+    void set_class(py::object c) { class_ = std::move(c); }
+    void set_post_init(bool v) { post_init_ = v; }
+    void set_field_names(std::vector<std::string> names) { field_names_ = std::move(names); }
+
+private:
+    std::shared_ptr<Validator> args_validator_;
+    py::object class_ = py::none();
+    bool post_init_ = false;
+    std::vector<std::string> field_names_;
+};
+
 } // namespace pydantic_core

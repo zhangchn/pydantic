@@ -108,6 +108,9 @@ public:
     // Arguments validation: accepts ArgsKwargs instances and plain dicts (kwargs-only)
     ValResult<ArgumentsInput> validate_args() const override;
 
+    // ArgsKwargs containers vs plain dicts
+    bool is_args_kwargs() const override;
+
     // Access underlying PyObject
     const py::object& py_object() const { return obj_; }
     
