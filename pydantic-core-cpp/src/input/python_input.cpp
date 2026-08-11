@@ -151,7 +151,7 @@ bool PythonInput::is_str() const {
 }
 
 bool PythonInput::is_bytes() const {
-    return py::isinstance<py::bytes>(obj_);
+    return py::isinstance<py::bytes>(obj_) || py::isinstance(obj_, py::module_::import("builtins").attr("bytearray"));
 }
 
 bool PythonInput::is_dict() const {
@@ -296,7 +296,19 @@ ValResult<ValMatch<EitherString>> PythonInput::validate_str(bool strict, bool co
     if (!strict) {
         if (is_bytes()) {
             try {
-                return ValMatch<EitherString>::lax(EitherString(as_str()));
+                // Decode bytes/bytearray to string using UTF-8 (matches Rust/pydantic behavior)
+                // py::str() on bytes gives repr like "b'a'", we want actual decoding
+                // Convert to py::bytes first (handles both bytes and bytearray)
+                py::object bytes_obj;
+                if (py::isinstance<py::bytes>(obj_)) {
+                    bytes_obj = obj_;
+                } else {
+                    // bytearray - convert to bytes via constructor
+                    bytes_obj = py::module_::import("builtins").attr("bytes")(obj_);
+                }
+                py::str decoded_str = bytes_obj.attr("decode")("utf-8");
+                std::string decoded = decoded_str.cast<std::string>();
+                return ValMatch<EitherString>::lax(EitherString(decoded));
             } catch (...) {
                 return type_error(ErrorType::Kind::StringType, *this, this->current_location());
             }
