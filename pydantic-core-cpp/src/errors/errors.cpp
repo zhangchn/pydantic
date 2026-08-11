@@ -99,7 +99,10 @@ void ValidationError::build_errors_from_val_error(const ValError& val_error) {
             details.loc_items = line_err->location.items;
             details.msg = line_err->error_type.message();
             details.input = line_err->input_value;
-            details.ctx = line_err->error_type.context();
+            // Filter out internal pluralization keys from context
+            auto ctx = line_err->error_type.context();
+            ctx.erase("s");
+            details.ctx = ctx;
             errors_.push_back(details);
         }
     }
