@@ -352,17 +352,105 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
         throw std::runtime_error("Validator not initialized");
     }
 
-    // The obj should be a dict or model-like object
-    // We need to validate the field_value against the field's schema
+    // Check if the field exists on the object
+    bool field_exists = false;
+    if (py::hasattr(obj, field_name.c_str())) {
+        field_exists = true;
+    } else if (py::hasattr(obj, "__pydantic_extra__")) {
+        py::object extra = obj.attr("__pydantic_extra__");
+        if (!extra.is_none() && py::isinstance<py::dict>(extra)) {
+            py::dict extra_dict = extra.cast<py::dict>();
+            if (extra_dict.contains(py::str(field_name.c_str()))) {
+                field_exists = true;
+            }
+        }
+    }
 
-    // For now, we use a simplified approach:
-    // 1. Extract the field validator from the schema (if it's a model-fields validator)
-    // 2. Validate field_value against it
-    // 3. Return the updated object
+    // If field doesn't exist, check if extra fields are allowed
+    if (!field_exists) {
+        // Check if extra fields are allowed by checking config or __pydantic_extra__
+        bool extra_allowed = false;
 
-    // Since we don't have direct access to field-level validators yet,
-    // we'll use a heuristic: validate the entire object with the new field value merged in
+        // First check __pydantic_extra__ - if it's a dict (even empty), extra='allow'
+        if (py::hasattr(obj, "__pydantic_extra__")) {
+            py::object extra = obj.attr("__pydantic_extra__");
+            if (py::isinstance<py::dict>(extra)) {
+                extra_allowed = true;
+            }
+        }
 
+        // If not determined yet, check the config
+        if (!extra_allowed && py::hasattr(obj, "__pydantic_config__")) {
+            py::object config = obj.attr("__pydantic_config__");
+            if (py::isinstance<py::dict>(config)) {
+                py::dict config_dict = config.cast<py::dict>();
+                if (config_dict.contains("extra")) {
+                    py::object extra_val = config_dict["extra"];
+                    if (py::isinstance<py::str>(extra_val)) {
+                        std::string extra_str = extra_val.cast<std::string>();
+                        if (extra_str == "allow") {
+                            extra_allowed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!extra_allowed) {
+            // Raise no_such_attribute error
+            ErrorType err_type(ErrorType::Kind::NoSuchAttribute, "attribute", field_name);
+            Location loc;
+            loc.push(field_name);
+            auto val_err = ValError::line_error(err_type, loc, py::repr(field_value).cast<std::string>());
+            throw ValidationError(title_, InputType::Python, val_err);
+        }
+
+        // Extra fields are allowed - validate and set
+        py::dict input_dict;
+        if (py::isinstance<py::dict>(obj)) {
+            input_dict = obj.cast<py::dict>();
+        } else if (py::hasattr(obj, "__dict__")) {
+            input_dict = obj.attr("__dict__").cast<py::dict>();
+        } else {
+            throw std::runtime_error("validate_assignment: object is not a dict or model");
+        }
+
+        py::dict updated_dict;
+        for (auto item : input_dict) {
+            updated_dict[item.first] = item.second;
+        }
+        updated_dict[py::str(field_name.c_str())] = field_value;
+
+        py::object validated_result = validate_python_object(updated_dict);
+
+        // Extract the validated value
+        py::object validated_value = field_value;
+        if (py::isinstance<py::dict>(validated_result)) {
+            py::dict result_dict = validated_result.cast<py::dict>();
+            if (result_dict.contains(py::str(field_name.c_str()))) {
+                validated_value = result_dict[py::str(field_name.c_str())];
+            }
+        } else if (py::hasattr(validated_result, "__pydantic_extra__")) {
+            py::object extra = validated_result.attr("__pydantic_extra__");
+            if (!extra.is_none() && py::isinstance<py::dict>(extra)) {
+                py::dict extra_dict = extra.cast<py::dict>();
+                if (extra_dict.contains(py::str(field_name.c_str()))) {
+                    validated_value = extra_dict[py::str(field_name.c_str())];
+                }
+            }
+        }
+
+        // Set the value using object.__setattr__ to bypass custom __setattr__
+        if (py::isinstance<py::dict>(obj)) {
+            obj.cast<py::dict>()[py::str(field_name.c_str())] = validated_value;
+        } else {
+            py::module_::import("builtins")
+                .attr("object").attr("__setattr__")(obj, py::str(field_name.c_str()), validated_value);
+        }
+        return validated_value;
+    }
+
+    // Field exists - validate and set it
     py::dict input_dict;
     if (py::isinstance<py::dict>(obj)) {
         input_dict = obj.cast<py::dict>();
@@ -372,16 +460,32 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
         throw std::runtime_error("validate_assignment: object is not a dict or model");
     }
 
-    // Create a new dict with the updated field
     py::dict updated_dict;
     for (auto item : input_dict) {
         updated_dict[item.first] = item.second;
     }
     updated_dict[py::str(field_name.c_str())] = field_value;
 
-    // Validate the entire object (this will validate all fields, not just the one)
-    // This is a simplification; the proper approach would be to extract the field validator
-    return validate_python_object(updated_dict);
+    py::object validated_result = validate_python_object(updated_dict);
+
+    py::object validated_value = field_value;  // Default to original value
+    if (py::isinstance<py::dict>(validated_result)) {
+        py::dict result_dict = validated_result.cast<py::dict>();
+        if (result_dict.contains(py::str(field_name.c_str()))) {
+            validated_value = result_dict[py::str(field_name.c_str())];
+        }
+    } else if (py::hasattr(validated_result, field_name.c_str())) {
+        validated_value = validated_result.attr(field_name.c_str());
+    }
+
+    if (py::isinstance<py::dict>(obj)) {
+        obj.cast<py::dict>()[py::str(field_name.c_str())] = validated_value;
+    } else {
+        py::module_::import("builtins")
+            .attr("object").attr("__setattr__")(obj, py::str(field_name.c_str()), validated_value);
+    }
+
+    return validated_value;
 }
 
 std::string SchemaValidator::repr() const {

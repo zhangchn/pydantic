@@ -73,6 +73,7 @@ std::string ErrorType::type_name() const {
         {Kind::FieldRequired, "field_required"},
         {Kind::Missing, "missing"},
         {Kind::ExtraForbidden, "extra_forbidden"},
+        {Kind::NoSuchAttribute, "no_such_attribute"},
 
         // Arguments errors
         {Kind::ArgumentsType, "arguments_type"},
@@ -198,6 +199,7 @@ std::string ErrorType::message_template() const {
         {Kind::FieldRequired, "Field required"},
         {Kind::Missing, "Missing field"},
         {Kind::ExtraForbidden, "Extra inputs are not permitted"},
+        {Kind::NoSuchAttribute, "Object has no attribute '{attribute}'"},
 
         // Arguments errors
         {Kind::ArgumentsType, "Arguments must be a tuple, list or a dictionary"},
