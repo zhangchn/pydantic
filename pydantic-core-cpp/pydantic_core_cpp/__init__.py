@@ -1027,65 +1027,67 @@ class SchemaValidator:
     def title(self):
         return self._base.title
 
-    def _apply_defaults(self, obj, schema):
-        """Apply default values and default_factory for missing fields."""
-        if not isinstance(obj, dict):
-            return obj
-
+    def _get_field_defaults(self, schema):
+        """Extract default values for fields from schema."""
+        defaults = {}
         schema_type = schema.get("type") if isinstance(schema, dict) else None
 
         if schema_type == "model":
             inner = schema.get("schema", {})
-            return self._apply_defaults(obj, inner)
+            return self._get_field_defaults(inner)
 
         if schema_type == "model-fields":
             fields = schema.get("fields", {})
-            result = dict(obj)
             for field_name, field_def in fields.items():
-                if field_name in result:
-                    continue
                 field_schema = field_def.get("schema", {})
                 if isinstance(field_schema, dict) and field_schema.get("type") == "default":
-                    # Check for default_factory first
                     if "default_factory" in field_schema:
-                        factory = field_schema["default_factory"]
-                        if callable(factory):
-                            try:
-                                takes_data = field_schema.get("default_factory_takes_data", False)
-                                if takes_data:
-                                    result[field_name] = factory(result)
-                                else:
-                                    result[field_name] = factory()
-                            except Exception:
-                                pass
+                        defaults[field_name] = ('factory', field_schema["default_factory"], field_schema.get("default_factory_takes_data", False))
                     elif "default" in field_schema:
-                        result[field_name] = field_schema["default"]
-            return result
+                        defaults[field_name] = ('value', field_schema["default"])
+            return defaults
 
         if schema_type == "definitions":
             inner = schema.get("schema", {})
-            return self._apply_defaults(obj, inner)
+            return self._get_field_defaults(inner)
 
         if schema_type == "definition-ref":
             ref = schema.get("schema_ref")
-            # Look up the definition
-            for defn in schema.get("definitions", []) if "definitions" in schema else self._schema.get("definitions", []):
-                if defn.get("ref") == ref:
-                    return self._apply_defaults(obj, defn)
-            # Try top-level definitions
             if hasattr(self, '_schema') and isinstance(self._schema, dict):
                 for defn in self._schema.get("definitions", []):
                     if defn.get("ref") == ref:
-                        return self._apply_defaults(obj, defn)
+                        return self._get_field_defaults(defn)
 
-        return obj
+        return defaults
+
+    def _apply_field_defaults(self, result, defaults):
+        """Apply default values to result dict for missing fields."""
+        if not isinstance(result, dict) or not defaults:
+            return result
+        
+        for field_name, default_info in defaults.items():
+            if field_name not in result:
+                if default_info[0] == 'factory':
+                    factory = default_info[1]
+                    takes_data = default_info[2]
+                    if callable(factory):
+                        try:
+                            result[field_name] = factory(result) if takes_data else factory()
+                        except Exception:
+                            pass
+                else:
+                    result[field_name] = default_info[1]
+        return result
 
     def validate_python(self, obj, *, strict=None, context=None, self_instance=None,
                         extra=None, from_attributes=None, by_alias=None, by_name=None):
-        # Apply defaults for missing fields before validation
+        # Extract field defaults before validation
+        field_defaults = {}
         if isinstance(obj, dict) and hasattr(self, '_schema'):
-            obj = self._apply_defaults(obj, self._schema)
-
+            field_defaults = self._get_field_defaults(self._schema)
+            # For fields with defaults, we need to make them not required
+            # We'll do this by catching validation errors for missing fields with defaults
+        
         try:
             result = self._base.validate_python(
                 obj, strict=strict, context=context, self_instance=self_instance,

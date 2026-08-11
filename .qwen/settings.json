@@ -7,8 +7,30 @@
       "Bash(ctest *)",
       "Bash(/users/cuser/documents/github/pydantic/.venv/bin/python3.10 *)",
       "Bash(/users/cuser/documents/github/pydantic/.venv/bin/pip3.10 *)",
-      "Bash(./build/test_model_fields)"
+      "Bash(./build/test_model_fields)",
+      "Bash(ls *)",
+      "Bash(find *)",
+      "Bash(/users/cuser/documents/github/pydantic/.venv_cpp/bin/pip *)",
+      "Bash(git submodule *)",
+      "Bash(cat *)",
+      "Bash(sleep *)",
+      "Bash(tail *)",
+      "Bash(git tag *)",
+      "Bash(grep *)",
+      "Bash(/users/cuser/documents/github/pydantic/.venv_cpp/bin/python *)",
+      "Bash(pip install *)",
+      "Bash(python *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git stash)",
+      "Bash(env *)",
+      "Bash(.venv/bin/pytest *)",
+      "Bash(.venv/bin/python *)",
+      "Bash(lldb *)",
+      "Bash(head *)",
+      "Bash(diff *)",
+      "Bash(/users/cuser/documents/github/pydantic/.venv/bin/pip *)"
     ]
   },
-  "$version": 3
+  "$version": 4
 }
