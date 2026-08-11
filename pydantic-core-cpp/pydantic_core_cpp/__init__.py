@@ -271,6 +271,143 @@ ValidationError.errors = _errors_with_include_url
 
 
 # ============================================================================
+# Add ValidationError.from_exception_data classmethod
+# ============================================================================
+
+# Error type -> (message_template, default_msg) mapping
+_ERR_TYPE_MESSAGES: dict[str, str] = {
+    'frozen_instance': 'Instance is frozen',
+    'frozen_field': 'Field is frozen',
+    'missing': 'Field required',
+    'field_required': 'Field required',
+    'extra_forbidden': 'Extra inputs are not permitted',
+    'no_such_attribute': "Object has no attribute '{attribute}'",
+    'string_too_short': 'String should have at least {min_length} character{_s}',
+    'string_too_long': 'String should have at most {max_length} character{_s}',
+    'string_pattern_mismatch': 'String should match pattern \'{pattern}\'',
+    'int_type': 'Input should be a valid integer',
+    'float_type': 'Input should be a valid number',
+    'bool_type': 'Input should be a valid boolean',
+    'str_type': 'Input should be a valid string',
+    'list_type': 'Input should be a valid list',
+    'dict_type': 'Input should be a valid dictionary',
+    'model_type': 'Input should be a valid dictionary or object',
+    'dataclass_type': 'Input should be a valid dictionary or object',
+    'union_type': 'Input should match one of the expected types',
+    'literal_mismatch': 'Input should match one of the allowed values',
+    'none_required': 'Input should be None',
+    'none_type': 'Input should be None',
+    'value_error': 'Value error, {error}',
+    'assertion_error': 'Assertion failed, {error}',
+    'greater_than': 'Input should be greater than {gt}',
+    'less_than': 'Input should be less than {lt}',
+    'greater_than_equal': 'Input should be greater than or equal to {ge}',
+    'less_than_equal': 'Input should be less than or equal to {le}',
+    'multiple_of': 'Input should be a multiple of {multiple_of}',
+    'int_parsing': 'Input should be a valid integer, unable to parse string as an integer',
+    'float_parsing': 'Input should be a valid number, unable to parse string as a number',
+    'bool_parsing': 'Input should be a valid boolean, unable to interpret input',
+    'recursion_error': 'Recursion error - cyclic reference detected',
+    'custom_error': '{msg}',
+}
+
+
+def _format_err_msg(type_str: str, ctx: dict | None) -> str:
+    template = _ERR_TYPE_MESSAGES.get(type_str, f'Validation error [{type_str}]')
+    if ctx:
+        # Handle pluralization for character/characters
+        format_ctx = dict(ctx)
+        for key in ('min_length', 'max_length'):
+            if key in format_ctx:
+                val = format_ctx[key]
+                format_ctx['_s'] = '' if val == 1 else 's'
+        try:
+            return template.format(**format_ctx)
+        except (KeyError, IndexError):
+            return template
+    return template
+
+
+@classmethod
+def _from_exception_data(cls, title: str, line_errors: list[dict], *, input_type: str = 'python') -> 'ValidationError':
+    """Create a ValidationError from error data dicts (matches Rust API)."""
+    # Build error details for the exception message
+    error_parts = []
+    error_dicts = []
+    for err in line_errors:
+        err_type = err.get('type', 'custom_error')
+        loc = err.get('loc', ())
+        input_val = err.get('input')
+        ctx = err.get('ctx')
+
+        msg = _format_err_msg(err_type, ctx)
+        loc_str = '.'.join(str(x) for x in loc) if loc else '(root)'
+
+        # Format input repr
+        try:
+            input_repr = repr(input_val)
+        except Exception:
+            input_repr = str(input_val)
+
+        error_parts.append(f'  {loc_str}\n    {msg} [type={err_type}, input_value={input_repr}, input_type={type(input_val).__name__}]')
+
+        # Build error dict
+        err_dict = {
+            'type': err_type,
+            'loc': tuple(loc) if not isinstance(loc, tuple) else loc,
+            'msg': msg,
+            'input': input_val,
+            'url': f'https://errors.pydantic.dev/2.14/v/{err_type}',
+        }
+        if ctx:
+            err_dict['ctx'] = ctx
+        error_dicts.append(err_dict)
+
+    # Build the what() message
+    count = len(error_parts)
+    errors_str = '\n'.join(error_parts)
+    what_msg = f'{count} validation error{"s" if count != 1 else ""} for {title}\n{errors_str}'
+
+    # Create the exception instance
+    # We need to create a ValidationError that behaves like the C++ one
+    # Use a subclass approach since we can't directly construct C++ ValidationError
+    exc = ValueError.__new__(cls, what_msg)
+    exc.args = (what_msg,)
+
+    # Store error data as attributes
+    exc._title = title
+    exc._errors = error_dicts
+    exc._input_type = input_type
+    exc._from_exception_data_msg = what_msg
+
+    # Override methods to return our data
+    def _errors_method(include_url=True):
+        result = []
+        for e in exc._errors:
+            d = dict(e)
+            if not include_url:
+                d.pop('url', None)
+            result.append(d)
+        return result
+
+    def _error_count_method():
+        return len(exc._errors)
+
+    def _to_json_method():
+        import json
+        return json.dumps(exc._errors)
+
+    exc.errors = _errors_method
+    exc.error_count = _error_count_method
+    exc.to_json = _to_json_method
+
+    return exc
+
+
+ValidationError.from_exception_data = _from_exception_data
+
+
+# ============================================================================
 # Patch ValidationError.__str__ to match Rust error message format
 # ============================================================================
 
@@ -445,6 +582,9 @@ _orig_str = ValidationError.__str__
 
 def _patched_str(self) -> str:
     """Rust-compatible error message string."""
+    # For from_exception_data-created exceptions, return pre-formatted message
+    if hasattr(self, '_from_exception_data_msg'):
+        return self._from_exception_data_msg
     cpp_msg = _orig_str(self)
     model_name = getattr(self, '_model_name', '')
     return _format_rust_error(cpp_msg, model_name)
