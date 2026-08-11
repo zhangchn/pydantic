@@ -284,10 +284,12 @@ struct ConstrainedStringValidator {
         std::string value = result.value().value().to_string();
         
         if (min_length && value.length() < *min_length) {
-            return ValError::line_error(ErrorType(ErrorType::Kind::StringTooShort, static_cast<int64_t>(*min_length)), Location(), input.as_error_value().repr);
+            std::string s = *min_length == 1 ? "" : "s";
+            return ValError::line_error(ErrorType(ErrorType::Kind::StringTooShort, "min_length", std::to_string(*min_length), "s", s), Location(), input.as_error_value().repr);
         }
         if (max_length && value.length() > *max_length) {
-            return ValError::line_error(ErrorType(ErrorType::Kind::StringTooLong, static_cast<int64_t>(*max_length)), Location(), input.as_error_value().repr);
+            std::string s = *max_length == 1 ? "" : "s";
+            return ValError::line_error(ErrorType(ErrorType::Kind::StringTooLong, "max_length", std::to_string(*max_length), "s", s), Location(), input.as_error_value().repr);
         }
         if (pattern && !std::regex_match(value, *pattern)) {
             return ValError::line_error(ErrorType(ErrorType::Kind::StringPatternMismatch), Location(), input.as_error_value().repr);

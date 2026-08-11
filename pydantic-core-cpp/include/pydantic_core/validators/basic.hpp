@@ -333,15 +333,17 @@ public:
         // Length check using char count (Unicode-aware approximation)
         size_t char_count = str.size();  // UTF-8 byte count as proxy
         if (min_length.has_value() && char_count < min_length.value()) {
+            std::string s = min_length.value() == 1 ? "" : "s";
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::StringTooShort, static_cast<int64_t>(min_length.value())),
+                ErrorType(ErrorType::Kind::StringTooShort, "min_length", std::to_string(min_length.value()), "s", s),
                 state.location(),
                 str
             );
         }
         if (max_length.has_value() && char_count > max_length.value()) {
+            std::string s = max_length.value() == 1 ? "" : "s";
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::StringTooLong, static_cast<int64_t>(max_length.value())),
+                ErrorType(ErrorType::Kind::StringTooLong, "max_length", std::to_string(max_length.value()), "s", s),
                 state.location(),
                 str
             );

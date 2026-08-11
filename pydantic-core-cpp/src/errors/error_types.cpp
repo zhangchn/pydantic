@@ -169,8 +169,8 @@ std::string ErrorType::message_template() const {
         {Kind::FloatLessThanEqual, "Input should be less than or equal to {value}"},
         
         // String constraint errors
-        {Kind::StringTooShort, "String should have at least {value} characters"},
-        {Kind::StringTooLong, "String should have at most {value} characters"},
+        {Kind::StringTooShort, "String should have at least {min_length} character{s}"},
+        {Kind::StringTooLong, "String should have at most {max_length} character{s}"},
         {Kind::StringPatternMismatch, "String should match pattern"},
         
         // Bytes constraint errors
