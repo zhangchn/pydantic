@@ -913,7 +913,6 @@ private:
             }
             if (!has_value) continue;
             if (exc_none && fv.is_none()) continue;
-            if (fv.is_none()) continue;
 
             // Apply exclude_if callable
             {
@@ -926,7 +925,29 @@ private:
                 }
             }
 
-            result[py::str(output_key)] = ser->to_python(fv, false, exc_none, round_trip, next.include, next.exclude);
+            py::object serialized;
+            if (ser->type == "function-plain" && !ser->py_func.is_none()) {
+                // Try field serializer call with model instance first
+                PySerializationInfo info(round_trip, "python");
+                bool tried = false;
+                try {
+                    if (ser->info_arg) {
+                        serialized = ser->py_func(value, fv, py::cast(info));
+                    } else {
+                        serialized = ser->py_func(value, fv);
+                    }
+                    tried = true;
+                } catch (const py::error_already_set&) {
+                    PyErr_Clear();
+                    tried = false;
+                }
+                if (!tried) {
+                    serialized = ser->to_python(fv, false, exc_none, round_trip, next.include, next.exclude);
+                }
+            } else {
+                serialized = ser->to_python(fv, false, exc_none, round_trip, next.include, next.exclude);
+            }
+            result[py::str(output_key)] = serialized;
         }
         // Extra fields - also apply include/exclude if they match by name
         if (py::hasattr(value, "__pydantic_extra__")) {
@@ -1035,7 +1056,6 @@ private:
             }
             if (!has_value) continue;
             if (exc_none && fv.is_none()) continue;
-            if (fv.is_none()) continue;
 
             // Apply exclude_if callable
             {
@@ -1048,9 +1068,34 @@ private:
                 }
             }
 
+            std::string field_json;
+            if (ser->type == "function-plain" && !ser->py_func.is_none()) {
+                // Try field serializer call with model instance first
+                PySerializationInfo info(round_trip, "json");
+                bool tried = false;
+                try {
+                    py::object result;
+                    if (ser->info_arg) {
+                        result = ser->py_func(value, fv, py::cast(info));
+                    } else {
+                        result = ser->py_func(value, fv);
+                    }
+                    field_json = infer_json(result, ensure_ascii, -1);
+                    tried = true;
+                } catch (const py::error_already_set&) {
+                    PyErr_Clear();
+                    tried = false;
+                }
+                if (!tried) {
+                    field_json = ser->to_json(fv, ensure_ascii, -1, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
+                }
+            } else {
+                field_json = ser->to_json(fv, ensure_ascii, -1, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
+            }
+
             if (!first) out += ",";
             first = false;
-            out += json_escape(output_key, ensure_ascii) + ":" + ser->to_json(fv, ensure_ascii, -1, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
+            out += json_escape(output_key, ensure_ascii) + ":" + field_json;
         }
         if (py::hasattr(value, "__pydantic_extra__")) {
             auto extra = py::getattr(value, "__pydantic_extra__");
@@ -1410,7 +1455,7 @@ public:
         bool use_alias = by_alias.value_or(false);
 
         bool e = ea.value_or(false);
-        std::string json = ser_->to_json(value, e, -1, round_trip, inc, exc, use_alias, exclude_unset, exclude_defaults, false);
+        std::string json = ser_->to_json(value, e, -1, round_trip, inc, exc, use_alias, exclude_unset, exclude_defaults, exc_none);
         return py::bytes(json);
     }
 
