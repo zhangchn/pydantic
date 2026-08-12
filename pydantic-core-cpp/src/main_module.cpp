@@ -520,7 +520,8 @@ struct SerNode {
                          const py::object& exclude = py::none(),
                          bool by_alias = false,
                          bool exclude_unset = false,
-                         bool exclude_defaults = false) const {
+                         bool exclude_defaults = false,
+                         bool exc_none = false) const {
         if (type == "lax-or-strict") {
             if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
         }
@@ -690,7 +691,7 @@ struct SerNode {
             return out;
         }
         if (!fields.empty()) {
-            return serialize_fields_json(value, ensure_ascii, indent, false, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
+            return serialize_fields_json(value, ensure_ascii, indent, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
         }
         // Delegate model/dataclass/typed-dict to inner serializer
         if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
@@ -1047,7 +1048,7 @@ private:
 
             if (!first) out += ",";
             first = false;
-            out += json_escape(output_key, ensure_ascii) + ":" + ser->to_json(fv, ensure_ascii, -1, round_trip, next.include, next.exclude);
+            out += json_escape(output_key, ensure_ascii) + ":" + ser->to_json(fv, ensure_ascii, -1, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
         }
         if (py::hasattr(value, "__pydantic_extra__")) {
             auto extra = py::getattr(value, "__pydantic_extra__");
