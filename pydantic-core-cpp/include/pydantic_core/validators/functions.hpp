@@ -496,9 +496,9 @@ private:
 // LaxOrStrictValidator - uses different validators for lax/strict mode
 class LaxOrStrictValidator : public Validator {
 public:
-    LaxOrStrictValidator() : lax_(nullptr), strict_(nullptr) {}
+    LaxOrStrictValidator() : lax_(nullptr), strict_(nullptr), used_strict_(false) {}
     LaxOrStrictValidator(std::shared_ptr<Validator> lax, std::shared_ptr<Validator> strict)
-        : lax_(std::move(lax)), strict_(std::move(strict)) {}
+        : lax_(std::move(lax)), strict_(std::move(strict)), used_strict_(false) {}
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -512,6 +512,7 @@ public:
                     "lax-or-strict: strict validator is null"
                 );
             }
+            used_strict_ = true;
             return strict_->validate(input, state);
         }
         if (!lax_) {
@@ -521,13 +522,14 @@ public:
                 "lax-or-strict: lax validator is null"
             );
         }
+        used_strict_ = false;
         return lax_->validate(input, state);
     }
 
     std::string name() const override { return "lax-or-strict"; }
 
-    // Both branches produce the same result type (that's the point)
     std::string effective_result_name() const override {
+        if (used_strict_ && strict_) return strict_->effective_result_name();
         if (lax_) return lax_->effective_result_name();
         if (strict_) return strict_->effective_result_name();
         return "lax-or-strict";
@@ -536,14 +538,15 @@ public:
 private:
     std::shared_ptr<Validator> lax_;
     std::shared_ptr<Validator> strict_;
+    mutable bool used_strict_;
 };
 
 // JsonOrPythonValidator - uses different validators for JSON/Python input
 class JsonOrPythonValidator : public Validator {
 public:
-    JsonOrPythonValidator() : json_(nullptr), python_(nullptr) {}
+    JsonOrPythonValidator() : json_(nullptr), python_(nullptr), used_python_(false) {}
     JsonOrPythonValidator(std::shared_ptr<Validator> json, std::shared_ptr<Validator> python)
-        : json_(std::move(json)), python_(std::move(python)) {}
+        : json_(std::move(json)), python_(std::move(python)), used_python_(false) {}
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -557,6 +560,7 @@ public:
                     "json-or-python: json validator is null"
                 );
             }
+            used_python_ = false;
             return json_->validate(input, state);
         }
         if (!python_) {
@@ -566,21 +570,23 @@ public:
                 "json-or-python: python validator is null"
             );
         }
+        used_python_ = true;
         return python_->validate(input, state);
     }
 
     std::string name() const override { return "json-or-python"; }
 
-    // The result comes from whichever branch handled the input
     std::string effective_result_name() const override {
-        if (python_) return python_->effective_result_name();
+        if (used_python_ && python_) return python_->effective_result_name();
         if (json_) return json_->effective_result_name();
+        if (python_) return python_->effective_result_name();
         return "json-or-python";
     }
 
 private:
     std::shared_ptr<Validator> json_;
     std::shared_ptr<Validator> python_;
+    mutable bool used_python_;
 };
 
 // JsonValidator - validates JSON input by converting to Python object
