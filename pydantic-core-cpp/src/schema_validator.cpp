@@ -795,8 +795,14 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
 
     // "any" type — try all casts (numbers before strings)
     if (is_any) {
-        // AnyValidator stores values as string*, parse the string
-        // to determine the correct Python type
+        // AnyValidator now stores values as py::object to preserve identity and type
+        try {
+            auto* obj = static_cast<py::object*>(value.get());
+            if (obj) {
+                return *obj;
+            }
+        } catch (...) {}
+        // Fallback for legacy string storage
         try {
             auto* s = static_cast<std::string*>(value.get());
             if (s) {

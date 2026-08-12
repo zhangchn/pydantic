@@ -17,16 +17,10 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        // Accept any input - return a string representation.
-        // as_error_value().repr adds surrounding quotes for strings
-        // (e.g. "'foobar'"), so strip them if present.
-        std::string repr = input.as_error_value().repr;
-        // Strip surrounding single quotes added by as_error_value
-        if (repr.size() >= 2 && repr.front() == '\'' && repr.back() == '\'') {
-            repr = repr.substr(1, repr.size() - 2);
-        }
+        // Accept any input - return the original Python object to preserve identity and type
+        py::object obj = input.as_python_object();
         return ValResult<std::shared_ptr<void>>(
-            std::make_shared<std::string>(std::move(repr))
+            std::make_shared<py::object>(std::move(obj))
         );
     }
 
