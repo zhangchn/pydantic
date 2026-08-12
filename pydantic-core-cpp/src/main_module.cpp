@@ -942,10 +942,10 @@ private:
                     tried = false;
                 }
                 if (!tried) {
-                    serialized = ser->to_python(fv, false, exc_none, round_trip, next.include, next.exclude);
+                    serialized = ser->to_python(fv, false, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults);
                 }
             } else {
-                serialized = ser->to_python(fv, false, exc_none, round_trip, next.include, next.exclude);
+                serialized = ser->to_python(fv, false, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults);
             }
             result[py::str(output_key)] = serialized;
         }
