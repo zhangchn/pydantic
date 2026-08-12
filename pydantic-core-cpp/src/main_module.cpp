@@ -375,7 +375,7 @@ struct SerNode {
                 // Serialize value to JSON string, return as Python string
                 std::string json_str;
                 if (!children.empty()) {
-                    json_str = children[0]->to_json(value, false, -1, round_trip);
+                    json_str = children[0]->to_json(value, false, -1, round_trip, py::none(), py::none(), false, false, false, exc_none);
                 } else {
                     json_str = infer_json(value, false, -1);
                 }
@@ -523,7 +523,7 @@ struct SerNode {
                          bool exclude_defaults = false,
                          bool exc_none = false) const {
         if (type == "lax-or-strict") {
-            if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
+            if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
         }
         if (type == "is-instance" || type == "is-subclass") {
             return infer_json(value, ensure_ascii, indent);
@@ -577,26 +577,26 @@ struct SerNode {
                 // round_trip: serialize value to JSON, wrap as escaped JSON string
                 std::string inner_json;
                 if (!children.empty()) {
-                    inner_json = children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias);
+                    inner_json = children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
                 } else {
                     inner_json = infer_json(value, ensure_ascii, indent);
                 }
                 return json_escape(inner_json, ensure_ascii);
             }
             if (!children.empty()) {
-                return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
+                return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
             }
         }
         if (type == "nullable" || type == "nullable-union") {
             if (value.is_none()) return "null";
-            if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
+            if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
         }
         if (type == "default" || type == "with-default") {
             if (value.is_none() && has_default_val) {
-                if (!children.empty()) return children[0]->to_json(default_val, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
+                if (!children.empty()) return children[0]->to_json(default_val, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
                 return infer_json(default_val, ensure_ascii, indent);
             }
-            if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
+            if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
         }
         if (type == "to-string") {
             py::object inner = !children.empty() ? children[0]->to_python(value, false, false, round_trip) : value;
@@ -682,7 +682,7 @@ struct SerNode {
                 first = false;
                 py::object obj = py::reinterpret_borrow<py::object>(item);
                 if (!children.empty()) {
-                    out += children[0]->to_json(obj, ensure_ascii, -1, round_trip);
+                    out += children[0]->to_json(obj, ensure_ascii, -1, round_trip, py::none(), py::none(), false, false, false, exc_none);
                 } else {
                     out += infer_json(obj, ensure_ascii, -1);
                 }
@@ -703,9 +703,9 @@ struct SerNode {
             // For root models, extract the 'root' attribute before delegating
             if (root_model && py::hasattr(value, "root")) {
                 auto root_val = py::getattr(value, "root");
-                return children[0]->to_json(root_val, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
+                return children[0]->to_json(root_val, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
             }
-            return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
+            return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
         }
         if (!py_func.is_none()) {
             py::object result;
@@ -913,6 +913,7 @@ private:
             }
             if (!has_value) continue;
             if (exc_none && fv.is_none()) continue;
+            if (fv.is_none()) continue;
 
             // Apply exclude_if callable
             {
@@ -1034,6 +1035,7 @@ private:
             }
             if (!has_value) continue;
             if (exc_none && fv.is_none()) continue;
+            if (fv.is_none()) continue;
 
             // Apply exclude_if callable
             {
@@ -1408,7 +1410,7 @@ public:
         bool use_alias = by_alias.value_or(false);
 
         bool e = ea.value_or(false);
-        std::string json = ser_->to_json(value, e, -1, round_trip, inc, exc, use_alias, exclude_unset, exclude_defaults);
+        std::string json = ser_->to_json(value, e, -1, round_trip, inc, exc, use_alias, exclude_unset, exclude_defaults, false);
         return py::bytes(json);
     }
 
@@ -1432,7 +1434,7 @@ static py::bytes to_json_fn(const py::object& value, std::optional<size_t>, std:
     std::optional<py::object>, bool, std::optional<bool>, std::optional<py::object>) {
     SerRef any = std::make_shared<SerNode>();
     any->type = "any";
-    return py::bytes(any->to_json(value, ea.value_or(false), -1, round_trip));
+    return py::bytes(any->to_json(value, ea.value_or(false), -1, round_trip, py::none(), py::none(), false, false, false, false));
 }
 
 static py::object to_jsonable_fn(const py::object& value, std::optional<py::object>, std::optional<py::object>,
