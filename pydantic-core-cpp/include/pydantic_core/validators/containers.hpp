@@ -9,6 +9,9 @@
 
 namespace pydantic_core {
 
+// Forward declaration — defined in schema_validator.cpp
+py::object value_to_python_with_type(const std::shared_ptr<void>& value, const std::string& type_name);
+
 // ListValidator - validates list/array values
 class ListValidator : public Validator {
 public:
@@ -54,9 +57,9 @@ public:
             py::list result_list;
             std::vector<std::shared_ptr<ValLineError>> errors;
             // In strings mode (validate_strings), items always coerce regardless of strict
-            ValidationState item_state = state.sub_copy(state.coerce_strings());
             for (const auto& entry : entries) {
                 state.location().push(entry.index);
+                ValidationState item_state = state.sub_copy(state.coerce_strings());
                 // Get the element and create an input for sub-validation
                 py::object element = list->get_item(entry.index);
                 std::unique_ptr<Input> element_input;
@@ -321,6 +324,8 @@ public:
 // SetValidator - validates set values
 class SetValidator : public Validator {
 public:
+    std::shared_ptr<Validator> items_schema;
+
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
@@ -329,15 +334,36 @@ public:
         if (result.is_err()) {
             return result.error();
         }
-        return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
+        auto& list_match = result.value();
+        auto& list = list_match.value();
+        auto entries = list->entries();
+        py::set result_set;
+        for (const auto& entry : entries) {
+            py::object element = list->get_item(entry.index);
+            if (items_schema) {
+                PythonInput elem_input(element);
+                auto item_result = items_schema->validate(elem_input, state);
+                if (item_result.is_ok()) {
+                    py::object py_val = value_to_python_with_type(item_result.value(), items_schema->effective_result_name());
+                    result_set.add(py_val);
+                } else {
+                    return item_result.error();
+                }
+            } else {
+                result_set.add(element);
+            }
+        }
+        return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(std::move(result_set)));
     }
-    
+
     std::string name() const override { return "set"; }
 };
 
 // FrozenSetValidator - validates frozenset values
 class FrozenSetValidator : public Validator {
 public:
+    std::shared_ptr<Validator> items_schema;
+
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
@@ -346,9 +372,29 @@ public:
         if (result.is_err()) {
             return result.error();
         }
-        return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
+        auto& list_match = result.value();
+        auto& list = list_match.value();
+        auto entries = list->entries();
+        py::set result_set;
+        for (const auto& entry : entries) {
+            py::object element = list->get_item(entry.index);
+            if (items_schema) {
+                PythonInput elem_input(element);
+                auto item_result = items_schema->validate(elem_input, state);
+                if (item_result.is_ok()) {
+                    py::object py_val = value_to_python_with_type(item_result.value(), items_schema->effective_result_name());
+                    result_set.add(py_val);
+                } else {
+                    return item_result.error();
+                }
+            } else {
+                result_set.add(element);
+            }
+        }
+        py::frozenset fs = py::frozenset(result_set);
+        return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(std::move(fs)));
     }
-    
+
     std::string name() const override { return "frozenset"; }
 };
 
@@ -373,18 +419,29 @@ public:
         auto& tuple = tuple_match.value();
         size_t tuple_size = tuple->size();
 
-        // Validate positional items
-        if (!items.empty()) {
-            auto entries = tuple->entries();
-            for (size_t i = 0; i < entries.size(); i++) {
-                state.location().push(i);
-                // In a full implementation, validate each element against items[i]
-                // or items.back() if variadic and i >= items.size()
-                state.location().pop();
+        // Build result tuple, validating items if we have item schemas
+        py::tuple result_tuple(tuple_size);
+        auto entries = tuple->entries();
+        for (size_t i = 0; i < entries.size(); i++) {
+            py::object element = tuple->get_item(i);
+            if (!items.empty()) {
+                size_t schema_idx = (variadic && i >= items.size()) ? items.size() - 1 : i;
+                if (schema_idx < items.size() && items[schema_idx]) {
+                    state.location().push(i);
+                    PythonInput elem_input(element);
+                    auto item_result = items[schema_idx]->validate(elem_input, state);
+                    state.location().pop();
+                    if (item_result.is_ok()) {
+                        element = value_to_python_with_type(item_result.value(), items[schema_idx]->effective_result_name());
+                    } else {
+                        return item_result.error();
+                    }
+                }
             }
+            result_tuple[i] = element;
         }
 
-        return ValResult<std::shared_ptr<void>>(std::make_shared<int>(static_cast<int>(tuple_size)));
+        return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(std::move(result_tuple)));
     }
 
     std::string name() const override { return "tuple"; }

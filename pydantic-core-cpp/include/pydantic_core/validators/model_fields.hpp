@@ -18,6 +18,9 @@
 
 namespace pydantic_core {
 
+// Forward declaration — defined in schema_validator.cpp
+py::object value_to_python_with_type(const std::shared_ptr<void>& value, const std::string& type_name);
+
 // ExtraBehavior is already defined in types.hpp
 
 // ============================================================================
@@ -33,6 +36,9 @@ struct FieldInfo {
                                                 // Strings stored raw (no JSON quotes).
     bool frozen = false;                       // Whether field can be reassigned
     std::string alias;                         // Alternative name for lookup
+    py::object default_factory = py::none();   // Python callable for default_factory
+    py::object default_py_obj = py::none();    // Complex Python object default (callables, etc.)
+    bool default_factory_takes_data = false;   // Whether factory receives validated data dict
 
     std::string display_name() const {
         return alias.empty() ? name : alias;
@@ -193,6 +199,70 @@ public:
                         original_input.as_error_value().repr
                     );
                     combined_errors.merge(std::move(err));
+                } else if (!field.default_factory.is_none()) {
+                    // Call default_factory to get the default value
+                    ValidatedModelFieldsOutput::FieldValue fv;
+                    try {
+                        py::object raw;
+                        if (field.default_factory_takes_data) {
+                            // Build dict of already-validated fields for the factory
+                            py::dict data_dict;
+                            for (const auto& fname : output.field_order) {
+                                auto& fval = output.fields.at(fname);
+                                data_dict[py::str(fname)] = value_to_python_with_type(fval.value, fval.type_name);
+                            }
+                            raw = field.default_factory(data_dict);
+                        } else {
+                            raw = field.default_factory();
+                        }
+                        if (field.schema) {
+                            PythonInput py_in(raw);
+                            auto default_result = field.schema->validate(py_in, state);
+                            if (default_result.is_ok()) {
+                                fv.value = default_result.value();
+                                fv.type_name = field_type_name(field.schema);
+                            } else {
+                                fv.value = std::make_shared<py::object>(std::move(raw));
+                                fv.type_name = "py_object";
+                            }
+                        } else {
+                            fv.value = std::make_shared<py::object>(std::move(raw));
+                            fv.type_name = "py_object";
+                        }
+                    } catch (py::error_already_set& e) {
+                        if (field.default_factory_takes_data) {
+                            // Let exceptions from data-aware factories propagate (e.g. KeyError)
+                            throw;
+                        }
+                        auto err = ValError::line_error(
+                            ErrorType(ErrorType::Kind::CustomError),
+                            state.location(),
+                            std::string("default_factory failed: ") + e.what()
+                        );
+                        combined_errors.merge(std::move(err));
+                    }
+                    output.fields[name] = std::move(fv);
+                    output.field_order.push_back(name);
+                } else if (!field.default_py_obj.is_none()) {
+                    // Complex Python object default (callable, etc.)
+                    ValidatedModelFieldsOutput::FieldValue fv;
+                    py::object raw = field.default_py_obj;
+                    if (field.schema) {
+                        PythonInput py_in(raw);
+                        auto default_result = field.schema->validate(py_in, state);
+                        if (default_result.is_ok()) {
+                            fv.value = default_result.value();
+                            fv.type_name = field_type_name(field.schema);
+                        } else {
+                            fv.value = std::make_shared<py::object>(std::move(raw));
+                            fv.type_name = "py_object";
+                        }
+                    } else {
+                        fv.value = std::make_shared<py::object>(std::move(raw));
+                        fv.type_name = "py_object";
+                    }
+                    output.fields[name] = std::move(fv);
+                    output.field_order.push_back(name);
                 } else if (!field.default_value_str.empty()) {
                     ValidatedModelFieldsOutput::FieldValue fv;
                     // Parse the default value through the field's validator

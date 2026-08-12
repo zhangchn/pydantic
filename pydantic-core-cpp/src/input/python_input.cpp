@@ -639,6 +639,13 @@ ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> PythonInput::validate_tuple
         );
     }
 
+    if (!strict && is_list()) {
+        py::tuple tup = py::tuple(obj_);
+        return ValMatch<std::unique_ptr<ValidatedTuple>>::lax(
+            std::make_unique<PythonValidatedTuple>(tup)
+        );
+    }
+
     return type_error(ErrorType::Kind::TupleType, *this, this->current_location());
 }
 

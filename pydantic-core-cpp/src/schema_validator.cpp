@@ -774,6 +774,25 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
         } catch (...) {}
     }
 
+    // UUID type — stored as std::string by UuidValidator
+    if (type_name == "uuid") {
+        try {
+            auto* s = static_cast<std::string*>(value.get());
+            if (s) {
+                py::object uuid_mod = py::module_::import("uuid");
+                return uuid_mod.attr("UUID")(*s);
+            }
+        } catch (...) {}
+    }
+
+    // Literal type — stored as std::string by LiteralValidator
+    if (type_name == "literal") {
+        try {
+            auto* s = static_cast<std::string*>(value.get());
+            if (s) return py::str(*s);
+        } catch (...) {}
+    }
+
     // "any" type — try all casts (numbers before strings)
     if (is_any) {
         // AnyValidator stores values as string*, parse the string
@@ -827,7 +846,9 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
     // For function-after/before/wrap/plain validators, check py::object*
     bool is_function_type = (type_name == "function-after" || type_name == "function-before" ||
                              type_name == "function-wrap" || type_name == "function-plain" ||
-                             type_name == "call" || type_name == "arguments" || type_name == "dataclass");
+                             type_name == "call" || type_name == "arguments" || type_name == "dataclass" ||
+                             type_name == "callable" || type_name == "set" || type_name == "frozenset" ||
+                             type_name == "tuple");
     if (is_function_type) {
         try {
             auto* obj = static_cast<py::object*>(value.get());

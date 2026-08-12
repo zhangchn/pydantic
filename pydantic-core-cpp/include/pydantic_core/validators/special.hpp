@@ -501,9 +501,48 @@ public:
     }
     
     std::string name() const override { return "enum"; }
-    
+
 private:
     std::unordered_set<std::string> valid_values_;
+};
+
+// CustomErrorValidator - wraps an inner validator, replacing its error with a custom one
+class CustomErrorValidator : public Validator {
+public:
+    CustomErrorValidator() = default;
+    CustomErrorValidator(std::shared_ptr<Validator> inner, std::string msg, std::string error_type)
+        : inner_(std::move(inner)), msg_(std::move(msg)), error_type_(std::move(error_type)) {}
+
+    ValResult<std::shared_ptr<void>> validate(
+        const Input& input,
+        ValidationState& state
+    ) override {
+        if (inner_) {
+            auto result = inner_->validate(input, state);
+            if (result.is_ok()) return result;
+        }
+        // Inner failed (or no inner) — raise custom error
+        return ValError::line_error(
+            ErrorType(ErrorType::Kind::CustomError),
+            state.location(),
+            msg_.empty() ? "Custom error" : msg_
+        );
+    }
+
+    std::string name() const override {
+        if (inner_) return inner_->name();
+        return "custom-error";
+    }
+
+    std::string effective_result_name() const override {
+        if (inner_) return inner_->effective_result_name();
+        return "custom-error";
+    }
+
+private:
+    std::shared_ptr<Validator> inner_;
+    std::string msg_;
+    std::string error_type_;
 };
 
 } // namespace pydantic_core

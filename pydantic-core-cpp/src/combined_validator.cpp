@@ -1238,7 +1238,12 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("expected")) {
             auto lst = schema["expected"].cast<py::list>();
             for (auto item : lst) {
-                expected.push_back(py::str(item).cast<std::string>());
+                // For Enum members, use .value instead of str() (which gives 'ClassName.MEMBER')
+                if (py::hasattr(item, "value")) {
+                    expected.push_back(py::str(py::getattr(item, "value")).cast<std::string>());
+                } else {
+                    expected.push_back(py::str(item).cast<std::string>());
+                }
             }
         }
         return std::make_shared<LiteralValidator>(std::move(expected));
@@ -1499,10 +1504,36 @@ static std::shared_ptr<Validator> build_from_py_dict(
         return v;
     }
 
+    // --- Custom Error ---
+    if (type == "custom-error") {
+        std::shared_ptr<Validator> inner;
+        if (schema.contains("schema")) {
+            inner = build_from_py_dict(schema["schema"].cast<py::dict>(), config, definitions);
+        }
+        std::string msg;
+        if (schema.contains("custom_error_message")) {
+            msg = py::str(schema["custom_error_message"]).cast<std::string>();
+        }
+        std::string error_type;
+        if (schema.contains("custom_error_type")) {
+            error_type = py::str(schema["custom_error_type"]).cast<std::string>();
+        }
+        return std::make_shared<CustomErrorValidator>(std::move(inner), std::move(msg), std::move(error_type));
+    }
+
     // --- Tuple ---
     if (type == "tuple" || type == "tuple-constrained" || type == "constr-tuple" || type == "tuple-variable") {
-        // Simple stub
-        return std::make_shared<TupleValidator>();
+        auto tv = std::make_shared<TupleValidator>();
+        if (schema.contains("items_schema")) {
+            auto items = schema["items_schema"].cast<py::list>();
+            for (auto item : items) {
+                tv->items.push_back(build_from_py_dict(item.cast<py::dict>(), config, definitions));
+            }
+        }
+        if (schema.contains("variadic_item_index")) {
+            tv->variadic = true;
+        }
+        return tv;
     }
 
     // --- Dict ---
@@ -1524,9 +1555,19 @@ static std::shared_ptr<Validator> build_from_py_dict(
     }
 
     // --- Set ---
-    if (type == "set" || type == "set-constrained" || type == "constr-set" || type == "frozenset" || type == "frozenset-constrained") {
-        // Simple stub
-        return std::make_shared<SetValidator>();
+    if (type == "set" || type == "set-constrained" || type == "constr-set") {
+        auto v = std::make_shared<SetValidator>();
+        if (schema.contains("items_schema")) {
+            v->items_schema = build_from_py_dict(schema["items_schema"].cast<py::dict>(), config, definitions);
+        }
+        return v;
+    }
+    if (type == "frozenset" || type == "frozenset-constrained") {
+        auto v = std::make_shared<FrozenSetValidator>();
+        if (schema.contains("items_schema")) {
+            v->items_schema = build_from_py_dict(schema["items_schema"].cast<py::dict>(), config, definitions);
+        }
+        return v;
     }
 
     // --- Model ---
@@ -1546,6 +1587,18 @@ static std::shared_ptr<Validator> build_from_py_dict(
         }
         auto v = std::make_shared<ModelValidator>(inner, model_name, /*frozen=*/false, /*custom_init=*/false, root_model, model_cls);
         return v;
+    }
+
+    // --- Chain ---
+    if (type == "chain") {
+        std::vector<std::shared_ptr<Validator>> validators;
+        if (schema.contains("steps")) {
+            auto steps = schema["steps"].cast<py::list>();
+            for (auto step : steps) {
+                validators.push_back(build_from_py_dict(step.cast<py::dict>(), config, definitions));
+            }
+        }
+        return std::make_shared<ChainValidator>(std::move(validators));
     }
 
     // --- ModelFields / TypedDict ---
@@ -1581,6 +1634,9 @@ static std::shared_ptr<Validator> build_from_py_dict(
                             auto py_default = field_schema_dict["default"];
                             if (py_default.is_none()) {
                                 default_val_str = "null";
+                            } else if (py::hasattr(py_default, "__call__")) {
+                                // Callable default — store as Python object, not JSON string
+                                // (will be handled by default_py_obj in missing-field path)
                             } else {
                                 default_val_str = py_default_to_json_str(py_default);
                             }
@@ -1595,15 +1651,32 @@ static std::shared_ptr<Validator> build_from_py_dict(
                         field_validator = build_from_py_dict(field_schema_dict, config, definitions);
                     }
                 }
-                
-                v->add_field(field_name, FieldInfo{
-                    "",          // name (set via add_field's first param)
-                    field_validator,
-                    required,    // required
-                    default_val_str,  // default_value_str
-                    false,       // frozen
-                    ""           // alias
-                });
+
+                FieldInfo info;
+                info.name = field_name;
+                info.schema = field_validator;
+                info.required = required;
+                info.default_value_str = default_val_str;
+                info.frozen = false;
+                // Extract default_factory and callable defaults from the field schema
+                if (field_def.contains("schema")) {
+                    auto fsd = field_def["schema"].cast<py::dict>();
+                    if (fsd.contains("default_factory") && !fsd["default_factory"].is_none()) {
+                        info.default_factory = fsd["default_factory"];
+                        info.required = false;
+                        if (fsd.contains("default_factory_takes_data") &&
+                            py::isinstance<py::bool_>(fsd["default_factory_takes_data"])) {
+                            info.default_factory_takes_data = fsd["default_factory_takes_data"].cast<bool>();
+                        }
+                    } else if (fsd.contains("default")) {
+                        auto py_default = fsd["default"];
+                        if (!py_default.is_none() && py::hasattr(py_default, "__call__")) {
+                            info.default_py_obj = py_default;
+                            info.required = false;
+                        }
+                    }
+                }
+                v->add_field(field_name, std::move(info));
             }
         }
         
