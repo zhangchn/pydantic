@@ -21,7 +21,10 @@ std::string get_version() { return "2.47.0"; }
 struct PySerializationInfo {
     bool round_trip;
     std::string mode;
-    PySerializationInfo(bool round_trip_, std::string mode_ = "python") : round_trip(round_trip_), mode(std::move(mode_)) {}
+    std::string field_name;
+    py::object context;
+    PySerializationInfo(bool round_trip_, std::string mode_ = "python", std::string field_name_ = "", py::object context_ = py::none()) 
+        : round_trip(round_trip_), mode(std::move(mode_)), field_name(std::move(field_name_)), context(std::move(context_)) {}
 };
 
 // ---------------------------------------------------------------------------
@@ -293,6 +296,8 @@ struct SerNode {
     // For function serializers
     py::object py_func;
     bool info_arg = false;
+    bool is_field_serializer = false;
+    std::string when_used = "always";  // "always", "unless-none", "json", "json-unless-none"
     // For default
     py::object default_val;
     bool has_default_val = false;
@@ -318,6 +323,8 @@ struct SerNode {
         computed_fields_ = other.computed_fields_;
         py_func = other.py_func;
         info_arg = other.info_arg;
+        is_field_serializer = other.is_field_serializer;
+        when_used = other.when_used;
         default_val = other.default_val;
         has_default_val = other.has_default_val;
         format_str = other.format_str;
@@ -331,7 +338,8 @@ struct SerNode {
                          const py::object& exclude = py::none(),
                          bool by_alias = false,
                          bool exclude_unset = false,
-                         bool exclude_defaults = false) const {
+                         bool exclude_defaults = false,
+                         const py::object& context = py::none()) const {
         // Type-specific logic
         if (type == "lax-or-strict") {
             if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
@@ -398,7 +406,7 @@ struct SerNode {
             }
         }
         if (!fields.empty()) {
-            return serialize_fields(value, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
+            return serialize_fields(value, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
         }
         // Delegate model/dataclass/typed-dict to inner serializer
         if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
@@ -415,28 +423,54 @@ struct SerNode {
             return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
         }
         if (!py_func.is_none()) {
+            // Check when_used
+            bool skip_serializer = false;
+            if (when_used == "json" || when_used == "json-unless-none") {
+                if (!json_mode) skip_serializer = true;
+            }
+            if ((when_used == "unless-none" || when_used == "json-unless-none") && value.is_none()) {
+                skip_serializer = true;
+            }
+            if (skip_serializer) {
+                if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
+                return value;
+            }
             if (type == "function-plain") {
                 if (info_arg) {
-                    PySerializationInfo info(round_trip, json_mode ? "json" : "python");
+                    PySerializationInfo info(round_trip, json_mode ? "json" : "python", "", context);
                     return py_func(value, py::cast(info));
                 }
                 return py_func(value);
             }
             if (type == "function-after" || type == "function-before" || type == "function-wrap") {
-                py::object handler = py::cpp_function([this, value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults](const py::object& v) -> py::object {
-                    if (!children.empty()) return children[0]->to_python(v, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
+                py::object handler = py::cpp_function([this, value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context](const py::object& v) -> py::object {
+                    if (!children.empty()) return children[0]->to_python(v, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
                     return v;
                 });
                 if (type == "function-wrap") {
-                    PySerializationInfo info(round_trip, json_mode ? "json" : "python");
-                    return py_func(value, handler, py::cast(info));
+                    if (info_arg) {
+                        PySerializationInfo info(round_trip, json_mode ? "json" : "python", "", context);
+                        return py_func(value, handler, py::cast(info));
+                    } else {
+                        return py_func(value, handler);
+                    }
                 }
                 try {
-                    return py_func(value, handler);
+                    if (info_arg) {
+                        PySerializationInfo info(round_trip, json_mode ? "json" : "python", "", context);
+                        return py_func(value, handler, py::cast(info));
+                    } else {
+                        return py_func(value, handler);
+                    }
                 } catch (...) {
                     PyErr_Clear();
                     try {
-                        return py_func(value);
+                        if (info_arg) {
+                            PySerializationInfo info(round_trip, json_mode ? "json" : "python", "", context);
+                            return py_func(value);
+                        } else {
+                            return py_func(value);
+                        }
                     } catch (...) {
                         PyErr_Clear();
                         return value;
@@ -521,7 +555,8 @@ struct SerNode {
                          bool by_alias = false,
                          bool exclude_unset = false,
                          bool exclude_defaults = false,
-                         bool exc_none = false) const {
+                         bool exc_none = false,
+                         const py::object& context = py::none()) const {
         if (type == "lax-or-strict") {
             if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
         }
@@ -708,6 +743,18 @@ struct SerNode {
             return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
         }
         if (!py_func.is_none()) {
+            // Check when_used
+            bool skip_serializer = false;
+            if (when_used == "json" || when_used == "json-unless-none") {
+                // json mode is always true in to_json
+            }
+            if ((when_used == "unless-none" || when_used == "json-unless-none") && value.is_none()) {
+                skip_serializer = true;
+            }
+            if (skip_serializer) {
+                if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
+                return infer_json(value, ensure_ascii, indent);
+            }
             py::object result;
             if (type == "function-plain") {
                 if (info_arg) {
@@ -831,7 +878,8 @@ private:
                                  const py::object& exclude = py::none(),
                                  bool by_alias = false,
                                  bool exclude_unset = false,
-                                 bool exclude_defaults = false) const {
+                                 bool exclude_defaults = false,
+                                 const py::object& context = py::none()) const {
         py::dict result;
         py::dict main;
         if (py::isinstance<py::dict>(value)) main = value.cast<py::dict>();
@@ -926,15 +974,63 @@ private:
             }
 
             py::object serialized;
-            if (ser->type == "function-plain" && !ser->py_func.is_none()) {
+            // Check if we should use the custom field serializer based on when_used
+            bool use_field_serializer = false;
+            if ((ser->type == "function-plain" || ser->type == "function-wrap") && !ser->py_func.is_none()) {
+                use_field_serializer = true;
+                // Check when_used conditions
+                if (ser->when_used == "unless-none" || ser->when_used == "json-unless-none") {
+                    if (fv.is_none()) {
+                        use_field_serializer = false;
+                    }
+                }
+                // Note: "json" and "json-unless-none" only apply in JSON mode, so skip in Python mode
+                if (ser->when_used == "json" || ser->when_used == "json-unless-none") {
+                    use_field_serializer = false;
+                }
+            }
+
+            if (use_field_serializer) {
                 // Try field serializer call with model instance first
-                PySerializationInfo info(round_trip, "python");
+                PySerializationInfo info(round_trip, "python", k, context);
                 bool tried = false;
                 try {
-                    if (ser->info_arg) {
-                        serialized = ser->py_func(value, fv, py::cast(info));
+                    if (ser->type == "function-wrap") {
+                        // For wrap mode, create a handler function
+                        py::object handler = py::cpp_function([ser, fv, exc_none, round_trip, next, by_alias, exclude_unset, exclude_defaults, context](const py::object& v) -> py::object {
+                            if (!ser->children.empty()) {
+                                return ser->children[0]->to_python(v, false, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context);
+                            }
+                            return v;
+                        });
+                        if (ser->is_field_serializer) {
+                            if (ser->info_arg) {
+                                serialized = ser->py_func(value, fv, handler, py::cast(info));
+                            } else {
+                                serialized = ser->py_func(value, fv, handler);
+                            }
+                        } else {
+                            if (ser->info_arg) {
+                                serialized = ser->py_func(fv, handler, py::cast(info));
+                            } else {
+                                serialized = ser->py_func(fv, handler);
+                            }
+                        }
                     } else {
-                        serialized = ser->py_func(value, fv);
+                        // function-plain
+                        if (ser->is_field_serializer) {
+                            if (ser->info_arg) {
+                                serialized = ser->py_func(value, fv, py::cast(info));
+                            } else {
+                                serialized = ser->py_func(value, fv);
+                            }
+                        } else {
+                            if (ser->info_arg) {
+                                serialized = ser->py_func(fv, py::cast(info));
+                            } else {
+                                serialized = ser->py_func(fv);
+                            }
+                        }
                     }
                     tried = true;
                 } catch (const py::error_already_set&) {
@@ -942,10 +1038,16 @@ private:
                     tried = false;
                 }
                 if (!tried) {
-                    serialized = ser->to_python(fv, false, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults);
+                    // Fallback to inner schema if available, otherwise use default serialization
+                    if (!ser->children.empty()) {
+                        serialized = ser->children[0]->to_python(fv, false, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context);
+                    } else {
+                        serialized = ser->to_python(fv, false, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context);
+                    }
                 }
             } else {
-                serialized = ser->to_python(fv, false, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults);
+                // Use the field serializer directly (it handles list/dict iteration, etc.)
+                serialized = ser->to_python(fv, false, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context);
             }
             result[py::str(output_key)] = serialized;
         }
@@ -1069,16 +1171,63 @@ private:
             }
 
             std::string field_json;
-            if (ser->type == "function-plain" && !ser->py_func.is_none()) {
+            // Check if we should use the custom field serializer based on when_used
+            bool use_field_serializer = false;
+            if ((ser->type == "function-plain" || ser->type == "function-wrap") && !ser->py_func.is_none()) {
+                use_field_serializer = true;
+                // Check when_used conditions
+                if (ser->when_used == "unless-none" || ser->when_used == "json-unless-none") {
+                    if (fv.is_none()) {
+                        use_field_serializer = false;
+                    }
+                }
+                // Note: "json" and "json-unless-none" are already in JSON mode, so no additional check needed
+            }
+
+            if (use_field_serializer) {
                 // Try field serializer call with model instance first
-                PySerializationInfo info(round_trip, "json");
+                PySerializationInfo info(round_trip, "json", k);
                 bool tried = false;
                 try {
                     py::object result;
-                    if (ser->info_arg) {
-                        result = ser->py_func(value, fv, py::cast(info));
+                    if (ser->type == "function-wrap") {
+                        // For wrap mode, create a handler function
+                        py::object handler = py::cpp_function([ser, fv, ensure_ascii, round_trip, next, by_alias, exclude_unset, exclude_defaults, exc_none](const py::object& v) -> py::object {
+                            if (!ser->children.empty()) {
+                                // Call to_python and let infer_json handle the conversion
+                                auto py_result = ser->children[0]->to_python(v, true, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults);
+                                return py_result;
+                            }
+                            return v;
+                        });
+                        if (ser->is_field_serializer) {
+                            if (ser->info_arg) {
+                                result = ser->py_func(value, fv, handler, py::cast(info));
+                            } else {
+                                result = ser->py_func(value, fv, handler);
+                            }
+                        } else {
+                            if (ser->info_arg) {
+                                result = ser->py_func(fv, handler, py::cast(info));
+                            } else {
+                                result = ser->py_func(fv, handler);
+                            }
+                        }
                     } else {
-                        result = ser->py_func(value, fv);
+                        // function-plain
+                        if (ser->is_field_serializer) {
+                            if (ser->info_arg) {
+                                result = ser->py_func(value, fv, py::cast(info));
+                            } else {
+                                result = ser->py_func(value, fv);
+                            }
+                        } else {
+                            if (ser->info_arg) {
+                                result = ser->py_func(fv, py::cast(info));
+                            } else {
+                                result = ser->py_func(fv);
+                            }
+                        }
                     }
                     field_json = infer_json(result, ensure_ascii, -1);
                     tried = true;
@@ -1087,9 +1236,11 @@ private:
                     tried = false;
                 }
                 if (!tried) {
+                    // Fallback to field serializer (handles list/dict iteration, etc.)
                     field_json = ser->to_json(fv, ensure_ascii, -1, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
                 }
             } else {
+                // Use the field serializer directly (handles list/dict iteration, etc.)
                 field_json = ser->to_json(fv, ensure_ascii, -1, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
             }
 
@@ -1151,16 +1302,35 @@ static SerRef build_ser_impl(const py::dict& schema,
     auto node = std::make_shared<SerNode>();
     node->type = type;
 
+    // Handle model-field wrapper: unwrap to inner schema
+    if (type == "model-field") {
+        try {
+            auto inner = build_ser_impl(schema["schema"].cast<py::dict>(), defs);
+            if (inner) {
+                node->copy_from(*inner);
+                return node;
+            }
+        } catch (...) {}
+    }
+
     // When serialization overrides the function too, store it for later use
     // (the function extraction below will use the main schema's function by default)
     py::object ser_func = py::none();
     bool ser_info_arg = false;
+    bool ser_is_field_serializer = false;
+    std::string ser_when_used = "always";
     try {
         if (!ser_dict.is_none() && ser_dict.contains("function")) {
             ser_func = ser_dict["function"];
         }
         if (!ser_dict.is_none() && ser_dict.contains("info_arg")) {
             ser_info_arg = ser_dict["info_arg"].cast<bool>();
+        }
+        if (!ser_dict.is_none() && ser_dict.contains("is_field_serializer")) {
+            ser_is_field_serializer = ser_dict["is_field_serializer"].cast<bool>();
+        }
+        if (!ser_dict.is_none() && ser_dict.contains("when_used")) {
+            ser_when_used = ser_dict["when_used"].cast<std::string>();
         }
     } catch (...) {}
 
@@ -1291,9 +1461,27 @@ static SerRef build_ser_impl(const py::dict& schema,
                 }
             }
             node->py_func = func;
-            node->info_arg = ser_info_arg;
+            // Determine info_arg: prefer serialization override, fall back to schema
+            bool info_arg = ser_info_arg;
+            if (ser_dict.is_none() || !ser_dict.contains("info_arg")) {
+                try { if (schema.contains("info_arg")) info_arg = schema["info_arg"].cast<bool>(); } catch (...) {}
+            }
+            node->info_arg = info_arg;
+            // Determine is_field_serializer: prefer serialization override, fall back to schema
+            bool is_field_serializer = ser_is_field_serializer;
+            if (ser_dict.is_none() || !ser_dict.contains("is_field_serializer")) {
+                try { if (schema.contains("is_field_serializer")) is_field_serializer = schema["is_field_serializer"].cast<bool>(); } catch (...) {}
+            }
+            node->is_field_serializer = is_field_serializer;
+            // Determine when_used: prefer serialization override, fall back to schema
+            std::string when_used = ser_when_used;
+            if (ser_dict.is_none() || !ser_dict.contains("when_used")) {
+                try { if (schema.contains("when_used")) when_used = schema["when_used"].cast<std::string>(); } catch (...) {}
+            }
+            node->when_used = when_used;
         } catch (...) {}
-        if (type != "function-plain") { auto c = sub(); if (c) node->children.push_back(c); }
+        // For function-plain with serialization override, build children from original schema for fallback
+        if (type != "function-plain" || !ser_dict.is_none()) { auto c = sub(); if (c) node->children.push_back(c); }
     }
 
     // model-fields, typed-dict, dataclass-args
@@ -1431,7 +1619,7 @@ public:
                          std::optional<py::object> include, std::optional<py::object> exclude,
                          std::optional<bool> by_alias, bool exclude_unset, bool exclude_defaults, bool exc_none,
                          bool, bool round_trip, py::object, std::optional<py::object>,
-                         bool, std::optional<bool>, std::optional<py::object>) const {
+                         bool, std::optional<bool>, py::object context) const {
         if (!ser_) throw std::runtime_error("Serializer not initialized");
 
         // Pass include/exclude through as-is (nested dict/set filters supported)
@@ -1439,14 +1627,14 @@ public:
         py::object exc = (exclude && !exclude->is_none()) ? *exclude : py::none();
         bool use_alias = by_alias.value_or(false);
 
-        return ser_->to_python(value, mode && *mode == "json", exc_none, round_trip, inc, exc, use_alias, exclude_unset, exclude_defaults);
+        return ser_->to_python(value, mode && *mode == "json", exc_none, round_trip, inc, exc, use_alias, exclude_unset, exclude_defaults, context);
     }
 
     py::bytes to_json(const py::object& value, std::optional<size_t>, std::optional<bool> ea,
                       std::optional<py::object> include, std::optional<py::object> exclude,
                       std::optional<bool> by_alias, bool exclude_unset, bool exclude_defaults, bool exc_none,
                       bool, bool round_trip, py::object, std::optional<py::object>,
-                      bool, std::optional<bool>, std::optional<py::object>) const {
+                      bool, std::optional<bool>, py::object context) const {
         if (!ser_) throw std::runtime_error("Serializer not initialized");
 
         // Pass include/exclude through as-is (nested dict/set filters supported)
@@ -1455,7 +1643,7 @@ public:
         bool use_alias = by_alias.value_or(false);
 
         bool e = ea.value_or(false);
-        std::string json = ser_->to_json(value, e, -1, round_trip, inc, exc, use_alias, exclude_unset, exclude_defaults, exc_none);
+        std::string json = ser_->to_json(value, e, -1, round_trip, inc, exc, use_alias, exclude_unset, exclude_defaults, exc_none, context);
         return py::bytes(json);
     }
 
@@ -1509,9 +1697,11 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
 
     // SerializationInfo - passed to custom serializer functions
     py::class_<PySerializationInfo>(m, "SerializationInfo")
-        .def(py::init<bool, std::string>(), py::arg("round_trip"), py::arg("mode") = "python")
+        .def(py::init<bool, std::string, std::string, py::object>(), py::arg("round_trip"), py::arg("mode") = "python", py::arg("field_name") = "", py::arg("context") = py::none())
         .def_readonly("round_trip", &PySerializationInfo::round_trip)
-        .def_readonly("mode", &PySerializationInfo::mode);
+        .def_readonly("mode", &PySerializationInfo::mode)
+        .def_readonly("field_name", &PySerializationInfo::field_name)
+        .def_readonly("context", &PySerializationInfo::context);
 
     // Register ValidationError as a proper Python exception (inherits from ValueError like Rust)
     py::register_exception<ValidationError>(m, "ValidationError", PyExc_ValueError);
