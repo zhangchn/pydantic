@@ -96,7 +96,14 @@ static std::shared_ptr<Validator> build_from_flat_dict(
     // Basic validators
     if (type == "any") return std::make_shared<AnyValidator>();
     if (type == "none") return std::make_shared<NoneValidator>();
-    if (type == "bool") return std::make_shared<BoolValidator>();
+    if (type == "bool") {
+        auto v = std::make_shared<BoolValidator>();
+        auto it = schema.find("strict");
+        if (it != schema.end() && (it->second == "true" || it->second == "1")) {
+            v->strict = true;
+        }
+        return v;
+    }
     if (type == "int") {
         auto v = std::make_shared<IntValidator>();
         return v;
@@ -155,7 +162,14 @@ static std::shared_ptr<Validator> build_from_element(
 
     if (type == "any") return std::make_shared<AnyValidator>();
     if (type == "none") return std::make_shared<NoneValidator>();
-    if (type == "bool") return std::make_shared<BoolValidator>();
+    if (type == "bool") {
+        auto v = std::make_shared<BoolValidator>();
+        auto it = flat_schema.find("strict");
+        if (it != flat_schema.end() && (it->second == "true" || it->second == "1")) {
+            v->strict = true;
+        }
+        return v;
+    }
 
     // Int validator — check for constraints
     if (type == "int") {
@@ -1101,7 +1115,13 @@ static std::shared_ptr<Validator> build_from_py_dict(
     // --- Scalar validators ---
     if (type == "any") return std::make_shared<AnyValidator>();
     if (type == "none") return std::make_shared<NoneValidator>();
-    if (type == "bool") return std::make_shared<BoolValidator>();
+    if (type == "bool") {
+        auto v = std::make_shared<BoolValidator>();
+        if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
+            v->strict = schema["strict"].cast<bool>();
+        }
+        return v;
+    }
 
     if (type == "int" || type == "int-constrained" || type == "constr-int") {
         if (schema.contains("multiple_of") || schema.contains("le") || schema.contains("ge") ||

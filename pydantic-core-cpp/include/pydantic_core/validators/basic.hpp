@@ -50,11 +50,13 @@ public:
 // BoolValidator - validates boolean values
 class BoolValidator : public Validator {
 public:
+    bool strict = false;
+
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
     ) override {
-        auto result = input.validate_bool(state.strict_or(false));
+        auto result = input.validate_bool(state.strict_or(strict));
         if (result.is_err()) {
             return result.error();
         }
@@ -62,7 +64,7 @@ public:
             std::make_shared<bool>(result.value().value())
         );
     }
-    
+
     std::string name() const override { return "bool"; }
 };
 
