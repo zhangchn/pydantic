@@ -38,14 +38,14 @@ public:
         // Length checks
         if (min_length.has_value() && list_size < min_length.value()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::TooShort),
+                ErrorType(ErrorType::Kind::ListTooShort, static_cast<int64_t>(min_length.value())),
                 state.location(),
                 "list(len=" + std::to_string(list_size) + ")"
             );
         }
         if (max_length.has_value() && list_size > max_length.value()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::TooLong),
+                ErrorType(ErrorType::Kind::ListTooLong, static_cast<int64_t>(max_length.value())),
                 state.location(),
                 "list(len=" + std::to_string(list_size) + ")"
             );
@@ -216,14 +216,14 @@ public:
         // Length checks
         if (min_length.has_value() && dict_size < min_length.value()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::TooShort),
+                ErrorType(ErrorType::Kind::DictTooShort, static_cast<int64_t>(min_length.value())),
                 state.location(),
                 "dict(len=" + std::to_string(dict_size) + ")"
             );
         }
         if (max_length.has_value() && dict_size > max_length.value()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::TooLong),
+                ErrorType(ErrorType::Kind::DictTooLong, static_cast<int64_t>(max_length.value())),
                 state.location(),
                 "dict(len=" + std::to_string(dict_size) + ")"
             );
@@ -325,6 +325,8 @@ public:
 class SetValidator : public Validator {
 public:
     std::shared_ptr<Validator> items_schema;
+    std::optional<size_t> min_length;
+    std::optional<size_t> max_length;
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -337,6 +339,24 @@ public:
         auto& list_match = result.value();
         auto& list = list_match.value();
         auto entries = list->entries();
+        size_t list_size = entries.size();
+
+        // Length checks
+        if (min_length.has_value() && list_size < min_length.value()) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::SetTooShort, static_cast<int64_t>(min_length.value())),
+                state.location(),
+                "set(len=" + std::to_string(list_size) + ")"
+            );
+        }
+        if (max_length.has_value() && list_size > max_length.value()) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::SetTooLong, static_cast<int64_t>(max_length.value())),
+                state.location(),
+                "set(len=" + std::to_string(list_size) + ")"
+            );
+        }
+
         py::set result_set;
         for (const auto& entry : entries) {
             py::object element = list->get_item(entry.index);
@@ -363,6 +383,8 @@ public:
 class FrozenSetValidator : public Validator {
 public:
     std::shared_ptr<Validator> items_schema;
+    std::optional<size_t> min_length;
+    std::optional<size_t> max_length;
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -375,6 +397,24 @@ public:
         auto& list_match = result.value();
         auto& list = list_match.value();
         auto entries = list->entries();
+        size_t list_size = entries.size();
+
+        // Length checks
+        if (min_length.has_value() && list_size < min_length.value()) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::SetTooShort, static_cast<int64_t>(min_length.value())),
+                state.location(),
+                "frozenset(len=" + std::to_string(list_size) + ")"
+            );
+        }
+        if (max_length.has_value() && list_size > max_length.value()) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::SetTooLong, static_cast<int64_t>(max_length.value())),
+                state.location(),
+                "frozenset(len=" + std::to_string(list_size) + ")"
+            );
+        }
+
         py::set result_set;
         for (const auto& entry : entries) {
             py::object element = list->get_item(entry.index);
