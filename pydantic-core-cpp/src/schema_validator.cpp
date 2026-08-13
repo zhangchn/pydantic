@@ -32,6 +32,11 @@ SchemaValidator::SchemaValidator(const py::dict& schema,
         title_ = "Schema";
     }
 
+    // Extract post_init method name from schema
+    if (schema.contains("post_init")) {
+        post_init_ = py::str(schema["post_init"]).cast<std::string>();
+    }
+
     try {
         validator_ = SchemaBuilder::build_from_py(schema, config);
     } catch (const std::exception& e) {

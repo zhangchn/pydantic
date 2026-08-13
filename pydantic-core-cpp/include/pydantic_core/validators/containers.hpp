@@ -37,15 +37,23 @@ public:
 
         // Length checks
         if (min_length.has_value() && list_size < min_length.value()) {
+            ErrorType err(ErrorType::Kind::ListTooShort);
+            err.context()["field_type"] = "List";
+            err.context()["min_length"] = std::to_string(min_length.value());
+            err.context()["actual_length"] = std::to_string(list_size);
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::ListTooShort, static_cast<int64_t>(min_length.value())),
+                std::move(err),
                 state.location(),
                 "list(len=" + std::to_string(list_size) + ")"
             );
         }
         if (max_length.has_value() && list_size > max_length.value()) {
+            ErrorType err(ErrorType::Kind::ListTooLong);
+            err.context()["field_type"] = "List";
+            err.context()["max_length"] = std::to_string(max_length.value());
+            err.context()["actual_length"] = std::to_string(list_size);
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::ListTooLong, static_cast<int64_t>(max_length.value())),
+                std::move(err),
                 state.location(),
                 "list(len=" + std::to_string(list_size) + ")"
             );
@@ -215,15 +223,23 @@ public:
 
         // Length checks
         if (min_length.has_value() && dict_size < min_length.value()) {
+            ErrorType err(ErrorType::Kind::DictTooShort);
+            err.context()["field_type"] = "Dictionary";
+            err.context()["min_length"] = std::to_string(min_length.value());
+            err.context()["actual_length"] = std::to_string(dict_size);
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::DictTooShort, static_cast<int64_t>(min_length.value())),
+                std::move(err),
                 state.location(),
                 "dict(len=" + std::to_string(dict_size) + ")"
             );
         }
         if (max_length.has_value() && dict_size > max_length.value()) {
+            ErrorType err(ErrorType::Kind::DictTooLong);
+            err.context()["field_type"] = "Dictionary";
+            err.context()["max_length"] = std::to_string(max_length.value());
+            err.context()["actual_length"] = std::to_string(dict_size);
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::DictTooLong, static_cast<int64_t>(max_length.value())),
+                std::move(err),
                 state.location(),
                 "dict(len=" + std::to_string(dict_size) + ")"
             );
@@ -343,15 +359,23 @@ public:
 
         // Length checks
         if (min_length.has_value() && list_size < min_length.value()) {
+            ErrorType err(ErrorType::Kind::SetTooShort);
+            err.context()["field_type"] = "Set";
+            err.context()["min_length"] = std::to_string(min_length.value());
+            err.context()["actual_length"] = std::to_string(list_size);
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::SetTooShort, static_cast<int64_t>(min_length.value())),
+                std::move(err),
                 state.location(),
                 "set(len=" + std::to_string(list_size) + ")"
             );
         }
         if (max_length.has_value() && list_size > max_length.value()) {
+            ErrorType err(ErrorType::Kind::SetTooLong);
+            err.context()["field_type"] = "Set";
+            err.context()["max_length"] = std::to_string(max_length.value());
+            err.context()["actual_length"] = std::to_string(list_size);
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::SetTooLong, static_cast<int64_t>(max_length.value())),
+                std::move(err),
                 state.location(),
                 "set(len=" + std::to_string(list_size) + ")"
             );
@@ -401,15 +425,23 @@ public:
 
         // Length checks
         if (min_length.has_value() && list_size < min_length.value()) {
+            ErrorType err(ErrorType::Kind::SetTooShort);
+            err.context()["field_type"] = "Frozenset";
+            err.context()["min_length"] = std::to_string(min_length.value());
+            err.context()["actual_length"] = std::to_string(list_size);
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::SetTooShort, static_cast<int64_t>(min_length.value())),
+                std::move(err),
                 state.location(),
                 "frozenset(len=" + std::to_string(list_size) + ")"
             );
         }
         if (max_length.has_value() && list_size > max_length.value()) {
+            ErrorType err(ErrorType::Kind::SetTooLong);
+            err.context()["field_type"] = "Frozenset";
+            err.context()["max_length"] = std::to_string(max_length.value());
+            err.context()["actual_length"] = std::to_string(list_size);
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::SetTooLong, static_cast<int64_t>(max_length.value())),
+                std::move(err),
                 state.location(),
                 "frozenset(len=" + std::to_string(list_size) + ")"
             );

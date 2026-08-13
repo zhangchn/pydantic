@@ -51,15 +51,15 @@ std::string ErrorType::type_name() const {
         {Kind::BytesTooShort, "bytes_too_short"},
         {Kind::BytesTooLong, "bytes_too_long"},
         
-        // List/Set constraint errors
-        {Kind::ListTooShort, "list_too_short"},
-        {Kind::ListTooLong, "list_too_long"},
-        {Kind::SetTooShort, "set_too_short"},
-        {Kind::SetTooLong, "set_too_long"},
-        
-        // Dict constraint errors
-        {Kind::DictTooShort, "dict_too_short"},
-        {Kind::DictTooLong, "dict_too_long"},
+        // List/Set constraint errors - use generic too_short/too_long
+        {Kind::ListTooShort, "too_short"},
+        {Kind::ListTooLong, "too_long"},
+        {Kind::SetTooShort, "too_short"},
+        {Kind::SetTooLong, "too_long"},
+
+        // Dict constraint errors - use generic too_short/too_long
+        {Kind::DictTooShort, "too_short"},
+        {Kind::DictTooLong, "too_long"},
         
         // Tuple errors
         {Kind::TupleLengthMismatch, "tuple_length_mismatch"},
@@ -177,15 +177,15 @@ std::string ErrorType::message_template() const {
         {Kind::BytesTooShort, "Data should have at least {min_length} bytes"},
         {Kind::BytesTooLong, "Data should have at most {max_length} bytes"},
         
-        // List/Set constraint errors
-        {Kind::ListTooShort, "List should have at least {value} items"},
-        {Kind::ListTooLong, "List should have at most {value} items"},
-        {Kind::SetTooShort, "Set should have at least {value} items"},
-        {Kind::SetTooLong, "Set should have at most {value} items"},
-        
-        // Dict constraint errors
-        {Kind::DictTooShort, "Dict should have at least {value} items"},
-        {Kind::DictTooLong, "Dict should have at most {value} items"},
+        // List/Set constraint errors - use generic too_short/too_long messages
+        {Kind::ListTooShort, "{field_type} should have at least {min_length} items after validation, not {actual_length}"},
+        {Kind::ListTooLong, "{field_type} should have at most {max_length} items after validation, not {actual_length}"},
+        {Kind::SetTooShort, "{field_type} should have at least {min_length} items after validation, not {actual_length}"},
+        {Kind::SetTooLong, "{field_type} should have at most {max_length} items after validation, not {actual_length}"},
+
+        // Dict constraint errors - use generic too_short/too_long messages
+        {Kind::DictTooShort, "{field_type} should have at least {min_length} items after validation, not {actual_length}"},
+        {Kind::DictTooLong, "{field_type} should have at most {max_length} items after validation, not {actual_length}"},
         
         // Tuple errors
         {Kind::TupleLengthMismatch, "Tuple should have {expected} items, got {actual}"},

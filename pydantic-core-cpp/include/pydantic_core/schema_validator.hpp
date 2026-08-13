@@ -90,6 +90,9 @@ public:
     // Whether the top-level schema is a dataclass validator
     bool is_dataclass() const { return validator_ && validator_->name() == "dataclass"; }
 
+    // The post_init method name from the schema (e.g. "model_post_init"), or empty
+    const std::string& post_init() const { return post_init_; }
+
     // Representation
     std::string repr() const;
 
@@ -104,6 +107,7 @@ private:
     std::string title_;
     std::string schema_json_;
     std::string config_json_;
+    std::string post_init_;
 
     ValidationState::Config config_;
 

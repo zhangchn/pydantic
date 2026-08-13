@@ -182,6 +182,7 @@ public:
 
     Kind kind() const { return kind_; }
     const std::unordered_map<std::string, std::string>& context() const { return context_; }
+    std::unordered_map<std::string, std::string>& context() { return context_; }
     
     // Get type name for error
     std::string type_name() const;

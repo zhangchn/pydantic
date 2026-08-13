@@ -704,6 +704,30 @@ def _find_function_after_callable(schema: dict, callables: list | None = None, s
     return callables
 
 
+def _find_inner_type(schema: dict) -> str:
+    """Find the innermost type in a schema, skipping wrapper types."""
+    if not isinstance(schema, dict):
+        return ""
+    t = schema.get("type", "")
+    if t in ("function-after", "function-before", "function-wrap", "function-plain",
+             "lax-or-strict", "json-or-python", "default", "with-default"):
+        for key in ("schema", "json_schema", "python_schema"):
+            child = schema.get(key)
+            if isinstance(child, dict):
+                result = _find_inner_type(child)
+                if result:
+                    return result
+        # Check choices for json-or-python/python_schema
+        choices = schema.get("choices")
+        if isinstance(choices, list):
+            for c in choices:
+                if isinstance(c, dict):
+                    result = _find_inner_type(c)
+                    if result:
+                        return result
+    return t
+
+
 class SchemaValidator:
     def __init__(self, schema, config=None, _use_prebuilt=True):
         # Do NOT mutate the caller's schema dict: model `__pydantic_core_schema__`
@@ -881,7 +905,7 @@ class SchemaValidator:
                     root_val = data
                 instance = object.__new__(cls)
                 instance.__dict__["root"] = root_val
-                object.__setattr__(instance, "__pydantic_private__", {})
+                object.__setattr__(instance, "__pydantic_private__", None)
                 object.__setattr__(instance, "__pydantic_extra__", None)
                 object.__setattr__(instance, "__pydantic_fields_set__", {"root"})
                 # Call model_post_init if defined
@@ -913,7 +937,7 @@ class SchemaValidator:
                 data.pop('__pydantic_defaults__', None)
                 instance = object.__new__(cls)
                 instance.__dict__ = data
-                object.__setattr__(instance, '__pydantic_private__', {})
+                object.__setattr__(instance, '__pydantic_private__', None)
                 object.__setattr__(instance, '__pydantic_extra__', extra)
                 object.__setattr__(instance, '__pydantic_fields_set__', fields_set)
                 # Call model_post_init if defined
@@ -957,7 +981,7 @@ class SchemaValidator:
 
         instance.__dict__ = data
         # Initialize pydantic slot attributes expected by BaseModel
-        object.__setattr__(instance, '__pydantic_private__', {})
+        object.__setattr__(instance, '__pydantic_private__', None)
         object.__setattr__(instance, '__pydantic_extra__', extra)
         object.__setattr__(instance, '__pydantic_fields_set__', fields_set)
         # Call model_post_init if defined
@@ -983,34 +1007,26 @@ class SchemaValidator:
             field_schema = field_def.get("schema", {})
             if isinstance(field_schema, dict):
                 val = self._dict_to_model(result[field_name], field_schema)
-                # For function-after wrapping with Python callable (e.g. SecretStr, use_enum_values)
+                # For function-after wrapping with enum/literal (use_enum_values)
+                # The C++ validator already handles function-after for non-enum types,
+                # so we only need to handle enum/literal extraction here.
                 if field_schema.get("type") == "function-after":
                     inner = field_schema.get("schema", {})
                     if isinstance(inner, dict) and inner.get("type") in ("enum", "literal"):
                         # use_enum_values: extract .value from Enum member
                         if hasattr(val, 'value'):
                             val = val.value
-                    else:
-                        # Generic function-after: apply the Python callable to the validated value
-                        func_ref = field_schema.get("function", {})
-                        if isinstance(func_ref, dict):
-                            func = func_ref.get("function", func_ref)
-                        else:
-                            func = func_ref
-                        if callable(func):
-                            try:
-                                val = func(val)
-                            except Exception:
-                                pass
-                # Also handle lax-or-strict -> json-or-python -> function-after chains
                 elif field_schema.get("type") == "lax-or-strict":
+                    # Check if this wraps a function-after with enum/literal
                     callables = _find_function_after_callable(field_schema)
-                    for func in callables:
-                        if callable(func):
-                            try:
-                                val = func(val)
-                            except Exception:
-                                pass
+                    inner_type = _find_inner_type(field_schema)
+                    if inner_type in ("enum", "literal"):
+                        for func in callables:
+                            if callable(func):
+                                try:
+                                    val = func(val)
+                                except Exception:
+                                    pass
                 result[field_name] = val
 
         # Convert extra field values (values in __pydantic_extra__) using extras_schema,
@@ -1131,7 +1147,7 @@ class SchemaValidator:
                     result.pop('__pydantic_defaults__', None)
                     instance = object.__new__(cls)
                     instance.__dict__ = result
-                    object.__setattr__(instance, '__pydantic_private__', {})
+                    object.__setattr__(instance, '__pydantic_private__', None)
                     object.__setattr__(instance, '__pydantic_extra__', extra)
                     object.__setattr__(instance, '__pydantic_fields_set__', fields_set)
                     return instance
@@ -1221,7 +1237,7 @@ class SchemaValidator:
                     result.pop('__pydantic_defaults__', None)
                     instance = object.__new__(cls)
                     instance.__dict__ = result
-                    object.__setattr__(instance, '__pydantic_private__', {})
+                    object.__setattr__(instance, '__pydantic_private__', None)
                     object.__setattr__(instance, '__pydantic_extra__', extra_fields)
                     object.__setattr__(instance, '__pydantic_fields_set__', fields_set)
                     return instance

@@ -480,8 +480,7 @@ struct SerNode {
         }
         // For list/dict/tuple/containers, serialize children
         if ((type == "list" || type == "set" || type == "frozenset") && !children.empty()) {
-            py::list result;
-            auto seq = py::reinterpret_borrow<py::sequence>(value);
+            py::iterable seq = py::reinterpret_borrow<py::iterable>(value);
             py::ssize_t len = py::len(seq);
             py::object inc;
             if (include.is_none()) {
@@ -496,14 +495,37 @@ struct SerNode {
                 exc = map_negative_indices(exclude, len);
             }
             py::ssize_t idx = 0;
-            for (auto item : seq) {
-                auto next = apply_ser_filter(py::int_(idx), inc, exc);
-                if (!next.omit) {
-                    result.append(children[0]->to_python(py::reinterpret_borrow<py::object>(item), json_mode, exc_none, round_trip, next.include, next.exclude));
+            if (type == "set") {
+                py::set result;
+                for (auto item : seq) {
+                    auto next = apply_ser_filter(py::int_(idx), inc, exc);
+                    if (!next.omit) {
+                        result.add(children[0]->to_python(py::reinterpret_borrow<py::object>(item), json_mode, exc_none, round_trip, next.include, next.exclude));
+                    }
+                    idx++;
                 }
-                idx++;
+                return std::move(result);
+            } else if (type == "frozenset") {
+                py::set temp;
+                for (auto item : seq) {
+                    auto next = apply_ser_filter(py::int_(idx), inc, exc);
+                    if (!next.omit) {
+                        temp.add(children[0]->to_python(py::reinterpret_borrow<py::object>(item), json_mode, exc_none, round_trip, next.include, next.exclude));
+                    }
+                    idx++;
+                }
+                return py::frozenset(temp);
+            } else {
+                py::list result;
+                for (auto item : seq) {
+                    auto next = apply_ser_filter(py::int_(idx), inc, exc);
+                    if (!next.omit) {
+                        result.append(children[0]->to_python(py::reinterpret_borrow<py::object>(item), json_mode, exc_none, round_trip, next.include, next.exclude));
+                    }
+                    idx++;
+                }
+                return std::move(result);
             }
-            return std::move(result);
         }
         if (type == "dict" && !children.empty()) {
             py::dict result;
@@ -520,7 +542,7 @@ struct SerNode {
             return std::move(result);
         }
         if (type == "tuple" && !children.empty()) {
-            py::list result;
+            py::list temp;
             auto seq = py::reinterpret_borrow<py::sequence>(value);
             py::ssize_t len = py::len(seq);
             py::object inc;
@@ -540,11 +562,11 @@ struct SerNode {
                 auto next = apply_ser_filter(py::int_(static_cast<py::ssize_t>(i)), inc, exc);
                 if (!next.omit) {
                     auto v = py::reinterpret_borrow<py::object>(item);
-                    result.append(i < children.size() ? children[i]->to_python(v, json_mode, exc_none, round_trip, next.include, next.exclude) : children.back()->to_python(v, json_mode, exc_none, round_trip, next.include, next.exclude));
+                    temp.append(i < children.size() ? children[i]->to_python(v, json_mode, exc_none, round_trip, next.include, next.exclude) : children.back()->to_python(v, json_mode, exc_none, round_trip, next.include, next.exclude));
                 }
                 i++;
             }
-            return std::move(result);
+            return py::tuple(temp);
         }
         return value;
     }
@@ -1828,7 +1850,7 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                         py::dict d = self_instance.attr("__dict__");
                         d[py::str("root")] = validated;
                         if (!py::hasattr(self_instance, "__pydantic_private__")) {
-                            py::setattr(self_instance, "__pydantic_private__", py::dict());
+                            py::setattr(self_instance, "__pydantic_private__", py::none());
                         }
                         py::setattr(self_instance, "__pydantic_extra__", py::none());
                         py::setattr(self_instance, "__pydantic_fields_set__", py::set(py::make_tuple(py::str("root"))));
@@ -1861,7 +1883,7 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
 
                         // Set pydantic slot attributes
                         if (!py::hasattr(self_instance, "__pydantic_private__")) {
-                            py::setattr(self_instance, "__pydantic_private__", py::dict());
+                            py::setattr(self_instance, "__pydantic_private__", py::none());
                         }
                         py::setattr(self_instance, "__pydantic_extra__",
                             extra_fields.is_none() ? py::none() : extra_fields);
@@ -1870,6 +1892,10 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                     // Dataclass __init__: call __post_init__ after fields are set
                     if (self.is_dataclass() && py::hasattr(self_instance, "__post_init__")) {
                         self_instance.attr("__post_init__")();
+                    }
+                    // Model post_init: call model_post_init(context) if schema specifies it
+                    if (!self.post_init().empty() && py::hasattr(self_instance, py::str(self.post_init()))) {
+                        self_instance.attr(py::str(self.post_init()))(context);
                     }
                 } catch (const std::exception& e) {
                     // If anything fails, just return validated as-is
