@@ -387,16 +387,16 @@ public:
 class LiteralValidator : public Validator {
 public:
     LiteralValidator() = default;
-    explicit LiteralValidator(std::vector<std::string> values)
-        : values_(std::move(values)) {}
-    
+    explicit LiteralValidator(std::vector<std::string> values, std::string expected_repr = "")
+        : values_(std::move(values)), expected_repr_(std::move(expected_repr)) {}
+
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
     ) override {
         if (values_.empty()) {
             return ValError::line_error(
-                PydanticKnownError::literal_mismatch(),
+                ErrorType(ErrorType::Kind::LiteralError, "expected", expected_repr_.empty() ? "" : expected_repr_),
                 state.location(),
                 input.as_error_value().repr
             );
@@ -418,16 +418,17 @@ public:
             }
         }
         return ValError::line_error(
-            PydanticKnownError::literal_mismatch(),
+            ErrorType(ErrorType::Kind::LiteralError, "expected", expected_repr_.empty() ? "" : expected_repr_),
             state.location(),
             input.as_error_value().repr
         );
     }
-    
+
     std::string name() const override { return "literal"; }
-    
+
 private:
     std::vector<std::string> values_;
+    std::string expected_repr_;
 };
 
 // EnumValidator - validates enum values

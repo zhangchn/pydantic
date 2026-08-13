@@ -431,16 +431,31 @@ static std::shared_ptr<Validator> build_from_element(
         auto expected = elem["expected"];
         if (!expected.error() && expected.value().is_array()) {
             std::vector<std::string> values;
+            std::vector<std::string> reprs;
             for (auto v : expected.value().get_array().value()) {
                 if (v.is_string()) {
-                    values.push_back(std::string(v.get_string().value()));
+                    std::string s = std::string(v.get_string().value());
+                    values.push_back(s);
+                    reprs.push_back("'" + s + "'");
                 } else if (v.is_int64()) {
-                    values.push_back(std::to_string(v.get_int64()));
+                    std::string s = std::to_string(v.get_int64());
+                    values.push_back(s);
+                    reprs.push_back(s);
                 } else if (v.is_bool()) {
-                    values.push_back(v.get_bool() ? "true" : "false");
+                    std::string s = v.get_bool() ? "true" : "false";
+                    values.push_back(s);
+                    reprs.push_back(s);
                 }
             }
-            return std::make_shared<LiteralValidator>(values);
+            std::string expected_repr;
+            if (!reprs.empty()) {
+                expected_repr = reprs[0];
+                for (size_t i = 1; i < reprs.size(); ++i) {
+                    expected_repr += " or ";
+                    expected_repr += reprs[i];
+                }
+            }
+            return std::make_shared<LiteralValidator>(std::move(values), std::move(expected_repr));
         }
         return std::make_shared<LiteralValidator>();
     }
@@ -1275,8 +1290,10 @@ static std::shared_ptr<Validator> build_from_py_dict(
     // --- Literal ---
     if (type == "literal") {
         std::vector<std::string> expected;
+        std::string expected_repr;
         if (schema.contains("expected")) {
             auto lst = schema["expected"].cast<py::list>();
+            std::vector<std::string> reprs;
             for (auto item : lst) {
                 // For Enum members, use .value instead of str() (which gives 'ClassName.MEMBER')
                 if (py::hasattr(item, "value")) {
@@ -1284,9 +1301,19 @@ static std::shared_ptr<Validator> build_from_py_dict(
                 } else {
                     expected.push_back(py::str(item).cast<std::string>());
                 }
+                // Build repr for error message
+                reprs.push_back(py::repr(item).cast<std::string>());
+            }
+            // Build expected_repr like "repr1 or repr2"
+            if (!reprs.empty()) {
+                expected_repr = reprs[0];
+                for (size_t i = 1; i < reprs.size(); ++i) {
+                    expected_repr += " or ";
+                    expected_repr += reprs[i];
+                }
             }
         }
-        return std::make_shared<LiteralValidator>(std::move(expected));
+        return std::make_shared<LiteralValidator>(std::move(expected), std::move(expected_repr));
     }
 
     // --- Enum ---

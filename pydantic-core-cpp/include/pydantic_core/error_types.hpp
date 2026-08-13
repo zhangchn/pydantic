@@ -74,6 +74,7 @@ public:
         
         // Literal errors
         LiteralMismatch,
+        LiteralError,
         EnumError,
         
         // Dict field errors

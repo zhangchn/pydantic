@@ -295,6 +295,7 @@ _ERR_TYPE_MESSAGES: dict[str, str] = {
     'dataclass_type': 'Input should be a valid dictionary or object',
     'union_type': 'Input should match one of the expected types',
     'literal_mismatch': 'Input should match one of the allowed values',
+    'literal_error': 'Input should be {expected}',
     'none_required': 'Input should be None',
     'none_type': 'Input should be None',
     'value_error': 'Value error, {error}',

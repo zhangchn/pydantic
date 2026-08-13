@@ -847,7 +847,7 @@ def test_literal_enum_values():
             'type': 'literal_error',
             'loc': ('baz',),
             'msg': "Input should be <FooEnum.foo: 'foo_value'>",
-            'input': FooEnum.bar,
+            'input': "<FooEnum.bar: 'bar_value'>",
             'ctx': {'expected': "<FooEnum.foo: 'foo_value'>"},
         }
     ]

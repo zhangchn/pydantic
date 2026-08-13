@@ -66,6 +66,7 @@ std::string ErrorType::type_name() const {
         
         // Literal errors
         {Kind::LiteralMismatch, "literal_mismatch"},
+        {Kind::LiteralError, "literal_error"},
         
         // Field errors
         {Kind::DictKeysMissing, "dict_keys_missing"},
@@ -192,6 +193,7 @@ std::string ErrorType::message_template() const {
         
         // Literal errors
         {Kind::LiteralMismatch, "Input should match one of the allowed values"},
+        {Kind::LiteralError, "Input should be {expected}"},
         
         // Field errors
         {Kind::DictKeysMissing, "Missing required keys"},
