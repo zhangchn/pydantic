@@ -124,7 +124,14 @@ static std::shared_ptr<Validator> build_from_flat_dict(
     if (type == "timedelta") return std::make_shared<TimedeltaValidator>();
     if (type == "url") return std::make_shared<UrlValidator>();
     if (type == "multi-host-url") return std::make_shared<MultiHostUrlValidator>();
-    if (type == "uuid") return std::make_shared<UuidValidator>();
+    if (type == "uuid") {
+        auto v = std::make_shared<UuidValidator>();
+        auto it = schema.find("strict");
+        if (it != schema.end() && (it->second == "true" || it->second == "1")) {
+            v->strict = true;
+        }
+        return v;
+    }
     if (type == "is-instance") return std::make_shared<IsInstanceValidator>();
     if (type == "is-subclass") return std::make_shared<IsSubclassValidator>();
     if (type == "callable") return std::make_shared<CallableValidator>();
@@ -456,7 +463,14 @@ static std::shared_ptr<Validator> build_from_element(
     if (type == "timedelta") return std::make_shared<TimedeltaValidator>();
     if (type == "url") return std::make_shared<UrlValidator>();
     if (type == "multi-host-url") return std::make_shared<MultiHostUrlValidator>();
-    if (type == "uuid") return std::make_shared<UuidValidator>();
+    if (type == "uuid") {
+        auto v = std::make_shared<UuidValidator>();
+        auto it = flat_schema.find("strict");
+        if (it != flat_schema.end() && (it->second == "true" || it->second == "1")) {
+            v->strict = true;
+        }
+        return v;
+    }
 
     // is-instance validator
     if (type == "is-instance") {
@@ -1244,7 +1258,13 @@ static std::shared_ptr<Validator> build_from_py_dict(
     if (type == "multi-host-url") return std::make_shared<MultiHostUrlValidator>();
 
     // --- UUID ---
-    if (type == "uuid") return std::make_shared<UuidValidator>();
+    if (type == "uuid") {
+        auto v = std::make_shared<UuidValidator>();
+        if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
+            v->strict = schema["strict"].cast<bool>();
+        }
+        return v;
+    }
 
     // --- Decimal ---
     if (type == "decimal" || type == "decimal-constrained") {

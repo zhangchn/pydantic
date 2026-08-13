@@ -322,13 +322,15 @@ public:
 // UuidValidator - validates UUID values
 class UuidValidator : public Validator {
 public:
+    bool strict = false;
+
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
     ) override {
         // Validate UUID using Python's uuid module
         py::object input_py = input.as_python_object();
-        
+
         // If already a UUID object, accept it
         try {
             py::object uuid_mod = py::module_::import("uuid");
@@ -339,8 +341,17 @@ public:
                 );
             }
         } catch (...) {}
-        
-        // If string, validate format
+
+        // In strict mode, only accept UUID objects
+        if (state.strict_or(strict)) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::IsInstanceType, "class", "UUID"),
+                state.location(),
+                input.as_error_value().repr
+            );
+        }
+
+        // If string, validate format (lax mode only)
         if (py::isinstance<py::str>(input_py)) {
             std::string uuid_str = py::str(input_py).cast<std::string>();
             try {
@@ -361,7 +372,7 @@ public:
                 );
             }
         }
-        
+
         return ValError::line_error(
             ErrorType(ErrorType::Kind::UuidType),
             state.location(),
