@@ -1155,6 +1155,7 @@ class SchemaValidator:
         elif self_instance is not None:
             # self_instance was provided and C++ returned it.
             # Recursively convert nested dicts in __dict__ to model instances
+            saved_defaults = self_instance.__dict__.pop('__pydantic_defaults__', None)
             processed = self._dict_to_model(dict(self_instance.__dict__))
             if isinstance(processed, dict):
                 self_instance.__dict__.clear()
@@ -1168,6 +1169,9 @@ class SchemaValidator:
                 # are slot attributes already set by the C++ binding; do NOT copy
                 # them from `processed` (a freshly built instance would clobber
                 # C++-populated extras/fields_set with None/default values).
+            # Restore __pydantic_defaults__ saved before _dict_to_model
+            if saved_defaults is not None:
+                self_instance.__dict__['__pydantic_defaults__'] = saved_defaults
 
             # Convert extra field values set by C++ (they live on the instance,
             # not in __dict__, e.g. __pydantic_extra__: dict[str, Foo])

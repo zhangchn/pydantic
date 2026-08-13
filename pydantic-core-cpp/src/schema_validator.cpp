@@ -737,12 +737,10 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
                 out[py::str("__pydantic_fields_set__")] = std::move(fields_set);
 
                 // Attach __pydantic_defaults__ for exclude_defaults support
+                // Use the defaults map populated by ModelFieldsValidator
                 py::dict defaults_dict;
-                for (const auto& key : mfo->field_order) {
-                    const auto& fv = mfo->fields.at(key);
-                    if (mfo->fields_set.find(key) == mfo->fields_set.end()) {
-                        defaults_dict[py::str(key)] = value_to_python_with_type(fv.value, fv.type_name);
-                    }
+                for (const auto& [key, def_val] : mfo->defaults) {
+                    defaults_dict[py::str(key)] = def_val;
                 }
                 out[py::str("__pydantic_defaults__")] = std::move(defaults_dict);
 
@@ -908,14 +906,10 @@ py::object SchemaValidator::result_to_python(const std::shared_ptr<void>& result
                 out[py::str("__pydantic_fields_set__")] = std::move(fields_set);
 
                 // Attach __pydantic_defaults__ for exclude_defaults support
-                // (fields NOT in fields_set that have defaults)
+                // Use the defaults map populated by ModelFieldsValidator
                 py::dict defaults_dict;
-                for (const auto& key : mfo->field_order) {
-                    const auto& fv = mfo->fields.at(key);
-                    if (mfo->fields_set.find(key) == mfo->fields_set.end()) {
-                        // This field was NOT in the input — it came from a default
-                        defaults_dict[py::str(key)] = value_to_python_with_type(fv.value, fv.type_name);
-                    }
+                for (const auto& [key, def_val] : mfo->defaults) {
+                    defaults_dict[py::str(key)] = def_val;
                 }
                 out[py::str("__pydantic_defaults__")] = std::move(defaults_dict);
 

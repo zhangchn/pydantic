@@ -57,6 +57,7 @@ struct ValidatedModelFieldsOutput {
     std::vector<std::string> field_order;                // Fields in declaration order
     std::unordered_map<std::string, FieldValue> extra;   // Extra fields (if allow)
     std::set<std::string> fields_set;                    // Names of fields that were in input
+    std::unordered_map<std::string, py::object> defaults; // Default values for non-required fields
 };
 
 // ============================================================================
@@ -297,6 +298,27 @@ public:
         // Check if we have any line errors
         if (combined_errors.has_line_errors() && !combined_errors.line_errors().empty()) {
             return combined_errors;
+        }
+
+        // Populate defaults map for exclude_defaults support
+        // Include ALL non-required fields with their default values
+        for (const auto& name : field_order_) {
+            const auto& field = fields_.at(name);
+            if (!field.required) {
+                py::object def_val = py::none();
+                if (!field.default_py_obj.is_none()) {
+                    def_val = field.default_py_obj;
+                } else if (!field.default_value_str.empty()) {
+                    // Parse via json.loads (handles strings, numbers, bools, null)
+                    try {
+                        py::object json_mod = py::module_::import("json");
+                        def_val = json_mod.attr("loads")(field.default_value_str);
+                    } catch (...) {
+                        def_val = py::str(field.default_value_str);
+                    }
+                }
+                output.defaults[name] = std::move(def_val);
+            }
         }
 
         return ValResult<std::shared_ptr<void>>(

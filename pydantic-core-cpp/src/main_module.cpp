@@ -1888,6 +1888,10 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                         py::setattr(self_instance, "__pydantic_extra__",
                             extra_fields.is_none() ? py::none() : extra_fields);
                         py::setattr(self_instance, "__pydantic_fields_set__", fields_set);
+                        // Store defaults for exclude_defaults serialization
+                        if (!defaults.is_none() && py::isinstance<py::dict>(defaults) && py::len(defaults.cast<py::dict>()) > 0) {
+                            py::setattr(self_instance, "__pydantic_defaults__", defaults);
+                        }
                     }
                     // Dataclass __init__: call __post_init__ after fields are set
                     if (self.is_dataclass() && py::hasattr(self_instance, "__post_init__")) {
