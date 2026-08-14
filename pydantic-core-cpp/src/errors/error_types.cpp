@@ -4,6 +4,7 @@
 namespace pydantic_core {
 
 std::string ErrorType::type_name() const {
+    if (!custom_type_name_.empty()) return custom_type_name_;
     static const std::unordered_map<Kind, std::string> names = {
         // Type errors
         {Kind::NoneRequired, "none_required"},
@@ -258,6 +259,7 @@ std::string ErrorType::message_template() const {
 }
 
 std::string ErrorType::message() const {
+    if (!custom_message_.empty()) return custom_message_;
     std::string result = message_template();
     for (const auto& [key, value] : context_) {
         std::string placeholder = "{" + key + "}";
@@ -268,6 +270,72 @@ std::string ErrorType::message() const {
         }
     }
     return result;
+}
+
+ErrorType ErrorType::build_known_type(const std::string& type_str) {
+    // First, try direct match against known kind names
+    static const std::unordered_map<std::string, Kind> name_to_kind = {
+        {"none_required", Kind::NoneRequired},      {"none_type", Kind::NoneType},
+        {"bool_type", Kind::BoolType},              {"int_type", Kind::IntType},
+        {"float_type", Kind::FloatType},            {"string_type", Kind::StringType},
+        {"bytes_type", Kind::BytesType},            {"dict_type", Kind::DictType},
+        {"list_type", Kind::ListType},              {"tuple_type", Kind::TupleType},
+        {"set_type", Kind::SetType},                {"frozenset_type", Kind::FrozenSetType},
+        {"union_type", Kind::UnionType},            {"date_type", Kind::DateType},
+        {"time_type", Kind::TimeType},              {"datetime_type", Kind::DateTimeType},
+        {"bool_parsing", Kind::BoolParsing},        {"int_parsing", Kind::IntParsing},
+        {"float_parsing", Kind::FloatParsing},      {"int_multiple_of", Kind::IntMultipleOf},
+        {"int_greater_than", Kind::IntGreaterThan}, {"int_less_than", Kind::IntLessThan},
+        {"int_greater_than_equal", Kind::IntGreaterThanEqual},
+        {"int_less_than_equal", Kind::IntLessThanEqual},
+        {"float_multiple_of", Kind::FloatMultipleOf},{"float_greater_than", Kind::FloatGreaterThan},
+        {"float_less_than", Kind::FloatLessThan},   {"float_greater_than_equal", Kind::FloatGreaterThanEqual},
+        {"float_less_than_equal", Kind::FloatLessThanEqual},
+        {"string_too_short", Kind::StringTooShort}, {"string_too_long", Kind::StringTooLong},
+        {"string_pattern_mismatch", Kind::StringPatternMismatch},
+        {"bytes_too_short", Kind::BytesTooShort},   {"bytes_too_long", Kind::BytesTooLong},
+        {"too_short", Kind::TooShort},              {"too_long", Kind::TooLong},
+        {"tuple_length_mismatch", Kind::TupleLengthMismatch},
+        {"literal_mismatch", Kind::LiteralMismatch},{"literal_error", Kind::LiteralError},
+        {"dict_keys_missing", Kind::DictKeysMissing},{"dict_keys_unexpected", Kind::DictKeysUnexpected},
+        {"field_required", Kind::FieldRequired},    {"missing", Kind::Missing},
+        {"extra_forbidden", Kind::ExtraForbidden},  {"no_such_attribute", Kind::NoSuchAttribute},
+        {"arguments_type", Kind::ArgumentsType},    {"missing_argument", Kind::MissingArgument},
+        {"missing_keyword_only_argument", Kind::MissingKeywordOnlyArgument},
+        {"missing_positional_only_argument", Kind::MissingPositionalOnlyArgument},
+        {"unexpected_positional_argument", Kind::UnexpectedPositionalArgument},
+        {"unexpected_keyword_argument", Kind::UnexpectedKeywordArgument},
+        {"multiple_argument_values", Kind::MultipleArgumentValues},
+        {"date_parsing", Kind::DateParsing},        {"date_from_datetime_inexact", Kind::DateFromDatetimeInexact},
+        {"date_past", Kind::DatePast},              {"date_future", Kind::DateFuture},
+        {"time_parsing", Kind::TimeParsing},        {"datetime_parsing", Kind::DateTimeParsing},
+        {"datetime_from_date_parsing", Kind::DatetimeFromDateParsing},
+        {"datetime_object_invalid", Kind::DatetimeObjectInvalid},
+        {"datetime_past", Kind::DatetimePast},      {"datetime_future", Kind::DatetimeFuture},
+        {"timezone_aware", Kind::TimezoneAware},    {"timezone_naive", Kind::TimezoneNaive},
+        {"timezone_offset", Kind::TimezoneOffset},  {"timedelta_type", Kind::TimedeltaType},
+        {"timedelta_parsing", Kind::TimedeltaParsing},
+        {"url_type", Kind::UrlType},               {"url_scheme", Kind::UrlScheme},
+        {"url_host", Kind::UrlHost},               {"uuid_type", Kind::UuidType},
+        {"is_instance_of", Kind::IsInstanceType},   {"is_subclass_of", Kind::IsSubclassType},
+        {"callable_type", Kind::CallableType},      {"json_invalid", Kind::JsonInvalid},
+        {"recursion_error", Kind::RecursionError},  {"greater_than", Kind::GreaterThan},
+        {"less_than", Kind::LessThan},              {"greater_than_equal", Kind::GreaterThanEqual},
+        {"less_than_equal", Kind::LessThanEqual},   {"multiple_of", Kind::MultipleOf},
+        {"finite_number", Kind::FiniteNumber},      {"string_not_ascii", Kind::StringNotAscii},
+        {"model_type", Kind::ModelType},           {"dataclass_type", Kind::DataclassType},
+        {"enum_error", Kind::EnumError},
+    };
+
+    auto it = name_to_kind.find(type_str);
+    if (it != name_to_kind.end()) {
+        return ErrorType(it->second);
+    }
+
+    // Unknown custom error type — build a pre-rendered ErrorType that produces
+    // exactly the requested type_name. The message will be set via ctx["message"]
+    // when CustomErrorValidator constructs the error (passing msg_ as context).
+    return ErrorType(type_str, "");
 }
 
 } // namespace pydantic_core

@@ -181,6 +181,10 @@ public:
         context_[std::move(key2)] = std::move(val2);
     }
 
+    // Construct from raw type_name and message (pre-rendered, no template processing)
+    ErrorType(std::string custom_type_name, std::string custom_message)
+        : kind_(Kind::CustomError), custom_type_name_(std::move(custom_type_name)), custom_message_(std::move(custom_message)) {}
+
     Kind kind() const { return kind_; }
     const std::unordered_map<std::string, std::string>& context() const { return context_; }
     std::unordered_map<std::string, std::string>& context() { return context_; }
@@ -193,10 +197,18 @@ public:
     
     // Get rendered message
     std::string message() const;
+
+    // Build a known ErrorType from a custom error type string.
+    // Tries to match against all registered known kinds first.
+    // Falls back to {Kind::CustomError} if no match is found.
+    static ErrorType build_known_type(const std::string& type_str);
     
 private:
     Kind kind_;
     std::unordered_map<std::string, std::string> context_;
+    // For pre-rendered custom errors (type_name + message stored as-is)
+    std::string custom_type_name_;
+    std::string custom_message_;
 };
 
 // PydanticKnownError - predefined error types (factory methods)

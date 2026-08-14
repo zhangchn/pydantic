@@ -1,6 +1,10 @@
 #include "pydantic_core/errors.hpp"
 #include <sstream>
 
+#ifdef HAS_PYBIND11
+namespace py = pybind11;
+#endif
+
 namespace pydantic_core {
 
 namespace {
@@ -99,6 +103,13 @@ void ValidationError::build_errors_from_val_error(const ValError& val_error) {
             details.loc_items = line_err->location.items;
             details.msg = line_err->error_type.message();
             details.input = line_err->input_value;
+#ifdef HAS_PYBIND11
+            // Preserve original Python object for accurate serialization (Rust parallel)
+            if (!line_err->raw_input_obj.is_none()) {
+                details.has_raw_input = true;
+                details.raw_input_obj = line_err->raw_input_obj;
+            }
+#endif
             // Filter out internal pluralization keys from context
             auto ctx = line_err->error_type.context();
             ctx.erase("s");

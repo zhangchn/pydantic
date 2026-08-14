@@ -548,6 +548,19 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
     if (result.is_ok()) {
         return result_to_python(result.value());
     } else {
+#ifdef HAS_PYBIND11
+        // Store raw Python input on module for error dict reconstruction.
+        // This mirrors Rust's approach where as_val_error(input) keeps Py<PyAny>.
+        // register_exception creates a new Python exception from C++ object, so
+        // the C++ ValidationError errors() lambda can't run — but module-level
+        // storage survives the throw/catch cycle.
+        try {
+            py::module_ m = py::module_::import("__main__");
+            m.attr("_last_raw_input") = input;
+        } catch (...) {
+            // Silently ignore if module state setting fails
+        }
+#endif
         auto err = prepare_error(result.error(), InputType::Python);
         throw err;
     }

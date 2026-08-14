@@ -8,6 +8,7 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <pybind11/pybind11.h>
+#include <cstdio>
 
 namespace py = pybind11;
 namespace pydantic_core {
@@ -533,12 +534,25 @@ public:
             auto result = inner_->validate(input, state);
             if (result.is_ok()) return result;
         }
-        // Inner failed (or no inner) — raise custom error
-        return ValError::line_error(
-            ErrorType(ErrorType::Kind::CustomError),
+        // Inner failed (or no inner) — raise custom error.
+        // Build an ErrorType whose type_name matches error_type_, and whose
+        // message is the rendered msg_ (no template processing needed).
+        std::string type_key = error_type_.empty() ? "custom_error" : error_type_;
+        std::string rendered_msg = msg_.empty() ? "Validation error" : msg_;
+        auto error_type = ErrorType(type_key, rendered_msg);
+        ValError val_err = ValError::line_error(
+            std::move(error_type),
             state.location(),
-            msg_.empty() ? "Custom error" : msg_
+            input.as_error_value().repr
         );
+        // Preserve original Python object for accurate serialization (Rust parallel:
+        // as_val_error(input) where input holds Py<PyAny>).
+#ifdef HAS_PYBIND11
+        if (!val_err.line_errors().empty()) {
+            val_err.line_errors()[0]->raw_input_obj = input.as_python_object();
+        }
+#endif
+        return val_err;
     }
 
     std::string name() const override {

@@ -110,10 +110,40 @@ def _errors_with_include_url(self, *args, include_url: bool = True, **kwargs):
         result = _parse_structured_errors(cpp_msg)
         if result is None:
             result = _parse_errors_from_message(cpp_msg)
+        # Post-process: use raw Python input stored by C++ before throwing
+        # (mirrors Rust's as_val_error(input) which passes Py<PyAny> through).
+        # When loc is non-empty (field-level), try to look up the value from
+        # the stored top-level dict using the location path.
+        if result:
+            import __main__ as _main
+            raw_input = getattr(_main, '_last_raw_input', None)
+            if raw_input is not None:
+                for i, err in enumerate(result):
+                    loc = err.get('loc', ())
+                    if isinstance(loc, tuple) and len(loc) > 0:
+                        val = _lookup_value_by_loc(raw_input, loc)
+                        if val is not None:
+                            result[i]['input'] = val
     if not include_url:
         for err in result:
             err.pop("url", None)
     return result
+
+
+def _lookup_value_by_loc(obj, loc):
+    """Recursively look up a value in a dict/tuple by location path.
+    
+    E.g. obj={'t': ArbitraryType()}, loc=('t',) → ArbitraryType()
+    """
+    current = obj
+    for key in loc:
+        if isinstance(current, dict) and key in current:
+            current = current[key]
+        elif isinstance(current, (list, tuple)) and isinstance(key, int):
+            current = current[key]
+        else:
+            return None
+    return current
 
 
 def _parse_input(raw: str):

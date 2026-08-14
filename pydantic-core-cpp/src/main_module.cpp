@@ -2,6 +2,7 @@
 #include <pybind11/stl.h>
 #include <pybind11/functional.h>
 #include <unordered_set>
+#include <cstdio>
 
 #include "pydantic_core/errors.hpp"
 #include "pydantic_core/error_types.hpp"
@@ -1782,17 +1783,23 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                     for (char c : err.loc) {
                         if (c == '.') { flush(); } else { cur += c; }
                     }
-                    flush();
-                    d["loc"] = py::tuple(loc_list);
-                    d["msg"] = err.msg;
                     // input: parse the stored repr into a real Python value
-                    py::object input_val;
-                    try {
-                        input_val = py::module_::import("ast").attr("literal_eval")(err.input);
-                    } catch (...) {
-                        input_val = py::str(err.input);
+#ifdef HAS_PYBIND11
+                    // Use raw Python object for accurate serialization (Rust parallel:
+                    // as_val_error(input) passes Py<PyAny> through). This avoids converting
+                    // arbitrary objects to string repr that can't be reconstructed later.
+                    if (err.has_raw_input && !err.raw_input_obj.is_none()) {
+                        d["input"] = err.raw_input_obj;
+                    } else
+#endif
+                    {
+                        // Fallback: parse string repr via ast.literal_eval
+                        try {
+                            d["input"] = py::module_::import("ast").attr("literal_eval")(err.input);
+                        } catch (...) {
+                            d["input"] = py::str(err.input);
+                        }
                     }
-                    d["input"] = input_val;
                     if (!err.ctx.empty()) {
                         py::dict ctx;
                         for (const auto& [k, v] : err.ctx) {

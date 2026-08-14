@@ -5,6 +5,10 @@
 #include <stdexcept>
 #include <memory>
 #include <unordered_map>
+#ifdef HAS_PYBIND11
+#include <pybind11/pybind11.h>
+namespace py = pybind11;
+#endif
 #include "types.hpp"
 #include "error_types.hpp"
 
@@ -15,7 +19,10 @@ struct ValLineError {
     ErrorType error_type;
     Location location;
     std::string input_value;
-    
+#ifdef HAS_PYBIND11
+    py::object raw_input_obj;  // Original Python object for accurate serialization (Rust parallel)
+#endif
+
     std::string message() const;
 };
 
@@ -80,6 +87,10 @@ private:
 class ValidationError : public std::exception {
 public:
     ValidationError(const std::string& title, InputType input_type, const ValError& val_error);
+    // Constructor with raw Python input for accurate error serialization
+#ifdef HAS_PYBIND11
+    ValidationError(const std::string& title, InputType input_type, const ValError& val_error, py::object raw_input);
+#endif
     
     const char* what() const noexcept override { return what_message_.c_str(); }
     
@@ -90,6 +101,10 @@ public:
         std::string msg;
         std::string input;
         std::unordered_map<std::string, std::string> ctx;
+#ifdef HAS_PYBIND11
+        bool has_raw_input = false;
+        py::object raw_input_obj;
+#endif
     };
     
     const std::vector<ErrorDetails>& errors() const { return errors_; }
@@ -110,7 +125,7 @@ private:
     InputType input_type_;
     std::vector<ErrorDetails> errors_;
     std::string what_message_;
-    
+
     void build_errors_from_val_error(const ValError& val_error);
 };
 
