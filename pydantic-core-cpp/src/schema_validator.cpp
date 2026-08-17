@@ -572,32 +572,32 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
         return py::none();
     }
 
-    // Handle "maybe_wrapper:" prefix - check if it's a PyObjectWrapper via magic number.
+    // Handle "maybe_wrapper:" prefix - check if it's a PyObjectWrapper via TypedResult.
     // The value might be:
     // 1. PyObjectWrapper* (from ModelValidator returning existing instance, revalidate='never')
     // 2. py::object* (from function-after/wrap/plain validators)
     // 3. ValidatedModelFieldsOutput* (from normal model validation)
-    // We use PyObjectWrapper's magic number to safely distinguish case 1 from cases 2 and 3.
+    // For model effective types (1 and 3), both inherit from TypedResult, so we can safely
+    // use static_cast and check result_type(). For "py_object" effective type (2), we can't
+    // safely check because py::object doesn't inherit from TypedResult.
     std::string effective_type = type_name;
     if (type_name.rfind("maybe_wrapper:", 0) == 0) {
         effective_type = type_name.substr(14);  // strlen("maybe_wrapper:") == 14
-        // Check for PyObjectWrapper magic number.
-        // PyObjectWrapper layout: [vtable_ptr (8 bytes)] [magic (8 bytes)] [py::object]
-        // The magic is at offset sizeof(void*) from the start of the object.
-        try {
-            auto* ptr = value.get();
-            if (ptr) {
-                // Read the magic number at the expected offset
-                auto magic_ptr = reinterpret_cast<const uint64_t*>(
-                    reinterpret_cast<const char*>(ptr) + sizeof(void*));
-                if (*magic_ptr == PyObjectWrapper::MAGIC) {
-                    auto* wrapper = static_cast<PyObjectWrapper*>(
-                        static_cast<TypedResult*>(value.get()));
+        if (effective_type == "model" || effective_type == "model-fields" || effective_type == "typed-dict") {
+            // Both PyObjectWrapper and ValidatedModelFieldsOutput inherit from TypedResult.
+            try {
+                auto* typed = static_cast<TypedResult*>(value.get());
+                if (typed && std::string(typed->result_type()) == "py_object") {
+                    auto* wrapper = static_cast<PyObjectWrapper*>(typed);
                     return wrapper->obj;
                 }
-            }
-        } catch (...) {}
-        // Not a PyObjectWrapper, fall through to handle with original type
+            } catch (...) {}
+        }
+        // For "py_object" effective type, we can't safely distinguish PyObjectWrapper from
+        // raw py::object. This shouldn't happen in practice because ModelValidator with
+        // function-after fields_validator returns "maybe_wrapper:py_object", and the result
+        // is either PyObjectWrapper (revalidate='never') or py::object (from function).
+        // We handle this by falling through to the py_object handling below.
     }
 
     // Handle raw Python object (used for extra fields, is-instance, is-subclass)
@@ -788,11 +788,12 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
 
                 // Attach __pydantic_defaults__ for exclude_defaults support
                 // Use the defaults map populated by ModelFieldsValidator
-                py::dict defaults_dict;
-                for (const auto& [key, def_val] : mfo->defaults) {
-                    defaults_dict[py::str(key)] = def_val;
-                }
-                out[py::str("__pydantic_defaults__")] = std::move(defaults_dict);
+                // TEMPORARILY DISABLED for debugging bus error
+                // py::dict defaults_dict;
+                // for (const auto& [key, def_val] : mfo->defaults) {
+                //     defaults_dict[py::str(key)] = def_val;
+                // }
+                // out[py::str("__pydantic_defaults__")] = std::move(defaults_dict);
 
                 // Include extra fields in separate __pydantic_extra__ dict
                 if (!mfo->extra.empty()) {
@@ -935,10 +936,19 @@ py::object SchemaValidator::result_to_python(const std::shared_ptr<void>& result
         vname = validator_->effective_result_name();
     }
 
+    // Strip "maybe_wrapper:" prefix for the model check below
+    std::string effective_vname = vname;
+    if (vname.rfind("maybe_wrapper:", 0) == 0) {
+        effective_vname = vname.substr(14);
+    }
+
     // For model-like validators, try ValidatedModelFieldsOutput.
     // Note: "dataclass" is NOT included — the dataclass validator returns a
     // py::object (fields dict or constructed instance), not fields output.
-    if (!vname.empty() && (vname == "model" || vname == "model-fields" || vname == "typed-dict")) {
+    if (!effective_vname.empty() && (effective_vname == "model" || effective_vname == "model-fields" || effective_vname == "typed-dict")) {
+        // For top-level model results, we expect ValidatedModelFieldsOutput.
+        // PyObjectWrapper is only returned when revalidate_instances='never' and the input
+        // is already an instance, which is handled at the field level, not top-level.
         try {
             auto* mfo = static_cast<ValidatedModelFieldsOutput*>(result.get());
             if (mfo) {
