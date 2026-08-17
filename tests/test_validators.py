@@ -3108,9 +3108,6 @@ def test_after_and_wrap_combo_called_once() -> None:
     assert my_model.nested.inner_value == 'after_prefix:wrap_prefix:foo'
 
 
-@pytest.mark.xfail(
-    reason="Bug: Nested 'after' model_validator is re-executed. See issue #8452.", raises=ValidationError
-)
 def test_nested_model_validator_not_reexecuted():
     """See https://github.com/pydantic/pydantic/issues/8452 for context.
 

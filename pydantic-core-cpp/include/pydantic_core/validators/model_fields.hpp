@@ -21,6 +21,27 @@ namespace pydantic_core {
 // Forward declaration — defined in schema_validator.cpp
 py::object value_to_python_with_type(const std::shared_ptr<void>& value, const std::string& type_name);
 
+// Forward declaration — defined below in this file
+class ModelValidator;
+
+// Base class for type-safe identification of result types
+struct TypedResult {
+    virtual ~TypedResult() = default;
+    virtual const char* result_type() const = 0;
+};
+
+// Wrapper for py::object results that can be distinguished from ValidatedModelFieldsOutput
+// Used when ModelValidator returns an existing instance (revalidate_instances='never')
+// or when function validators return py::object results for model fields.
+struct PyObjectWrapper : public TypedResult {
+    // Magic number for safe identification without dynamic_cast on void*
+    static constexpr uint64_t MAGIC = 0xC0FEE1234BAE1234ULL;
+    uint64_t magic = MAGIC;
+    py::object obj;
+    explicit PyObjectWrapper(py::object o) : obj(std::move(o)) {}
+    const char* result_type() const override { return "py_object"; }
+};
+
 // ExtraBehavior is already defined in types.hpp
 
 // ============================================================================
@@ -48,7 +69,7 @@ struct FieldInfo {
 // ============================================================================
 // ValidatedModelFieldsOutput - the return value from ModelFieldsValidator
 // ============================================================================
-struct ValidatedModelFieldsOutput {
+struct ValidatedModelFieldsOutput : public TypedResult {
     struct FieldValue {
         std::shared_ptr<void> value;
         std::string type_name;  // "str", "int", "float", "bool", "bytes", "dict", "list", etc.
@@ -58,6 +79,8 @@ struct ValidatedModelFieldsOutput {
     std::unordered_map<std::string, FieldValue> extra;   // Extra fields (if allow)
     std::set<std::string> fields_set;                    // Names of fields that were in input
     std::unordered_map<std::string, py::object> defaults; // Default values for non-required fields
+
+    const char* result_type() const override { return "model_fields"; }
 };
 
 // ============================================================================
@@ -185,8 +208,11 @@ public:
                     auto& val = validate_result.value();
                     ValidatedModelFieldsOutput::FieldValue fv;
                     fv.value = val;
-                    // Determine type name from field validator
+                    // Determine type name from field validator.
+                    // The validator's effective_result_name() already includes "maybe_wrapper:"
+                    // prefix if it might return a PyObjectWrapper (from revalidate_instances).
                     fv.type_name = field_type_name(field.schema);
+
                     output.fields[name] = std::move(fv);
                     output.fields_set.insert(name);
                     output.field_order.push_back(name);
@@ -746,6 +772,12 @@ private:
 // ============================================================================
 // ModelValidator - validates model instances
 // ============================================================================
+enum class RevalidateInstances {
+    Always,
+    Never,
+    SubclassInstances
+};
+
 class ModelValidator : public Validator {
 public:
     ModelValidator() = default;
@@ -756,7 +788,8 @@ public:
         bool frozen = false,
         bool custom_init = false,
         bool root_model = false,
-        py::object class_ = py::none()
+        py::object class_ = py::none(),
+        RevalidateInstances revalidate = RevalidateInstances::Never
     )
         : fields_validator_(std::move(fields_validator))
         , class_name_(std::move(class_name))
@@ -764,6 +797,7 @@ public:
         , custom_init_(custom_init)
         , root_model_(root_model)
         , class_(std::move(class_))
+        , revalidate_(revalidate)
     {}
 
     ValResult<std::shared_ptr<void>> validate(
@@ -777,6 +811,45 @@ public:
                 "ModelValidator: no fields validator set"
             );
         }
+
+        // Check if input is already an instance of the expected class
+        if (!class_.is_none()) {
+            auto* py_input = dynamic_cast<const PythonInput*>(&input);
+            if (py_input) {
+                const py::object& obj = py_input->py_object();
+                bool is_instance = false;
+                try {
+                    is_instance = py::isinstance(obj, class_);
+                } catch (...) {}
+
+                if (is_instance) {
+                    bool should_revalidate = false;
+                    switch (revalidate_) {
+                        case RevalidateInstances::Always:
+                            should_revalidate = true;
+                            break;
+                        case RevalidateInstances::Never:
+                            should_revalidate = false;
+                            break;
+                        case RevalidateInstances::SubclassInstances:
+                            // Revalidate if it's a subclass instance (not exact class)
+                            try {
+                                py::object obj_type = py::type::of(obj);
+                                should_revalidate = !obj_type.is(class_);
+                            } catch (...) {
+                                should_revalidate = true;
+                            }
+                            break;
+                    }
+
+                    if (!should_revalidate) {
+                        // Return the instance as-is, wrapped in PyObjectWrapper
+                        return ValResult<std::shared_ptr<void>>(std::make_shared<PyObjectWrapper>(obj));
+                    }
+                }
+            }
+        }
+
         return fields_validator_->validate(input, state);
     }
 
@@ -800,22 +873,33 @@ public:
     }
 
     std::string effective_result_name() const override {
+        std::string base_name;
         if (fields_validator_) {
             std::string n = fields_validator_->name();
             if (n == "function-after" || n == "function-wrap" || n == "function-plain") {
-                return "py_object";
-            }
-            if (root_model_) {
+                base_name = "py_object";
+            } else if (root_model_) {
                 // Root model result is the inner validator's value type
                 // (recursively resolved for nested root models)
                 auto inner = fields_validator_->root_model_inner_name();
                 if (!inner.empty()) {
-                    return inner;
+                    base_name = inner;
+                } else {
+                    base_name = n;
                 }
-                return n;
+            } else {
+                base_name = n;
             }
+        } else {
+            base_name = name();
         }
-        return name();
+
+        // If this model has a class and might return PyObjectWrapper (revalidate != 'always'),
+        // prefix with "maybe_wrapper:" so the conversion code checks for it at runtime.
+        if (!class_.is_none() && revalidate_ != RevalidateInstances::Always) {
+            return "maybe_wrapper:" + base_name;
+        }
+        return base_name;
     }
 
     ValResult<std::shared_ptr<void>> validate_assignment(
@@ -855,6 +939,7 @@ public:
     void set_fields_validator(std::shared_ptr<Validator> v) { fields_validator_ = std::move(v); }
     void set_class_name(const std::string& name) { class_name_ = name; }
     void set_frozen(bool f) { frozen_ = f; }
+    void set_revalidate(RevalidateInstances r) { revalidate_ = r; }
 
 private:
     std::shared_ptr<Validator> fields_validator_;
@@ -863,6 +948,7 @@ private:
     bool custom_init_ = false;
     bool root_model_ = false;
     py::object class_ = py::none();
+    RevalidateInstances revalidate_ = RevalidateInstances::Never;
 };
 
 // ============================================================================

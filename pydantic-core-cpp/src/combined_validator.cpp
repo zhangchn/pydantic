@@ -844,8 +844,27 @@ static std::shared_ptr<Validator> build_from_element(
             fields_validator = std::make_shared<ModelFieldsValidator>();
         }
 
+        // Parse revalidate_instances from schema or config
+        RevalidateInstances revalidate = RevalidateInstances::Never;
+        std::string revalidate_str;
+        auto revalidate_val = elem["revalidate_instances"];
+        if (!revalidate_val.error() && revalidate_val.value().is_string()) {
+            revalidate_str = revalidate_val.value().get_string().value();
+        } else {
+            // Try config
+            auto config_revalidate = config.find("revalidate_instances");
+            if (config_revalidate != config.end()) {
+                revalidate_str = config_revalidate->second;
+            }
+        }
+        if (revalidate_str == "always") {
+            revalidate = RevalidateInstances::Always;
+        } else if (revalidate_str == "subclass-instances") {
+            revalidate = RevalidateInstances::SubclassInstances;
+        }
+
         auto validator = std::make_shared<ModelValidator>(
-            fields_validator, class_name, frozen, false, root_model);
+            fields_validator, class_name, frozen, false, root_model, py::none(), revalidate);
         return validator;
     }
 
@@ -1670,7 +1689,29 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("cls")) {
             try { model_cls = schema["cls"].cast<py::object>(); } catch (...) {}
         }
-        auto v = std::make_shared<ModelValidator>(inner, model_name, /*frozen=*/false, /*custom_init=*/false, root_model, model_cls);
+
+        // Parse revalidate_instances from schema or the model's own config
+        // (models ignore the parent config and always use the config from this model)
+        RevalidateInstances revalidate = RevalidateInstances::Never;
+        std::string revalidate_str;
+        if (schema.contains("revalidate_instances")) {
+            try { revalidate_str = schema["revalidate_instances"].cast<std::string>(); } catch (...) {}
+        } else if (schema.contains("config")) {
+            try {
+                auto model_config = schema["config"].cast<py::dict>();
+                if (model_config.contains("revalidate_instances")) {
+                    revalidate_str = model_config["revalidate_instances"].cast<std::string>();
+                }
+            } catch (...) {}
+        }
+        if (revalidate_str == "always") {
+            revalidate = RevalidateInstances::Always;
+        } else if (revalidate_str == "subclass-instances") {
+            revalidate = RevalidateInstances::SubclassInstances;
+        }
+        // Default is "never" which maps to RevalidateInstances::Never
+
+        auto v = std::make_shared<ModelValidator>(inner, model_name, /*frozen=*/false, /*custom_init=*/false, root_model, model_cls, revalidate);
         return v;
     }
 

@@ -572,8 +572,36 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
         return py::none();
     }
 
+    // Handle "maybe_wrapper:" prefix - check if it's a PyObjectWrapper via magic number.
+    // The value might be:
+    // 1. PyObjectWrapper* (from ModelValidator returning existing instance, revalidate='never')
+    // 2. py::object* (from function-after/wrap/plain validators)
+    // 3. ValidatedModelFieldsOutput* (from normal model validation)
+    // We use PyObjectWrapper's magic number to safely distinguish case 1 from cases 2 and 3.
+    std::string effective_type = type_name;
+    if (type_name.rfind("maybe_wrapper:", 0) == 0) {
+        effective_type = type_name.substr(14);  // strlen("maybe_wrapper:") == 14
+        // Check for PyObjectWrapper magic number.
+        // PyObjectWrapper layout: [vtable_ptr (8 bytes)] [magic (8 bytes)] [py::object]
+        // The magic is at offset sizeof(void*) from the start of the object.
+        try {
+            auto* ptr = value.get();
+            if (ptr) {
+                // Read the magic number at the expected offset
+                auto magic_ptr = reinterpret_cast<const uint64_t*>(
+                    reinterpret_cast<const char*>(ptr) + sizeof(void*));
+                if (*magic_ptr == PyObjectWrapper::MAGIC) {
+                    auto* wrapper = static_cast<PyObjectWrapper*>(
+                        static_cast<TypedResult*>(value.get()));
+                    return wrapper->obj;
+                }
+            }
+        } catch (...) {}
+        // Not a PyObjectWrapper, fall through to handle with original type
+    }
+
     // Handle raw Python object (used for extra fields, is-instance, is-subclass)
-    if (type_name == "py_object") {
+    if (effective_type == "py_object") {
         try {
             auto* py_obj = static_cast<py::object*>(value.get());
             if (py_obj) return *py_obj;
@@ -581,8 +609,17 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
         return py::none();
     }
 
+    // Handle py_object_wrapper (PyObjectWrapper from ModelValidator returning existing instance)
+    if (effective_type == "py_object_wrapper") {
+        try {
+            auto* wrapper = static_cast<PyObjectWrapper*>(value.get());
+            if (wrapper) return wrapper->obj;
+        } catch (...) {}
+        return py::none();
+    }
+
     // py_raw_object: PyObject* stored by is-instance/is-subclass validators
-    if (type_name == "py_raw_object") {
+    if (effective_type == "py_raw_object") {
         try {
             auto* raw = static_cast<PyObject*>(value.get());
             if (raw) return py::reinterpret_borrow<py::object>(raw);
@@ -591,7 +628,7 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
     }
 
     // Handle date/time types
-    if (type_name == "date") {
+    if (effective_type == "date") {
         try {
             auto* ed = static_cast<EitherDate*>(value.get());
             if (ed) {
@@ -602,7 +639,7 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
         } catch (...) {}
         return py::none();
     }
-    if (type_name == "time") {
+    if (effective_type == "time") {
         try {
             auto* et = static_cast<EitherTime*>(value.get());
             if (et) {
@@ -620,7 +657,7 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
         } catch (...) {}
         return py::none();
     }
-    if (type_name == "datetime") {
+    if (effective_type == "datetime") {
         try {
             auto* edt = static_cast<EitherDateTime*>(value.get());
             if (edt) {
@@ -642,7 +679,7 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
         } catch (...) {}
         return py::none();
     }
-    if (type_name == "timedelta") {
+    if (effective_type == "timedelta") {
         try {
             auto* etd = static_cast<EitherTimedelta*>(value.get());
             if (etd) {
@@ -660,17 +697,17 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
     // Use type_name to determine how to cast
     // For wrapper types, try all scalar types since we don't know the inner type
     // (NOT for model/typed-dict/dataclass — those have their own handler below)
-    bool try_all = (type_name == "nullable"
-                    || type_name == "lax-or-strict" || type_name == "json-or-python");
+    bool try_all = (effective_type == "nullable"
+                    || effective_type == "lax-or-strict" || effective_type == "json-or-python");
 
     // For "any", try specific type casts based on actual value content
-    bool is_any = (type_name == "any");
+    bool is_any = (effective_type == "any");
 
     // Helper: match base type name, including constrained- variants
     auto matches_type = [&](const std::string& base) -> bool {
-        return type_name == base || type_name == ("constrained-" + base) ||
-               type_name == (base + "-constrained") || type_name == ("constr-" + base) ||
-               type_name == (base + "-constr");
+        return effective_type == base || effective_type == ("constrained-" + base) ||
+               effective_type == (base + "-constrained") || effective_type == ("constr-" + base) ||
+               effective_type == (base + "-constr");
     };
 
     // For wrapper types with try_all, check list/container types first to avoid
@@ -682,7 +719,7 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
         } catch (...) {}
     }
 
-    if (try_all || matches_type("str") || type_name == "string") {
+    if (try_all || matches_type("str") || effective_type == "string") {
         auto* s = static_cast<std::string*>(value.get());
         if (s) {
             try {
@@ -702,7 +739,7 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
         }
     }
 
-    if (try_all || matches_type("int") || type_name == "int64") {
+    if (try_all || matches_type("int") || effective_type == "int64") {
         try {
             auto* i = static_cast<int64_t*>(value.get());
             if (i) return py::int_(*i);
@@ -730,7 +767,7 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
             if (v) return py::bytes(reinterpret_cast<const char*>(v->data()), v->size());
         } catch (...) {}
     }
-    if (!type_name.empty() && (type_name == "model" || type_name == "model-fields" || type_name == "typed-dict")) {
+    if (!effective_type.empty() && (effective_type == "model" || effective_type == "model-fields" || effective_type == "typed-dict")) {
         // Directly convert ValidatedModelFieldsOutput to dict.
         // Note: "dataclass" is NOT included — the dataclass validator returns
         // a py::object (fields dict or constructed instance), not fields output.
@@ -771,7 +808,7 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
     }
 
     // Url type - convert to Python Url object using pybind11 cast
-    if (type_name == "url") {
+    if (effective_type == "url") {
         try {
             auto* url_ptr = static_cast<Url*>(value.get());
             if (url_ptr) {
@@ -781,7 +818,7 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
     }
 
     // MultiHostUrl type
-    if (type_name == "multi-host-url") {
+    if (effective_type == "multi-host-url") {
         try {
             auto* url_ptr = static_cast<MultiHostUrl*>(value.get());
             if (url_ptr) {
@@ -791,7 +828,7 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
     }
 
     // UUID type — stored as std::string by UuidValidator
-    if (type_name == "uuid") {
+    if (effective_type == "uuid") {
         try {
             auto* s = static_cast<std::string*>(value.get());
             if (s) {
@@ -802,7 +839,7 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
     }
 
     // Literal type — stored as std::string by LiteralValidator
-    if (type_name == "literal") {
+    if (effective_type == "literal") {
         try {
             auto* s = static_cast<std::string*>(value.get());
             if (s) return py::str(*s);
@@ -835,7 +872,7 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
     }
 
     // "enum" type — return the matched string value
-    if (type_name == "enum" || type_name == "enum-constrained") {
+    if (effective_type == "enum" || effective_type == "enum-constrained") {
         try {
             auto* s = static_cast<std::string*>(value.get());
             if (s) {
@@ -866,11 +903,11 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
     }
 
     // For function-after/before/wrap/plain validators, check py::object*
-    bool is_function_type = (type_name == "function-after" || type_name == "function-before" ||
-                             type_name == "function-wrap" || type_name == "function-plain" ||
-                             type_name == "call" || type_name == "arguments" || type_name == "dataclass" ||
-                             type_name == "callable" || type_name == "set" || type_name == "frozenset" ||
-                             type_name == "tuple");
+    bool is_function_type = (effective_type == "function-after" || effective_type == "function-before" ||
+                             effective_type == "function-wrap" || effective_type == "function-plain" ||
+                             effective_type == "call" || effective_type == "arguments" || effective_type == "dataclass" ||
+                             effective_type == "callable" || effective_type == "set" || effective_type == "frozenset" ||
+                             effective_type == "tuple");
     if (is_function_type) {
         try {
             auto* obj = static_cast<py::object*>(value.get());
