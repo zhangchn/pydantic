@@ -423,7 +423,10 @@ struct SerNode {
             }
             return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
         }
-        if (!py_func.is_none()) {
+        // Note: py_func may be a default-constructed py::object (null handle)
+        // when no serialization function was assigned, so check ptr() rather
+        // than is_none() (which is false for a null handle).
+        if (py_func.ptr() && !py_func.is_none()) {
             // Check when_used
             bool skip_serializer = false;
             if (when_used == "json" || when_used == "json-unless-none") {
@@ -765,7 +768,10 @@ struct SerNode {
             }
             return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
         }
-        if (!py_func.is_none()) {
+        // Note: py_func may be a default-constructed py::object (null handle)
+        // when no serialization function was assigned, so check ptr() rather
+        // than is_none() (which is false for a null handle).
+        if (py_func.ptr() && !py_func.is_none()) {
             // Check when_used
             bool skip_serializer = false;
             if (when_used == "json" || when_used == "json-unless-none") {
@@ -1311,9 +1317,11 @@ static SerRef build_ser_impl(const py::dict& schema,
 
     // Check serialization override
     py::dict ser_dict;
+    bool has_ser_dict = false;
     try {
         if (schema.contains("serialization")) {
             ser_dict = schema["serialization"].cast<py::dict>();
+            has_ser_dict = true;
             if (ser_dict.contains("type")) {
                 std::string st = ser_dict["type"].cast<std::string>();
                 if (st != "include-exclude-sequence" && st != "include-exclude-dict" && st != "base64")
@@ -1473,38 +1481,52 @@ static SerRef build_ser_impl(const py::dict& schema,
     }
 
     if (type == "function-plain" || type == "function-after" || type == "function-before" || type == "function-wrap") {
-        try {
-            // Use serialization function if available (overrides main schema's function)
-            py::object func = ser_func.is_none() ? schema["function"] : ser_func;
-            // function may be a dict like {'function': actual_callable, 'type': 'no-info'}
-            if (py::isinstance<py::dict>(func)) {
-                py::dict func_dict = func.cast<py::dict>();
-                if (func_dict.contains("function")) {
-                    func = func_dict["function"];
+        // Without a serialization override, function-before/after/wrap are
+        // validation-only wrappers: serialize the inner schema directly,
+        // matching Rust's FunctionBefore/After/WrapSerializerBuilder (which
+        // builds from `schema.schema`). Otherwise model_dump would re-run
+        // validators (e.g. root_validator returning a fixed dict) and produce
+        // wrong output.
+        if ((type == "function-before" || type == "function-after" || type == "function-wrap") && !has_ser_dict) {
+            auto inner = sub();
+            if (inner) return inner;
+        }
+        // Only treat the schema's function as a serializer when a serialization
+        // override exists (e.g. PlainSerializer/WrapSerializer/field serializers).
+        if (has_ser_dict) {
+            try {
+                // Use serialization function if available (overrides main schema's function)
+                py::object func = ser_func.is_none() ? schema["function"] : ser_func;
+                // function may be a dict like {'function': actual_callable, 'type': 'no-info'}
+                if (py::isinstance<py::dict>(func)) {
+                    py::dict func_dict = func.cast<py::dict>();
+                    if (func_dict.contains("function")) {
+                        func = func_dict["function"];
+                    }
                 }
-            }
-            node->py_func = func;
-            // Determine info_arg: prefer serialization override, fall back to schema
-            bool info_arg = ser_info_arg;
-            if (ser_dict.is_none() || !ser_dict.contains("info_arg")) {
-                try { if (schema.contains("info_arg")) info_arg = schema["info_arg"].cast<bool>(); } catch (...) {}
-            }
-            node->info_arg = info_arg;
-            // Determine is_field_serializer: prefer serialization override, fall back to schema
-            bool is_field_serializer = ser_is_field_serializer;
-            if (ser_dict.is_none() || !ser_dict.contains("is_field_serializer")) {
-                try { if (schema.contains("is_field_serializer")) is_field_serializer = schema["is_field_serializer"].cast<bool>(); } catch (...) {}
-            }
-            node->is_field_serializer = is_field_serializer;
-            // Determine when_used: prefer serialization override, fall back to schema
-            std::string when_used = ser_when_used;
-            if (ser_dict.is_none() || !ser_dict.contains("when_used")) {
-                try { if (schema.contains("when_used")) when_used = schema["when_used"].cast<std::string>(); } catch (...) {}
-            }
-            node->when_used = when_used;
-        } catch (...) {}
+                node->py_func = func;
+                // Determine info_arg: prefer serialization override, fall back to schema
+                bool info_arg = ser_info_arg;
+                if (!has_ser_dict || !ser_dict.contains("info_arg")) {
+                    try { if (schema.contains("info_arg")) info_arg = schema["info_arg"].cast<bool>(); } catch (...) {}
+                }
+                node->info_arg = info_arg;
+                // Determine is_field_serializer: prefer serialization override, fall back to schema
+                bool is_field_serializer = ser_is_field_serializer;
+                if (!has_ser_dict || !ser_dict.contains("is_field_serializer")) {
+                    try { if (schema.contains("is_field_serializer")) is_field_serializer = schema["is_field_serializer"].cast<bool>(); } catch (...) {}
+                }
+                node->is_field_serializer = is_field_serializer;
+                // Determine when_used: prefer serialization override, fall back to schema
+                std::string when_used = ser_when_used;
+                if (!has_ser_dict || !ser_dict.contains("when_used")) {
+                    try { if (schema.contains("when_used")) when_used = schema["when_used"].cast<std::string>(); } catch (...) {}
+                }
+                node->when_used = when_used;
+            } catch (...) {}
+        }
         // For function-plain with serialization override, build children from original schema for fallback
-        if (type != "function-plain" || !ser_dict.is_none()) { auto c = sub(); if (c) node->children.push_back(c); }
+        if (type != "function-plain" || has_ser_dict) { auto c = sub(); if (c) node->children.push_back(c); }
     }
 
     // model-fields, typed-dict, dataclass-args
@@ -1940,13 +1962,13 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             return validated;
         }, py::arg("object"), py::arg("strict") = py::none(), py::arg("context") = py::none(), py::arg("self_instance") = py::none(),
              py::arg("extra") = py::none(), py::arg("from_attributes") = py::none(), py::arg("by_alias") = py::none(), py::arg("by_name") = py::none())
-        .def("validate_json", [](SchemaValidator& self, const py::object& jd, py::object strict) {
+        .def("validate_json", [](SchemaValidator& self, const py::object& jd, py::object strict, py::object context) {
             std::string js = py::isinstance<py::bytes>(jd) ? jd.cast<std::string>() : jd.cast<std::string>();
             // Parse JSON to Python object first, then validate as Python
             // This ensures proper type coercion (e.g., "Infinity" string -> float inf)
             py::object py_input = json_to_pyobj(js);
-            return self.validate_python_object(py_input, pyobj_to_bool(strict), std::nullopt, std::nullopt, py::none());
-        }, py::arg("json_data"), py::arg("strict") = py::none())
+            return self.validate_python_object(py_input, pyobj_to_bool(strict), std::nullopt, std::nullopt, context);
+        }, py::arg("json_data"), py::arg("strict") = py::none(), py::arg("context") = py::none())
         .def("validate_strings", [](SchemaValidator& self, const py::object& sd, py::object strict, py::object extra) {
             std::optional<ExtraBehavior> extra_opt;
             if (!extra.is_none()) {

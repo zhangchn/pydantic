@@ -557,6 +557,16 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
         try {
             py::module_ m = py::module_::import("__main__");
             m.attr("_last_raw_input") = input;
+            // Collect Python exception objects from line errors, index-aligned
+            // with the error details, so the Python wrapper can attach them to
+            // ctx['error'] for value_error/assertion_error entries.
+            py::list err_objs;
+            if (result.error().has_line_errors()) {
+                for (const auto& le : result.error().line_errors()) {
+                    err_objs.append(le->raw_error_obj.ptr() ? py::object(le->raw_error_obj) : py::none());
+                }
+            }
+            m.attr("_last_error_objs") = err_objs;
         } catch (...) {
             // Silently ignore if module state setting fails
         }

@@ -54,6 +54,7 @@ linting = [
 ]
 
 [tool.scikit-build]
+install.strip = false
 cmake.source-dir = "."
 wheel.py-api = "cp310"
 wheel.packages = ["pydantic_core_cpp"]

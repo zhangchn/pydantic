@@ -4,6 +4,7 @@
 #include "pydantic_core/validation_state.hpp"
 #include "pydantic_core/python_input.hpp"
 #include "pydantic_core/json_input.hpp"
+#include "pydantic_core/validators/model_fields.hpp"
 #include <memory>
 #include <functional>
 #include <optional>
@@ -17,6 +18,47 @@ namespace pydantic_core {
 // Defined in schema_validator.cpp; converts a validated result to a Python
 // object by type name (used here to pass the validated value to after-functions).
 py::object value_to_python_with_type(const std::shared_ptr<void>& value, const std::string& type_name);
+
+// Convert a Python exception raised by a validator function into a ValError,
+// mirroring Rust's convert_err: ValueError -> value_error, AssertionError ->
+// assertion_error, anything else -> custom_error carrying the message. The
+// exception object is attached to the line error so the Python wrapper can
+// surface it as ctx['error'].
+inline ValError function_error_from_exception(py::error_already_set& e, const Input& input, ValidationState& state) {
+    // Keep a reference to the exception object for ctx['error'] — value()
+    // returns a new reference, so it stays valid after e.restore().
+    py::object exc_value = e.value();
+    std::string exc_str;
+    try {
+        exc_str = py::str(exc_value).cast<std::string>();
+    } catch (...) {
+        exc_str = "";
+    }
+    ErrorType::Kind kind;
+    if (e.matches(PyExc_ValueError)) {
+        kind = ErrorType::Kind::ValueError;
+    } else if (e.matches(PyExc_AssertionError)) {
+        kind = ErrorType::Kind::AssertionError;
+    } else {
+        std::string msg = e.what();
+        e.restore();
+        PyErr_Clear();
+        return ValError::line_error(
+            ErrorType(ErrorType::Kind::CustomError),
+            state.location(),
+            "Function validator failed: " + msg
+        );
+    }
+    ErrorType et(kind);
+    et.context()["error"] = exc_str;
+    auto err = ValError::line_error(et, state.location(), input.as_error_value().repr);
+    err.line_errors()[0]->raw_error_obj = exc_value;
+    // Swallow the exception: restore() + PyErr_Clear() leaves the Python error
+    // indicator clear so the destructor's restore is a no-op.
+    e.restore();
+    PyErr_Clear();
+    return err;
+}
 
 // FunctionBeforeValidator - runs Python function before validation
 // Python signature: func(input, info) -> transformed_input
@@ -50,22 +92,23 @@ public:
                 // Try with info dict (general/no-info-wrapped functions)
                 transformed = py_func_(input.as_python_object(), info_dict);
             } catch (py::error_already_set& e1) {
-                // If fails, try without info dict (no-info functions like
-                // BeforeValidator lambdas).  restore() + PyErr_Clear() swallows
-                // the error so the destructor's restore is a no-op.
+                if (!e1.matches(PyExc_TypeError)) {
+                    // Genuine exception raised by the validator function —
+                    // convert it (ValueError -> value_error, etc.). Do NOT
+                    // retry without info: that would mask the real exception
+                    // with the retry's TypeError (e.g. a root_validator raising
+                    // ValueError would surface as a bogus argument-count error).
+                    return function_error_from_exception(e1, input, state);
+                }
+                // TypeError: likely a no-info function — retry without info.
+                // restore() + PyErr_Clear() swallows the error so the
+                // destructor's restore is a no-op.
                 e1.restore();
                 PyErr_Clear();
                 try {
                     transformed = py_func_(input.as_python_object());
                 } catch (py::error_already_set& e2) {
-                    std::string msg = e2.what();
-                    e2.restore();
-                    PyErr_Clear();
-                    return ValError::line_error(
-                        ErrorType(ErrorType::Kind::CustomError),
-                        state.location(),
-                        "FunctionBefore validator failed: " + msg
-                    );
+                    return function_error_from_exception(e2, input, state);
                 }
             }
 
@@ -124,6 +167,23 @@ public:
 
         if (py_func_.is_none()) return result;
 
+        // If the inner validator reused an existing instance (ModelValidator with
+        // revalidate_instances='never' returning PyObjectWrapper), the after-function
+        // must NOT re-run: the instance is already validated, and re-running would
+        // re-execute the model's after validators (fixes #8452: nested
+        // model_validator(mode='after') re-executed when a parent model receives an
+        // existing child instance). The result is stored as py::object so the
+        // "function-after" result type dispatch stays consistent.
+        if (inner_->effective_result_name().rfind("maybe_wrapper:", 0) == 0) {
+            try {
+                auto* typed = static_cast<TypedResult*>(result.value().get());
+                if (typed && std::string(typed->result_type()) == "py_object") {
+                    auto* wrapper = static_cast<PyObjectWrapper*>(typed);
+                    return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(wrapper->obj));
+                }
+            } catch (...) {}
+        }
+
         // Convert the validated inner result to a Python object — Rust passes
         // the validated value to the after-function (model validators receive
         // the validated fields dict, field validators the coerced value).
@@ -161,15 +221,24 @@ public:
                 // Try with info object (general/no-info-wrapped functions)
                 output = py_func_(validated_obj, info_obj);
             } catch (py::error_already_set& e1) {
-                // If fails with info dict, try without info dict (no-info
-                // functions like attrgetter).  restore() + PyErr_Clear()
-                // swallows the error so the destructor's restore is a no-op.
+                if (!e1.matches(PyExc_TypeError)) {
+                    // Genuine exception raised by the validator function —
+                    // convert it (ValueError -> value_error, etc.) instead of
+                    // retrying without info and masking the real error.
+                    return function_error_from_exception(e1, input, state);
+                }
+                // TypeError: likely a no-info function — retry without info
+                // (e.g. attrgetter).  restore() + PyErr_Clear() swallows the
+                // error so the destructor's restore is a no-op.
                 e1.restore();
                 PyErr_Clear();
                 try {
                     output = py_func_(validated_obj);
                 } catch (py::error_already_set& e2) {
-                    // If the function fails (e.g. attrgetter('value') on a plain string),
+                    if (e2.matches(PyExc_ValueError) || e2.matches(PyExc_AssertionError)) {
+                        return function_error_from_exception(e2, input, state);
+                    }
+                    // Other failures (e.g. attrgetter('value') on a plain string),
                     // use the validated inner result as the output
                     e2.restore();
                     PyErr_Clear();
@@ -234,20 +303,16 @@ public:
                 // Try with info dict (general/no-info-wrapped functions)
                 output = py_func_(input.as_python_object(), info_dict);
             } catch (py::error_already_set& e1) {
-                // If fails, try without info dict (no-info functions like class constructors)
+                if (!e1.matches(PyExc_TypeError)) {
+                    return function_error_from_exception(e1, input, state);
+                }
+                // TypeError: likely a no-info function — retry without info
                 e1.restore();
                 PyErr_Clear();
                 try {
                     output = py_func_(input.as_python_object());
                 } catch (py::error_already_set& e2) {
-                    std::string msg = e2.what();
-                    e2.restore();
-                    PyErr_Clear();
-                    return ValError::line_error(
-                        ErrorType(ErrorType::Kind::CustomError),
-                        state.location(),
-                        "FunctionPlain validator failed: " + msg
-                    );
+                    return function_error_from_exception(e2, input, state);
                 }
             }
             return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(output));
@@ -315,20 +380,19 @@ public:
                 // Try with info dict (general wrap functions)
                 output = py_func_(input.as_python_object(), handler, info_dict);
             } catch (py::error_already_set& e1) {
-                // If fails, try without info dict (no-info wrap functions)
+                if (!e1.matches(PyExc_TypeError)) {
+                    // Genuine exception raised by the validator function —
+                    // convert it (ValueError -> value_error, etc.) instead of
+                    // retrying without info and masking the real error.
+                    return function_error_from_exception(e1, input, state);
+                }
+                // TypeError: likely a no-info wrap function — retry without info
                 e1.restore();
                 PyErr_Clear();
                 try {
                     output = py_func_(input.as_python_object(), handler);
                 } catch (py::error_already_set& e2) {
-                    std::string msg = e2.what();
-                    e2.restore();
-                    PyErr_Clear();
-                    return ValError::line_error(
-                        ErrorType(ErrorType::Kind::CustomError),
-                        state.location(),
-                        "FunctionWrap validator failed: " + msg
-                    );
+                    return function_error_from_exception(e2, input, state);
                 }
             }
             return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(output));

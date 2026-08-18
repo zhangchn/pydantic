@@ -21,6 +21,7 @@ struct ValLineError {
     std::string input_value;
 #ifdef HAS_PYBIND11
     py::object raw_input_obj;  // Original Python object for accurate serialization (Rust parallel)
+    py::object raw_error_obj;  // Python exception object for ctx['error'] (value_error/assertion_error)
 #endif
 
     std::string message() const;
@@ -104,6 +105,8 @@ public:
 #ifdef HAS_PYBIND11
         bool has_raw_input = false;
         py::object raw_input_obj;
+        bool has_raw_error = false;
+        py::object raw_error_obj;
 #endif
     };
     

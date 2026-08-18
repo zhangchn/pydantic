@@ -84,10 +84,20 @@ std::string ValidationError::errors_to_json() const {
             << ",\"input\":" << json_quote(err.input)
             << ",\"ctx\":{";
         bool cfirst = true;
+        // Exceptions cannot be JSON-serialized, so emit a marker that the
+        // Python wrapper resolves against the stored error objects. When the
+        // marker is emitted it replaces the message-string "error" entry.
+        bool emit_error_ref = err.has_raw_error && err.raw_error_obj.ptr();
         for (const auto& [k, v] : err.ctx) {
+            if (emit_error_ref && k == "error") continue;
             if (!cfirst) oss << ",";
             cfirst = false;
             oss << json_quote(k) << ":" << json_quote(v);
+        }
+        if (emit_error_ref) {
+            if (!cfirst) oss << ",";
+            cfirst = false;
+            oss << json_quote("error") << ":" << json_quote("__PYDANTIC_EXC_REF__");
         }
         oss << "}}";
     }
@@ -108,6 +118,13 @@ void ValidationError::build_errors_from_val_error(const ValError& val_error) {
             if (!line_err->raw_input_obj.is_none()) {
                 details.has_raw_input = true;
                 details.raw_input_obj = line_err->raw_input_obj;
+            }
+            // Preserve the Python exception for ctx['error'] (value_error/assertion_error).
+            // Note: default-constructed py::object has a null handle, so check ptr()
+            // rather than is_none() (which is false for a null handle).
+            if (line_err->raw_error_obj.ptr()) {
+                details.has_raw_error = true;
+                details.raw_error_obj = line_err->raw_error_obj;
             }
 #endif
             // Filter out internal pluralization keys from context

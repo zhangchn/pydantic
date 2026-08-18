@@ -191,7 +191,12 @@ def _parse_structured_errors(msg: str) -> list[dict] | None:
         import json as _json
         raw = _json.loads(msg.split(marker, 1)[1].strip())
         result = []
-        for err in raw:
+        # Python exceptions cannot be JSON-serialized; the C++ backend stores
+        # them (index-aligned with the error list) on __main__ and emits a
+        # marker in ctx. Resolve the marker back to the real exception object.
+        import __main__ as _main
+        error_objs = getattr(_main, '_last_error_objs', None)
+        for i, err in enumerate(raw):
             d = {
                 'type': err['type'],
                 'loc': tuple(err['loc']),
@@ -201,6 +206,8 @@ def _parse_structured_errors(msg: str) -> list[dict] | None:
             }
             if err.get('ctx'):
                 d['ctx'] = {k: _parse_input(v) for k, v in err['ctx'].items()}
+                if d['ctx'].get('error') == '__PYDANTIC_EXC_REF__' and error_objs is not None and i < len(error_objs):
+                    d['ctx']['error'] = error_objs[i]
             result.append(d)
         return result
     except Exception:
@@ -582,6 +589,11 @@ def _format_rust_error(msg: str, model_name: str = '') -> str:
                                 input_type = type(_ast.literal_eval(raw_input)).__name__
                             except Exception:
                                 pass
+                            # Keep the full message text for errors that carry a
+                            # detail after the prefix (e.g. "Value error, foo"
+                            # must not be truncated to "Value error").
+                            if err_type in ('value_error', 'assertion_error'):
+                                rust_msg = msg_line[:seg.start()].strip()
                         break
                 else:
                     # Unmapped message: strip the trailing [type=..., input_value=...]
@@ -1235,7 +1247,7 @@ class SchemaValidator:
 
     def validate_json(self, json_data, *, strict=None, context=None, extra=None,
                       from_attributes=None, by_alias=None, by_name=None):
-        result = self._base.validate_json(json_data, strict=strict)
+        result = self._base.validate_json(json_data, strict=strict, context=context)
         if isinstance(result, dict):
             result = self._dict_to_model(result)
         else:

@@ -134,6 +134,8 @@ public:
         JsonInvalid,
         CustomError,
         RecursionError,
+        ValueError,
+        AssertionError,
         
         // Generic constraint errors (used by constrained int/float validators)
         GreaterThan,

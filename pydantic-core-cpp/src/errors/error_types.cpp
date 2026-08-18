@@ -115,6 +115,8 @@ std::string ErrorType::type_name() const {
         {Kind::JsonInvalid, "json_invalid"},
         {Kind::CustomError, "custom_error"},
         {Kind::RecursionError, "recursion_error"},
+        {Kind::ValueError, "value_error"},
+        {Kind::AssertionError, "assertion_error"},
         
         // Generic constraint errors
         {Kind::GreaterThan, "greater_than"},
@@ -217,6 +219,8 @@ std::string ErrorType::message_template() const {
         {Kind::JsonInvalid, "Invalid JSON"},
         {Kind::CustomError, "{message}"},
         {Kind::RecursionError, "Recursion depth exceeded"},
+        {Kind::ValueError, "Value error, {error}"},
+        {Kind::AssertionError, "Assertion failed, {error}"},
         
         // Generic constraint errors
         {Kind::GreaterThan, "Input should be greater than {gt}"},
@@ -323,6 +327,7 @@ ErrorType ErrorType::build_known_type(const std::string& type_str) {
         {"less_than", Kind::LessThan},              {"greater_than_equal", Kind::GreaterThanEqual},
         {"less_than_equal", Kind::LessThanEqual},   {"multiple_of", Kind::MultipleOf},
         {"finite_number", Kind::FiniteNumber},      {"string_not_ascii", Kind::StringNotAscii},
+        {"value_error", Kind::ValueError},          {"assertion_error", Kind::AssertionError},
         {"model_type", Kind::ModelType},           {"dataclass_type", Kind::DataclassType},
         {"enum_error", Kind::EnumError},
     };

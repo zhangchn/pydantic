@@ -878,6 +878,13 @@ public:
             std::string n = fields_validator_->name();
             if (n == "function-after" || n == "function-wrap" || n == "function-plain") {
                 base_name = "py_object";
+            } else if (n == "function-before") {
+                // function-before transforms the input, then the inner validator
+                // produces the result — so the stored value has the inner
+                // validator's type (e.g. ValidatedModelFieldsOutput), not a
+                // py::object. Without this, result conversion would misread the
+                // value as a py::object and crash.
+                base_name = fields_validator_->effective_result_name();
             } else if (root_model_) {
                 // Root model result is the inner validator's value type
                 // (recursively resolved for nested root models)
