@@ -1807,6 +1807,13 @@ static std::shared_ptr<Validator> build_from_py_dict(
                         }
                     }
                 }
+                // Parse validation_alias
+                if (field_def.contains("validation_alias")) {
+                    auto alias_val = field_def["validation_alias"];
+                    if (py::isinstance<py::str>(alias_val)) {
+                        info.alias = alias_val.cast<std::string>();
+                    }
+                }
                 v->add_field(field_name, std::move(info));
             }
         }
