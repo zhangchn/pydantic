@@ -93,9 +93,16 @@ public:
                             ErrorType(ErrorType::Kind::CustomError), state.location(), "Item validation failed"}));
                     }
                 } else {
-                    // Validation succeeded — use the original input element as the result
-                    // (validated result type differs per validator, but input is always py::object)
-                    result_list.append(element);
+                    // Validation succeeded — convert the validated result to a Python object
+                    // (the inner validator may have transformed the value, e.g. AfterValidator)
+                    py::object validated_item;
+                    try {
+                        validated_item = value_to_python_with_type(item_result.value(), items_schema->effective_result_name());
+                    } catch (...) {
+                        // Fallback: use the original input element
+                        validated_item = element;
+                    }
+                    result_list.append(validated_item);
                 }
                 state.location().pop();
             }

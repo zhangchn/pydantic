@@ -956,9 +956,16 @@ py::object SchemaValidator::result_to_python(const std::shared_ptr<void>& result
     // Note: "dataclass" is NOT included — the dataclass validator returns a
     // py::object (fields dict or constructed instance), not fields output.
     if (!effective_vname.empty() && (effective_vname == "model" || effective_vname == "model-fields" || effective_vname == "typed-dict")) {
-        // For top-level model results, we expect ValidatedModelFieldsOutput.
-        // PyObjectWrapper is only returned when revalidate_instances='never' and the input
-        // is already an instance, which is handled at the field level, not top-level.
+        // Check if it's a PyObjectWrapper first (from revalidate_instances='never' with existing instance)
+        try {
+            auto* typed = static_cast<TypedResult*>(result.get());
+            if (typed && std::string(typed->result_type()) == "py_object") {
+                auto* wrapper = static_cast<PyObjectWrapper*>(typed);
+                return wrapper->obj;
+            }
+        } catch (...) {}
+
+        // Otherwise, expect ValidatedModelFieldsOutput
         try {
             auto* mfo = static_cast<ValidatedModelFieldsOutput*>(result.get());
             if (mfo) {

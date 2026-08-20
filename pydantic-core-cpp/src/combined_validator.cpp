@@ -1385,7 +1385,12 @@ static std::shared_ptr<Validator> build_from_py_dict(
                 v->set_class_name(cls.cast<std::string>());
             } else if (py::isinstance<py::type>(cls)) {
                 v->set_py_class(cls);
-                v->set_class_name(py::str(cls).cast<std::string>());
+                // Rust uses the class qualname (no module prefix) for the error ctx
+                try {
+                    v->set_class_name(py::str(py::getattr(cls, "__qualname__")).cast<std::string>());
+                } catch (...) {
+                    v->set_class_name(py::str(cls).cast<std::string>());
+                }
             }
         }
         return v;

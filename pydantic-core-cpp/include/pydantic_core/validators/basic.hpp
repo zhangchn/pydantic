@@ -550,9 +550,9 @@ public:
                 py::object type_obj = py::module_::import("builtins").attr("type");
                 if (!py::isinstance(input_py, type_obj)) {
                     return ValError::line_error(
-                        ErrorType(ErrorType::Kind::IsSubclassType),
+                        ErrorType(ErrorType::Kind::IsSubclassType, "class", class_name_),
                         state.location(),
-                        "Input must be a class/type, not an instance"
+                        input.as_error_value().repr
                     );
                 }
                 // Check subclass relationship using Python's issubclass()
@@ -560,9 +560,9 @@ public:
                 py::bool_ is_subclass = builtins.attr("issubclass")(input_py, py_class_);
                 if (!is_subclass.cast<bool>()) {
                     return ValError::line_error(
-                        ErrorType(ErrorType::Kind::IsSubclassType),
+                        ErrorType(ErrorType::Kind::IsSubclassType, "class", class_name_),
                         state.location(),
-                        "Input is not a subclass of " + class_name_
+                        input.as_error_value().repr
                     );
                 }
                 // Store as PyObject* — leak the reference to avoid GIL issues
@@ -577,9 +577,9 @@ public:
                 e.restore();
                 PyErr_Clear();
                 return ValError::line_error(
-                    ErrorType(ErrorType::Kind::IsSubclassType),
+                    ErrorType(ErrorType::Kind::IsSubclassType, "class", class_name_),
                     state.location(),
-                    "Subclass check failed: " + msg
+                    input.as_error_value().repr
                 );
             }
         }

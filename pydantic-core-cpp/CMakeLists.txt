@@ -5,6 +5,20 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Always emit DWARF debug info: needed by the dSYM step (release) and for
+# local lldb debugging (debug). Independent of whether symbols get stripped.
+add_compile_options(-g)
+
+# PDC_DEBUG=ON: unoptimized build that retains ALL symbols (local + global +
+# DWARF) in the object files and the .so — nothing is stripped. Use for lldb.
+option(PDC_DEBUG "Debug build: -O0 with full unstripped symbols" OFF)
+
+if(PDC_DEBUG)
+    set(PDC_OPT_FLAGS -O0)
+else()
+    set(PDC_OPT_FLAGS -O3)
+endif()
+
 # ---------------------------------------------------------------------------
 # Dependencies
 # ---------------------------------------------------------------------------
@@ -61,18 +75,16 @@ endif()
 # <binary>.dSYM bundle and strip removes local symbols from the shipped
 # binary (exported symbols such as PyInit_* are kept).  Compile with -g so
 # the dSYM contains usable debug info for symbolication (lldb, atos,
-# CrashReporter).  Disable with -DPDC_STRIP_TO_DSYM=OFF; Debug builds are
-# left untouched so they stay debuggable.
+# CrashReporter).  Disable with -DPDC_STRIP_TO_DSYM=OFF; PDC_DEBUG=ON builds
+# (and single-config Debug builds) are left untouched so they stay debuggable.
 option(PDC_STRIP_TO_DSYM "Strip binary symbols into a .dSYM bundle (macOS)" ON)
 
 if(APPLE AND PDC_STRIP_TO_DSYM)
     find_program(PDC_DSYMUTIL_EXECUTABLE dsymutil)
     find_program(PDC_STRIP_EXECUTABLE strip)
     if(PDC_DSYMUTIL_EXECUTABLE AND PDC_STRIP_EXECUTABLE)
-        # Ensure DWARF debug info exists for dsymutil to extract
-        add_compile_options(-g)
-        # Skip stripping in single-config Debug builds so they stay debuggable
-        if(NOT CMAKE_CONFIGURATION_TYPES AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+        # Skip stripping for debug builds so the .so keeps all symbols
+        if(PDC_DEBUG OR (NOT CMAKE_CONFIGURATION_TYPES AND CMAKE_BUILD_TYPE STREQUAL "Debug"))
             set(PDC_STRIP_ENABLED OFF)
         else()
             set(PDC_STRIP_ENABLED ON)
@@ -116,7 +128,19 @@ set(CORE_SOURCES
     src/main_module.cpp
 )
 
-pybind11_add_module(_pydantic_core_cpp ${CORE_SOURCES})
+# NO_EXTRAS: skip pybind11's automatic extras — most importantly its
+# POST_BUILD `strip -x`, which fires for any CMAKE_BUILD_TYPE other than
+# Debug/RelWithDebInfo/None (pybind/pybind11#4454). scikit-build-core builds
+# wheels as Release, so that strip removed local symbols + DWARF right after
+# linking (before our dSYM step could run), leaving a stripped .so and a
+# useless stub .dSYM.
+pybind11_add_module(_pydantic_core_cpp NO_EXTRAS ${CORE_SOURCES})
+
+# Re-add LTO for optimized builds so release codegen is unchanged; debug
+# builds skip it (LTO defeats -O0 debugging).
+if(NOT PDC_DEBUG AND NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION)
+    target_link_libraries(_pydantic_core_cpp PRIVATE pybind11::lto)
+endif()
 
 target_include_directories(_pydantic_core_cpp PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -132,7 +156,7 @@ target_compile_options(_pydantic_core_cpp PRIVATE
     -Wall
     -Wextra
     -Wpedantic
-    -O3
+    ${PDC_OPT_FLAGS}
 )
 
 # Strip symbols into a .dSYM bundle (macOS, non-Debug builds) and ship the
