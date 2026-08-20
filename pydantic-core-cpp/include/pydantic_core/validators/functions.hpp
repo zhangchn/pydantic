@@ -175,13 +175,38 @@ public:
         // existing child instance). The result is stored as py::object so the
         // "function-after" result type dispatch stays consistent.
         if (inner_->effective_result_name().rfind("maybe_wrapper:", 0) == 0) {
-            try {
-                auto* typed = static_cast<TypedResult*>(result.value().get());
-                if (typed && std::string(typed->result_type()) == "py_object") {
-                    auto* wrapper = static_cast<PyObjectWrapper*>(typed);
-                    return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(wrapper->obj));
+            std::string base_type = inner_->effective_result_name().substr(14);
+            if (base_type == "model" || base_type == "model-fields" || base_type == "typed-dict") {
+                // Both PyObjectWrapper and ValidatedModelFieldsOutput/TypedDictResult
+                // inherit from TypedResult, so the cast is safe.
+                try {
+                    auto* typed = static_cast<TypedResult*>(result.value().get());
+                    if (typed && std::string(typed->result_type()) == "py_object") {
+                        auto* wrapper = static_cast<PyObjectWrapper*>(typed);
+                        return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(wrapper->obj));
+                    }
+                } catch (...) {}
+            } else {
+                // Root model with primitive inner type (int, str, etc.): the result is
+                // either a PyObjectWrapper (existing instance, revalidate='never') or a
+                // primitive C++ value. We can't safely cast to TypedResult for primitive
+                // values, so check if the input was an existing instance of the model.
+                if (auto* mv = dynamic_cast<ModelValidator*>(inner_.get())) {
+                    py::object cls = mv->expected_class();
+                    if (!cls.is_none()) {
+                        try {
+                            py::object obj = input.as_python_object();
+                            if (py::isinstance(obj, cls)) {
+                                auto* wrapper = static_cast<PyObjectWrapper*>(result.value().get());
+                                if (wrapper) {
+                                    return ValResult<std::shared_ptr<void>>(
+                                        std::make_shared<py::object>(wrapper->obj));
+                                }
+                            }
+                        } catch (...) {}
+                    }
                 }
-            } catch (...) {}
+            }
         }
 
         // Convert the validated inner result to a Python object — Rust passes
@@ -193,6 +218,47 @@ public:
         } catch (...) {
             // Unknown inner result type: pass through the raw input
             validated_obj = input.as_python_object();
+        }
+
+        // If the inner validator is a ModelValidator, construct the model instance
+        // before calling the after-function (model_validator(mode='after') expects self)
+        if (auto* model_validator = dynamic_cast<ModelValidator*>(inner_.get())) {
+            py::object model_cls = model_validator->expected_class();
+            if (!model_cls.is_none()) {
+                try {
+                    // Construct the model instance WITHOUT triggering validation
+                    // (to avoid infinite recursion with model_validator)
+                    py::object instance;
+                    if (model_validator->root_model()) {
+                        if (py::hasattr(model_cls, "model_construct")) {
+                            instance = model_cls.attr("model_construct")(validated_obj);
+                        } else {
+                            instance = py::module_::import("builtins").attr("object").attr("__new__")(model_cls);
+                            instance.attr("__dict__") = py::dict(py::arg("root") = validated_obj);
+                        }
+                    } else {
+                        // For BaseModel, use model_construct to avoid validation
+                        if (py::isinstance<py::dict>(validated_obj)) {
+                            py::dict fields_dict = validated_obj.cast<py::dict>();
+                            py::object extra = fields_dict.attr("pop")("__pydantic_extra__", py::none());
+                            py::object fields_set = fields_dict.attr("pop")("__pydantic_fields_set__", py::set());
+                            fields_dict.attr("pop")("__pydantic_defaults__", py::none());
+
+                            instance = py::module_::import("builtins").attr("object").attr("__new__")(model_cls);
+                            instance.attr("__dict__").attr("update")(fields_dict);
+                            py::setattr(instance, "__pydantic_private__", py::none());
+                            py::setattr(instance, "__pydantic_extra__",
+                                extra.is_none() ? py::none() : extra);
+                            py::setattr(instance, "__pydantic_fields_set__", fields_set);
+                        } else {
+                            instance = validated_obj;
+                        }
+                    }
+                    validated_obj = instance;
+                } catch (...) {
+                    // If construction fails, continue with the validated_obj as-is
+                }
+            }
         }
 
         try {
@@ -245,6 +311,21 @@ public:
                     return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(validated_obj));
                 }
             }
+            // Return the output as a py::object.
+            // For root models, the after-function returns the model instance (self),
+            // but the binding expects the raw root value to store in d["root"].
+            if (auto* mv = dynamic_cast<ModelValidator*>(inner_.get())) {
+                if (mv->root_model()) {
+                    py::object model_cls = mv->expected_class();
+                    if (!model_cls.is_none()) {
+                        try {
+                            if (py::isinstance(output, model_cls) && py::hasattr(output, "root")) {
+                                output = output.attr("root");
+                            }
+                        } catch (...) {}
+                    }
+                }
+            }
             return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(output));
         } catch (py::error_already_set& e) {
             std::string msg = e.what();
@@ -260,11 +341,17 @@ public:
 
     std::string name() const override { return "function-after"; }
 
+    // Delegate to inner so is_root_model() works through function wrappers
+    std::string root_model_inner_name() const override {
+        return inner_ ? inner_->root_model_inner_name() : "";
+    }
+
     // When the after-function is applied the result is a Python object;
     // otherwise it is the inner validator's result type.
     std::string effective_result_name() const override {
         if (py_func_.is_none() && inner_) return inner_->effective_result_name();
-        return "function-after";
+        // After-function always produces a py::object (the function's return value)
+        return "py_object";
     }
 
     void set_py_func(py::object func) { py_func_ = std::move(func); }

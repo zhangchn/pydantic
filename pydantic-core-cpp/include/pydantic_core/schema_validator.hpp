@@ -87,6 +87,13 @@ public:
     // so the int-result input passthrough heuristic must not apply to them.
     bool is_call() const { return validator_ && validator_->name() == "call"; }
 
+    // Whether the top-level schema is a function validator (before/after/wrap/plain).
+    // Function validators produce real results which may be plain ints,
+    // so the int-result input passthrough heuristic must not apply to them.
+    bool is_function_wrapper() const {
+        return validator_ && validator_->name().rfind("function-", 0) == 0;
+    }
+
     // Whether the top-level schema is a dataclass validator
     bool is_dataclass() const { return validator_ && validator_->name() == "dataclass"; }
 

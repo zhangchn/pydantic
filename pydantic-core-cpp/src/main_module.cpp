@@ -1955,7 +1955,8 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
 
             // If validated result is a simple value (like int for dict size), return original input.
             // Call validators produce real function results which may be ints — exclude them.
-            if (py::isinstance<py::int_>(validated) && !py::isinstance<py::bool_>(input) && !self.is_call()) {
+            // Function validators (before/after/wrap/plain) also produce real results — exclude them.
+            if (py::isinstance<py::int_>(validated) && !py::isinstance<py::bool_>(input) && !self.is_call() && !self.is_function_wrapper()) {
                 return input;
             }
 
