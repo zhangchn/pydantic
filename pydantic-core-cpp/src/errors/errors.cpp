@@ -115,7 +115,9 @@ void ValidationError::build_errors_from_val_error(const ValError& val_error) {
             details.input = line_err->input_value;
 #ifdef HAS_PYBIND11
             // Preserve original Python object for accurate serialization (Rust parallel)
-            if (!line_err->raw_input_obj.is_none()) {
+            // Note: default-constructed py::object has a null handle, so check ptr()
+            // rather than is_none() (which is false for a null handle).
+            if (line_err->raw_input_obj.ptr()) {
                 details.has_raw_input = true;
                 details.raw_input_obj = line_err->raw_input_obj;
             }

@@ -1810,7 +1810,7 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                     // Use raw Python object for accurate serialization (Rust parallel:
                     // as_val_error(input) passes Py<PyAny> through). This avoids converting
                     // arbitrary objects to string repr that can't be reconstructed later.
-                    if (err.has_raw_input && !err.raw_input_obj.is_none()) {
+                    if (err.has_raw_input && err.raw_input_obj.ptr()) {
                         d["input"] = err.raw_input_obj;
                     } else
 #endif

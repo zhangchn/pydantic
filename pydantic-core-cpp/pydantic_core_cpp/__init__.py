@@ -114,11 +114,17 @@ def _errors_with_include_url(self, *args, include_url: bool = True, **kwargs):
         # (mirrors Rust's as_val_error(input) which passes Py<PyAny> through).
         # When loc is non-empty (field-level), try to look up the value from
         # the stored top-level dict using the location path.
+        # For literal errors, the input is compared as a string, so the
+        # string repr is the correct format (matches Rust behavior).
+        _literal_error_types = {'literal_error', 'literal_mismatch'}
         if result:
             import __main__ as _main
             raw_input = getattr(_main, '_last_raw_input', None)
             if raw_input is not None:
                 for i, err in enumerate(result):
+                    err_type = err.get('type', '')
+                    if err_type in _literal_error_types:
+                        continue
                     loc = err.get('loc', ())
                     if isinstance(loc, tuple) and len(loc) > 0:
                         val = _lookup_value_by_loc(raw_input, loc)
