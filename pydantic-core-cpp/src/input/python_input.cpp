@@ -445,7 +445,8 @@ ValResult<std::unique_ptr<ValidatedDict>> PythonInput::validate_dict(bool strict
         return result;
     }
 
-    if (!strict && py::hasattr(obj_, "__dict__")) {
+    // Accept pydantic model instances for revalidation (they have __pydantic_validator__)
+    if (!strict && py::hasattr(obj_, "__pydantic_validator__") && py::hasattr(obj_, "__dict__")) {
         auto dict = obj_.attr("__dict__").cast<py::dict>();
         std::unique_ptr<ValidatedDict> result = std::make_unique<PythonValidatedDict>(dict);
         return result;

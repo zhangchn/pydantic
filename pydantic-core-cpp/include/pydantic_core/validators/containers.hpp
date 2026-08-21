@@ -355,6 +355,54 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
+        // Accept set inputs directly (Rust accepts both list and set)
+        if (auto* py_input = dynamic_cast<const PythonInput*>(&input)) {
+            const py::object& obj = py_input->py_object();
+            if (py::isinstance<py::set>(obj)) {
+                auto py_set = obj.cast<py::set>();
+                size_t set_size = py::len(py_set);
+
+                if (min_length.has_value() && set_size < min_length.value()) {
+                    ErrorType err(ErrorType::Kind::SetTooShort);
+                    err.context()["field_type"] = "Set";
+                    err.context()["min_length"] = std::to_string(min_length.value());
+                    err.context()["actual_length"] = std::to_string(set_size);
+                    return ValError::line_error(
+                        std::move(err), state.location(),
+                        "set(len=" + std::to_string(set_size) + ")"
+                    );
+                }
+                if (max_length.has_value() && set_size > max_length.value()) {
+                    ErrorType err(ErrorType::Kind::SetTooLong);
+                    err.context()["field_type"] = "Set";
+                    err.context()["max_length"] = std::to_string(max_length.value());
+                    err.context()["actual_length"] = std::to_string(set_size);
+                    return ValError::line_error(
+                        std::move(err), state.location(),
+                        "set(len=" + std::to_string(set_size) + ")"
+                    );
+                }
+
+                py::set result_set;
+                for (auto item : py_set) {
+                    py::object element = py::reinterpret_borrow<py::object>(item);
+                    if (items_schema) {
+                        PythonInput elem_input(element);
+                        auto item_result = items_schema->validate(elem_input, state);
+                        if (item_result.is_ok()) {
+                            py::object py_val = value_to_python_with_type(item_result.value(), items_schema->effective_result_name());
+                            result_set.add(py_val);
+                        } else {
+                            return item_result.error();
+                        }
+                    } else {
+                        result_set.add(element);
+                    }
+                }
+                return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(std::move(result_set)));
+            }
+        }
+
         auto result = input.validate_list(state.strict_or(false));
         if (result.is_err()) {
             return result.error();

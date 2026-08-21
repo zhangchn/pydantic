@@ -902,6 +902,50 @@ private:
         return json_escape(py::repr(value).cast<std::string>(), ensure_ascii);
     }
 
+    // Recursively serialize an arbitrary Python value for use in extra fields
+    // (mirrors Rust's infer_to_python: models → to_python, dicts → recurse, lists → recurse)
+    static py::object serialize_any_value(const py::object& v, bool exc_none, bool round_trip) {
+        if (v.is_none()) return py::none();
+        // Model / dataclass instances: use __pydantic_serializer__ if available
+        if (py::hasattr(v, "__pydantic_serializer__")) {
+            auto ser = py::getattr(v, "__pydantic_serializer__");
+            try {
+                return ser.attr("to_python")(v, py::arg("mode") = "python",
+                    py::arg("exclude_none") = exc_none, py::arg("round_trip") = round_trip);
+            } catch (const py::error_already_set&) {
+                PyErr_Clear();
+                return v;
+            }
+        }
+        if (py::isinstance<py::dict>(v)) {
+            py::dict out;
+            auto d = v.cast<py::dict>();
+            for (auto item : d) {
+                auto k = py::reinterpret_borrow<py::object>(item.first);
+                auto val = py::reinterpret_borrow<py::object>(item.second);
+                out[k] = serialize_any_value(val, exc_none, round_trip);
+            }
+            return std::move(out);
+        }
+        if (py::isinstance<py::list>(v)) {
+            py::list out;
+            auto lst = v.cast<py::list>();
+            for (auto item : lst) {
+                out.append(serialize_any_value(py::reinterpret_borrow<py::object>(item), exc_none, round_trip));
+            }
+            return std::move(out);
+        }
+        if (py::isinstance<py::tuple>(v)) {
+            py::list temp;
+            auto t = v.cast<py::tuple>();
+            for (auto item : t) {
+                temp.append(serialize_any_value(py::reinterpret_borrow<py::object>(item), exc_none, round_trip));
+            }
+            return py::tuple(temp);
+        }
+        return v;
+    }
+
     py::object serialize_fields(const py::object& value, bool exc_none, bool round_trip = false,
                                  const py::object& include = py::none(),
                                  const py::object& exclude = py::none(),
@@ -1092,7 +1136,7 @@ private:
                     if (next.omit) continue;
                     py::object v = py::reinterpret_borrow<py::object>(item.second);
                     if (exc_none && v.is_none()) continue;
-                    result[py::str(k)] = v;
+                    result[py::str(k)] = serialize_any_value(v, exc_none, round_trip);
                 }
             }
         }
@@ -1921,15 +1965,31 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                         if (!defaults.is_none() && py::isinstance<py::dict>(defaults) && py::len(defaults.cast<py::dict>()) > 0) {
                             py::setattr(self_instance, "__pydantic_defaults__", defaults);
                         }
+                    } else if (py::hasattr(validated, "__dict__")) {
+                        // validated is a model instance (e.g. from FunctionAfterValidator)
+                        // Copy its __dict__ to self_instance
+                        py::dict d = self_instance.attr("__dict__");
+                        py::dict validated_dict = validated.attr("__dict__");
+                        for (auto item : validated_dict) {
+                            d[item.first] = item.second;
+                        }
+                        // Copy pydantic slot attributes
+                        if (py::hasattr(validated, "__pydantic_extra__")) {
+                            py::setattr(self_instance, "__pydantic_extra__", validated.attr("__pydantic_extra__"));
+                        }
+                        if (py::hasattr(validated, "__pydantic_fields_set__")) {
+                            py::setattr(self_instance, "__pydantic_fields_set__", validated.attr("__pydantic_fields_set__"));
+                        }
+                        if (!py::hasattr(self_instance, "__pydantic_private__")) {
+                            py::setattr(self_instance, "__pydantic_private__", py::none());
+                        }
                     }
                     // Dataclass __init__: call __post_init__ after fields are set
                     if (self.is_dataclass() && py::hasattr(self_instance, "__post_init__")) {
                         self_instance.attr("__post_init__")();
                     }
-                    // Model post_init: call model_post_init(context) if schema specifies it
-                    if (!self.post_init().empty() && py::hasattr(self_instance, py::str(self.post_init()))) {
-                        self_instance.attr(py::str(self.post_init()))(context);
-                    }
+                    // NOTE: model_post_init is called from the Python wrapper after
+                    // nested models are processed, to ensure correct call order.
                 } catch (const std::exception& e) {
                     // If anything fails, just return validated as-is
                     py::print("validate_python self_instance error:", py::str(e.what()));
@@ -1963,13 +2023,20 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             return validated;
         }, py::arg("object"), py::arg("strict") = py::none(), py::arg("context") = py::none(), py::arg("self_instance") = py::none(),
              py::arg("extra") = py::none(), py::arg("from_attributes") = py::none(), py::arg("by_alias") = py::none(), py::arg("by_name") = py::none())
-        .def("validate_json", [](SchemaValidator& self, const py::object& jd, py::object strict, py::object context) {
+        .def("validate_json", [](SchemaValidator& self, const py::object& jd, py::object strict, py::object context, py::object extra) {
             std::string js = py::isinstance<py::bytes>(jd) ? jd.cast<std::string>() : jd.cast<std::string>();
             // Parse JSON to Python object first, then validate as Python
             // This ensures proper type coercion (e.g., "Infinity" string -> float inf)
             py::object py_input = json_to_pyobj(js);
-            return self.validate_python_object(py_input, pyobj_to_bool(strict), std::nullopt, std::nullopt, context);
-        }, py::arg("json_data"), py::arg("strict") = py::none(), py::arg("context") = py::none())
+            std::optional<ExtraBehavior> extra_opt;
+            if (!extra.is_none()) {
+                std::string e = extra.cast<std::string>();
+                if (e == "allow") extra_opt = ExtraBehavior::Allow;
+                else if (e == "forbid") extra_opt = ExtraBehavior::Forbid;
+                else extra_opt = ExtraBehavior::Ignore;
+            }
+            return self.validate_python_object(py_input, pyobj_to_bool(strict), extra_opt, std::nullopt, context);
+        }, py::arg("json_data"), py::arg("strict") = py::none(), py::arg("context") = py::none(), py::arg("extra") = py::none())
         .def("validate_strings", [](SchemaValidator& self, const py::object& sd, py::object strict, py::object extra) {
             std::optional<ExtraBehavior> extra_opt;
             if (!extra.is_none()) {

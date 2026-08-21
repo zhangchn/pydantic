@@ -134,6 +134,7 @@ public:
         JsonInvalid,
         CustomError,
         RecursionError,
+        RecursionLoop,
         ValueError,
         AssertionError,
         

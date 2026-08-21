@@ -76,7 +76,7 @@ struct ValidatedModelFieldsOutput : public TypedResult {
     };
     std::unordered_map<std::string, FieldValue> fields;  // Validated field values
     std::vector<std::string> field_order;                // Fields in declaration order
-    std::unordered_map<std::string, FieldValue> extra;   // Extra fields (if allow)
+    std::vector<std::pair<std::string, FieldValue>> extra; // Extra fields (if allow), insertion order
     std::set<std::string> fields_set;                    // Names of fields that were in input
     std::unordered_map<std::string, py::object> defaults; // Default values for non-required fields
 
@@ -123,12 +123,17 @@ public:
         ValidationState& state
     ) override {
         // Check from_attributes setting from state or schema
-        bool use_from_attributes = state.from_attributes_or(from_attributes_);
+        // from_attributes: use the parameter if explicitly set, otherwise use the schema default
+        bool use_from_attributes = from_attributes_;
+        if (state.from_attributes().has_value()) {
+            use_from_attributes = state.from_attributes().value();
+        }
         
         // Get dict - if from_attributes is true, extract only known field attributes
+        // (only for non-dict inputs; dicts are already in the right format)
         if (use_from_attributes) {
             auto* py_input = dynamic_cast<const PythonInput*>(&input);
-            if (py_input) {
+            if (py_input && !py::isinstance<py::dict>(py_input->py_object())) {
                 const py::object& obj = py_input->py_object();
                 py::dict filtered;
                 for (const auto& name : field_order_) {
@@ -150,12 +155,15 @@ public:
             }
         }
         
-        // Regular dict validation — recursion guard using unique depth tokens
-        char depth_unique_marker = 0;
-        auto rec_entry = state.enter_recursion(&depth_unique_marker);
+        // Regular dict validation — recursion guard using the actual object address
+        // to detect cyclic references (same PyObject seen again at a deeper level)
+        const void* rec_key = dynamic_cast<const PythonInput*>(&input)
+            ? dynamic_cast<const PythonInput*>(const_cast<Input*>(&input))->py_object().ptr()
+            : static_cast<const void*>(&input);
+        auto rec_entry = state.enter_recursion(rec_key);
         if (!rec_entry.allowed()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::RecursionError),
+                ErrorType(ErrorType::Kind::RecursionLoop),
                 state.location(),
                 "Recursion error - cyclic reference detected"
             );
@@ -163,11 +171,14 @@ public:
 
         auto dict_result = input.validate_dict(state.strict_or(false));
         if (dict_result.is_err()) {
-            return ValError::line_error(
-                ErrorType(ErrorType::Kind::ModelType),
-                state.location(),
-                input.as_error_value().repr
-            );
+            ErrorType err(ErrorType::Kind::ModelType);
+            err.context()["class_name"] = model_name_.empty() ? "Model" : model_name_;
+            auto line_err = std::make_shared<ValLineError>(ValLineError{err, state.location(), input.as_error_value().repr});
+            // Pass the actual Python object as input for proper serialization
+            if (auto* py_input = dynamic_cast<const PythonInput*>(&input)) {
+                line_err->raw_input_obj = py_input->py_object();
+            }
+            return ValError::line_errors({std::move(line_err)});
         }
 
         auto dict = std::move(dict_result.value());
@@ -617,7 +628,7 @@ protected:
                         ValidatedModelFieldsOutput::FieldValue fv;
                         fv.value = result.value();
                         fv.type_name = extras_validator_->name();
-                        output.extra[key] = std::move(fv);
+                        output.extra.emplace_back(key, std::move(fv));
                         output.fields_set.insert(key);
                     } else {
                         combined_errors.merge(std::move(result.error()));
@@ -628,7 +639,7 @@ protected:
                         field_input->as_error_value().repr
                     );
                     fv.type_name = "str";
-                    output.extra[key] = std::move(fv);
+                    output.extra.emplace_back(key, std::move(fv));
                     output.fields_set.insert(key);
                 }
             }
@@ -696,7 +707,7 @@ protected:
                         ValidatedModelFieldsOutput::FieldValue fv;
                         fv.value = result.value();
                         fv.type_name = extras_validator_->name();
-                        output.extra[key] = std::move(fv);
+                        output.extra.emplace_back(key, std::move(fv));
                         output.fields_set.insert(key);
                     } else {
                         combined_errors.merge(std::move(result.error()));
@@ -706,7 +717,7 @@ protected:
                     ValidatedModelFieldsOutput::FieldValue fv;
                     fv.value = std::make_shared<py::object>(*py_obj_opt);
                     fv.type_name = "py_object";
-                    output.extra[key] = std::move(fv);
+                    output.extra.emplace_back(key, std::move(fv));
                     output.fields_set.insert(key);
                 }
             }

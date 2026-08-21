@@ -1576,10 +1576,20 @@ static std::shared_ptr<Validator> build_from_py_dict(
         std::string discriminator = py_str(schema, "discriminator");
         std::vector<std::shared_ptr<Validator>> choices;
         if (schema.contains("choices")) {
-            auto choices_list = schema["choices"].cast<py::list>();
-            for (auto item : choices_list) {
-                auto choice = build_from_py_dict(item.cast<py::dict>(), config, definitions);
-                choices.push_back(choice);
+            auto choices_obj = schema["choices"];
+            if (py::isinstance<py::list>(choices_obj)) {
+                auto choices_list = choices_obj.cast<py::list>();
+                for (auto item : choices_list) {
+                    auto choice = build_from_py_dict(item.cast<py::dict>(), config, definitions);
+                    choices.push_back(choice);
+                }
+            } else if (py::isinstance<py::dict>(choices_obj)) {
+                // Tagged union: choices is a dict mapping tag -> schema
+                auto choices_dict = choices_obj.cast<py::dict>();
+                for (auto item : choices_dict) {
+                    auto choice = build_from_py_dict(item.second.cast<py::dict>(), config, definitions);
+                    choices.push_back(choice);
+                }
             }
         }
         return std::make_shared<TaggedUnionValidator>(discriminator, std::move(choices));
@@ -1685,7 +1695,39 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("schema")) {
             inner = build_from_py_dict(schema["schema"].cast<py::dict>(), config, definitions);
         }
-        std::string model_name = py_str(schema, "title", py_str(schema, "model_name", py_str(schema, "cls", "")));
+        std::string model_name;
+        if (schema.contains("title") && !schema["title"].is_none()) {
+            model_name = py::str(schema["title"]).cast<std::string>();
+        } else if (schema.contains("model_name") && !schema["model_name"].is_none()) {
+            model_name = py::str(schema["model_name"]).cast<std::string>();
+        } else if (schema.contains("cls") && !schema["cls"].is_none()) {
+            auto cls = schema["cls"];
+            if (py::hasattr(cls, "__name__")) {
+                model_name = cls.attr("__name__").cast<std::string>();
+            } else {
+                model_name = py::str(cls).cast<std::string>();
+            }
+        }
+        // Propagate model name to inner ModelFieldsValidator (JSON path defaults to "Model")
+        if (!model_name.empty()) {
+            if (auto mfv = std::dynamic_pointer_cast<ModelFieldsValidator>(inner)) {
+                mfv->set_model_name(model_name);
+            }
+        }
+        // Propagate from_attributes to inner ModelFieldsValidator
+        {
+            bool fa = false;
+            if (schema.contains("from_attributes") && !schema["from_attributes"].is_none()) {
+                fa = schema["from_attributes"].cast<bool>();
+            } else if (config.contains("from_attributes") && py::isinstance<py::bool_>(config["from_attributes"])) {
+                fa = config["from_attributes"].cast<bool>();
+            }
+            if (fa) {
+                if (auto mfv = std::dynamic_pointer_cast<ModelFieldsValidator>(inner)) {
+                    mfv->set_from_attributes(true);
+                }
+            }
+        }
         bool root_model = false;
         if (schema.contains("root_model")) {
             root_model = schema["root_model"].cast<bool>();

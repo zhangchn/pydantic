@@ -212,7 +212,7 @@ TEST_SUITE("ModelFieldsValidator") {
 
         auto output = std::static_pointer_cast<ValidatedModelFieldsOutput>(result.value());
         CHECK(output->fields.count("name"));
-        CHECK(!output->extra.count("unknown"));  // extra should be empty for 'ignore'
+        CHECK(output->extra.empty());  // extra should be empty for 'ignore'
     }
 
     TEST_CASE("Model-fields - extra fields forbidden") {
@@ -260,7 +260,8 @@ TEST_SUITE("ModelFieldsValidator") {
 
         auto output = std::static_pointer_cast<ValidatedModelFieldsOutput>(result.value());
         CHECK(output->fields.count("name"));
-        CHECK(output->extra.count("extra_field"));
+        CHECK(std::any_of(output->extra.begin(), output->extra.end(),
+            [](const auto& p) { return p.first == "extra_field"; }));
         CHECK(output->fields_set.count("extra_field"));
     }
 
@@ -633,7 +634,8 @@ TEST_SUITE("TypedDictValidator") {
 
         auto output = std::static_pointer_cast<ValidatedModelFieldsOutput>(result.value());
         CHECK(output->fields.count("x"));
-        CHECK(output->extra.count("extra"));
+        CHECK(std::any_of(output->extra.begin(), output->extra.end(),
+            [](const auto& p) { return p.first == "extra"; }));
     }
 
 }

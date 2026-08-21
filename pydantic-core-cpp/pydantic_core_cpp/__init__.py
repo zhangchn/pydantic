@@ -130,6 +130,9 @@ def _errors_with_include_url(self, *args, include_url: bool = True, **kwargs):
                         val = _lookup_value_by_loc(raw_input, loc)
                         if val is not None:
                             result[i]['input'] = val
+                    elif len(loc) == 0:
+                        # Top-level error: use the raw input itself
+                        result[i]['input'] = raw_input
     if not include_url:
         for err in result:
             err.pop("url", None)
@@ -840,7 +843,7 @@ class SchemaValidator:
 
         return classes
 
-    def _dict_to_model(self, data, schema=None):
+    def _dict_to_model(self, data, schema=None, call_post_init=True):
         """Recursively convert dicts to model instances based on schema."""
         if schema is None:
             schema = self._schema
@@ -958,7 +961,7 @@ class SchemaValidator:
                 object.__setattr__(instance, "__pydantic_extra__", None)
                 object.__setattr__(instance, "__pydantic_fields_set__", {"root"})
                 # Call model_post_init if defined
-                if hasattr(instance, 'model_post_init'):
+                if call_post_init and hasattr(instance, 'model_post_init'):
                     try:
                         instance.model_post_init(None)
                     except Exception:
@@ -990,7 +993,7 @@ class SchemaValidator:
                 object.__setattr__(instance, '__pydantic_extra__', extra)
                 object.__setattr__(instance, '__pydantic_fields_set__', fields_set)
                 # Call model_post_init if defined
-                if hasattr(instance, 'model_post_init'):
+                if call_post_init and hasattr(instance, 'model_post_init'):
                     try:
                         instance.model_post_init(None)
                     except Exception:
@@ -1155,6 +1158,8 @@ class SchemaValidator:
             # We'll do this by catching validation errors for missing fields with defaults
 
         try:
+            import __main__ as _main
+            _main._last_raw_input = obj
             result = self._base.validate_python(
                 obj, strict=strict, context=context, self_instance=self_instance,
                 extra=extra, from_attributes=from_attributes, by_alias=by_alias, by_name=by_name)
@@ -1205,7 +1210,7 @@ class SchemaValidator:
             # self_instance was provided and C++ returned it.
             # Recursively convert nested dicts in __dict__ to model instances
             saved_defaults = self_instance.__dict__.pop('__pydantic_defaults__', None)
-            processed = self._dict_to_model(dict(self_instance.__dict__))
+            processed = self._dict_to_model(dict(self_instance.__dict__), call_post_init=False)
             if isinstance(processed, dict):
                 self_instance.__dict__.clear()
                 self_instance.__dict__.update(processed)
@@ -1233,6 +1238,14 @@ class SchemaValidator:
                         extra[key] = self._dict_to_model(val, extras_schema)
                 object.__setattr__(self_instance, '__pydantic_extra__', extra)
 
+            # Call model_post_init AFTER nested models are processed (correct order)
+            # Only call if the model actually overrides model_post_init
+            if getattr(type(self_instance), '__pydantic_post_init__', None):
+                try:
+                    self_instance.model_post_init(None)
+                except Exception:
+                    pass
+
         else:
             # No self_instance and non-dict result: wrap scalar results for
             # root models (e.g. MyRootModel.model_validate(1) -> MyRootModel(root=1))
@@ -1241,11 +1254,14 @@ class SchemaValidator:
                 # Unwrap the definitions wrapper to find the actual model schema
                 if inner.get("type") == "definitions":
                     ref_schema = inner.get("schema", {})
-                    ref = ref_schema.get("schema_ref", "__root__") if ref_schema.get("type") == "definition-ref" else None
-                    for defn in inner.get("definitions", []):
-                        if defn.get("ref") == ref:
-                            inner = defn
-                            break
+                    if ref_schema.get("type") == "definition-ref":
+                        ref = ref_schema.get("schema_ref", "__root__")
+                        for defn in inner.get("definitions", []):
+                            if defn.get("ref") == ref:
+                                inner = defn
+                                break
+                    elif ref_schema.get("type") == "model":
+                        inner = ref_schema
                 if inner.get("type") == "model" and inner.get("root_model"):
                     return self._dict_to_model(result, inner)
 
@@ -1253,7 +1269,7 @@ class SchemaValidator:
 
     def validate_json(self, json_data, *, strict=None, context=None, extra=None,
                       from_attributes=None, by_alias=None, by_name=None):
-        result = self._base.validate_json(json_data, strict=strict, context=context)
+        result = self._base.validate_json(json_data, strict=strict, context=context, extra=extra)
         if isinstance(result, dict):
             result = self._dict_to_model(result)
         else:

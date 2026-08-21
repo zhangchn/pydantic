@@ -110,11 +110,14 @@ std::string ErrorType::type_name() const {
         {Kind::IsInstanceType, "is_instance_of"},
         {Kind::IsSubclassType, "is_subclass_of"},
         {Kind::CallableType, "callable_type"},
+        {Kind::ModelType, "model_type"},
+        {Kind::DataclassType, "dataclass_type"},
 
         // Other errors
         {Kind::JsonInvalid, "json_invalid"},
         {Kind::CustomError, "custom_error"},
         {Kind::RecursionError, "recursion_error"},
+        {Kind::RecursionLoop, "recursion_loop"},
         {Kind::ValueError, "value_error"},
         {Kind::AssertionError, "assertion_error"},
         
@@ -219,6 +222,7 @@ std::string ErrorType::message_template() const {
         {Kind::JsonInvalid, "Invalid JSON"},
         {Kind::CustomError, "{message}"},
         {Kind::RecursionError, "Recursion depth exceeded"},
+        {Kind::RecursionLoop, "Recursion error - cyclic reference detected"},
         {Kind::ValueError, "Value error, {error}"},
         {Kind::AssertionError, "Assertion failed, {error}"},
         
@@ -257,6 +261,8 @@ std::string ErrorType::message_template() const {
         {Kind::IsInstanceType, "Input should be an instance of {class}"},
         {Kind::IsSubclassType, "Input should be a subclass of {class}"},
         {Kind::CallableType, "Input should be callable"},
+        {Kind::ModelType, "Input should be a valid dictionary or instance of {class_name}"},
+        {Kind::DataclassType, "Input should be a valid dictionary or instance of {class_name}"},
     };
     auto it = templates.find(kind_);
     return it != templates.end() ? it->second : "Validation error";
@@ -323,7 +329,8 @@ ErrorType ErrorType::build_known_type(const std::string& type_str) {
         {"url_host", Kind::UrlHost},               {"uuid_type", Kind::UuidType},
         {"is_instance_of", Kind::IsInstanceType},   {"is_subclass_of", Kind::IsSubclassType},
         {"callable_type", Kind::CallableType},      {"json_invalid", Kind::JsonInvalid},
-        {"recursion_error", Kind::RecursionError},  {"greater_than", Kind::GreaterThan},
+        {"recursion_error", Kind::RecursionError},  {"recursion_loop", Kind::RecursionLoop},
+        {"greater_than", Kind::GreaterThan},
         {"less_than", Kind::LessThan},              {"greater_than_equal", Kind::GreaterThanEqual},
         {"less_than_equal", Kind::LessThanEqual},   {"multiple_of", Kind::MultipleOf},
         {"finite_number", Kind::FiniteNumber},      {"string_not_ascii", Kind::StringNotAscii},
