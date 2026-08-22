@@ -106,6 +106,12 @@ std::string ErrorType::type_name() const {
         {Kind::TimedeltaType, "timedelta_type"},
         {Kind::TimedeltaParsing, "timedelta_parsing"},
 
+        // Decimal errors
+        {Kind::DecimalType, "decimal_type"},
+        {Kind::DecimalParsing, "decimal_parsing"},
+        {Kind::DecimalMaxDigits, "decimal_max_digits"},
+        {Kind::DecimalMaxPlaces, "decimal_max_places"},
+
         // Type checking errors
         {Kind::IsInstanceType, "is_instance_of"},
         {Kind::IsSubclassType, "is_subclass_of"},
@@ -259,6 +265,12 @@ std::string ErrorType::message_template() const {
         {Kind::TimedeltaType, "Input should be a valid timedelta"},
         {Kind::TimedeltaParsing, "Input should be a valid timedelta, unable to parse string as an ISO 8601 duration"},
 
+        // Decimal errors
+        {Kind::DecimalType, "Input should be a valid decimal"},
+        {Kind::DecimalParsing, "Input should be a valid decimal, unable to parse string as a decimal"},
+        {Kind::DecimalMaxDigits, "Decimal should have no more than {max_digits} digit{s}"},
+        {Kind::DecimalMaxPlaces, "Decimal should have no more than {decimal_places} decimal place{s}"},
+
         // Type checking errors
         {Kind::IsInstanceType, "Input should be an instance of {class}"},
         {Kind::IsSubclassType, "Input should be a subclass of {class}"},
@@ -329,6 +341,8 @@ ErrorType ErrorType::build_known_type(const std::string& type_str) {
         {"timedelta_parsing", Kind::TimedeltaParsing},
         {"url_type", Kind::UrlType},               {"url_scheme", Kind::UrlScheme},
         {"url_host", Kind::UrlHost},               {"uuid_type", Kind::UuidType},
+        {"decimal_type", Kind::DecimalType},       {"decimal_parsing", Kind::DecimalParsing},
+        {"decimal_max_digits", Kind::DecimalMaxDigits}, {"decimal_max_places", Kind::DecimalMaxPlaces},
         {"is_instance_of", Kind::IsInstanceType},   {"is_subclass_of", Kind::IsSubclassType},
         {"callable_type", Kind::CallableType},      {"json_invalid", Kind::JsonInvalid},
         {"invalid_json_value", Kind::InvalidJsonValue},

@@ -7,6 +7,7 @@
 #include <regex>
 #include <algorithm>
 #include <cctype>
+#include <sstream>
 
 namespace pydantic_core {
 
@@ -391,6 +392,7 @@ public:
 class BytesValidator : public Validator {
 public:
     bool strict = false;
+    std::string val_json_bytes = "utf8";  // "utf8", "base64", or "hex"
 
     BytesValidator() = default;
 
@@ -398,6 +400,50 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
+        // For base64/hex encoding, check if input is a string (not bytes)
+        if (val_json_bytes != "utf8") {
+            py::object py_in = input.as_python_object();
+            if (py::isinstance<py::str>(py_in)) {
+                std::string str_val = py_in.cast<std::string>();
+                if (val_json_bytes == "base64") {
+                    // Decode base64
+                    static const std::string b64chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                    std::vector<uint8_t> decoded;
+                    int val = 0, valb = -8;
+                    for (unsigned char c : str_val) {
+                        if (c == '=') break;
+                        auto pos = b64chars.find(c);
+                        if (pos == std::string::npos) continue;
+                        val = (val << 6) + static_cast<int>(pos);
+                        valb += 6;
+                        if (valb >= 0) {
+                            decoded.push_back(static_cast<uint8_t>((val >> valb) & 0xFF));
+                            valb -= 8;
+                        }
+                    }
+                    return ValResult<std::shared_ptr<void>>(
+                        std::make_shared<EitherBytes>(EitherBytes{decoded})
+                    );
+                } else if (val_json_bytes == "hex") {
+                    // Decode hex
+                    std::vector<uint8_t> decoded;
+                    for (size_t i = 0; i + 1 < str_val.size(); i += 2) {
+                        unsigned int byte_val = 0;
+                        for (int j = 0; j < 2; j++) {
+                            char c = str_val[i + j];
+                            byte_val <<= 4;
+                            if (c >= '0' && c <= '9') byte_val |= (c - '0');
+                            else if (c >= 'a' && c <= 'f') byte_val |= (c - 'a' + 10);
+                            else if (c >= 'A' && c <= 'F') byte_val |= (c - 'A' + 10);
+                        }
+                        decoded.push_back(static_cast<uint8_t>(byte_val));
+                    }
+                    return ValResult<std::shared_ptr<void>>(
+                        std::make_shared<EitherBytes>(EitherBytes{decoded})
+                    );
+                }
+            }
+        }
         auto result = input.validate_bytes(state.strict_or(strict));
         if (result.is_err()) {
             return result.error();
@@ -406,7 +452,7 @@ public:
             std::make_shared<EitherBytes>(result.value().value())
         );
     }
-    
+
     std::string name() const override { return "bytes"; }
 };
 

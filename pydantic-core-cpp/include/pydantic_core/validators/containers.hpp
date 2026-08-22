@@ -576,4 +576,53 @@ public:
     std::string name() const override { return "tuple"; }
 };
 
+// GeneratorValidator - validates generator/iterable values, returns list
+class GeneratorValidator : public Validator {
+public:
+    std::shared_ptr<Validator> items_schema;
+
+    ValResult<std::shared_ptr<void>> validate(
+        const Input& input,
+        ValidationState& state
+    ) override {
+        py::object py_in = input.as_python_object();
+        py::list result;
+
+        // Accept any iterable (generators, lists, tuples, etc.)
+        if (!py::hasattr(py_in, "__iter__") && !py::hasattr(py_in, "__next__")) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::ListType),
+                state.location(),
+                input.as_error_value().repr
+            );
+        }
+
+        size_t idx = 0;
+        for (auto item : py::iter(py_in)) {
+            state.location().push(idx);
+            ValidationState sub_state = state.sub_copy(state.coerce_strings());
+            if (items_schema) {
+                PythonInput py_item(py::reinterpret_borrow<py::object>(item));
+                auto item_result = items_schema->validate(py_item, sub_state);
+                if (item_result.is_err()) {
+                    return item_result.error();
+                }
+                auto py_val = value_to_python_with_type(item_result.value(), items_schema->effective_result_name());
+                result.append(py_val);
+            } else {
+                result.append(py::reinterpret_borrow<py::object>(item));
+            }
+            state.location().pop();
+            idx++;
+        }
+
+        return ValResult<std::shared_ptr<void>>(
+            std::make_shared<py::object>(std::move(result))
+        );
+    }
+
+    std::string name() const override { return "generator"; }
+    std::string effective_result_name() const override { return "py_object"; }
+};
+
 } // namespace pydantic_core

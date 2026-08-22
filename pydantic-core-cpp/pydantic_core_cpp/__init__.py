@@ -908,6 +908,39 @@ class SchemaValidator:
             cls = self._model_classes.get(ref)
             if cls:
                 return self._build_model(data, cls, ref)
+            # Check if the definition-ref points to an enum
+            if isinstance(data, str) and self._enum_classes:
+                # Look up the enum class by ref
+                for defn in self._schema.get("definitions", []):
+                    if defn.get("ref") == ref and defn.get("type") == "enum":
+                        enum_cls = defn.get("cls")
+                        if enum_cls is not None and isinstance(enum_cls, type) and hasattr(enum_cls, '__members__'):
+                            # Try matching by name first
+                            try:
+                                return enum_cls[data]
+                            except (KeyError, TypeError):
+                                pass
+                            # Try matching by value
+                            for member in enum_cls:
+                                if str(member.value) == data:
+                                    return member
+                        break
+            return data
+
+        if schema.get("type") == "tagged-union":
+            if isinstance(data, dict):
+                discriminator = schema.get("discriminator")
+                choices = schema.get("choices", {})
+                if isinstance(discriminator, str) and isinstance(choices, dict):
+                    # Extract tag from data
+                    tag = data.get(discriminator)
+                    if tag is not None:
+                        # Try direct match
+                        choice_schema = choices.get(str(tag))
+                        if choice_schema and isinstance(choice_schema, dict):
+                            result = self._dict_to_model(data, choice_schema)
+                            if result is not data:
+                                return result
             return data
 
         if schema.get("type") == "union":

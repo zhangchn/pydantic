@@ -512,9 +512,9 @@ static std::shared_ptr<Validator> build_from_element(
         return std::make_shared<CallableValidator>();
     }
 
-    // generator validator (treated as any for now)
+    // generator validator
     if (type == "generator") {
-        return std::make_shared<AnyValidator>();
+        return std::make_shared<GeneratorValidator>();
     }
 
     // ========================================================================
@@ -1278,7 +1278,11 @@ static std::shared_ptr<Validator> build_from_py_dict(
             if (auto mv = ps("max_length")) v->max_length = *mv;
             return v;
         }
-        return std::make_shared<BytesValidator>();
+        auto bv = std::make_shared<BytesValidator>();
+        if (config.contains("val_json_bytes")) {
+            bv->val_json_bytes = config["val_json_bytes"].cast<std::string>();
+        }
+        return bv;
     }
 
     // --- Date/time validators ---
@@ -1302,8 +1306,11 @@ static std::shared_ptr<Validator> build_from_py_dict(
 
     // --- Decimal ---
     if (type == "decimal" || type == "decimal-constrained") {
-        // Decimal not yet implemented — use AnyValidator as stub
-        return std::make_shared<AnyValidator>();
+        auto v = std::make_shared<DecimalValidator>();
+        if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
+            v->strict = schema["strict"].cast<bool>();
+        }
+        return v;
     }
 
     // --- Literal ---
@@ -1629,6 +1636,15 @@ static std::shared_ptr<Validator> build_from_py_dict(
         return v;
     }
 
+    // --- Generator ---
+    if (type == "generator") {
+        auto v = std::make_shared<GeneratorValidator>();
+        if (schema.contains("items_schema")) {
+            v->items_schema = build_from_py_dict(schema["items_schema"].cast<py::dict>(), config, definitions);
+        }
+        return v;
+    }
+
     // --- Custom Error ---
     if (type == "custom-error") {
         std::shared_ptr<Validator> inner;
@@ -1709,9 +1725,17 @@ static std::shared_ptr<Validator> build_from_py_dict(
 
     // --- Model ---
     if (type == "model") {
+        // Merge model's own config into the config dict for inner validators
+        py::dict inner_config = config;
+        if (schema.contains("config") && py::isinstance<py::dict>(schema["config"])) {
+            py::dict model_config = schema["config"].cast<py::dict>();
+            for (auto item : model_config) {
+                inner_config[item.first] = item.second;
+            }
+        }
         std::shared_ptr<Validator> inner;
         if (schema.contains("schema")) {
-            inner = build_from_py_dict(schema["schema"].cast<py::dict>(), config, definitions);
+            inner = build_from_py_dict(schema["schema"].cast<py::dict>(), inner_config, definitions);
         }
         std::string model_name;
         if (schema.contains("title") && !schema["title"].is_none()) {
@@ -1828,8 +1852,15 @@ static std::shared_ptr<Validator> build_from_py_dict(
                             } else if (py::hasattr(py_default, "__call__")) {
                                 // Callable default — store as Python object, not JSON string
                                 // (will be handled by default_py_obj in missing-field path)
-                            } else {
+                            } else if (py::isinstance<py::str>(py_default) || py::isinstance<py::int_>(py_default) ||
+                                       py::isinstance<py::float_>(py_default) || py::isinstance<py::bool_>(py_default) ||
+                                       py::isinstance<py::list>(py_default) || py::isinstance<py::dict>(py_default)) {
+                                // JSON-native types — safe to convert to JSON string
                                 default_val_str = py_default_to_json_str(py_default);
+                            } else {
+                                // Non-JSON types (timedelta, date, datetime, Decimal, etc.)
+                                // Store as Python object for proper validation later
+                                // Will be handled by default_py_obj in missing-field path
                             }
                             required = false;
                         }
@@ -1861,9 +1892,18 @@ static std::shared_ptr<Validator> build_from_py_dict(
                         }
                     } else if (fsd.contains("default")) {
                         auto py_default = fsd["default"];
-                        if (!py_default.is_none() && py::hasattr(py_default, "__call__")) {
-                            info.default_py_obj = py_default;
-                            info.required = false;
+                        if (!py_default.is_none()) {
+                            if (py::hasattr(py_default, "__call__")) {
+                                info.default_py_obj = py_default;
+                                info.required = false;
+                            } else if (!py::isinstance<py::str>(py_default) && !py::isinstance<py::int_>(py_default) &&
+                                       !py::isinstance<py::float_>(py_default) && !py::isinstance<py::bool_>(py_default) &&
+                                       !py::isinstance<py::list>(py_default) && !py::isinstance<py::dict>(py_default)) {
+                                // Non-JSON types (timedelta, date, datetime, Decimal, etc.)
+                                // Store as Python object for proper validation
+                                info.default_py_obj = py_default;
+                                info.required = false;
+                            }
                         }
                     }
                 }

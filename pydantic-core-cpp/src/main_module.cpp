@@ -310,6 +310,10 @@ struct SerNode {
     py::object class_;
     // For inf/nan serialization mode: "constants" (default) or "strings"
     std::string inf_nan_mode = "constants";
+    // For bytes serialization: "utf8" (default), "base64", or "hex"
+    std::string ser_json_bytes = "utf8";
+    // For timedelta serialization: "iso8601" (default) or "float"
+    std::string ser_json_timedelta = "iso8601";
 
     // Copy content from another node into this one (preserves shared_ptr identity)
     void copy_from(const SerNode& other) {
@@ -332,6 +336,8 @@ struct SerNode {
         root_model = other.root_model;
         class_ = other.class_;
         inf_nan_mode = other.inf_nan_mode;
+        ser_json_bytes = other.ser_json_bytes;
+        ser_json_timedelta = other.ser_json_timedelta;
     }
 
     py::object to_python(const py::object& value, bool json_mode, bool exc_none, bool round_trip = false,
@@ -400,6 +406,10 @@ struct SerNode {
             if (children.size() > 1) return children[1]->to_python(value, false, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
         }
         if (type == "enum") {
+            if (!json_mode) {
+                // Python mode: return the Enum member as-is
+                return value;
+            }
             if (py::hasattr(value, "value")) {
                 auto ev = py::getattr(value, "value");
                 if (!children.empty()) return children[0]->to_python(ev, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
@@ -407,7 +417,7 @@ struct SerNode {
             }
         }
         if (!fields.empty()) {
-            return serialize_fields(value, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
+            return serialize_fields(value, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context, json_mode);
         }
         // Delegate model/dataclass/typed-dict to inner serializer
         if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
@@ -510,7 +520,7 @@ struct SerNode {
             }
         }
         // For list/dict/tuple/containers, serialize children
-        if ((type == "list" || type == "set" || type == "frozenset") && !children.empty()) {
+        if ((type == "list" || type == "set" || type == "frozenset" || type == "generator") && !children.empty()) {
             py::iterable seq = py::reinterpret_borrow<py::iterable>(value);
             py::ssize_t len = py::len(seq);
             py::object inc;
@@ -599,6 +609,44 @@ struct SerNode {
             }
             return py::tuple(temp);
         }
+        // In json mode, apply config-aware conversions for timedelta and bytes
+        if (json_mode) {
+            if (type == "timedelta" && ser_json_timedelta == "float") {
+                try {
+                    long days = value.attr("days").cast<long>();
+                    long seconds = value.attr("seconds").cast<long>();
+                    long microseconds = value.attr("microseconds").cast<long>();
+                    double total = days * 86400.0 + seconds + microseconds / 1000000.0;
+                    return py::float_(total);
+                } catch (...) {}
+            }
+            if (type == "bytes") {
+                try {
+                    std::string b = value.cast<std::string>();
+                    if (ser_json_bytes == "base64") {
+                        static const char* b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                        std::string enc;
+                        for (size_t i = 0; i < b.size(); i += 3) {
+                            uint32_t n = ((uint8_t)b[i] << 16);
+                            if (i+1 < b.size()) n |= ((uint8_t)b[i+1] << 8);
+                            if (i+2 < b.size()) n |= (uint8_t)b[i+2];
+                            enc += b64[(n>>18)&0x3F]; enc += b64[(n>>12)&0x3F];
+                            enc += (i+1<b.size()) ? b64[(n>>6)&0x3F] : '=';
+                            enc += (i+2<b.size()) ? b64[n&0x3F] : '=';
+                        }
+                        return py::str(enc);
+                    } else if (ser_json_bytes == "hex") {
+                        static const char* hex_chars = "0123456789abcdef";
+                        std::string enc;
+                        for (unsigned char c : b) {
+                            enc += hex_chars[c >> 4];
+                            enc += hex_chars[c & 0x0F];
+                        }
+                        return py::str(enc);
+                    }
+                } catch (...) {}
+            }
+        }
         return value;
     }
 
@@ -612,6 +660,11 @@ struct SerNode {
                          const py::object& context = py::none()) const {
         if (type == "lax-or-strict") {
             if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
+        }
+        if (type == "union") {
+            for (auto& c : children) {
+                try { return c->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none); } catch (...) {}
+            }
         }
         if (type == "is-instance" || type == "is-subclass") {
             return infer_json(value, ensure_ascii, indent);
@@ -652,9 +705,30 @@ struct SerNode {
             return json_escape(value.cast<std::string>(), ensure_ascii);
         }
         if (type == "bytes") {
-            // Default: decode bytes as UTF-8 string (matching Rust pydantic-core behavior)
+            std::string b = value.cast<std::string>();
+            if (ser_json_bytes == "base64") {
+                static const char* b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                std::string enc;
+                for (size_t i = 0; i < b.size(); i += 3) {
+                    uint32_t n = ((uint8_t)b[i] << 16);
+                    if (i+1 < b.size()) n |= ((uint8_t)b[i+1] << 8);
+                    if (i+2 < b.size()) n |= (uint8_t)b[i+2];
+                    enc += b64[(n>>18)&0x3F]; enc += b64[(n>>12)&0x3F];
+                    enc += (i+1<b.size()) ? b64[(n>>6)&0x3F] : '=';
+                    enc += (i+2<b.size()) ? b64[n&0x3F] : '=';
+                }
+                return "\"" + enc + "\"";
+            } else if (ser_json_bytes == "hex") {
+                static const char* hex = "0123456789abcdef";
+                std::string enc;
+                for (unsigned char c : b) {
+                    enc += hex[c >> 4];
+                    enc += hex[c & 0x0F];
+                }
+                return "\"" + enc + "\"";
+            }
+            // Default: UTF-8
             try {
-                std::string b = value.cast<std::string>();
                 return json_escape(b, ensure_ascii);
             } catch (...) {
                 return "\"<bytes>\"";
@@ -690,6 +764,14 @@ struct SerNode {
             py::object inner = !children.empty() ? children[0]->to_python(value, false, false, round_trip) : value;
             return json_escape(py::str(inner).cast<std::string>(), ensure_ascii);
         }
+        if (type == "enum") {
+            if (py::hasattr(value, "value")) {
+                auto ev = py::getattr(value, "value");
+                if (!children.empty()) return children[0]->to_json(ev, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
+                return infer_json(ev, ensure_ascii, indent);
+            }
+            return infer_json(value, ensure_ascii, indent);
+        }
         // Types that serialize as their str() representation
         if (type == "uuid" || type == "decimal" || type == "ipaddress" ||
             type == "ipv4address" || type == "ipv6address" ||
@@ -697,8 +779,8 @@ struct SerNode {
             type == "ipv4network" || type == "ipv6network") {
             return json_escape(py::str(value).cast<std::string>(), ensure_ascii);
         }
-        // datetime/time: call .isoformat()
-        if (type == "datetime" || type == "time") {
+        // datetime/date/time: call .isoformat()
+        if (type == "datetime" || type == "date" || type == "time") {
             try {
                 py::object iso = value.attr("isoformat")();
                 std::string s = py::str(iso).cast<std::string>();
@@ -711,9 +793,24 @@ struct SerNode {
                 return json_escape(py::str(value).cast<std::string>(), ensure_ascii);
             }
         }
-        // timedelta: ISO 8601 duration format
+        // timedelta: ISO 8601 duration format or float
         if (type == "timedelta") {
             try {
+                if (ser_json_timedelta == "float") {
+                    long days = value.attr("days").cast<long>();
+                    long seconds = value.attr("seconds").cast<long>();
+                    long microseconds = value.attr("microseconds").cast<long>();
+                    double total = days * 86400.0 + seconds + microseconds / 1000000.0;
+                    // Format as number without trailing zeros
+                    std::string s = std::to_string(total);
+                    auto dot = s.find('.');
+                    if (dot != std::string::npos) {
+                        auto last = s.find_last_not_of('0');
+                        if (last > dot) s.erase(last + 1);
+                        else s.erase(dot + 2);
+                    }
+                    return s;
+                }
                 long days = value.attr("days").cast<long>();
                 long seconds = value.attr("seconds").cast<long>();
                 long microseconds = value.attr("microseconds").cast<long>();
@@ -729,30 +826,33 @@ struct SerNode {
                     if (seconds < 0) { seconds += 86400; days--; }
                     if (days < 0) { days = 0; seconds = 0; microseconds = 0; }
                 }
+                // Break seconds into hours, minutes, seconds
+                long hours = seconds / 3600;
+                seconds = seconds % 3600;
+                long mins = seconds / 60;
+                long secs = seconds % 60;
+
                 std::string result = negative ? "-P" : "P";
                 if (days > 0) result += std::to_string(days) + "D";
-                if (seconds > 0 || microseconds > 0) {
+
+                // Build time part - omit zero components
+                bool has_time = hours > 0 || mins > 0 || secs > 0 || microseconds > 0;
+                if (has_time) {
                     result += "T";
-                    if (seconds > 0) {
+                    if (hours > 0) result += std::to_string(hours) + "H";
+                    if (mins > 0) result += std::to_string(mins) + "M";
+                    if (secs > 0 || microseconds > 0) {
                         if (microseconds > 0) {
                             char buf[32];
-                            snprintf(buf, sizeof(buf), "%ld.%06ld", seconds, microseconds);
+                            snprintf(buf, sizeof(buf), "%ld.%06ld", secs, microseconds);
                             std::string s(buf);
                             auto last = s.find_last_not_of('0');
                             if (last != std::string::npos) s.erase(last + 1);
                             if (s.back() == '.') s.pop_back();
                             result += s + "S";
                         } else {
-                            result += std::to_string(seconds) + "S";
+                            result += std::to_string(secs) + "S";
                         }
-                    } else if (microseconds > 0) {
-                        char buf[32];
-                        snprintf(buf, sizeof(buf), "0.%06ld", microseconds);
-                        std::string s(buf);
-                        auto last = s.find_last_not_of('0');
-                        if (last != std::string::npos) s.erase(last + 1);
-                        if (s.back() == '.') s.pop_back();
-                        result += s + "S";
                     }
                 }
                 if (result == "P" || result == "-P") result = "PT0S";
@@ -761,8 +861,8 @@ struct SerNode {
                 return json_escape(py::str(value).cast<std::string>(), ensure_ascii);
             }
         }
-        // set/frozenset: serialize as JSON array
-        if (type == "set" || type == "frozenset") {
+        // set/frozenset/generator: serialize as JSON array
+        if (type == "set" || type == "frozenset" || type == "generator") {
             std::string out = "[";
             bool first = true;
             for (auto item : py::reinterpret_borrow<py::iterable>(value)) {
@@ -876,17 +976,46 @@ struct SerNode {
 private:
     static std::string json_escape(const std::string& s, bool ensure_ascii) {
         std::string out = "\"";
-        for (unsigned char c : s) {
+        size_t i = 0;
+        while (i < s.size()) {
+            unsigned char c = static_cast<unsigned char>(s[i]);
             switch (c) {
-                case '"': out += "\\\""; break;
-                case '\\': out += "\\\\"; break;
-                case '\n': out += "\\n"; break;
-                case '\r': out += "\\r"; break;
-                case '\t': out += "\\t"; break;
+                case '"': out += "\\\""; ++i; break;
+                case '\\': out += "\\\\"; ++i; break;
+                case '\n': out += "\\n"; ++i; break;
+                case '\r': out += "\\r"; ++i; break;
+                case '\t': out += "\\t"; ++i; break;
                 default:
-                    if (ensure_ascii && c > 127) {
+                    if (c < 0x20) {
                         char buf[8]; snprintf(buf, 8, "\\u%04x", c); out += buf;
-                    } else out += (char)c;
+                        ++i;
+                    } else if (ensure_ascii && c > 127) {
+                        // Decode UTF-8 to get the Unicode codepoint
+                        uint32_t cp = 0;
+                        int extra_bytes = 0;
+                        if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; extra_bytes = 1; }
+                        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; extra_bytes = 2; }
+                        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; extra_bytes = 3; }
+                        else { out += (char)c; ++i; break; } // invalid UTF-8, pass through
+                        for (int j = 0; j < extra_bytes && i + 1 < s.size(); ++j) {
+                            ++i;
+                            cp = (cp << 6) | (static_cast<unsigned char>(s[i]) & 0x3F);
+                        }
+                        ++i;
+                        if (cp > 0xFFFF) {
+                            // Surrogate pair for characters above BMP
+                            cp -= 0x10000;
+                            char buf[16];
+                            snprintf(buf, 16, "\\u%04x\\u%04x",
+                                     0xD800 + (cp >> 10), 0xDC00 + (cp & 0x3FF));
+                            out += buf;
+                        } else {
+                            char buf[8]; snprintf(buf, 8, "\\u%04x", cp); out += buf;
+                        }
+                    } else {
+                        out += (char)c;
+                        ++i;
+                    }
                     break;
             }
         }
@@ -1009,7 +1138,8 @@ private:
                                  bool by_alias = false,
                                  bool exclude_unset = false,
                                  bool exclude_defaults = false,
-                                 const py::object& context = py::none()) const {
+                                 const py::object& context = py::none(),
+                                 bool json_mode = false) const {
         py::dict result;
         py::dict main;
         if (py::isinstance<py::dict>(value)) main = value.cast<py::dict>();
@@ -1114,8 +1244,8 @@ private:
                         use_field_serializer = false;
                     }
                 }
-                // Note: "json" and "json-unless-none" only apply in JSON mode, so skip in Python mode
-                if (ser->when_used == "json" || ser->when_used == "json-unless-none") {
+                // Note: "json" and "json-unless-none" only apply in JSON mode
+                if ((ser->when_used == "json" || ser->when_used == "json-unless-none") && !json_mode) {
                     use_field_serializer = false;
                 }
             }
@@ -1170,14 +1300,14 @@ private:
                 if (!tried) {
                     // Fallback to inner schema if available, otherwise use default serialization
                     if (!ser->children.empty()) {
-                        serialized = ser->children[0]->to_python(fv, false, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context);
+                        serialized = ser->children[0]->to_python(fv, json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context);
                     } else {
-                        serialized = ser->to_python(fv, false, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context);
+                        serialized = ser->to_python(fv, json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context);
                     }
                 }
             } else {
                 // Use the field serializer directly (it handles list/dict iteration, etc.)
-                serialized = ser->to_python(fv, false, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context);
+                serialized = ser->to_python(fv, json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context);
             }
             result[py::str(output_key)] = serialized;
         }
@@ -1485,7 +1615,13 @@ static SerRef build_ser_impl(const py::dict& schema,
             for (auto item : defs_list) {
                 auto d = item.cast<py::dict>();
                 std::string ref = d["ref"].cast<std::string>();
-                auto actual = build_ser_impl(d["schema"].cast<py::dict>(), defs);
+                SerRef actual;
+                if (d.contains("schema")) {
+                    actual = build_ser_impl(d["schema"].cast<py::dict>(), defs);
+                } else {
+                    // Definitions without inner schema (e.g. enum) — build from the definition itself
+                    actual = build_ser_impl(d, defs);
+                }
                 // Copy actual content into the stub (preserves shared_ptr identity)
                 defs[ref]->copy_from(*actual);
             }
@@ -1735,22 +1871,26 @@ static SerRef build_ser_impl(const py::dict& schema,
         }
     }
 
-    // Extract ser_json_inf_nan from config and propagate to all descendants
+    // Extract config options and propagate to all descendants
     if (schema.contains("config")) {
         try {
             py::dict config = schema["config"].cast<py::dict>();
-            if (config.contains("ser_json_inf_nan")) {
-                std::string mode = config["ser_json_inf_nan"].cast<std::string>();
-                // Set on this node and all children recursively
-                std::function<void(SerRef)> set_mode = [&](SerRef n) {
-                    if (!n) return;
-                    n->inf_nan_mode = mode;
-                    for (auto& child : n->children) set_mode(child);
-                    for (auto& [k, v] : n->fields) set_mode(v);
-                    for (auto& [k, v] : n->tagged) set_mode(v);
-                };
-                set_mode(node);
-            }
+            std::function<void(SerRef)> set_config = [&](SerRef n) {
+                if (!n) return;
+                if (config.contains("ser_json_inf_nan")) {
+                    n->inf_nan_mode = config["ser_json_inf_nan"].cast<std::string>();
+                }
+                if (config.contains("ser_json_bytes")) {
+                    n->ser_json_bytes = config["ser_json_bytes"].cast<std::string>();
+                }
+                if (config.contains("ser_json_timedelta")) {
+                    n->ser_json_timedelta = config["ser_json_timedelta"].cast<std::string>();
+                }
+                for (auto& child : n->children) set_config(child);
+                for (auto& [k, v] : n->fields) set_config(v);
+                for (auto& [k, v] : n->tagged) set_config(v);
+            };
+            set_config(node);
         } catch (...) {}
     }
 

@@ -125,6 +125,12 @@ public:
         // UUID errors
         UuidType,
 
+        // Decimal errors
+        DecimalType,
+        DecimalParsing,
+        DecimalMaxDigits,
+        DecimalMaxPlaces,
+
         // Type checking errors
         IsInstanceType,
         IsSubclassType,
