@@ -1541,8 +1541,20 @@ static SerRef build_ser(const py::dict& schema,
     return build_ser_impl(schema, defs);
 }
 
+static thread_local int _build_ser_depth = 0;
+
 static SerRef build_ser_impl(const py::dict& schema,
                         std::unordered_map<std::string, SerRef>& defs) {
+    _build_ser_depth++;
+    if (_build_ser_depth > 200) {
+        std::string t = "unknown";
+        try { t = schema["type"].cast<std::string>(); } catch (...) {}
+        fprintf(stderr, "ERROR: build_ser_impl recursion depth exceeded 200, type=%s\n", t.c_str());
+        _build_ser_depth--;
+        return std::make_shared<SerNode>();
+    }
+    struct DepthGuard { ~DepthGuard() { _build_ser_depth--; } } _guard;
+
     std::string type;
     try { type = schema["type"].cast<std::string>(); } catch (...) { type = "any"; }
     std::string original_type = type;  // Save original type before serialization override
@@ -1875,8 +1887,11 @@ static SerRef build_ser_impl(const py::dict& schema,
     if (schema.contains("config")) {
         try {
             py::dict config = schema["config"].cast<py::dict>();
+            std::unordered_set<SerRef> visited;
             std::function<void(SerRef)> set_config = [&](SerRef n) {
                 if (!n) return;
+                if (visited.count(n)) return;  // Cycle detection
+                visited.insert(n);
                 if (config.contains("ser_json_inf_nan")) {
                     n->inf_nan_mode = config["ser_json_inf_nan"].cast<std::string>();
                 }
