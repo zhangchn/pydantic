@@ -419,6 +419,33 @@ struct SerNode {
             // For root models, extract the 'root' attribute before delegating
             if (root_model && py::hasattr(value, "root")) {
                 auto root_val = py::getattr(value, "root");
+                // If the child is a field serializer, pass the model instance
+                if (!children.empty() && children[0]->is_field_serializer && children[0]->py_func.ptr() && !children[0]->py_func.is_none()) {
+                    auto child = children[0];
+                    // Create handler for wrap mode
+                    if (child->type == "function-wrap") {
+                        py::object handler = py::cpp_function([child, root_val, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context](const py::object& v) -> py::object {
+                            if (!child->children.empty()) {
+                                return child->children[0]->to_python(v, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
+                            }
+                            return v;
+                        });
+                        if (child->info_arg) {
+                            PySerializationInfo info(round_trip, json_mode ? "json" : "python", "root", context);
+                            return child->py_func(value, root_val, handler, py::cast(info));
+                        } else {
+                            return child->py_func(value, root_val, handler);
+                        }
+                    } else {
+                        // function-plain
+                        if (child->info_arg) {
+                            PySerializationInfo info(round_trip, json_mode ? "json" : "python", "root", context);
+                            return child->py_func(value, root_val, py::cast(info));
+                        } else {
+                            return child->py_func(value, root_val);
+                        }
+                    }
+                }
                 return children[0]->to_python(root_val, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
             }
             return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
@@ -764,6 +791,36 @@ struct SerNode {
             // For root models, extract the 'root' attribute before delegating
             if (root_model && py::hasattr(value, "root")) {
                 auto root_val = py::getattr(value, "root");
+                // If the child is a field serializer, pass the model instance
+                if (!children.empty() && children[0]->is_field_serializer && children[0]->py_func.ptr() && !children[0]->py_func.is_none()) {
+                    auto child = children[0];
+                    // For field serializers, call the function directly
+                    if (child->type == "function-wrap") {
+                        // Create handler that serializes to JSON
+                        py::object handler = py::cpp_function([child, root_val, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none](const py::object& v) -> py::object {
+                            if (!child->children.empty()) {
+                                return py::str(child->children[0]->to_json(v, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none));
+                            }
+                            return py::str(v);
+                        });
+                        if (child->info_arg) {
+                            PySerializationInfo info(round_trip, "json", "root");
+                            return py::str(child->py_func(value, root_val, handler, py::cast(info)));
+                        } else {
+                            return py::str(child->py_func(value, root_val, handler));
+                        }
+                    } else {
+                        // function-plain
+                        py::object result;
+                        if (child->info_arg) {
+                            PySerializationInfo info(round_trip, "json", "root");
+                            result = child->py_func(value, root_val, py::cast(info));
+                        } else {
+                            result = child->py_func(value, root_val);
+                        }
+                        return infer_json(result, ensure_ascii, indent);
+                    }
+                }
                 return children[0]->to_json(root_val, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
             }
             return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
@@ -1358,6 +1415,7 @@ static SerRef build_ser_impl(const py::dict& schema,
                         std::unordered_map<std::string, SerRef>& defs) {
     std::string type;
     try { type = schema["type"].cast<std::string>(); } catch (...) { type = "any"; }
+    std::string original_type = type;  // Save original type before serialization override
 
     // Check serialization override
     py::dict ser_dict;
@@ -1437,11 +1495,25 @@ static SerRef build_ser_impl(const py::dict& schema,
         try { return build_ser_impl(schema["schema"].cast<py::dict>(), defs); } catch (...) {}
         return node;
     }
-    if (type == "definition-ref") {
+    if (original_type == "definition-ref") {
         try {
             std::string ref = schema["schema_ref"].cast<std::string>();
             auto it = defs.find(ref);
-            if (it != defs.end()) return it->second;  // Return stub (will be populated)
+            if (it != defs.end()) {
+                // If this definition-ref has a serialization override, apply it
+                if (has_ser_dict && ser_dict.contains("function")) {
+                    auto wrapped = std::make_shared<SerNode>();
+                    wrapped->type = ser_dict["type"].cast<std::string>();
+                    wrapped->py_func = ser_dict["function"];
+                    wrapped->info_arg = ser_info_arg;
+                    wrapped->is_field_serializer = ser_is_field_serializer;
+                    wrapped->when_used = ser_when_used;
+                    // Add the resolved definition as a child (not copy its fields)
+                    wrapped->children.push_back(it->second);
+                    return wrapped;
+                }
+                return it->second;  // Return stub (will be populated)
+            }
         } catch (...) {}
         return node;
     }
@@ -1658,7 +1730,9 @@ static SerRef build_ser_impl(const py::dict& schema,
             try { node->class_ = schema["cls"].cast<py::object>(); } catch (...) {}
         }
         auto c = sub();
-        if (c) node->children.push_back(c);
+        if (c) {
+            node->children.push_back(c);
+        }
     }
 
     // Extract ser_json_inf_nan from config and propagate to all descendants
