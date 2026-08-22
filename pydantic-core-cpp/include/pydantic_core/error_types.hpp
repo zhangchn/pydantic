@@ -132,6 +132,7 @@ public:
 
         // Other errors
         JsonInvalid,
+        InvalidJsonValue,
         CustomError,
         RecursionError,
         RecursionLoop,

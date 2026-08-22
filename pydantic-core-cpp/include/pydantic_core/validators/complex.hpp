@@ -1,11 +1,16 @@
 #pragma once
 
 #include "pydantic_core/validator.hpp"
+#include "pydantic_core/python_input.hpp"
 #include <memory>
 #include <vector>
 #include <string>
+#include <unordered_map>
 
 namespace pydantic_core {
+
+// Forward declaration
+py::object value_to_python_with_type(const std::shared_ptr<void>& value, const std::string& type_name);
 
 // NullableValidator - wraps another validator and allows None
 class NullableValidator : public Validator {
@@ -106,16 +111,72 @@ public:
     TaggedUnionValidator() = default;
     TaggedUnionValidator(std::string tag, std::vector<std::shared_ptr<Validator>> validators)
         : tag_(std::move(tag)), validators_(std::move(validators)) {}
-    
+    // Callable discriminator constructor: maps tag string -> validator
+    TaggedUnionValidator(py::object discriminator,
+                         std::unordered_map<std::string, std::shared_ptr<Validator>> choice_map)
+        : discriminator_(std::move(discriminator)), choice_map_(std::move(choice_map)) {}
+
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
     ) override {
-        // For now, just try all validators (Phase 2 will implement proper tag matching)
+        // If we have a callable discriminator and choice map, use them
+        if (!discriminator_.is_none() && !choice_map_.empty()) {
+            py::object tag_value;
+            try {
+                // Get the raw Python input for the discriminator call
+                auto* py_input = dynamic_cast<const PythonInput*>(&input);
+                if (!py_input) {
+                    return ValError::line_error(
+                        ErrorType(ErrorType::Kind::CustomError),
+                        state.location(),
+                        "tagged-union: callable discriminator requires Python input"
+                    );
+                }
+                tag_value = discriminator_(py_input->py_object());
+            } catch (py::error_already_set& e) {
+                e.restore();
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::CustomError),
+                    state.location(),
+                    "tagged-union: discriminator call failed"
+                );
+            } catch (...) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::CustomError),
+                    state.location(),
+                    "tagged-union: discriminator call failed"
+                );
+            }
+            std::string tag_str;
+            try { tag_str = tag_value.cast<std::string>(); } catch (...) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::CustomError),
+                    state.location(),
+                    "tagged-union: discriminator did not return a string"
+                );
+            }
+            auto it = choice_map_.find(tag_str);
+            if (it == choice_map_.end()) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::InvalidJsonValue),
+                    state.location(),
+                    input.as_error_value().repr
+                );
+            }
+            auto result = it->second->validate(input, state);
+            if (result.is_ok()) {
+                auto py_obj = value_to_python_with_type(result.value(), it->second->effective_result_name());
+                return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(std::move(py_obj)));
+            }
+            return result;
+        }
+        // Fallback: try all validators
         for (auto& validator : validators_) {
             auto result = validator->validate(input, state);
             if (result.is_ok()) {
-                return result;
+                auto py_obj = value_to_python_with_type(result.value(), validator->effective_result_name());
+                return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(std::move(py_obj)));
             }
         }
         return ValError::line_error(
@@ -124,12 +185,17 @@ public:
             "No tagged union variant matched"
         );
     }
-    
+
     std::string name() const override { return "tagged-union"; }
-    
+
+    // The stored value is always a py::object (converted at validate time).
+    std::string effective_result_name() const override { return "py_object"; }
+
 private:
     std::string tag_;
     std::vector<std::shared_ptr<Validator>> validators_;
+    py::object discriminator_ = py::none();
+    std::unordered_map<std::string, std::shared_ptr<Validator>> choice_map_;
 };
 
 } // namespace pydantic_core

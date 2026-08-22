@@ -1268,8 +1268,10 @@ class SchemaValidator:
         return result
 
     def validate_json(self, json_data, *, strict=None, context=None, extra=None,
-                      from_attributes=None, by_alias=None, by_name=None):
-        result = self._base.validate_json(json_data, strict=strict, context=context, extra=extra)
+                      from_attributes=None, by_alias=None, by_name=None,
+                      allow_partial=None):
+        result = self._base.validate_json(json_data, strict=strict, context=context, extra=extra,
+                                          allow_partial=allow_partial, by_alias=by_alias, by_name=by_name)
         if isinstance(result, dict):
             result = self._dict_to_model(result)
         else:

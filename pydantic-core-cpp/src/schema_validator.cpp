@@ -708,7 +708,9 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
     // For wrapper types, try all scalar types since we don't know the inner type
     // (NOT for model/typed-dict/dataclass — those have their own handler below)
     bool try_all = (effective_type == "nullable"
-                    || effective_type == "lax-or-strict" || effective_type == "json-or-python");
+                    || effective_type == "lax-or-strict" || effective_type == "json-or-python"
+                    || effective_type == "tagged-union" || effective_type == "union"
+                    || effective_type == "any-of");
 
     // For "any", try specific type casts based on actual value content
     bool is_any = (effective_type == "any");

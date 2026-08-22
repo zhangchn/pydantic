@@ -1573,6 +1573,24 @@ static std::shared_ptr<Validator> build_from_py_dict(
 
     // --- TaggedUnion ---
     if (type == "tagged-union") {
+        auto disc_obj = schema["discriminator"];
+        // Callable discriminator: build a tag->validator map
+        if (py::isinstance<py::function>(disc_obj) || py::hasattr(disc_obj, "__call__")) {
+            std::unordered_map<std::string, std::shared_ptr<Validator>> choice_map;
+            if (schema.contains("choices")) {
+                auto choices_obj = schema["choices"];
+                if (py::isinstance<py::dict>(choices_obj)) {
+                    auto choices_dict = choices_obj.cast<py::dict>();
+                    for (auto item : choices_dict) {
+                        std::string tag = py::str(item.first).cast<std::string>();
+                        auto choice = build_from_py_dict(item.second.cast<py::dict>(), config, definitions);
+                        choice_map[tag] = std::move(choice);
+                    }
+                }
+            }
+            return std::make_shared<TaggedUnionValidator>(disc_obj.cast<py::object>(), std::move(choice_map));
+        }
+        // String discriminator: try all validators in order
         std::string discriminator = py_str(schema, "discriminator");
         std::vector<std::shared_ptr<Validator>> choices;
         if (schema.contains("choices")) {

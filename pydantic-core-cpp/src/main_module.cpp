@@ -2023,7 +2023,8 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             return validated;
         }, py::arg("object"), py::arg("strict") = py::none(), py::arg("context") = py::none(), py::arg("self_instance") = py::none(),
              py::arg("extra") = py::none(), py::arg("from_attributes") = py::none(), py::arg("by_alias") = py::none(), py::arg("by_name") = py::none())
-        .def("validate_json", [](SchemaValidator& self, const py::object& jd, py::object strict, py::object context, py::object extra) {
+        .def("validate_json", [](SchemaValidator& self, const py::object& jd, py::object strict, py::object context, py::object extra,
+                                  py::object allow_partial, py::object by_alias, py::object by_name) {
             std::string js = py::isinstance<py::bytes>(jd) ? jd.cast<std::string>() : jd.cast<std::string>();
             // Parse JSON to Python object first, then validate as Python
             // This ensures proper type coercion (e.g., "Infinity" string -> float inf)
@@ -2036,7 +2037,8 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                 else extra_opt = ExtraBehavior::Ignore;
             }
             return self.validate_python_object(py_input, pyobj_to_bool(strict), extra_opt, std::nullopt, context);
-        }, py::arg("json_data"), py::arg("strict") = py::none(), py::arg("context") = py::none(), py::arg("extra") = py::none())
+        }, py::arg("json_data"), py::arg("strict") = py::none(), py::arg("context") = py::none(), py::arg("extra") = py::none(),
+             py::arg("allow_partial") = py::none(), py::arg("by_alias") = py::none(), py::arg("by_name") = py::none())
         .def("validate_strings", [](SchemaValidator& self, const py::object& sd, py::object strict, py::object extra) {
             std::optional<ExtraBehavior> extra_opt;
             if (!extra.is_none()) {

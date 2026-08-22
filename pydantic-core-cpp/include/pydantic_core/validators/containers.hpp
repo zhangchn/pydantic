@@ -209,8 +209,10 @@ public:
         // Validators that store py::object results.  Note: "any" results are
         // NOT py::object — the C++ AnyValidator stores a string repr — so "any"
         // falls through and callers keep the original input object.
+        // Note: "json-or-python" is NOT handled here — its effective_result_name()
+        // delegates to the inner validator, so the name is always the inner type.
         if (name == "function-after" || name == "function-before" ||
-            name == "function-wrap" || name == "function-plain" || name == "json-or-python" ||
+            name == "function-wrap" || name == "function-plain" ||
             name == "py_object" || name == "is-instance" || name == "is-subclass") {
             if (auto* o = static_cast<py::object*>(value.get())) return *o;
         }
@@ -269,7 +271,6 @@ public:
 
         // In strings mode (validate_strings), keys/values always coerce
         // regardless of strict — match Rust's StringInput semantics.
-        ValidationState sub_state = state.sub_copy(state.coerce_strings());
 
         // Validate keys and values if schemas provided
         if (keys_schema || values_schema) {
@@ -277,6 +278,7 @@ public:
             std::vector<std::shared_ptr<ValLineError>> errors;
             for (const auto& entry : entries) {
                 state.location().push(entry.key);
+                ValidationState sub_state = state.sub_copy(state.coerce_strings());
                 py::object key_obj = dict->get_key(entry.key).value_or(py::str(entry.key));
                 py::object val_obj = dict->get_value(entry.key).value_or(py::none());
 

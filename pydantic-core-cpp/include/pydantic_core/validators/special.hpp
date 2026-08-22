@@ -79,6 +79,16 @@ public:
         return "definition-ref";
     }
 
+    std::string effective_result_name() const override {
+        if (definitions_) {
+            auto def = definitions_->get_definition(schema_ref_);
+            if (def) {
+                return def->effective_result_name();
+            }
+        }
+        return "definition-ref";
+    }
+
     // Delegate expected-class lookup to the resolved definition (e.g. unions
     // use this to prefer the exact-class branch for model instance inputs).
     const py::object& expected_class() const override {

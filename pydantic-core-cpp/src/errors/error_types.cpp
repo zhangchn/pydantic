@@ -115,6 +115,7 @@ std::string ErrorType::type_name() const {
 
         // Other errors
         {Kind::JsonInvalid, "json_invalid"},
+        {Kind::InvalidJsonValue, "invalid-json-value"},
         {Kind::CustomError, "custom_error"},
         {Kind::RecursionError, "recursion_error"},
         {Kind::RecursionLoop, "recursion_loop"},
@@ -220,6 +221,7 @@ std::string ErrorType::message_template() const {
         
         // Other errors
         {Kind::JsonInvalid, "Invalid JSON"},
+        {Kind::InvalidJsonValue, "input was not a valid JSON value"},
         {Kind::CustomError, "{message}"},
         {Kind::RecursionError, "Recursion depth exceeded"},
         {Kind::RecursionLoop, "Recursion error - cyclic reference detected"},
@@ -329,6 +331,7 @@ ErrorType ErrorType::build_known_type(const std::string& type_str) {
         {"url_host", Kind::UrlHost},               {"uuid_type", Kind::UuidType},
         {"is_instance_of", Kind::IsInstanceType},   {"is_subclass_of", Kind::IsSubclassType},
         {"callable_type", Kind::CallableType},      {"json_invalid", Kind::JsonInvalid},
+        {"invalid_json_value", Kind::InvalidJsonValue},
         {"recursion_error", Kind::RecursionError},  {"recursion_loop", Kind::RecursionLoop},
         {"greater_than", Kind::GreaterThan},
         {"less_than", Kind::LessThan},              {"greater_than_equal", Kind::GreaterThanEqual},
