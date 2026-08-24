@@ -5,11 +5,19 @@
 #include <vector>
 #include <unordered_map>
 
+#include <pybind11/pybind11.h>
+#include <pybind11/embed.h>
+
 #include "pydantic_core/combined_validator.hpp"
 #include "pydantic_core/json_input.hpp"
 #include "pydantic_core/validators/model_fields.hpp"
 #include "pydantic_core/validators/containers.hpp"
 #include "pydantic_core/validation_state.hpp"
+
+// Python interpreter for the lifetime of the process (validators under test
+// convert values to/from Python objects; one global guard since a second
+// scoped_interpreter fails while one is running).
+static pybind11::scoped_interpreter g_py_interpreter_guard_{};
 
 using namespace pydantic_core;
 

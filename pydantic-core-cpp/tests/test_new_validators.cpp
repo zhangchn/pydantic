@@ -8,7 +8,18 @@
 #include "pydantic_core/validators/basic.hpp"
 #include "pydantic_core/validators/special.hpp"
 
+#include <pybind11/pybind11.h>
+#include <pybind11/embed.h>
+#include <pybind11/eval.h>
+
+#include "pydantic_core/python_input.hpp"
+
 #include <string>
+
+// Python interpreter for the lifetime of the process (validators under test
+// convert values to/from Python objects; one global guard since a second
+// scoped_interpreter fails while one is running).
+static pybind11::scoped_interpreter g_py_interpreter_guard_{};
 
 using namespace pydantic_core;
 
@@ -18,7 +29,8 @@ using namespace pydantic_core;
 TEST_SUITE("IsInstanceValidator") {
 
 TEST_CASE("IsInstanceValidator accepts any non-null input") {
-    auto v = std::make_shared<IsInstanceValidator>("SomeClass");
+    // No class info (zero-arg): accepts any non-null input.
+    auto v = std::make_shared<IsInstanceValidator>();
     ValidationState state;
     
     // Accepts string
@@ -33,8 +45,11 @@ TEST_CASE("IsInstanceValidator accepts any non-null input") {
 }
 
 TEST_CASE("IsInstanceValidator has correct name") {
-    auto v = std::make_shared<IsInstanceValidator>("TestClass");
-    CHECK(v->name() == "is-instance");
+    auto v = std::make_shared<IsInstanceValidator>("TestClass", py::none());
+    // name() is the result-dispatch token (raw PyObject* pass-through), see
+    // schema_validator.cpp: "py_raw_object: PyObject* stored by
+    // is-instance/is-subclass validators".
+    CHECK(v->name() == "py_raw_object");
 }
 
 } // TEST_SUITE
@@ -45,7 +60,7 @@ TEST_CASE("IsInstanceValidator has correct name") {
 TEST_SUITE("IsSubclassValidator") {
 
 TEST_CASE("IsSubclassValidator accepts any input") {
-    auto v = std::make_shared<IsSubclassValidator>("BaseClass");
+    auto v = std::make_shared<IsSubclassValidator>("BaseClass", py::none());
     ValidationState state;
     
     StringInput str_input("value");
@@ -54,8 +69,8 @@ TEST_CASE("IsSubclassValidator accepts any input") {
 }
 
 TEST_CASE("IsSubclassValidator has correct name") {
-    auto v = std::make_shared<IsSubclassValidator>("BaseClass");
-    CHECK(v->name() == "is-subclass");
+    auto v = std::make_shared<IsSubclassValidator>("BaseClass", py::none());
+    CHECK(v->name() == "py_raw_object");
 }
 
 } // TEST_SUITE
@@ -65,12 +80,22 @@ TEST_CASE("IsSubclassValidator has correct name") {
 // ---------------------------------------------------------------------------
 TEST_SUITE("CallableValidator") {
 
-TEST_CASE("CallableValidator accepts any input") {
+TEST_CASE("CallableValidator rejects non-callable input") {
     auto v = std::make_shared<CallableValidator>();
     ValidationState state;
     
     StringInput str_input("some_func");
     auto result = v->validate(str_input, state);
+    CHECK(result.is_err());
+}
+
+TEST_CASE("CallableValidator accepts a Python callable") {
+    auto v = std::make_shared<CallableValidator>();
+    ValidationState state;
+    
+    py::object fn = py::eval("lambda x: x");
+    PythonInput py_input(fn);
+    auto result = v->validate(py_input, state);
     CHECK(result.is_ok());
 }
 

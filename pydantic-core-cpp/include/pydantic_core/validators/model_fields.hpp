@@ -116,7 +116,14 @@ public:
         , extra_behavior_(extra_behavior)
         , extras_validator_(std::move(extras_validator))
         , model_name_(std::move(model_name))
-    {}
+    {
+        // Record every field so validation iterates over all of them.  (The
+        // add_field() path records fields as they are added; this constructor
+        // receives a complete map up front.)
+        for (auto& [name, info] : fields_) {
+            field_order_.push_back(name);
+        }
+    }
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,

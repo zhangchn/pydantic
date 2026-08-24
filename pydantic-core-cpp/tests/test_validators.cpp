@@ -1,4 +1,8 @@
 #include <doctest/doctest.h>
+
+#include <pybind11/pybind11.h>
+#include <pybind11/embed.h>
+
 #include "pydantic_core/validator.hpp"
 #include "pydantic_core/validators/basic.hpp"
 #include "pydantic_core/validators/containers.hpp"
@@ -7,6 +11,12 @@
 #include "pydantic_core/validators/special.hpp"
 #include "pydantic_core/json_input.hpp"
 #include "pydantic_core/string_input.hpp"
+
+// Python interpreter for the lifetime of the process — the validators under
+// test convert values to/from Python objects (pybind11 needs a running
+// interpreter). One global guard: a second scoped_interpreter fails if an
+// interpreter is already running.
+static pybind11::scoped_interpreter g_py_interpreter_guard_{};
 
 using namespace pydantic_core;
 
@@ -557,7 +567,8 @@ TEST_SUITE("Complex Validators") {
 TEST_CASE("NullableValidator") {
     auto inner = std::make_shared<IntValidator>();
     NullableValidator validator(inner);
-    CHECK(validator.name() == "nullable");
+    // name() delegates to the inner validator (the result-dispatch token).
+    CHECK(validator.name() == "int");
     
     // Test with null
     auto json_result = parse_json("null");
@@ -630,7 +641,8 @@ TEST_CASE("WithDefaultValidator") {
     auto default_value = std::make_shared<int>(0);
     
     WithDefaultValidator validator(inner, default_value);
-    CHECK(validator.name() == "with-default");
+    // name() delegates to the inner validator (the result-dispatch token).
+    CHECK(validator.name() == "int");
     
     // Test with integer
     auto json_result = parse_json("42");
@@ -705,7 +717,8 @@ TEST_CASE("WithDefaultValidator - returns inner value for valid input") {
     auto default_value = std::make_shared<int64_t>(42);
 
     WithDefaultValidator validator(inner, default_value);
-    CHECK(validator.name() == "with-default");
+    // name() delegates to the inner validator (the result-dispatch token).
+    CHECK(validator.name() == "int");
 
     ValidationState state;
     auto json_result = parse_json("100");
@@ -1266,7 +1279,7 @@ TEST_CASE("Unknown validator type throws") {
 
 TEST_CASE("FunctionBeforeValidator - delegates to inner validator") {
     auto inner = std::make_shared<IntValidator>();
-    FunctionBeforeValidator validator(inner);
+    FunctionBeforeValidator validator(inner, py::none());
 
     ValidationState state;
 
@@ -1300,7 +1313,7 @@ TEST_CASE("FunctionBeforeValidator - no inner validator returns default") {
 
 TEST_CASE("FunctionAfterValidator - delegates to inner validator") {
     auto inner = std::make_shared<StringValidator>();
-    FunctionAfterValidator validator(inner);
+    FunctionAfterValidator validator(inner, py::none());
 
     ValidationState state;
 
@@ -1345,7 +1358,7 @@ TEST_CASE("FunctionPlainValidator - always succeeds (stub)") {
 
 TEST_CASE("FunctionWrapValidator - delegates to inner validator") {
     auto inner = std::make_shared<BoolValidator>();
-    FunctionWrapValidator validator(inner);
+    FunctionWrapValidator validator(inner, py::none());
 
     ValidationState state;
 
@@ -1378,7 +1391,7 @@ TEST_CASE("FunctionWrapValidator - no inner validator returns default") {
     CHECK(result.is_ok());
 }
 
-TEST_CASE("JsonValidator - stub returns string repr of input") {
+TEST_CASE("JsonValidator - parses JSON into Python object") {
     JsonValidator validator;
     CHECK(validator.name() == "json");
 
@@ -1387,22 +1400,22 @@ TEST_CASE("JsonValidator - stub returns string repr of input") {
     REQUIRE(json_result.is_ok());
     auto result = validator.validate(*json_result.value(), state);
     REQUIRE(result.is_ok());
-    auto str_val = std::static_pointer_cast<std::string>(result.value());
-    // The as_error_value().repr uses Python-style repr (single quotes for strings)
-    CHECK(*str_val == "'hello'");
+    auto py_val = std::static_pointer_cast<py::object>(result.value());
+    REQUIRE(py::isinstance<py::str>(*py_val));
+    CHECK(py_val->cast<std::string>() == "hello");
 }
 
-TEST_CASE("JsonValidator - with inner validator (stub, inner not called)") {
+TEST_CASE("JsonValidator - with inner validator") {
     JsonValidator validator(std::make_shared<IntValidator>());
 
     ValidationState state;
-    // Current impl ignores inner and returns repr
+    // The parsed JSON value is fed to the inner validator as Python input.
     auto json_result = parse_json("42");
     REQUIRE(json_result.is_ok());
     auto result = validator.validate(*json_result.value(), state);
     REQUIRE(result.is_ok());
-    auto str_val = std::static_pointer_cast<std::string>(result.value());
-    CHECK(*str_val == "42");
+    auto int_val = std::static_pointer_cast<int64_t>(result.value());
+    CHECK(*int_val == 42);
 }
 
 TEST_CASE("JsonOrPythonValidator - routes based on input type") {

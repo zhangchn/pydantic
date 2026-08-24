@@ -16,13 +16,13 @@ TEST_CASE("ErrorType construction") {
     }
     
     SUBCASE("String too short") {
-        auto err = ErrorType(ErrorType::Kind::StringTooShort, static_cast<int64_t>(5));
+        auto err = ErrorType(ErrorType::Kind::StringTooShort, "min_length", "5", "s", "s");
         CHECK(err.kind() == ErrorType::Kind::StringTooShort);
         CHECK(err.message() == "String should have at least 5 characters");
     }
     
     SUBCASE("String too long") {
-        auto err = ErrorType(ErrorType::Kind::StringTooLong, static_cast<int64_t>(100));
+        auto err = ErrorType(ErrorType::Kind::StringTooLong, "max_length", "100", "s", "s");
         CHECK(err.kind() == ErrorType::Kind::StringTooLong);
         CHECK(err.message() == "String should have at most 100 characters");
     }

@@ -4,9 +4,19 @@
 #include <string>
 #include <unordered_map>
 
+#include <pybind11/pybind11.h>
+#include <pybind11/embed.h>
+
 #include "pydantic_core/schema_validator.hpp"
 #include "pydantic_core/combined_validator.hpp"
 #include "pydantic_core/json_input.hpp"
+
+namespace py = pybind11;
+
+// Python interpreter for the lifetime of the process (validate_python/
+// isinstance_python convert values to Python objects; one global guard since
+// a second scoped_interpreter fails while one is running).
+static pybind11::scoped_interpreter g_py_interpreter_guard_{};
 
 using namespace pydantic_core;
 

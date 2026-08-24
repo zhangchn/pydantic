@@ -103,7 +103,11 @@ std::string ValidationError::errors_to_json() const {
         // Exceptions cannot be JSON-serialized, so emit a marker that the
         // Python wrapper resolves against the stored error objects. When the
         // marker is emitted it replaces the message-string "error" entry.
+#ifdef HAS_PYBIND11
         bool emit_error_ref = err.has_raw_error && err.raw_error_obj.ptr();
+#else
+        bool emit_error_ref = false;
+#endif
         for (const auto& [k, v] : err.ctx) {
             if (emit_error_ref && k == "error") continue;
             if (!cfirst) oss << ",";

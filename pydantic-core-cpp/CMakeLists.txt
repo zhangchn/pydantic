@@ -180,8 +180,8 @@ if(NOT SKBUILD)
         src/errors/errors.cpp
         src/errors/error_types.cpp
     )
-    target_compile_definitions(test_errors PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
-    target_link_libraries(test_errors PRIVATE doctest::doctest)
+    target_compile_definitions(test_errors PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN HAS_PYBIND11)
+    target_link_libraries(test_errors PRIVATE doctest::doctest pybind11::module Python3::Python)
     target_include_directories(test_errors PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
     # Test validation state
@@ -189,8 +189,8 @@ if(NOT SKBUILD)
         src/validation_state.cpp
         src/recursion_guard.cpp
     )
-    target_compile_definitions(test_validation_state PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
-    target_link_libraries(test_validation_state PRIVATE doctest::doctest)
+    target_compile_definitions(test_validation_state PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN HAS_PYBIND11)
+    target_link_libraries(test_validation_state PRIVATE doctest::doctest pybind11::module Python3::Python)
     target_include_directories(test_validation_state PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
     # Test validators
@@ -200,11 +200,14 @@ if(NOT SKBUILD)
         src/recursion_guard.cpp
         src/validation_state.cpp
         src/validator.cpp
+        src/url_types.cpp
+        src/schema_validator.cpp
         src/input/json_input.cpp
         src/input/string_input.cpp
+        src/input/python_input.cpp
     )
-    target_compile_definitions(test_validators PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
-    target_link_libraries(test_validators PRIVATE doctest::doctest simdjson::simdjson)
+    target_compile_definitions(test_validators PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN HAS_PYBIND11)
+    target_link_libraries(test_validators PRIVATE doctest::doctest simdjson::simdjson pybind11::module Python3::Python)
     target_include_directories(test_validators PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
     add_test(NAME Errors COMMAND test_errors)
@@ -218,8 +221,8 @@ if(NOT SKBUILD)
         src/recursion_guard.cpp
         src/serializer.cpp
     )
-    target_compile_definitions(test_serializers PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
-    target_link_libraries(test_serializers PRIVATE doctest::doctest)
+    target_compile_definitions(test_serializers PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN HAS_PYBIND11)
+    target_link_libraries(test_serializers PRIVATE doctest::doctest pybind11::module Python3::Python)
     target_include_directories(test_serializers PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
     add_test(NAME Serializers COMMAND test_serializers)
@@ -234,6 +237,7 @@ if(NOT SKBUILD)
         src/serializer.cpp
         src/combined_validator.cpp
         src/schema_validator.cpp
+        src/url_types.cpp
         src/input/json_input.cpp
         src/input/string_input.cpp
         src/input/python_input.cpp
@@ -252,11 +256,14 @@ if(NOT SKBUILD)
         src/validation_state.cpp
         src/validator.cpp
         src/combined_validator.cpp
+        src/url_types.cpp
+        src/schema_validator.cpp
         src/input/json_input.cpp
         src/input/string_input.cpp
+        src/input/python_input.cpp
     )
-    target_compile_definitions(test_model_fields PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
-    target_link_libraries(test_model_fields PRIVATE doctest::doctest simdjson::simdjson)
+    target_compile_definitions(test_model_fields PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN HAS_PYBIND11)
+    target_link_libraries(test_model_fields PRIVATE doctest::doctest simdjson::simdjson pybind11::module Python3::Python)
     target_include_directories(test_model_fields PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
     add_test(NAME ModelFields COMMAND test_model_fields)
@@ -269,11 +276,14 @@ if(NOT SKBUILD)
         src/validation_state.cpp
         src/validator.cpp
         src/combined_validator.cpp
+        src/url_types.cpp
+        src/schema_validator.cpp
         src/input/json_input.cpp
         src/input/string_input.cpp
+        src/input/python_input.cpp
     )
-    target_compile_definitions(test_constrained_validators PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
-    target_link_libraries(test_constrained_validators PRIVATE doctest::doctest simdjson::simdjson)
+    target_compile_definitions(test_constrained_validators PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN HAS_PYBIND11)
+    target_link_libraries(test_constrained_validators PRIVATE doctest::doctest simdjson::simdjson pybind11::module Python3::Python)
     target_include_directories(test_constrained_validators PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
     add_test(NAME ConstrainedValidators COMMAND test_constrained_validators)
@@ -282,12 +292,16 @@ if(NOT SKBUILD)
     add_executable(test_new_validators tests/test_new_validators.cpp
         src/combined_validator.cpp
         src/validator.cpp
+        src/errors/errors.cpp
         src/errors/error_types.cpp
+        src/url_types.cpp
+        src/schema_validator.cpp
         src/input/string_input.cpp
         src/input/json_input.cpp
+        src/input/python_input.cpp
     )
-    target_compile_definitions(test_new_validators PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
-    target_link_libraries(test_new_validators PRIVATE doctest::doctest simdjson::simdjson)
+    target_compile_definitions(test_new_validators PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN HAS_PYBIND11)
+    target_link_libraries(test_new_validators PRIVATE doctest::doctest simdjson::simdjson pybind11::module Python3::Python)
     target_include_directories(test_new_validators PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
     add_test(NAME NewValidators COMMAND test_new_validators)
@@ -300,7 +314,7 @@ if(NOT SKBUILD)
         src/validation_state.cpp
         src/recursion_guard.cpp
     )
-    target_compile_definitions(test_python_input PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
+    target_compile_definitions(test_python_input PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN HAS_PYBIND11)
     target_link_libraries(test_python_input PRIVATE doctest::doctest pybind11::module Python3::Python)
     target_include_directories(test_python_input PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
