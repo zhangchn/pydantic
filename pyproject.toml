@@ -116,6 +116,14 @@ testing-extra = [
     'sqlalchemy',
     'pytest-memray; platform_python_implementation == "CPython" and platform_system != "Windows"',
 ]
+# Test the C++ backend (pydantic-core-cpp) instead of the Rust one.
+# cmake/ninja provide the build toolchain for the scikit-build-core backend.
+testing-cpp = [
+    { include-group = "testing-extra" },
+    'pydantic-core-cpp',
+    'cmake',
+    'ninja',
+]
 typechecking = [
     'mypy',
     'pyright',
@@ -199,11 +207,13 @@ required-version = '>=0.8.4'
 
 [tool.uv.sources]
 pydantic-core = { workspace = true }
+pydantic-core-cpp = { workspace = true }
 pydantic-docs = { git = "https://github.com/pydantic/pydantic-docs" }
 
 [tool.uv.workspace]
 members = [
     "pydantic-core",
+    "pydantic-core-cpp",
 ]
 
 # configuring https://github.com/pydantic/hooky

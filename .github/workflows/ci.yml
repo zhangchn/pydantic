@@ -38,7 +38,7 @@ jobs:
       - name: Install dependencies
         # Installing pip is required for the pre-commit action:
         run: |
-          uv sync --all-packages --group linting --all-extras
+          uv sync --all-packages --no-install-package pydantic-core-cpp --group linting --all-extras
           uv pip install pip
       - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
         with:
@@ -462,7 +462,7 @@ jobs:
           enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
 
       - name: Install dependencies
-        run: uv sync --all-packages --group testing-extra
+        run: uv sync --all-packages --no-install-package pydantic-core-cpp --group testing-extra
         env:
           RUST_BACKTRACE: 1
 
@@ -500,7 +500,7 @@ jobs:
           lookup-only: false # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
 
       - name: Install dependencies
-        run: uv sync --all-packages --all-extras --group testing-extra
+        run: uv sync --all-packages --no-install-package pydantic-core-cpp --all-extras --group testing-extra
         env:
           RUST_BACKTRACE: 1
 
@@ -543,13 +543,38 @@ jobs:
           lookup-only: false # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
 
       - name: Install dependencies
-        run: uv sync --all-packages --all-extras --group testing-extra
+        run: uv sync --all-packages --no-install-package pydantic-core-cpp --all-extras --group testing-extra
 
       - run: uv run --no-sync maturin develop --uv
         working-directory: pydantic-core
 
       - run: uv pip freeze
       - run: uv run pytest
+
+  core-cpp-test:
+    name: core-cpp / Unit tests on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu, macos, windows]
+
+    runs-on: ${{ matrix.os }}-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Configure
+        # CMAKE_POLICY_VERSION_MINIMUM: doctest declares cmake_minimum_required(3.0),
+        # which CMake >= 4.x rejects without this compatibility flag.
+        run: cmake -S pydantic-core-cpp -B pydantic-core-cpp/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+
+      - name: Build
+        run: cmake --build pydantic-core-cpp/build --parallel 4
+
+      - name: Run tests
+        run: ctest --test-dir pydantic-core-cpp/build --output-on-failure
 
   test-pyemscripten:
     name: Test build on PyEmscripten (Pyodide) (${{ matrix.python-version }})
@@ -639,7 +664,7 @@ jobs:
         # Unlike the docs build, we don't use mkdocs_material-insiders
         # Because the secret for accessing the library is not accessible from forks, but we still want to run
         # this job on public CI runs.
-        run: uv sync --all-packages --group docs
+        run: uv sync --all-packages --no-install-package pydantic-core-cpp --group docs
 
       - run: uv run python -c 'import docs.plugins.main'
 
@@ -666,7 +691,7 @@ jobs:
           enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
 
       - name: install deps
-        run: uv sync --all-packages --group testing-extra
+        run: uv sync --all-packages --no-install-package pydantic-core-cpp --group testing-extra
 
       - name: Run tests
         run: uv run pytest --ignore=tests/mypy/ --ignore=tests/test_docs.py --memray
@@ -703,7 +728,7 @@ jobs:
           enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
 
       - name: Install dependencies
-        run: uv sync --all-packages --group testing-extra --all-extras
+        run: uv sync --all-packages --no-install-package pydantic-core-cpp --group testing-extra --all-extras
 
       - run: 'uv run python -c "import pydantic.version; print(pydantic.version.version_info())"'
 
@@ -714,6 +739,51 @@ jobs:
         env:
           COVERAGE_FILE: coverage/.coverage.${{ runner.os }}-py${{ matrix.python-version }}
           CONTEXT: ${{ runner.os }}-py${{ matrix.python-version }}-without-deps
+
+  test-cpp:
+    name: Test C++ backend on ${{ matrix.os }} / ${{ matrix.python-version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ['3.10', '3.12', '3.14']
+
+    env:
+      OS: ${{ matrix.os }}
+      UV_PYTHON_PREFERENCE: only-managed
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
+
+      - name: Install dependencies
+        # Builds pydantic-core-cpp from source (scikit-build-core) and installs
+        # it into the environment so the shim selects the C++ backend.
+        run: uv sync --all-packages --group testing-cpp --all-extras
+
+      - name: Assert C++ backend is active
+        # Fail loudly if the shim silently fell back to the Rust backend
+        # (e.g. pydantic-core-cpp failed to build or load).
+        run: uv run python -c 'from pydantic import _pydantic_core_shim as shim; assert shim.__backend__ == "cpp", f"C++ backend not active (got {shim.__backend__})"'
+
+      - run: mkdir coverage
+
+      - name: Run pytest (core suite against the C++ backend)
+        # The C++ port is work-in-progress, so run the core behavior suite
+        # (tests/test_main.py), which is expected to be green. Extend this as
+        # the port matures.
+        run: uv run coverage run -m pytest tests/test_main.py --durations=10
+        env:
+          COVERAGE_FILE: coverage/.coverage.${{ runner.os }}-py${{ matrix.python-version }}
+          CONTEXT: ${{ runner.os }}-py${{ matrix.python-version }}-cpp
 
       - name: Store coverage files
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
@@ -890,7 +960,7 @@ jobs:
           enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
 
       - name: Install dependencies
-        run: uv sync --all-packages --group testing-extra --all-extras
+        run: uv sync --all-packages --no-install-package pydantic-core-cpp --group testing-extra --all-extras
 
       - name: Install typing-extensions
         run: uv pip install 'typing-extensions @ git+https://github.com/python/typing_extensions.git'
@@ -903,7 +973,7 @@ jobs:
     if: always()
     outputs:
       result: ${{ steps.all-green.outputs.result }}
-    needs: [lint, docs-build, test, test-memray, test-mypy, test-plugin, core-test-os, core-test-debug, core-build-pyemscripten]
+    needs: [lint, docs-build, test, test-cpp, test-memray, test-mypy, test-plugin, core-test-os, core-test-debug, core-cpp-test, core-build-pyemscripten]
     runs-on: ubuntu-latest
 
     steps:
