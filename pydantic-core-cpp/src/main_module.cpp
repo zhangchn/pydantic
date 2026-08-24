@@ -67,6 +67,118 @@ static std::optional<bool> pyobj_to_bool(const py::object& obj) {
 struct SerNode;
 using SerRef = std::shared_ptr<SerNode>;
 
+// ---------------------------------------------------------------------------
+// Shared JSON-mode conversion helpers
+// ---------------------------------------------------------------------------
+
+static std::string b64_encode_string(const std::string& b) {
+    static const char* b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string enc;
+    for (size_t i = 0; i < b.size(); i += 3) {
+        uint32_t n = ((uint8_t)b[i] << 16);
+        if (i+1 < b.size()) n |= ((uint8_t)b[i+1] << 8);
+        if (i+2 < b.size()) n |= (uint8_t)b[i+2];
+        enc += b64[(n>>18)&0x3F]; enc += b64[(n>>12)&0x3F];
+        enc += (i+1<b.size()) ? b64[(n>>6)&0x3F] : '=';
+        enc += (i+2<b.size()) ? b64[n&0x3F] : '=';
+    }
+    return enc;
+}
+
+// Convert one typed leaf value for JSON-mode serialization (SchemaSerializer
+// mode="json" and to_jsonable_python). Returns true and sets `out` when the
+// (type, value) pair has a JSON-compatible form; false otherwise.
+static bool json_leaf_convert(const std::string& type, const py::object& value,
+                              const std::string& ser_json_bytes,
+                              const std::string& ser_json_timedelta,
+                              py::object& out) {
+    try {
+        if (type == "bytes" && py::isinstance<py::bytes>(value)) {
+            std::string b = value.cast<std::string>();
+            if (ser_json_bytes == "base64") { out = py::str(b64_encode_string(b)); return true; }
+            if (ser_json_bytes == "hex") {
+                static const char* hex_chars = "0123456789abcdef";
+                std::string enc;
+                for (unsigned char c : b) {
+                    enc += hex_chars[c >> 4];
+                    enc += hex_chars[c & 0x0F];
+                }
+                out = py::str(enc);
+                return true;
+            }
+            // utf8: decodes UTF-8; invalid input raises and the caller keeps
+            // handling the value (or reports an error).
+            out = py::str(value.cast<py::bytes>().operator std::string());
+            return true;
+        }
+        if (type == "decimal" || type == "uuid" || type == "ipaddress" ||
+            type == "ipv4address" || type == "ipv6address" ||
+            type == "ipv4interface" || type == "ipv6interface" ||
+            type == "ipv4network" || type == "ipv6network") {
+            out = py::str(value);
+            return true;
+        }
+        if (type == "datetime" || type == "date" || type == "time") {
+            py::object iso = value.attr("isoformat")();
+            std::string s = py::str(iso).cast<std::string>();
+            if (s.size() >= 6 && s.substr(s.size() - 6) == "+00:00") {
+                s = s.substr(0, s.size() - 6) + "Z";
+            }
+            out = py::str(s);
+            return true;
+        }
+        if (type == "timedelta") {
+            long days = value.attr("days").cast<long>();
+            long seconds = value.attr("seconds").cast<long>();
+            long microseconds = value.attr("microseconds").cast<long>();
+            if (ser_json_timedelta == "float") {
+                double total = days * 86400.0 + seconds + microseconds / 1000000.0;
+                out = py::float_(total);
+                return true;
+            }
+            double total_seconds = days * 86400.0 + seconds + microseconds / 1000000.0;
+            bool negative = total_seconds < 0;
+            if (negative) {
+                days = -days; seconds = -seconds; microseconds = -microseconds;
+                if (microseconds < 0) { microseconds += 1000000; seconds--; }
+                if (seconds < 0) { seconds += 86400; days--; }
+                if (days < 0) { days = 0; seconds = 0; microseconds = 0; }
+            }
+            long hours = seconds / 3600;
+            seconds = seconds % 3600;
+            long mins = seconds / 60;
+            long secs = seconds % 60;
+            std::string result = negative ? "-P" : "P";
+            if (days > 0) result += std::to_string(days) + "D";
+            bool has_time = hours > 0 || mins > 0 || secs > 0 || microseconds > 0;
+            if (has_time) {
+                result += "T";
+                if (hours > 0) result += std::to_string(hours) + "H";
+                if (mins > 0) result += std::to_string(mins) + "M";
+                if (secs > 0 || microseconds > 0) {
+                    if (microseconds > 0) {
+                        char buf[32];
+                        snprintf(buf, sizeof(buf), "%ld.%06ld", secs, microseconds);
+                        std::string s(buf);
+                        auto last = s.find_last_not_of('0');
+                        if (last != std::string::npos) s.erase(last + 1);
+                        if (s.back() == '.') s.pop_back();
+                        result += s + "S";
+                    } else {
+                        result += std::to_string(secs) + "S";
+                    }
+                }
+            }
+            if (result == "P" || result == "-P") result = "PT0S";
+            out = py::str(result);
+            return true;
+        }
+    } catch (...) {
+        PyErr_Clear();
+    }
+    return false;
+}
+
 // ============================================================================
 // include/exclude filter helpers (mirror pydantic-core serializers/filter.rs)
 // ============================================================================
@@ -540,6 +652,18 @@ struct SerNode {
             }
             py::ssize_t idx = 0;
             if (type == "set") {
+                if (json_mode) {
+                    // JSON has no set type: serialize as an array
+                    py::list jresult;
+                    for (auto item : seq) {
+                        auto next = apply_ser_filter(py::int_(idx), inc, exc);
+                        if (!next.omit) {
+                            jresult.append(children[0]->to_python(py::reinterpret_borrow<py::object>(item), json_mode, exc_none, round_trip, next.include, next.exclude));
+                        }
+                        idx++;
+                    }
+                    return std::move(jresult);
+                }
                 py::set result;
                 for (auto item : seq) {
                     auto next = apply_ser_filter(py::int_(idx), inc, exc);
@@ -550,6 +674,18 @@ struct SerNode {
                 }
                 return std::move(result);
             } else if (type == "frozenset") {
+                if (json_mode) {
+                    // JSON has no frozenset type: serialize as an array
+                    py::list jtemp;
+                    for (auto item : seq) {
+                        auto next = apply_ser_filter(py::int_(idx), inc, exc);
+                        if (!next.omit) {
+                            jtemp.append(children[0]->to_python(py::reinterpret_borrow<py::object>(item), json_mode, exc_none, round_trip, next.include, next.exclude));
+                        }
+                        idx++;
+                    }
+                    return std::move(jtemp);
+                }
                 py::set temp;
                 for (auto item : seq) {
                     auto next = apply_ser_filter(py::int_(idx), inc, exc);
@@ -612,42 +748,29 @@ struct SerNode {
             }
             return py::tuple(temp);
         }
-        // In json mode, apply config-aware conversions for timedelta and bytes
+        // In json mode, convert leaf values to their JSON-compatible form
+        // (bytes→str, decimal/uuid→str, datetime→ISO string, timedelta→ISO
+        // duration or float, etc.), mirroring Rust's mode="json" behavior.
         if (json_mode) {
-            if (type == "timedelta" && ser_json_timedelta == "float") {
-                try {
-                    long days = value.attr("days").cast<long>();
-                    long seconds = value.attr("seconds").cast<long>();
-                    long microseconds = value.attr("microseconds").cast<long>();
-                    double total = days * 86400.0 + seconds + microseconds / 1000000.0;
-                    return py::float_(total);
-                } catch (...) {}
+            py::object converted;
+            if (json_leaf_convert(type, value, ser_json_bytes, ser_json_timedelta, converted)) {
+                return converted;
             }
-            if (type == "bytes") {
-                try {
-                    std::string b = value.cast<std::string>();
-                    if (ser_json_bytes == "base64") {
-                        static const char* b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-                        std::string enc;
-                        for (size_t i = 0; i < b.size(); i += 3) {
-                            uint32_t n = ((uint8_t)b[i] << 16);
-                            if (i+1 < b.size()) n |= ((uint8_t)b[i+1] << 8);
-                            if (i+2 < b.size()) n |= (uint8_t)b[i+2];
-                            enc += b64[(n>>18)&0x3F]; enc += b64[(n>>12)&0x3F];
-                            enc += (i+1<b.size()) ? b64[(n>>6)&0x3F] : '=';
-                            enc += (i+2<b.size()) ? b64[n&0x3F] : '=';
-                        }
-                        return py::str(enc);
-                    } else if (ser_json_bytes == "hex") {
-                        static const char* hex_chars = "0123456789abcdef";
-                        std::string enc;
-                        for (unsigned char c : b) {
-                            enc += hex_chars[c >> 4];
-                            enc += hex_chars[c & 0x0F];
-                        }
-                        return py::str(enc);
-                    }
-                } catch (...) {}
+            // Enum members serialize as their value
+            if (type == "enum" && py::hasattr(value, "value")) {
+                auto ev = py::getattr(value, "value");
+                if (!children.empty()) {
+                    return children[0]->to_python(ev, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
+                }
+                return ev;
+            }
+            // Un-typed set/generator: JSON has no set type, emit a plain list
+            if ((type == "set" || type == "frozenset" || type == "generator") && children.empty()) {
+                py::list out;
+                for (auto item : py::reinterpret_borrow<py::iterable>(value)) {
+                    out.append(py::reinterpret_borrow<py::object>(item));
+                }
+                return std::move(out);
             }
         }
         return value;
@@ -1991,11 +2114,133 @@ static py::bytes to_json_fn(const py::object& value, std::optional<size_t>, std:
     return py::bytes(any->to_json(value, ea.value_or(false), -1, round_trip, py::none(), py::none(), false, false, false, false));
 }
 
+// Convert an arbitrary Python value to its JSON-compatible Python form
+// (mirrors Rust's infer_jsonable_python used by to_jsonable_python).
+// Raises pydantic_core::PydanticSerializationError (registered below as a
+// Python exception) for values that have no JSON-compatible form.
+static py::object infer_jsonable_python(const py::object& v, const std::string& bytes_mode,
+                                        const std::string& timedelta_mode,
+                                        const std::string& inf_nan_mode,
+                                        bool serialize_unknown) {
+    if (v.is_none()) return py::none();
+    if (py::isinstance<py::bool_>(v) || py::isinstance<py::int_>(v) || py::isinstance<py::str>(v)) return v;
+    if (py::isinstance<py::float_>(v)) {
+        double d = v.cast<double>();
+        if ((std::isnan(d) || std::isinf(d)) && inf_nan_mode == "null") return py::none();
+        return v;
+    }
+    if (py::isinstance<py::bytes>(v)) {
+        std::string b = v.cast<std::string>();
+        if (bytes_mode == "base64") return py::str(b64_encode_string(b));
+        if (bytes_mode == "hex") {
+            static const char* hex_chars = "0123456789abcdef";
+            std::string enc;
+            for (unsigned char c : b) {
+                enc += hex_chars[c >> 4];
+                enc += hex_chars[c & 0x0F];
+            }
+            return py::str(enc);
+        }
+        try {
+            return py::str(v.cast<py::bytes>().operator std::string());  // utf8
+        } catch (...) {
+            PyErr_Clear();
+            throw PydanticSerializationError("Cannot serialize bytes: invalid utf-8");
+        }
+    }
+    // Types that serialize as their str() representation
+    try {
+        static py::object decimal_cls = py::module_::import("decimal").attr("Decimal");
+        if (py::isinstance(v, decimal_cls)) return py::str(v);
+    } catch (...) { PyErr_Clear(); }
+    try {
+        static py::object uuid_cls = py::module_::import("uuid").attr("UUID");
+        if (py::isinstance(v, uuid_cls)) return py::str(v);
+    } catch (...) { PyErr_Clear(); }
+    try {
+        static py::object purepath_cls = py::module_::import("pathlib").attr("PurePath");
+        if (py::isinstance(v, purepath_cls)) return py::str(v);
+    } catch (...) { PyErr_Clear(); }
+    try {
+        py::object mod = py::module_::import("pydantic_core_cpp._pydantic_core_cpp");
+        if (py::isinstance(v, mod.attr("Url")) || py::isinstance(v, mod.attr("MultiHostUrl"))) return py::str(v);
+    } catch (...) { PyErr_Clear(); }
+    // datetime/date/time expose isoformat()
+    if (py::hasattr(v, "isoformat")) {
+        try {
+            py::object iso = v.attr("isoformat")();
+            std::string s = py::str(iso).cast<std::string>();
+            if (s.size() >= 6 && s.substr(s.size() - 6) == "+00:00") s = s.substr(0, s.size() - 6) + "Z";
+            return py::str(s);
+        } catch (...) { PyErr_Clear(); }
+    }
+    // timedelta (duck-typed via its components)
+    if (py::hasattr(v, "days") && py::hasattr(v, "seconds") && py::hasattr(v, "microseconds")
+        && !py::hasattr(v, "isoformat")) {
+        py::object out;
+        if (json_leaf_convert("timedelta", v, "utf8", timedelta_mode, out)) return out;
+    }
+    // Enum members convert as their value
+    if (py::hasattr(v, "_value_")) {
+        return infer_jsonable_python(py::getattr(v, "_value_"), bytes_mode, timedelta_mode,
+                                     inf_nan_mode, serialize_unknown);
+    }
+    // Sets/tuples/lists/sequences → arrays; dicts → objects (recursively)
+    if (py::isinstance<py::set>(v) || py::isinstance<py::frozenset>(v)
+        || py::isinstance<py::list>(v) || py::isinstance<py::tuple>(v)
+        || py::isinstance<py::sequence>(v)) {
+        py::list out;
+        for (auto item : py::reinterpret_borrow<py::iterable>(v)) {
+            out.append(infer_jsonable_python(py::reinterpret_borrow<py::object>(item), bytes_mode,
+                                             timedelta_mode, inf_nan_mode, serialize_unknown));
+        }
+        return std::move(out);
+    }
+    if (py::isinstance<py::dict>(v)) {
+        py::dict out;
+        for (auto item : v.cast<py::dict>()) {
+            auto k = infer_jsonable_python(py::reinterpret_borrow<py::object>(item.first), bytes_mode,
+                                           timedelta_mode, inf_nan_mode, serialize_unknown);
+            auto val = infer_jsonable_python(py::reinterpret_borrow<py::object>(item.second), bytes_mode,
+                                             timedelta_mode, inf_nan_mode, serialize_unknown);
+            out[k] = val;
+        }
+        return std::move(out);
+    }
+    // Model/dataclass instances: delegate to their serializer in json mode
+    if (py::hasattr(v, "__pydantic_serializer__")) {
+        try {
+            auto ser = py::getattr(v, "__pydantic_serializer__");
+            return ser.attr("to_python")(v, py::arg("mode") = "json");
+        } catch (const py::error_already_set&) {
+            PyErr_Clear();
+        }
+    }
+    // Plain instances with state: mirror infer_json's __dict__ handling.
+    // Note: functions/lambdas have an empty __dict__, so they fall through
+    // to the error below — matching Rust's refusal to serialize callables.
+    if (py::hasattr(v, "__dict__")) {
+        try {
+            py::dict d = py::getattr(v, "__dict__").cast<py::dict>();
+            if (!d.empty()) {
+                return infer_jsonable_python(py::reinterpret_borrow<py::object>(d), bytes_mode,
+                                             timedelta_mode, inf_nan_mode, serialize_unknown);
+            }
+        } catch (...) { PyErr_Clear(); }
+    }
+    if (serialize_unknown) return py::str(v);
+    throw PydanticSerializationError("Value is not JSON serializable");
+}
+
 static py::object to_jsonable_fn(const py::object& value, std::optional<py::object>, std::optional<py::object>,
-    bool, bool, bool round_trip, std::string, std::string, std::string, std::string, bool,
-    std::optional<py::object>, bool, std::optional<bool>, std::optional<py::object>) {
+    bool, bool, bool round_trip, std::string timedelta_mode, std::string temporal_mode, std::string bytes_mode,
+    std::string inf_nan_mode, bool serialize_unknown,
+    std::optional<py::object> fallback, bool serialize_as_any, std::optional<bool>, std::optional<py::object>) {
     (void)round_trip;
-    return py::reinterpret_borrow<py::object>(value);
+    (void)temporal_mode;
+    (void)fallback;
+    (void)serialize_as_any;
+    return infer_jsonable_python(value, bytes_mode, timedelta_mode, inf_nan_mode, serialize_unknown);
 }
 
 PYBIND11_MODULE(_pydantic_core_cpp, m) {
@@ -2029,6 +2274,9 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
 
     // SchemaError as a proper Python exception
     py::register_exception<SchemaError>(m, "SchemaError", PyExc_ValueError);
+
+    // Serialization failure for unserializable values
+    py::register_exception<PydanticSerializationError>(m, "PydanticSerializationError", PyExc_ValueError);
 
     // Add custom methods to ValidationError (register_exception creates bare Exception subclass)
     {   // title property
@@ -2117,8 +2365,10 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             }, py::is_method(ve_cls))
         );
     }
-    py::class_<PydanticOmit>(m, "PydanticOmit").def(py::init<>());
-    py::class_<PydanticUseDefault>(m, "PydanticUseDefault").def(py::init<>());
+    // Signal exceptions raised by custom serializers/schema code. These must
+    // be real Python exception types so `except PydanticOmit:` works.
+    py::register_exception<PydanticOmit>(m, "PydanticOmit");
+    py::register_exception<PydanticUseDefault>(m, "PydanticUseDefault");
 
     // _LazyValidator — lazy iterator for generator/iterable validation
     struct LazyValidator {

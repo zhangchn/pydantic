@@ -24,6 +24,7 @@ from ._pydantic_core_cpp import (
     InputType,
     MultiHostUrl,
     PydanticOmit,
+    PydanticSerializationError,
     PydanticUseDefault,
     SchemaError,
     SchemaSerializer,
@@ -1716,18 +1717,10 @@ class PydanticKnownError(ValueError):
         return self._type
 
 
-class PydanticSerializationError(ValueError):
-    """An error raised when an issue occurs during serialization.
-
-    In custom serializers, this error can be used to indicate that
-    serialization has failed.
-
-    Arguments:
-        message: The message associated with the error.
-    """
-
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
+# PydanticSerializationError is imported from the native extension so that
+# errors raised by C++ code (e.g. from to_jsonable_python) are catchable as
+# pydantic_core.PydanticSerializationError — a pure-Python re-definition here
+# would shadow the extension's class and break except clauses.
 
 
 class PydanticSerializationUnexpectedValue(PydanticSerializationError):
