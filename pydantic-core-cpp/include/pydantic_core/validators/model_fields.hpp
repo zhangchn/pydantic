@@ -857,6 +857,16 @@ public:
                         // Return the instance as-is, wrapped in PyObjectWrapper
                         return ValResult<std::shared_ptr<void>>(std::make_shared<PyObjectWrapper>(obj));
                     }
+                } else {
+                    // Input is a model instance of a different class — reject with model_type error
+                    // (unless it's a dict, which is valid model input)
+                    if (!py::isinstance<py::dict>(obj) && py::hasattr(obj, "__pydantic_validator__")) {
+                        ErrorType err(ErrorType::Kind::ModelType);
+                        err.context()["class_name"] = class_name_.empty() ? "Model" : class_name_;
+                        auto line_err = std::make_shared<ValLineError>(ValLineError{err, state.location(), input.as_error_value().repr});
+                        line_err->raw_input_obj = obj;
+                        return ValError::line_errors({std::move(line_err)});
+                    }
                 }
             }
         }
