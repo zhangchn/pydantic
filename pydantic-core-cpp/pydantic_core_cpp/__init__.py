@@ -1838,6 +1838,46 @@ if _sys.version_info < (3, 12):
 else:
     from typing import TypedDict as _TypedDict
 
+
+class ErrorDetails(_TypedDict):
+    type: str
+    """
+    The type of error that occurred, this is an identifier designed for
+    programmatic use that will change rarely or never.
+
+    `type` is unique for each error message, and can hence be used as an identifier to build custom error messages.
+    """
+    loc: tuple[int | str, ...]
+    """Tuple of strings and ints identifying where in the schema the error occurred."""
+    msg: str
+    """A human readable error message."""
+    input: _Any
+    """The input data at this `loc` that caused the error."""
+    ctx: _NotRequired[dict[str, _Any]]
+    """
+    Values which are required to render the error message, and could hence be useful in rendering custom error messages.
+    Also useful for passing custom error data forward.
+    """
+    url: _NotRequired[str]
+    """
+    The documentation URL giving information about the error. No URL is available if
+    a [`PydanticCustomError`][pydantic_core.PydanticCustomError] is used.
+    """
+
+
+class InitErrorDetails(_TypedDict):
+    type: str | PydanticCustomError
+    """The type of error that occurred, this should be a "slug" identifier that changes rarely or never."""
+    loc: _NotRequired[tuple[int | str, ...]]
+    """Tuple of strings and ints identifying where in the schema the error occurred."""
+    input: _Any
+    """The input data at this `loc` that caused the error."""
+    ctx: _NotRequired[dict[str, _Any]]
+    """
+    Values which are required to render the error message, and could hence be useful in rendering custom error messages.
+    """
+
+
 __all__: list[str] = [
     '__version__',
     # Core validation
@@ -1845,6 +1885,8 @@ __all__: list[str] = [
     'SchemaSerializer',
     'ValidationError',
     'SchemaError',
+    'ErrorDetails',
+    'InitErrorDetails',
     # Sentinels
     'PydanticUndefined',
     'PydanticUndefinedType',
