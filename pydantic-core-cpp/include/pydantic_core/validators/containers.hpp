@@ -642,7 +642,14 @@ public:
                 sub_state.location().push(index);
                 auto result = validator->validate(py_item, sub_state);
                 if (result.is_err()) {
-                    ValidationError ve("validation", InputType::Python, result.error(), py::object(item));
+                    auto err = result.error();
+                    // Leaf validators don't propagate the accumulated location,
+                    // so prepend the item index here (matching Rust's
+                    // ValidatorIterator, which reports errors at (index, ...)).
+                    for (const auto& le : err.line_errors()) {
+                        le->location.items.insert(le->location.items.begin(), static_cast<int64_t>(index));
+                    }
+                    ValidationError ve("validation", InputType::Python, err, py::object(item));
                     throw ve;
                 }
                 return value_to_python_with_type(result.value(), type_name);

@@ -59,6 +59,22 @@ ValidationError::ValidationError(const std::string& title, InputType input_type,
     what_message_ = oss.str();
 }
 
+#ifdef HAS_PYBIND11
+ValidationError::ValidationError(const std::string& title, InputType input_type,
+                                const ValError& val_error, py::object raw_input)
+    : ValidationError(title, input_type, val_error) {
+    // Rust parallel: as_val_error(input) — attach the raw Python input to
+    // line errors that don't carry their own input object, so errors()
+    // can report the actual Python value instead of its string repr.
+    for (auto& details : errors_) {
+        if (!details.has_raw_input && raw_input.ptr()) {
+            details.has_raw_input = true;
+            details.raw_input_obj = raw_input;
+        }
+    }
+}
+#endif
+
 std::string ValidationError::errors_to_json() const {
     std::ostringstream oss;
     oss << "[";
