@@ -586,7 +586,6 @@ public:
         ValidationState& state
     ) override {
         py::object py_in = input.as_python_object();
-        py::list result;
 
         // Accept any iterable (generators, lists, tuples, etc.)
         if (!py::hasattr(py_in, "__iter__") && !py::hasattr(py_in, "__next__")) {
@@ -597,27 +596,66 @@ public:
             );
         }
 
-        size_t idx = 0;
-        for (auto item : py::iter(py_in)) {
-            state.location().push(idx);
-            ValidationState sub_state = state.sub_copy(state.coerce_strings());
-            if (items_schema) {
-                PythonInput py_item(py::reinterpret_borrow<py::object>(item));
-                auto item_result = items_schema->validate(py_item, sub_state);
-                if (item_result.is_err()) {
-                    return item_result.error();
+        // For list/tuple inputs, validate eagerly and return a list (matching Rust)
+        // For generators/iterators, return a lazy ValidatorIterator
+        bool is_eager = py::isinstance<py::list>(py_in) || py::isinstance<py::tuple>(py_in);
+
+        if (is_eager) {
+            py::list result;
+            size_t idx = 0;
+            for (auto item : py::iter(py_in)) {
+                state.location().push(idx);
+                ValidationState sub_state = state.sub_copy(state.coerce_strings());
+                if (items_schema) {
+                    PythonInput py_item(py::reinterpret_borrow<py::object>(item));
+                    auto item_result = items_schema->validate(py_item, sub_state);
+                    if (item_result.is_err()) {
+                        return item_result.error();
+                    }
+                    auto py_val = value_to_python_with_type(item_result.value(), items_schema->effective_result_name());
+                    result.append(py_val);
+                } else {
+                    result.append(py::reinterpret_borrow<py::object>(item));
                 }
-                auto py_val = value_to_python_with_type(item_result.value(), items_schema->effective_result_name());
-                result.append(py_val);
-            } else {
-                result.append(py::reinterpret_borrow<py::object>(item));
+                state.location().pop();
+                idx++;
             }
-            state.location().pop();
-            idx++;
+            return ValResult<std::shared_ptr<void>>(
+                std::make_shared<py::object>(std::move(result))
+            );
         }
 
+        // Lazy path: return a ValidatorIterator that validates on demand
+        py::object source_iter = py::iter(py_in);
+        std::string type_name = items_schema ? items_schema->effective_result_name() : "";
+        std::string schema_repr = items_schema ? items_schema->name() : "None";
+
+        // Create a C++ callable that validates a single item
+        auto validator = items_schema;
+        auto validate_fn = py::cpp_function(
+            [validator, type_name](const py::object& item, size_t index) -> py::object {
+                if (!validator) {
+                    return item;
+                }
+                PythonInput py_item(py::reinterpret_borrow<py::object>(item));
+                ValidationState sub_state;
+                sub_state.location().push(index);
+                auto result = validator->validate(py_item, sub_state);
+                if (result.is_err()) {
+                    ValidationError ve("validation", InputType::Python, result.error(), py::object(item));
+                    throw ve;
+                }
+                return value_to_python_with_type(result.value(), type_name);
+            }
+        );
+
+        // Create the Python-level lazy iterator
+        py::module_ mod = py::module_::import("pydantic_core_cpp._pydantic_core_cpp");
+        py::object LazyValidator = mod.attr("_LazyValidator");
+        py::object py_iter = LazyValidator(source_iter, validate_fn, schema_repr);
+
         return ValResult<std::shared_ptr<void>>(
-            std::make_shared<py::object>(std::move(result))
+            std::make_shared<py::object>(py_iter)
         );
     }
 

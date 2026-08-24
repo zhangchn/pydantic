@@ -2117,6 +2117,30 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
     py::class_<PydanticOmit>(m, "PydanticOmit").def(py::init<>());
     py::class_<PydanticUseDefault>(m, "PydanticUseDefault").def(py::init<>());
 
+    // _LazyValidator — lazy iterator for generator/iterable validation
+    struct LazyValidator {
+        py::object source;
+        py::function validate_fn;
+        std::string schema_repr;
+        size_t index = 0;
+    };
+    py::class_<LazyValidator>(m, "_LazyValidator")
+        .def(py::init([](py::object source, py::function validate_fn, std::string schema_repr) {
+            return std::make_unique<LazyValidator>(LazyValidator{source, validate_fn, schema_repr, 0});
+        }))
+        .def("__iter__", [](LazyValidator& self) -> py::object {
+            return py::cast(self);
+        })
+        .def("__next__", [](LazyValidator& self) -> py::object {
+            py::object item = py::module_::import("builtins").attr("next")(self.source);
+            size_t idx = self.index++;
+            return self.validate_fn(item, idx);
+        })
+        .def("__repr__", [](LazyValidator& self) -> std::string {
+            return "ValidatorIterator(index=" + std::to_string(self.index) +
+                   ", schema=Some(" + self.schema_repr + "))";
+        });
+
     // SchemaValidator
     py::class_<SchemaValidator>(m, "SchemaValidator")
         // Primary constructor: takes Python dict directly (Rust-style)
