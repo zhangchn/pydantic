@@ -31,14 +31,27 @@ def _get_backend() -> tuple[Any, str]:
                 # Restore saved modules
                 sys.modules.update(_saved_modules)
         except ImportError:
+            import warnings
+            warnings.warn(
+                "pydantic-core-cpp is not installed or failed to load; "
+                "falling back to the Rust pydantic-core backend. "
+                "Install pydantic-core-cpp to use the C++ backend, or set "
+                "PYDANTIC_USE_CPP_CORE=0 to opt out explicitly (and silence "
+                "this warning).",
+                stacklevel=2,
+            )
             import pydantic_core as _core
             return _core, "rust"
     else:
         import pydantic_core as _core
         return _core, "rust"
 
-def _setup_shim() -> None:
-    """Set up the shim by redirecting pydantic_core imports in sys.modules."""
+def _setup_shim() -> str:
+    """Set up the shim by redirecting pydantic_core imports in sys.modules.
+
+    Returns the backend actually selected ("cpp" or "rust"), which may differ
+    from the requested one when the C++ backend is missing or fails to load.
+    """
     _core, _backend = _get_backend()
     
     # Always replace pydantic_core in sys.modules with the selected backend
@@ -53,6 +66,8 @@ def _setup_shim() -> None:
             _create_core_schema_shim(_core)
     except Exception:
         pass
+
+    return _backend
 
 def _create_core_schema_shim(_core: Any) -> None:
     """Create a minimal core_schema shim for the C++ backend."""
@@ -85,8 +100,9 @@ def _create_core_schema_shim(_core: Any) -> None:
     sys.modules['pydantic_core.core_schema'] = _shim
 
 # Set up the shim when this module is imported
-_setup_shim()
+__backend__ = _setup_shim()
 
-# Expose backend information
-__backend__ = _USE_CPP and "cpp" or "rust"
+# Expose backend information: __backend__ is the backend actually in use
+# (it falls back to "rust" when pydantic-core-cpp is missing or broken),
+# while __use_cpp__ is the requested preference from PYDANTIC_USE_CPP_CORE.
 __use_cpp__ = _USE_CPP
