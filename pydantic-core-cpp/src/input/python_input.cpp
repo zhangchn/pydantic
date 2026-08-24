@@ -1,5 +1,6 @@
 #include "pydantic_core/python_input.hpp"
 #include "pydantic_core/errors.hpp"
+#include <memory>
 #include <string>
 #include <vector>
 #include <cmath>

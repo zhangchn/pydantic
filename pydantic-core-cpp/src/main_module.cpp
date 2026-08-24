@@ -1,6 +1,9 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/functional.h>
+#include <functional>
+#include <memory>
+#include <stdexcept>
 #include <unordered_set>
 #include <cstdio>
 

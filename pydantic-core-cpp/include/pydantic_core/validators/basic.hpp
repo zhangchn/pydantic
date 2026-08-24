@@ -3,6 +3,7 @@
 #include "pydantic_core/validator.hpp"
 #include <memory>
 #include <optional>
+#include <string>
 #include <cmath>
 #include <regex>
 #include <algorithm>

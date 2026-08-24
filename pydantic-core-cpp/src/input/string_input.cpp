@@ -1,8 +1,9 @@
 #include "pydantic_core/string_input.hpp"
 #include "pydantic_core/error_types.hpp"
 #include "pydantic_core/result.hpp"
-#include <sstream>
 #include <algorithm>
+#include <memory>
+#include <sstream>
 #include <pybind11/pybind11.h>
 
 namespace py = pybind11;

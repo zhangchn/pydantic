@@ -1,7 +1,8 @@
 #pragma once
 
-#include <string>
 #include <memory>
+#include <optional>
+#include <string>
 #include "errors.hpp"
 #include "validation_state.hpp"
 #include "result.hpp"

@@ -1,9 +1,10 @@
 #pragma once
 
-#include <string>
 #include <memory>
-#include <variant>
+#include <optional>
+#include <string>
 #include <unordered_map>
+#include <variant>
 #include "types.hpp"
 #include "errors.hpp"
 #include "validation_state.hpp"

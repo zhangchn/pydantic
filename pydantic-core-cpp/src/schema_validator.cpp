@@ -6,7 +6,9 @@
 #include "pydantic_core/url_types.hpp"
 #include "pydantic_core/validators/model_fields.hpp"
 #include "pydantic_core/validators/complex.hpp"
+#include <memory>
 #include <pybind11/stl.h>
+#include <stdexcept>
 
 namespace py = pybind11;
 namespace pydantic_core {

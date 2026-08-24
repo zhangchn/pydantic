@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <pybind11/pybind11.h>
 #include <cstdio>
+#include <stdexcept>
 
 namespace py = pybind11;
 namespace pydantic_core {

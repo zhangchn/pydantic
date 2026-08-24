@@ -2,6 +2,7 @@
 #include "pydantic_core/result.hpp"
 #include "pydantic_core/error_types.hpp"
 #include <simdjson.h>
+#include <memory>
 #include <sstream>
 #include <pybind11/pybind11.h>
 

@@ -3,8 +3,10 @@
 #include "pydantic_core/validators/model_fields.hpp"
 #include "pydantic_core/validators/special.hpp"
 #include "pydantic_core/validators/functions.hpp"
+#include <memory>
 #include <pybind11/pybind11.h>
 #include <simdjson.h>
+#include <stdexcept>
 
 namespace py = pybind11;
 

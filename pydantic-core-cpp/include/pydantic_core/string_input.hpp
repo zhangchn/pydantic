@@ -1,5 +1,7 @@
 #pragma once
 
+#include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <pybind11/pybind11.h>

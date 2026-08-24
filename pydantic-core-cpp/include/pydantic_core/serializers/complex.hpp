@@ -1,9 +1,10 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
-#include <vector>
 #include <unordered_map>
+#include <vector>
 #include "../serializer.hpp"
 #include "../result.hpp"
 #include "../errors.hpp"

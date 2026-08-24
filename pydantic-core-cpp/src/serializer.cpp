@@ -4,6 +4,9 @@
 #include "pydantic_core/serializers/complex.hpp"
 #include "pydantic_core/serializers/special.hpp"
 
+#include <memory>
+#include <stdexcept>
+
 namespace pydantic_core {
 
 // BuildSerializer implementations for factory registration

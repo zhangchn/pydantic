@@ -4,6 +4,7 @@
 #include <variant>
 #include <optional>
 #include <exception>
+#include <stdexcept>
 #include <string>
 #include <memory>
 #include "types.hpp"

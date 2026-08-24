@@ -5,6 +5,7 @@
 #include "pydantic_core/string_input.hpp"
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace pydantic_core {

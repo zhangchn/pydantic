@@ -1,8 +1,9 @@
 #pragma once
 
+#include <memory>
+#include <optional>
 #include <string>
 #include <vector>
-#include <memory>
 #include <simdjson.h>
 #include "result.hpp"
 #include "input.hpp"

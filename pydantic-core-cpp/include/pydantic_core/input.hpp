@@ -4,8 +4,9 @@
 #include <string>
 #include <optional>
 #include <vector>
-#include <memory>
 #include <cmath>
+#include <limits>
+#include <memory>
 #include "types.hpp"
 #include "error_types.hpp"
 #include "errors.hpp"

@@ -1,9 +1,10 @@
 #pragma once
 
-#include <string>
 #include <memory>
-#include <variant>
+#include <optional>
+#include <string>
 #include <unordered_map>
+#include <variant>
 #include "types.hpp"
 #include "serialization_config.hpp"
 #include "serialization_state.hpp"
