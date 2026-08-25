@@ -75,7 +75,6 @@ def version_info() -> str:
     info = {
         'pydantic version': VERSION,
         'pydantic-core version': __pydantic_core_version__,
-        'pydantic-core variant': __pydantic_core_name__,
         'pydantic-core build': build_info,
         'python version': sys.version,
         'platform': platform.platform(),
