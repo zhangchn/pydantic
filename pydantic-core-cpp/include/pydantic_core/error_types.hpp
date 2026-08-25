@@ -19,6 +19,7 @@ public:
         NoneType,
         BoolType,
         IntType,
+        IntFromFloat,
         FloatType,
         StringType,
         BytesType,
@@ -228,6 +229,7 @@ public:
     static ErrorType none_type() { return ErrorType(ErrorType::Kind::NoneType); }
     static ErrorType bool_type() { return ErrorType(ErrorType::Kind::BoolType); }
     static ErrorType int_type() { return ErrorType(ErrorType::Kind::IntType); }
+    static ErrorType int_from_float() { return ErrorType(ErrorType::Kind::IntFromFloat); }
     static ErrorType float_type() { return ErrorType(ErrorType::Kind::FloatType); }
     static ErrorType string_type() { return ErrorType(ErrorType::Kind::StringType); }
     static ErrorType bytes_type() { return ErrorType(ErrorType::Kind::BytesType); }

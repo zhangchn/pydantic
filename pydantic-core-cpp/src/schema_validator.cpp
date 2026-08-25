@@ -754,6 +754,21 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
     }
 
     if (try_all || matches_type("int") || effective_type == "int64") {
+        // EitherInt wrapper (produced by the int validators) supports both the
+        // int64 and uint64 range, so check it first to preserve values larger
+        // than 2^63-1.
+        try {
+            auto* ei = static_cast<EitherInt*>(value.get());
+            if (ei) {
+                if (auto i64 = ei->as_i64()) {
+                    return py::int_(*i64);
+                }
+                if (auto u64 = ei->as_u64()) {
+                    return py::reinterpret_steal<py::object>(
+                        PyLong_FromUnsignedLongLong(*u64));
+                }
+            }
+        } catch (...) {}
         try {
             auto* i = static_cast<int64_t*>(value.get());
             if (i) return py::int_(*i);

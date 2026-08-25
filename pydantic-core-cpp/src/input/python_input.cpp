@@ -385,11 +385,14 @@ ValResult<ValMatch<EitherInt>> PythonInput::validate_int(bool strict) const {
     if (!strict) {
         if (is_float()) {
             double v = as_float();
-            if (std::floor(v) == v && !std::isinf(v) && !std::isnan(v)) {
+            if (std::isnan(v) || std::isinf(v)) {
+                return type_error(ErrorType::Kind::FiniteNumber, *this, this->current_location());
+            }
+            if (std::floor(v) == v) {
                 int64_t iv = static_cast<int64_t>(v);
                 return ValMatch<EitherInt>::lax(EitherInt(iv));
             }
-            return type_error(ErrorType::Kind::IntType, *this, this->current_location());
+            return type_error(ErrorType::Kind::IntFromFloat, *this, this->current_location());
         }
 
         if (is_str()) {

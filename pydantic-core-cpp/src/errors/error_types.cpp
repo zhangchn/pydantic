@@ -11,6 +11,7 @@ std::string ErrorType::type_name() const {
         {Kind::NoneType, "none_type"},
         {Kind::BoolType, "bool_type"},
         {Kind::IntType, "int_type"},
+        {Kind::IntFromFloat, "int_from_float"},
         {Kind::FloatType, "float_type"},
         {Kind::StringType, "string_type"},
         {Kind::BytesType, "bytes_type"},
@@ -150,6 +151,7 @@ std::string ErrorType::message_template() const {
         {Kind::NoneType, "Input should be None"},
         {Kind::BoolType, "Input should be a valid boolean"},
         {Kind::IntType, "Input should be a valid integer"},
+        {Kind::IntFromFloat, "Input should be a valid integer, got a number with a fractional part"},
         {Kind::FloatType, "Input should be a valid number"},
         {Kind::StringType, "Input should be a valid string"},
         {Kind::BytesType, "Input should be a valid bytes"},
@@ -301,6 +303,7 @@ ErrorType ErrorType::build_known_type(const std::string& type_str) {
     static const std::unordered_map<std::string, Kind> name_to_kind = {
         {"none_required", Kind::NoneRequired},      {"none_type", Kind::NoneType},
         {"bool_type", Kind::BoolType},              {"int_type", Kind::IntType},
+        {"int_from_float", Kind::IntFromFloat},
         {"float_type", Kind::FloatType},            {"string_type", Kind::StringType},
         {"bytes_type", Kind::BytesType},            {"dict_type", Kind::DictType},
         {"list_type", Kind::ListType},              {"tuple_type", Kind::TupleType},

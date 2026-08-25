@@ -84,9 +84,10 @@ public:
             return result.error();
         }
         auto& either_int = result.value().value();
-        // Return the actual validated integer
+        // Return the actual validated integer (preserves both int64 and
+        // uint64 range so values larger than 2^63-1 are not truncated).
         return ValResult<std::shared_ptr<void>>(
-            std::make_shared<int64_t>(either_int.as_i64().value_or(0))
+            std::make_shared<EitherInt>(either_int)
         );
     }
 
@@ -154,7 +155,8 @@ public:
             }
         }
 
-        return ValResult<std::shared_ptr<void>>(std::make_shared<int64_t>(int_value));
+        // Return the full validated integer (supports the uint64 range as well).
+        return ValResult<std::shared_ptr<void>>(std::make_shared<EitherInt>(either_int));
     }
     
     std::string name() const override { return "constrained-int"; }
