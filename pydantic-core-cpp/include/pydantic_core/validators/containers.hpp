@@ -472,14 +472,55 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        auto result = input.validate_list(state.strict_or(false));
-        if (result.is_err()) {
-            return result.error();
+        // Collect source items. Mirrors the Rust implementation: frozensets
+        // match exactly; sets, lists, tuples and general iterables are
+        // accepted in lax mode only (never str/bytes/dict-like inputs).
+        std::vector<py::object> items;
+        bool matched = false;
+
+        if (auto* py_input = dynamic_cast<const PythonInput*>(&input)) {
+            const py::object& obj = py_input->py_object();
+            bool strict = state.strict_or(false);
+
+            if (py::isinstance<py::frozenset>(obj)) {
+                matched = true;
+                for (auto handle : obj) {
+                    items.push_back(py::reinterpret_borrow<py::object>(handle));
+                }
+            } else if (!strict && !py::isinstance<py::str>(obj)
+                       && !py::isinstance<py::bytes>(obj)
+                       && !py::isinstance<py::bytearray>(obj)
+                       && !py::isinstance<py::dict>(obj)) {
+                try {
+                    for (auto handle : obj) {
+                        items.push_back(py::reinterpret_borrow<py::object>(handle));
+                    }
+                    matched = true;
+                } catch (const py::error_already_set&) {
+                    PyErr_Clear();
+                }
+            }
+        } else {
+            // Non-Python inputs (e.g. JSON): accept array-like values.
+            auto result = input.validate_list(state.strict_or(false));
+            if (result.is_ok()) {
+                auto& list = result.value().value();
+                matched = true;
+                for (const auto& entry : list->entries()) {
+                    items.push_back(list->get_item(entry.index));
+                }
+            }
         }
-        auto& list_match = result.value();
-        auto& list = list_match.value();
-        auto entries = list->entries();
-        size_t list_size = entries.size();
+
+        if (!matched) {
+            return ValError::line_error(
+                PydanticKnownError::frozenset_type(),
+                state.location(),
+                input.as_error_value().repr
+            );
+        }
+
+        size_t list_size = items.size();
 
         // Length checks
         if (min_length.has_value() && list_size < min_length.value()) {
@@ -506,8 +547,7 @@ public:
         }
 
         py::set result_set;
-        for (const auto& entry : entries) {
-            py::object element = list->get_item(entry.index);
+        for (auto& element : items) {
             if (items_schema) {
                 PythonInput elem_input(element);
                 auto item_result = items_schema->validate(elem_input, state);
