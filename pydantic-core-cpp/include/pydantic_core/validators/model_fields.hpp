@@ -202,9 +202,28 @@ public:
         ValError combined_errors(ValError::Kind::LineErrors);
         std::set<std::string> used_keys;
 
+        // Scope a dict of validated fields as state.data while fields are
+        // validated (Rust: scoped_set_data(model_dict)).  Python callable
+        // validators read it back as ValidationInfo.data so V1-style
+        // validators see previously-validated fields.
+        py::dict model_data;
+        ScopedValidationData data_scope(state, py::object(model_data));
+        const std::optional<std::string> outer_field_name = state.field_name();
+
+        auto add_to_data = [&model_data](const std::string& n,
+                                         const ValidatedModelFieldsOutput::FieldValue& fv) {
+            if (!fv.value) return;
+            try {
+                model_data[py::str(n)] = value_to_python_with_type(fv.value, fv.type_name);
+            } catch (...) {}
+        };
+
         for (const auto& name : field_order_) {
             const auto& field = fields_.at(name);
             state.push_loc(name);
+            // Expose the current field name to validators via ValidationInfo
+            // (Rust: scoped_set_field_name).  Restored after the loop.
+            state.set_field_name(name);
 
             std::string lookup_key = field.alias.empty() ? name : field.alias;
             bool has_entry = false;
@@ -235,6 +254,7 @@ public:
                     output.fields[name] = std::move(fv);
                     output.fields_set.insert(name);
                     output.field_order.push_back(name);
+                    add_to_data(name, output.fields.at(name));
                 }
             } else {
                 // Field not found
@@ -289,6 +309,7 @@ public:
                     }
                     output.fields[name] = std::move(fv);
                     output.field_order.push_back(name);
+                    add_to_data(name, output.fields.at(name));
                 } else if (!field.default_py_obj.is_none()) {
                     // Complex Python object default (callable, etc.)
                     ValidatedModelFieldsOutput::FieldValue fv;
@@ -309,6 +330,7 @@ public:
                     }
                     output.fields[name] = std::move(fv);
                     output.field_order.push_back(name);
+                    add_to_data(name, output.fields.at(name));
                 } else if (!field.default_value_str.empty()) {
                     ValidatedModelFieldsOutput::FieldValue fv;
                     // Parse the default value through the field's validator
@@ -331,11 +353,17 @@ public:
                     }
                     output.fields[name] = std::move(fv);
                     output.field_order.push_back(name);
+                    add_to_data(name, output.fields.at(name));
                 }
             }
 
             state.pop_loc();
         }
+
+        // Restore the outer field name so enclosing validators (e.g. an
+        // after-function reading ValidationInfo.field_name) don't observe a
+        // stale per-field name.
+        state.set_field_name_opt(outer_field_name);
 
         // Handle extra fields
         handle_extra_fields(*dict, used_keys, output, state, combined_errors);

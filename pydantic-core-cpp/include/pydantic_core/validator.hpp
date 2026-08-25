@@ -78,6 +78,10 @@ public:
     // Default: not a root model.
     virtual std::string root_model_inner_name() const { return ""; }
 
+    // The wrapped child validator, when this validator delegates to exactly
+    // one inner schema (function-* wrappers, models).  nullptr otherwise.
+    virtual std::shared_ptr<Validator> inner_validator() const { return nullptr; }
+
     // Expected Python class for this validator (models only).  Used by unions
     // to prefer the exact-class branch for instance inputs.
     virtual const py::object& expected_class() const {

@@ -60,6 +60,48 @@ inline ValError function_error_from_exception(py::error_already_set& e, const In
     return err;
 }
 
+// Build a ValidationInfo object for Python callable validators, mirroring
+// Rust's ValidationInfo::new: exposes field_name, the effective strict flag,
+// context, and the accumulated validated-field data dict (state.data) so
+// V1-style validators can read previously-validated values.
+inline py::object make_validation_info(ValidationState& state) {
+    py::dict info_dict;
+    if (state.field_name().has_value()) {
+        info_dict["field_name"] = py::str(*state.field_name());
+    }
+    info_dict["strict"] = state.strict_or(false);
+    if (!state.context_py().is_none()) {
+        info_dict["context"] = state.context_py();
+    }
+    py::object data = state.data();
+    if (!data.is_none()) {
+        info_dict["data"] = data;
+    }
+    try {
+        // Convert info_dict to an object with attribute access (like
+        // ValidationInfo); missing attributes return None.
+        py::object info_cls = py::module_::import("pydantic_core_cpp").attr("_ValidationInfo");
+        return info_cls(info_dict);
+    } catch (...) {
+        return py::object(info_dict);
+    }
+}
+
+// Returns true when this validator chain terminates in a model-fields or
+// typed-dict validator through any number of function wrappers (i.e. a V1
+// post root-validator position where after-functions exchange fields
+// semantics: 3-tuple in, flattened dict out).
+inline bool reaches_fields_result(const std::shared_ptr<Validator>& v) {
+    if (!v) return false;
+    std::string n = v->name();
+    if (n == "model-fields" || n.rfind("typed-dict", 0) == 0) return true;
+    if (n == "function-after" || n == "function-before" ||
+        n == "function-wrap" || n == "function-plain") {
+        return reaches_fields_result(v->inner_validator());
+    }
+    return false;
+}
+
 // FunctionBeforeValidator - runs Python function before validation
 // Python signature: func(input, info) -> transformed_input
 class FunctionBeforeValidator : public Validator {
@@ -78,19 +120,12 @@ public:
         }
         
         try {
-            py::dict info_dict;
-            if (state.field_name().has_value()) {
-                info_dict["field_name"] = py::str(*state.field_name());
-            }
-            info_dict["strict"] = state.strict_or(false);
-            if (!state.context_py().is_none()) {
-                info_dict["context"] = state.context_py();
-            }
+            py::object info_obj = make_validation_info(state);
 
             py::object transformed;
             try {
-                // Try with info dict (general/no-info-wrapped functions)
-                transformed = py_func_(input.as_python_object(), info_dict);
+                // Try with info object (general/no-info-wrapped functions)
+                transformed = py_func_(input.as_python_object(), info_obj);
             } catch (py::error_already_set& e1) {
                 if (!e1.matches(PyExc_TypeError)) {
                     // Genuine exception raised by the validator function —
@@ -212,12 +247,71 @@ public:
         // Convert the validated inner result to a Python object — Rust passes
         // the validated value to the after-function (model validators receive
         // the validated fields dict, field validators the coerced value).
-        py::object validated_obj;
-        try {
-            validated_obj = value_to_python_with_type(result.value(), inner_->effective_result_name());
-        } catch (...) {
-            // Unknown inner result type: pass through the raw input
-            validated_obj = input.as_python_object();
+        // NB: default-constructed py::object holds nullptr (not None) in
+        // pybind11 >= 2.13, so always seed explicitly with py::none().
+        py::object validated_obj = py::none();
+        std::string inner_result_name = inner_->effective_result_name();
+        bool inner_is_after = inner_ && inner_->name() == "function-after";
+        // Rust passes a ModelFieldsValidator result to after-functions as
+        // the raw 3-tuple (fields_dict, extra_or_None, fields_set) — this
+        // is what V1 post root validators unpack in their shim.  Detect the
+        // position structurally: chained after-functions hold a flattened
+        // dict (py::object), direct/before-wrapped model-fields hold MFO.
+        bool is_fields_result = reaches_fields_result(inner_);
+        {
+            if (is_fields_result) {
+                if (!inner_is_after) {
+                    try {
+                        auto* mfo = static_cast<ValidatedModelFieldsOutput*>(result.value().get());
+                        if (mfo) {
+                            py::dict fields_out;
+                            for (const auto& key : mfo->field_order) {
+                                const auto& fv = mfo->fields.at(key);
+                                fields_out[py::str(key)] = value_to_python_with_type(fv.value, fv.type_name);
+                            }
+                            py::object extra_obj = py::none();
+                            if (!mfo->extra.empty()) {
+                                py::dict extra_dict;
+                                for (const auto& pair : mfo->extra) {
+                                    extra_dict[py::str(pair.first)] =
+                                        value_to_python_with_type(pair.second.value, pair.second.type_name);
+                                }
+                                extra_obj = extra_dict;
+                            }
+                            py::set fields_set;
+                            for (const auto& fname : mfo->fields_set) {
+                                fields_set.add(py::str(fname));
+                            }
+                            validated_obj = py::make_tuple(fields_out, extra_obj, fields_set);
+                        }
+                    } catch (...) {}
+                } else {
+                    // Chained after-function: the inner function returned the
+                    // flattened dict form.  Rebuild the 3-tuple from it so
+                    // this validator's shim also sees fields semantics.
+                    try {
+                        py::dict fd = value_to_python_with_type(result.value(), "py_object")
+                                          .cast<py::dict>();
+                        py::object extra_obj = fd.attr("pop")("__pydantic_extra__", py::none());
+                        py::object fs_obj = fd.attr("pop")("__pydantic_fields_set__", py::none());
+                        if (fs_obj.is_none()) {
+                            fs_obj = fd.attr("keys")();
+                        }
+                        validated_obj = py::make_tuple(fd, extra_obj, fs_obj);
+                    } catch (...) {}
+                }
+            }
+            if (validated_obj.is_none()) {
+                try {
+                    // Honest runtime representation: a nested after-function
+                    // produced a py::object, anything else its declared type.
+                    validated_obj = value_to_python_with_type(
+                        result.value(), inner_is_after ? "py_object" : inner_result_name);
+                } catch (...) {
+                    // Unknown inner result type: pass through the raw input
+                    validated_obj = input.as_python_object();
+                }
+            }
         }
 
         // If the inner validator is a ModelValidator, construct the model instance
@@ -262,28 +356,10 @@ public:
         }
 
         try {
-            py::dict info_dict;
-            if (state.field_name().has_value()) {
-                info_dict["field_name"] = py::str(*state.field_name());
-            }
-            info_dict["strict"] = state.strict_or(false);
-            if (!state.context_py().is_none()) {
-                info_dict["context"] = state.context_py();
-            }
+            py::object info_obj = make_validation_info(state);
 
             py::object output;
             try {
-                // Convert info_dict to an object with attribute access (like ValidationInfo)
-                // pydantic's field_validator accesses info.context, info.field_name via attributes
-                // Missing attributes should return None (not raise AttributeError)
-                py::object info_obj;
-                try {
-                    // Create a dict subclass that returns None for missing attribute access
-                    py::object info_cls = py::module_::import("pydantic_core_cpp").attr("_ValidationInfo");
-                    info_obj = info_cls(info_dict);
-                } catch (...) {
-                    info_obj = info_dict;
-                }
                 // Try with info object (general/no-info-wrapped functions)
                 output = py_func_(validated_obj, info_obj);
             } catch (py::error_already_set& e1) {
@@ -310,6 +386,44 @@ public:
                     PyErr_Clear();
                     return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(validated_obj));
                 }
+            }
+            // If the inner validator is a model-fields/typed-dict validator
+            // (i.e. this is a V1 post root validator position), the shim
+            // returns a (fields_dict, extra_or_None, fields_set) tuple.
+            // Flatten it back into the plain-dict-with-dunder-keys format
+            // downstream expects for "py_object" model results (the shim's
+            // _build_model pops these keys when constructing the instance).
+            // NB: do NOT return a ValidatedModelFieldsOutput here — models
+            // wrapping a function-after declare their result type as
+            // "py_object", so the value would be misread and crash.
+            if (is_fields_result && py::isinstance<py::tuple>(output)) {
+                py::tuple out_tuple = py::reinterpret_borrow<py::tuple>(output);
+                py::ssize_t n = py::len(out_tuple);
+                if ((n == 2 || n == 3) && !py::isinstance<py::dict>(out_tuple[0])) {
+                    // Mirror Rust create_instance: the (invalid) validator
+                    // return would be assigned to __dict__ and must raise.
+                    std::string tname =
+                        py::str(out_tuple[0].get_type().attr("__name__")).cast<std::string>();
+                    throw py::type_error(
+                        "__dict__ must be set to a dictionary, not a '" + tname + "'");
+                }
+                try {
+                    if (n == 2 || (n == 3 && py::isinstance<py::dict>(out_tuple[0]))) {
+                        py::dict flattened = py::reinterpret_borrow<py::dict>(out_tuple[0]);
+                        if (n == 3) {
+                            if (!out_tuple[1].is_none()) {
+                                flattened["__pydantic_extra__"] = out_tuple[1];
+                            }
+                            flattened["__pydantic_fields_set__"] = out_tuple[2];
+                        } else {
+                            flattened["__pydantic_fields_set__"] = flattened.attr("keys")();
+                        }
+                        output = flattened;
+                    }
+                } catch (py::error_already_set& e) {
+                    e.restore();
+                    PyErr_Clear();
+                } catch (...) {}
             }
             // Return the output as a py::object.
             // For root models, the after-function returns the model instance (self),
@@ -350,7 +464,9 @@ public:
     // otherwise it is the inner validator's result type.
     std::string effective_result_name() const override {
         if (py_func_.is_none() && inner_) return inner_->effective_result_name();
-        // After-function always produces a py::object (the function's return value)
+        // After-function always produces a py::object (the function's return
+        // value).  Fields positions are detected structurally via
+        // reaches_fields_result(), not through this name.
         return "py_object";
     }
 
@@ -359,6 +475,9 @@ public:
 private:
     std::shared_ptr<Validator> inner_;
     py::object py_func_;
+
+public:
+    std::shared_ptr<Validator> inner_validator() const override { return inner_; }
 };
 
 // FunctionPlainValidator - plain Python function that replaces validation
@@ -376,19 +495,12 @@ public:
         }
         
         try {
-            py::dict info_dict;
-            if (state.field_name().has_value()) {
-                info_dict["field_name"] = py::str(*state.field_name());
-            }
-            info_dict["strict"] = state.strict_or(false);
-            if (!state.context_py().is_none()) {
-                info_dict["context"] = state.context_py();
-            }
+            py::object info_obj = make_validation_info(state);
 
             py::object output;
             try {
-                // Try with info dict (general/no-info-wrapped functions)
-                output = py_func_(input.as_python_object(), info_dict);
+                // Try with info object (general/no-info-wrapped functions)
+                output = py_func_(input.as_python_object(), info_obj);
             } catch (py::error_already_set& e1) {
                 if (!e1.matches(PyExc_TypeError)) {
                     return function_error_from_exception(e1, input, state);
@@ -439,14 +551,7 @@ public:
         }
         
         try {
-            py::dict info_dict;
-            if (state.field_name().has_value()) {
-                info_dict["field_name"] = py::str(*state.field_name());
-            }
-            info_dict["strict"] = state.strict_or(false);
-            if (state.context()) {
-                info_dict["context"] = py::cast(state.context());
-            }
+            py::object info_obj = make_validation_info(state);
             
             py::object handler = py::cpp_function([this, &state](py::object v) -> py::object {
                 if (inner_) {
@@ -464,8 +569,8 @@ public:
             
             py::object output;
             try {
-                // Try with info dict (general wrap functions)
-                output = py_func_(input.as_python_object(), handler, info_dict);
+                // Try with info object (general wrap functions)
+                output = py_func_(input.as_python_object(), handler, info_obj);
             } catch (py::error_already_set& e1) {
                 if (!e1.matches(PyExc_TypeError)) {
                     // Genuine exception raised by the validator function —
@@ -505,6 +610,8 @@ public:
     }
 
     void set_py_func(py::object func) { py_func_ = std::move(func); }
+
+    std::shared_ptr<Validator> inner_validator() const override { return inner_; }
 
 private:
     std::shared_ptr<Validator> inner_;

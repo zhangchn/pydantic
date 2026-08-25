@@ -96,6 +96,10 @@ public:
     // Return a copy of this state (fresh construction, since the implicit copy
     // constructor is deleted).  When force_lax is set, strict is disabled.
     // Container validators use this for sub-validation in strings mode.
+    // Set the field name from an optional (used by model-fields validation
+    // which scopes a per-field name, matching Rust's scoped_set_field_name).
+    void set_field_name_opt(std::optional<std::string> name) { field_name_ = std::move(name); }
+
     ValidationState sub_copy(bool force_lax = false) const {
         ValidationState s(config_);
         if (force_lax) {
@@ -112,6 +116,7 @@ public:
         s.location_ = location_;
 #ifdef HAS_PYBIND11
         s.context_py_ = context_py_;
+        s.data_ = data_;
 #endif
         return s;
     }
@@ -128,6 +133,13 @@ public:
     // Python context (for Python callable validators)
     py::object context_py() const { return context_py_; }
     void set_context_py(py::object ctx) { context_py_ = std::move(ctx); }
+
+    // Accumulated validated field data (Rust's state.data).  Model-fields
+    // validation scopes a dict here while fields are validated; Python
+    // callable validators receive it as ValidationInfo.data so V1-style
+    // validators observe previously-validated fields.
+    py::object data() const { return data_; }
+    void set_data(py::object d) { data_ = std::move(d); }
 #endif
     
     // Recursion management
@@ -164,6 +176,9 @@ public:
         child.exactness_ = exactness_;
         child.context_ = context_;
         child.coerce_strings_ = coerce_strings_;
+#ifdef HAS_PYBIND11
+        child.data_ = data_;
+#endif
         return child;
     }
 
@@ -179,6 +194,9 @@ public:
         child.exactness_ = exactness_;
         child.context_ = context_;
         child.coerce_strings_ = coerce_strings_;
+#ifdef HAS_PYBIND11
+        child.data_ = data_;
+#endif
         return child;
     }
 
@@ -196,9 +214,28 @@ private:
     bool coerce_strings_ = false;
 #ifdef HAS_PYBIND11
     py::object context_py_ = py::none();
+    py::object data_ = py::none();
 #endif
 
     Location location_;
 };
+
+#ifdef HAS_PYBIND11
+// RAII helper mirroring Rust's ValidationState::scoped_set_data: installs a
+// data dict for the enclosing scope and restores the previous one afterwards
+// (including on exception unwind).
+class ScopedValidationData {
+public:
+    ScopedValidationData(ValidationState& state, py::object data)
+        : state_(state), previous_(state.data()) {
+        state_.set_data(std::move(data));
+    }
+    ~ScopedValidationData() { state_.set_data(std::move(previous_)); }
+
+private:
+    ValidationState& state_;
+    py::object previous_;
+};
+#endif
 
 } // namespace pydantic_core
