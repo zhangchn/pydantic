@@ -462,12 +462,25 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        if (values_.empty()) {
-            return ValError::line_error(
+        // Build a literal_error carrying the ORIGINAL Python input object so
+        // error serialization matches Rust (which keeps the raw input rather
+        // than its repr).
+        auto literal_error = [&]() -> ValError {
+            ValError err = ValError::line_error(
                 ErrorType(ErrorType::Kind::LiteralError, "expected", expected_repr_.empty() ? "" : expected_repr_),
                 state.location(),
                 input.as_error_value().repr
             );
+#ifdef HAS_PYBIND11
+            if (!err.line_errors().empty()) {
+                err.line_errors()[0]->raw_input_obj = input.as_python_object();
+            }
+#endif
+            return err;
+        };
+
+        if (values_.empty()) {
+            return literal_error();
         }
         auto str_result = input.validate_str(state.strict_or(false), false);
         if (str_result.is_err()) {
@@ -485,11 +498,7 @@ public:
                 return ValResult<std::shared_ptr<void>>(std::make_shared<std::string>(str_val));
             }
         }
-        return ValError::line_error(
-            ErrorType(ErrorType::Kind::LiteralError, "expected", expected_repr_.empty() ? "" : expected_repr_),
-            state.location(),
-            input.as_error_value().repr
-        );
+        return literal_error();
     }
 
     std::string name() const override { return "literal"; }
