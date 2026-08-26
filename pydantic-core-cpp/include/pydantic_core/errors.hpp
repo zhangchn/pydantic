@@ -57,6 +57,19 @@ public:
         err.internal_message_ = message;
         return err;
     }
+
+#ifdef HAS_PYBIND11
+    // Rust convert_err: exceptions other than ValueError/AssertionError
+    // become InternalErr carrying the ORIGINAL Python exception so it can be
+    // re-raised at the binding boundary (e.g. RuntimeError propagation).
+    static ValError internal_err(py::object py_exc) {
+        ValError err(Kind::InternalErr);
+        err.internal_py_err_ = std::move(py_exc);
+        return err;
+    }
+    bool has_internal_py_err() const { return !internal_py_err_.is_none(); }
+    const py::object& internal_py_err() const { return internal_py_err_; }
+#endif
     
     static ValError omit() { return ValError(Kind::Omit); }
     static ValError use_default() { return ValError(Kind::UseDefault); }
@@ -82,6 +95,9 @@ private:
     Kind kind_;
     std::vector<std::shared_ptr<ValLineError>> line_errors_;
     std::string internal_message_;
+#ifdef HAS_PYBIND11
+    py::object internal_py_err_ = py::none();
+#endif
 };
 
 // ValidationError exception

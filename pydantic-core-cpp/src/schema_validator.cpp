@@ -13,6 +13,8 @@
 namespace py = pybind11;
 namespace pydantic_core {
 
+static void reraise_if_internal(const ValError& err);
+
 SchemaValidator::SchemaValidator(const std::string& schema_json, 
                                 const std::string& config_json)
     : schema_json_(schema_json), config_json_(config_json) {
@@ -370,6 +372,56 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
         throw std::runtime_error("Validator not initialized");
     }
 
+    // Modern path: model schemas implement Rust-style per-field assignment
+    // validation through the validate_assignment virtual (function wrappers
+    // forward to the model; unknown schemas report "not supported" and we
+    // fall back to the legacy whole-model re-validation below).
+    if (auto base = validator_->base_validator()) {
+        std::cerr << "[ASG] dispatch base=" << base->name() << "\n";
+        ValidationState state(config_);
+        auto r = base->validate_assignment(obj, field_name, field_value, state);
+        if (!r.is_ok()) {
+            bool unsupported = false;
+            if (r.error().has_line_errors()) {
+                auto les = r.error().line_errors();
+                if (les.size() == 1 &&
+                    les[0]->error_type.type_name() == "custom_error" &&
+                    les[0]->input_value.find("not supported for this schema") != std::string::npos) {
+                    unsupported = true;
+                }
+            }
+            std::cerr << "[ASG] err unsupported=" << unsupported << "\n";
+            if (!unsupported) {
+#ifdef HAS_PYBIND11
+                try {
+                    py::module_ m = py::module_::import("__main__");
+                    // Assignment errors carry their own correct inputs;
+                    // skip the Python-side raw-input override entirely.
+                    m.attr("_last_raw_input") = obj;
+                    m.attr("_last_assignment_error") = py::bool_(true);
+                    py::list err_objs;
+                    if (r.error().has_line_errors()) {
+                        for (const auto& le : r.error().line_errors()) {
+                            err_objs.append(le->raw_error_obj.ptr() ? py::object(le->raw_error_obj) : py::none());
+                        }
+                    }
+                    m.attr("_last_error_objs") = err_objs;
+                } catch (...) {}
+#endif
+                reraise_if_internal(r.error());
+                auto err = prepare_error(r.error(), InputType::Python);
+                throw err;
+            }
+        } else {
+            std::cerr << "[ASG] ok\n";
+            try {
+                return *std::static_pointer_cast<py::object>(r.value());
+            } catch (...) {
+                // fall through to legacy path on conversion failure
+            }
+        }
+    }
+
     // Check if the field exists on the object
     bool field_exists = false;
     if (py::hasattr(obj, field_name.c_str())) {
@@ -676,9 +728,24 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
             // Silently ignore if module state setting fails
         }
 #endif
+        reraise_if_internal(result.error());
         auto err = prepare_error(result.error(), InputType::Python);
         throw err;
     }
+}
+
+// Re-raise an InternalErr carrying the original Python exception (Rust
+// propagates RuntimeError etc. unchanged instead of wrapping them).
+static void reraise_if_internal(const ValError& err) {
+#ifdef HAS_PYBIND11
+    if (err.kind() == ValError::Kind::InternalErr && err.has_internal_py_err()) {
+        py::object exc = err.internal_py_err();
+        PyErr_SetObject(reinterpret_cast<PyObject*>(Py_TYPE(exc.ptr())), exc.ptr());
+        throw py::error_already_set();
+    }
+#else
+    (void)err;
+#endif
 }
 
 // Helper: convert shared_ptr<void> to Python object using type name

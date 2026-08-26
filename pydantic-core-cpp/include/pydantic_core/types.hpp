@@ -67,6 +67,7 @@ struct Location {
     void push(int64_t index) { items.push_back(index); }
     void push(const std::string& key) { items.push_back(key); }
     void pop() { if (!items.empty()) items.pop_back(); }
+    void prepend(const std::string& key) { items.insert(items.begin(), key); }
     
     std::string to_string() const {
         std::string result;

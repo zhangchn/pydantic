@@ -2408,6 +2408,10 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                                     py::object extra, py::object from_attributes, py::object by_alias, py::object by_name) -> py::object {
             // NEW: Use native PythonInput - no JSON round-trip!
             (void)by_alias; (void)by_name;
+            {
+                py::module_ m = py::module_::import("__main__");
+                m.attr("_last_assignment_error") = false;
+            }
             std::optional<bool> fa_opt;
             if (!from_attributes.is_none()) {
                 fa_opt = pyobj_to_bool(from_attributes);
@@ -2423,15 +2427,17 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
 
             // If self_instance provided, populate and return it
             if (!self_instance.is_none() && py::hasattr(self_instance, "__dict__")) {
-                // Rust validate_init semantics: a foreign instance returned
-                // by an after-validator must NOT overwrite the validated
-                // fields already snapshotted onto self.
-                bool snapshot_used = false;
-                try {
-                    if (!self.is_root_model() && !py::isinstance<py::dict>(validated) &&
-                        py::hasattr(validated, "__dict__") && !validated.is(self_instance)) {
-                        snapshot_used = self.apply_init_snapshot(self_instance);
+                // Rust validate_init semantics: a foreign value returned by
+                // an after-validator must NOT overwrite the validated fields
+                // already snapshotted onto self.
+                bool foreign_return = false;
+                if (!self.is_root_model() && !validated.is(self_instance) &&
+                    self.has_init_snapshot()) {
+                    if (self.apply_init_snapshot(self_instance)) {
+                        foreign_return = true;
                     }
+                }
+                try {
                     if (self.is_root_model()) {
                         // Root model: store the whole validated value as 'root'
                         py::dict d = self_instance.attr("__dict__");
@@ -2441,7 +2447,7 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                         }
                         py::setattr(self_instance, "__pydantic_extra__", py::none());
                         py::setattr(self_instance, "__pydantic_fields_set__", py::set(py::make_tuple(py::str("root"))));
-                    } else if (!snapshot_used && py::isinstance<py::dict>(validated)) {
+                    } else if (!foreign_return && py::isinstance<py::dict>(validated)) {
                         py::dict d = self_instance.attr("__dict__");
                         py::dict validated_dict = validated.cast<py::dict>();
 
@@ -2479,7 +2485,7 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                         if (!defaults.is_none() && py::isinstance<py::dict>(defaults) && py::len(defaults.cast<py::dict>()) > 0) {
                             py::setattr(self_instance, "__pydantic_defaults__", defaults);
                         }
-                    } else if (!snapshot_used && py::hasattr(validated, "__dict__")) {
+                    } else if (!foreign_return && py::hasattr(validated, "__dict__")) {
                         // validated is a model instance (e.g. from FunctionAfterValidator)
                         // Copy its __dict__ to self_instance
                         py::dict d = self_instance.attr("__dict__");
@@ -2511,8 +2517,7 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                 // Rust validate_init surfaces the after-validator's return value
                 // (main.py warns when it is not self).  self keeps the validated
                 // fields via the snapshot above.
-                if (snapshot_used && py::hasattr(validated, "__dict__") &&
-                    !validated.is(self_instance)) {
+                if (foreign_return) {
                     return validated;
                 }
                 return self_instance;

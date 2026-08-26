@@ -48,6 +48,7 @@ public:
     // fields-position function-after (BaseModel.__init__ path).  Returns
     // false when no snapshot exists (and clears it).
     bool apply_init_snapshot(const py::object& self_instance);
+    bool has_init_snapshot() const { return !init_snapshot_.is_none(); }
 
     // isinstance check on Python object directly (NEW - no JSON round-trip)
     bool isinstance_python_object(const py::object& input,

@@ -115,8 +115,8 @@ def _errors_with_include_url(self, *args, include_url: bool = True, **kwargs):
         # (mirrors Rust's as_val_error(input) which passes Py<PyAny> through).
         # When loc is non-empty (field-level), try to look up the value from
         # the stored top-level dict using the location path.
-        if result:
-            import __main__ as _main
+        import __main__ as _main
+        if result and not getattr(_main, '_last_assignment_error', False):
             raw_input = getattr(_main, '_last_raw_input', None)
             if raw_input is not None:
                 for i, err in enumerate(result):

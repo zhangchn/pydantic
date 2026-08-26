@@ -153,6 +153,10 @@ public:
     const py::object& init_self_py() const { return init_self_py_; }
     void set_init_self_py(py::object o) { init_self_py_ = std::move(o); }
 
+    // True while running model validate_assignment: unknown validator
+    // exceptions (RuntimeError etc.) propagate instead of becoming errors.
+    bool in_assignment = false;
+
     // Pre-function-call snapshot of the validated fields (3-tuple or flattened
     // dunder-dict) taken by the outermost fields-position function-after.
     // The BaseModel.__init__ binding uses it to populate self_instance even

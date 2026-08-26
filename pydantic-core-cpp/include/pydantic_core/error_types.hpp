@@ -28,6 +28,8 @@ public:
         TupleType,
         SetType,
         FrozenSetType,
+        FrozenField,
+        FrozenInstance,
         UnionType,
         ModelType,
         DataclassType,

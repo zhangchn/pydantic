@@ -9,6 +9,7 @@
 #include "pydantic_core/python_input.hpp"
 #endif
 #include <memory>
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -407,6 +408,88 @@ public:
         }
         fv.value = std::make_shared<py::object>(raw);
         fv.type_name = "py_object";
+    }
+
+    // Rust ModelFieldsValidator::validate_assignment: validate ONLY the
+    // assigned field against its schema, with state.data scoped to the model
+    // dict minus that field.  input_dict already contains the new value.
+    // Returns the updated full dict (py::object).
+    ValResult<std::shared_ptr<void>> validate_assignment(
+        const py::object& obj, const std::string& field_name,
+        const py::object& field_value, ValidationState& state) override {
+        return validate_assignment_impl(obj.cast<py::dict>(), field_name, field_value, state);
+    }
+
+    ValResult<std::shared_ptr<void>> validate_assignment_impl(
+        const py::dict& input_dict, const std::string& field_name,
+        const py::object& field_value, ValidationState& state) {
+        auto it = fields_.find(field_name);
+        if (it == fields_.end()) {
+            // Unknown field: extras behavior decides
+            if (extra_behavior_ == ExtraBehavior::Allow) {
+                py::dict updated = input_dict;
+                if (extras_validator_) {
+                    PythonInput py_in(field_value);
+                    py_in.set_current_location(state.location());
+                    auto r = extras_validator_->validate(py_in, state);
+                    if (r.is_err()) return r.error();
+                    updated[py::str(field_name)] =
+                        value_to_python_with_type(r.value(), field_type_name(extras_validator_));
+                } else {
+                    updated[py::str(field_name)] = field_value;
+                }
+                return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(updated));
+            }
+            ErrorType err(ErrorType::Kind::NoSuchAttribute, "attribute", field_name);
+            Location loc;
+            loc.push(field_name);
+            return ValError::line_error(err, loc, py::repr(field_value).cast<std::string>());
+        }
+
+        const FieldInfo& field = it->second;
+        std::cerr << "[IMPL] field found, schema=" << (field.schema ? field.schema->name() : "NULL") << "\n";
+        if (field.frozen) {
+            ErrorType err(ErrorType::Kind::FrozenField);
+            Location loc;
+            loc.push(field.name);
+            return ValError::line_error(err, loc, py::repr(field_value).cast<std::string>());
+        }
+        if (!field.schema) {
+            py::dict updated = input_dict;
+            updated[py::str(field_name)] = field_value;
+            return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(updated));
+        }
+
+        // data scope: everything except the assigned field (V1 behaviour)
+        py::dict data_dict;
+        for (auto item : input_dict) {
+            if (py::str(item.first).cast<std::string>() != field_name) {
+                data_dict[item.first] = item.second;
+            }
+        }
+        ScopedValidationData data_scope(state, py::object(data_dict));
+        state.set_field_name(field.name);
+        PythonInput py_in(field_value);
+        py_in.set_current_location(state.location());
+        auto result = field.schema->validate(py_in, state);
+        std::cerr << "[IMPL] validated ok=" << (result.is_ok()?1:0) << "\n";
+        state.set_field_name_opt(std::nullopt);
+
+        if (result.is_err()) {
+            // attach outer location (the field name)
+            ValError err = result.error();
+            if (err.has_line_errors()) {
+                for (auto& le : err.line_errors()) {
+                    le->location.prepend(field.name);
+                }
+            }
+            return err;
+        }
+
+        py::dict updated = input_dict;
+        updated[py::str(field_name)] =
+            value_to_python_with_type(result.value(), field_type_name(field.schema));
+        return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(updated));
     }
 
     void set_extra_behavior(ExtraBehavior eb) { extra_behavior_ = eb; }
@@ -906,6 +989,126 @@ public:
         }
 
         return fields_validator_->validate(input, state);
+    }
+
+    // Rust ModelValidator::validate_assignment: re-validate the whole model
+    // data with the assigned value substituted (single-field validation
+    // happens in the fields validator), then write attributes back.
+    ValResult<std::shared_ptr<void>> validate_assignment(
+        const py::object& obj, const std::string& field_name,
+        const py::object& field_value, ValidationState& state) override {
+        state.in_assignment = true;
+        if (frozen_) {
+            return ValError::line_error(ErrorType(ErrorType::Kind::FrozenInstance),
+                                        state.location(), py::repr(field_value).cast<std::string>());
+        }
+        if (root_model_) {
+            if (field_name != "root") {
+                ErrorType err(ErrorType::Kind::NoSuchAttribute, "attribute", field_name);
+                Location loc;
+                loc.push(field_name);
+                return ValError::line_error(err, loc, py::repr(field_value).cast<std::string>());
+            }
+            state.set_field_name("root");
+            PythonInput py_in(field_value);
+            auto r = fields_validator_->validate(py_in, state);
+            state.set_field_name_opt(std::nullopt);
+            if (r.is_err()) return r.error();
+            py::object out = value_to_python_with_type(r.value(), effective_result_name());
+            py::module_::import("builtins").attr("object").attr("__setattr__")(
+                obj, py::str("root"), out);
+            return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(obj));
+        }
+
+        // input_dict = __dict__ + __pydantic_extra__ + new value
+        // input_dict = copy of __dict__ + __pydantic_extra__ + new value
+        py::dict input_dict;
+        {
+            py::object d = obj.attr("__dict__");
+            if (!d.is_none() && py::isinstance<py::dict>(d)) {
+                py::dict src = d.cast<py::dict>();
+                for (auto kv : src) {
+                    input_dict[kv.first] = kv.second;
+                }
+            }
+        }
+        py::object existing_extra = py::none();
+        if (py::hasattr(obj, "__pydantic_extra__")) {
+            existing_extra = obj.attr("__pydantic_extra__");
+            if (!existing_extra.is_none() && py::isinstance<py::dict>(existing_extra)) {
+                py::dict exd = existing_extra.cast<py::dict>();
+                for (auto kv : exd) {
+                    input_dict[kv.first] = kv.second;
+                }
+            }
+        }
+        input_dict[py::str(field_name)] = field_value;
+
+        // Route through the virtual chain so nested function-before/wrap
+        // validators around the fields schema run first (Rust semantics).
+        std::function<ModelFieldsValidator*(Validator*)> resolve =
+            [&](Validator* v) -> ModelFieldsValidator* {
+            if (!v) return nullptr;
+            if (auto* mf = dynamic_cast<ModelFieldsValidator*>(v)) return mf;
+            return resolve(v->inner_validator().get());
+        };
+        ModelFieldsValidator* fields_impl = resolve(fields_validator_.get());
+        if (!fields_impl) {
+            return ValError::line_error(ErrorType(ErrorType::Kind::CustomError),
+                                        state.location(), "model fields validator missing");
+        }
+        auto res = fields_validator_->validate_assignment(
+            py::object(input_dict), field_name, field_value, state);
+        if (res.is_err()) return res.error();
+
+        std::shared_ptr<py::object> updated_ptr =
+            std::static_pointer_cast<py::object>(res.value());
+        if (!updated_ptr || !py::isinstance<py::dict>(*updated_ptr)) {
+            return ValError::line_error(ErrorType(ErrorType::Kind::CustomError),
+                                        state.location(), "assignment validation returned non-dict");
+        }
+        py::dict updated = updated_ptr->cast<py::dict>();
+
+        // Split dunders / extras out of the updated dict
+        py::object new_extra = py::none();
+        bool is_declared = fields_impl->fields().find(field_name) != fields_impl->fields().end();
+        if (updated.contains("__pydantic_extra__")) {
+            new_extra = updated[py::str("__pydantic_extra__")];
+            updated.attr("pop")(py::str("__pydantic_extra__"), py::none());
+        }
+        if (!is_declared) {
+            // assigned extra: route into __pydantic_extra__
+            if (new_extra.is_none()) new_extra = py::dict();
+            if (!py::isinstance<py::dict>(new_extra)) new_extra = py::dict(new_extra);
+            new_extra.cast<py::dict>()[py::str(field_name)] = updated[py::str(field_name)];
+            updated.attr("pop")(py::str(field_name), py::none());
+        }
+        updated.attr("pop")(py::str("__pydantic_fields_set__"), py::none());
+        updated.attr("pop")(py::str("__pydantic_defaults__"), py::none());
+
+        // Replace model __dict__ contents
+        py::object d2 = obj.attr("__dict__");
+        if (!d2.is_none() && py::isinstance<py::dict>(d2)) {
+            py::dict dd = d2.cast<py::dict>();
+            dd.clear();
+            for (auto kv : updated) {
+                dd[kv.first] = kv.second;
+            }
+        }
+        auto setattr_fn = py::module_::import("builtins").attr("object").attr("__setattr__");
+        if (!py::hasattr(obj, "__pydantic_private__")) {
+            setattr_fn(obj, py::str("__pydantic_private__"), py::none());
+        }
+        py::object final_extra = new_extra.is_none()
+            ? (existing_extra.is_none() ? py::object(py::none()) : existing_extra)
+            : new_extra;
+        setattr_fn(obj, py::str("__pydantic_extra__"), final_extra);
+        py::object fs = py::hasattr(obj, "__pydantic_fields_set__")
+            ? py::object(obj.attr("__pydantic_fields_set__")) : py::object(py::none());
+        if (!fs.is_none() && py::hasattr(fs, "add")) {
+            fs.attr("add")(py::str(field_name));
+        }
+        return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(obj));
     }
 
     // Expected Python class for this model (used by unions to prefer the

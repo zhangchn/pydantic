@@ -25,6 +25,7 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
 // exception object is attached to the line error so the Python wrapper can
 // surface it as ctx['error'].
 inline ValError function_error_from_exception(py::error_already_set& e, const Input& input, ValidationState& state) {
+    std::cerr << "[FE] enter type=" << Py_TYPE(e.value().ptr())->tp_name << "\n";
     // Keep a reference to the exception object for ctx['error'] — value()
     // returns a new reference, so it stays valid after e.restore().
     py::object exc_value = e.value();
@@ -40,14 +41,13 @@ inline ValError function_error_from_exception(py::error_already_set& e, const In
     } else if (e.matches(PyExc_AssertionError)) {
         kind = ErrorType::Kind::AssertionError;
     } else {
-        std::string msg = e.what();
+        // Rust convert_err: other exceptions become InternalErr carrying the
+        // original exception so it propagates unchanged to the caller.
+        std::cerr << "[FE] -> internal_err\n";
+        py::object exc = e.value();
         e.restore();
         PyErr_Clear();
-        return ValError::line_error(
-            ErrorType(ErrorType::Kind::CustomError),
-            state.location(),
-            "Function validator failed: " + msg
-        );
+        return ValError::internal_err(std::move(exc));
     }
     ErrorType et(kind);
     et.context()["error"] = exc_str;
@@ -211,6 +211,42 @@ public:
     }
 
     std::string name() const override { return "function-before"; }
+
+    std::shared_ptr<Validator> inner_validator() const override { return inner_; }
+
+    // Rust FunctionBeforeValidator::validate_assignment: run the function on
+    // the input dict first, then delegate to the inner validator.
+    ValResult<std::shared_ptr<void>> validate_assignment(
+        const py::object& obj, const std::string& field_name,
+        const py::object& field_value, ValidationState& state) override {
+        if (py_func_.is_none() && inner_) {
+            return inner_->validate_assignment(obj, field_name, field_value, state);
+        }
+        py::object obj2;
+        try {
+            py::object info_obj = make_validation_info(state);
+            try {
+                obj2 = py_func_(obj, info_obj);
+            } catch (py::error_already_set& e1) {
+                if (!e1.matches(PyExc_TypeError)) {
+                    return function_error_from_exception(e1, PythonInput(obj), state);
+                }
+                e1.restore();
+                PyErr_Clear();
+                try {
+                    obj2 = py_func_(obj);
+                } catch (py::error_already_set& e2) {
+                    return function_error_from_exception(e2, PythonInput(obj), state);
+                }
+            }
+        } catch (py::error_already_set& e) {
+            return function_error_from_exception(e, PythonInput(obj), state);
+        }
+        auto* pi2 = new py::object(obj2);
+        std::shared_ptr<void> holder(pi2);
+        return inner_ ? inner_->validate_assignment(*pi2, field_name, field_value, state)
+                      : ValResult<std::shared_ptr<void>>(holder);
+    }
 
     // The result comes from the inner validator when one is present
     std::string effective_result_name() const override {
@@ -483,6 +519,14 @@ public:
                 try {
                     output = py_func_(validated_obj);
                 } catch (py::error_already_set& e2) {
+                    if (!e2.matches(PyExc_ValueError) && !e2.matches(PyExc_AssertionError)
+                        && state.in_assignment) {
+                        // Assignment: propagate genuine validator exceptions
+                        py::object exc = e2.value();
+                        e2.restore();
+                        PyErr_Clear();
+                        return ValError::internal_err(std::move(exc));
+                    }
                     if (e2.matches(PyExc_ValueError) || e2.matches(PyExc_AssertionError)) {
                         return function_error_from_exception(e2, input, state);
                     }
@@ -560,6 +604,51 @@ public:
     }
 
     std::string name() const override { return "function-after"; }
+
+    // Rust FunctionAfterValidator::validate_assignment: run the inner
+    // assignment validation, then hand its result to the callable.
+    ValResult<std::shared_ptr<void>> validate_assignment(
+        const py::object& obj, const std::string& field_name,
+        const py::object& field_value, ValidationState& state) override {
+        if (py_func_.is_none() && inner_) {
+            return inner_->validate_assignment(obj, field_name, field_value, state);
+        }
+        auto res = inner_->validate_assignment(obj, field_name, field_value, state);
+        if (res.is_err()) return res.error();
+        // Assignment results are always wrapped py::object values (models
+        // return themselves; fields return the updated dict).
+        py::object v = py::none();
+        try {
+            auto* optr = static_cast<py::object*>(res.value().get());
+            if (optr) v = *optr;
+        } catch (...) {
+            v = py::none();
+        }
+        try {
+            py::object info_obj = make_validation_info(state);
+            py::object out;
+            try {
+                out = py_func_(v, info_obj);
+            } catch (py::error_already_set& e1) {
+                if (!e1.matches(PyExc_TypeError)) {
+                    return function_error_from_exception(e1, PythonInput(v), state);
+                }
+                // TypeError: likely a no-info function — retry without info
+                e1.restore();
+                PyErr_Clear();
+                try {
+                    out = py_func_(v);
+                    std::cerr << "[AFT] retry2 done\n";
+                } catch (py::error_already_set& e2) {
+                    std::cerr << "[AFT] retry2 err\n";
+                    return function_error_from_exception(e2, PythonInput(v), state);
+                }
+            }
+            return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(out));
+        } catch (py::error_already_set& e) {
+            return function_error_from_exception(e, PythonInput(v), state);
+        }
+    }
 
     // Delegate to inner so is_root_model() works through function wrappers
     std::string root_model_inner_name() const override {
@@ -718,6 +807,16 @@ public:
     }
 
     std::string name() const override { return "function-wrap"; }
+
+    // Assignment: delegate straight to the inner validator (the wrap
+    // function itself is not re-run on assignments).
+    ValResult<std::shared_ptr<void>> validate_assignment(
+        const py::object& obj, const std::string& field_name,
+        const py::object& field_value, ValidationState& state) override {
+        if (inner_) return inner_->validate_assignment(obj, field_name, field_value, state);
+        return ValError::line_error(ErrorType(ErrorType::Kind::CustomError),
+                                    state.location(), "function-wrap assignment without inner");
+    }
 
     // When the wrap-function is applied the result is a Python object;
     // otherwise it is the inner validator's result type.

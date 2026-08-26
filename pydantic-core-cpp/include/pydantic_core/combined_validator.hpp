@@ -159,6 +159,14 @@ public:
 
 private:
     VariantType variant_;
+
+public:
+    // Access the stored validator when it was built through the modern
+    // base-class path (build_from_py); nullptr for legacy JSON-built ones.
+    std::shared_ptr<Validator> base_validator() const {
+        if (auto* p = std::get_if<std::shared_ptr<Validator>>(&variant_)) return *p;
+        return nullptr;
+    }
 };
 
 // Schema parser for building validators from JSON schema

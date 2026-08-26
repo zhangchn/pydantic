@@ -82,6 +82,17 @@ public:
     // one inner schema (function-* wrappers, models).  nullptr otherwise.
     virtual std::shared_ptr<Validator> inner_validator() const { return nullptr; }
 
+    // Assignment validation for model schemas (Rust validate_assignment).
+    // obj is the MODEL INSTANCE.  Default: unsupported.
+    virtual ValResult<std::shared_ptr<void>> validate_assignment(
+        const py::object& obj, const std::string& field_name,
+        const py::object& field_value, ValidationState& state) {
+        (void)obj; (void)field_name; (void)field_value; (void)state;
+        return ValError::line_error(
+            ErrorType(ErrorType::Kind::CustomError), Location(),
+            "validate_assignment not supported for this schema");
+    }
+
     // Expected Python class for this validator (models only).  Used by unions
     // to prefer the exact-class branch for instance inputs.
     virtual const py::object& expected_class() const {
