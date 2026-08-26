@@ -455,8 +455,47 @@ public:
 class LiteralValidator : public Validator {
 public:
     LiteralValidator() = default;
+
+    static bool is_exact_str(const py::object& o) {
+        return Py_TYPE(o.ptr()) == &PyUnicode_Type;
+    }
+
+    // Build from Python expected values, mirroring Rust LiteralLookup::new:
+    // exact bool/int/str maps plus a hash-based dict for everything else
+    // (enum members hash-equal their underlying value, so a plain-string
+    // input matches a StrEnum literal and yields the MEMBER back).
+    explicit LiteralValidator(py::sequence expected, std::string expected_repr = "")
+        : expected_repr_(std::move(expected_repr)) {
+        size_t id = 0;
+        for (auto handle : expected) {
+            py::object k = py::reinterpret_borrow<py::object>(handle);
+            if (py::isinstance<py::bool_>(k)) {
+                bool_ids_.push_back(id);
+            } else if (py::isinstance<py::int_>(k)) {
+                try {
+                    int_ids_.emplace(k.cast<long long>(), id);
+                } catch (...) {}
+            } else if (is_exact_str(k)) {
+                str_ids_.emplace(k.cast<std::string>(), id);
+            }
+            try {
+                expected_dict_[k] = py::int_(static_cast<long long>(id));
+            } catch (...) {
+                // Unhashable expected value: linear equality scan instead.
+                eq_ids_.push_back(id);
+            }
+            values_.push_back(k);
+            ++id;
+        }
+    }
+
+    // Legacy convenience ctor (JSON-schema path): wrap plain strings.
     explicit LiteralValidator(std::vector<std::string> values, std::string expected_repr = "")
-        : values_(std::move(values)), expected_repr_(std::move(expected_repr)) {}
+        : expected_repr_(std::move(expected_repr)) {
+        py::list items;
+        for (const auto& v : values) items.append(py::str(v));
+        *this = LiteralValidator(items, expected_repr_);
+    }
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -482,21 +521,52 @@ public:
         if (values_.empty()) {
             return literal_error();
         }
-        auto str_result = input.validate_str(state.strict_or(false), false);
-        if (str_result.is_err()) {
-            return str_result.error();
-        }
-        const auto& es = str_result.value().value();
-        std::string str_val;
-        if (auto* s = std::get_if<std::string>(&es.value)) {
-            str_val = *s;
-        } else {
-            str_val = std::string(std::get<std::string_view>(es.value));
-        }
-        for (const auto& v : values_) {
-            if (v == str_val) {
-                return ValResult<std::shared_ptr<void>>(std::make_shared<std::string>(str_val));
+        auto make_result = [&](size_t id) {
+            return ValResult<std::shared_ptr<void>>(
+                std::make_shared<py::object>(values_[id]));
+        };
+
+        py::object py_in = input.as_python_object();
+
+        // 1. Exact bool match (before int: bool subclasses int).
+        if (py::isinstance<py::bool_>(py_in)) {
+            bool b = py_in.cast<bool>();
+            for (size_t id : bool_ids_) {
+                if (values_[id].cast<bool>() == b) return make_result(id);
             }
+        } else {
+            // 2. Exact int match (no lax str/float coercion, unlike Rust's
+            //    generic str validation — literals are strict about type).
+            if (py::isinstance<py::int_>(py_in)) {
+                try {
+                    long long i = py_in.cast<long long>();
+                    auto it = int_ids_.find(i);
+                    if (it != int_ids_.end()) return make_result(it->second);
+                } catch (...) {}
+            }
+            // 3. Exact (non-subclass) str match.
+            if (is_exact_str(py_in)) {
+                auto it = str_ids_.find(py_in.cast<std::string>());
+                if (it != str_ids_.end()) return make_result(it->second);
+            }
+        }
+        // 4. Hash-based lookup: covers enum-member literals matched by their
+        //    plain value (StrEnum members hash/eq like their string value)
+        //    and any other hashable expected objects.
+        bool hashed = false;
+        try {
+            hashed = expected_dict_.contains(py_in);
+        } catch (py::error_already_set&) {
+            PyErr_Clear();  // unhashable input
+        }
+        if (hashed) {
+            return make_result(expected_dict_[py_in].cast<size_t>());
+        }
+        // 5. Equality scan for unhashable expected values.
+        for (size_t id : eq_ids_) {
+            try {
+                if (values_[id].equal(py_in)) return make_result(id);
+            } catch (...) {}
         }
         return literal_error();
     }
@@ -504,7 +574,12 @@ public:
     std::string name() const override { return "literal"; }
 
 private:
-    std::vector<std::string> values_;
+    std::vector<py::object> values_;
+    std::vector<size_t> bool_ids_;
+    std::unordered_map<long long, size_t> int_ids_;
+    std::unordered_map<std::string, size_t> str_ids_;
+    py::dict expected_dict_;
+    std::vector<size_t> eq_ids_;
     std::string expected_repr_;
 };
 

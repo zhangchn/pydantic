@@ -87,10 +87,12 @@ private:
 // ValidationError exception
 class ValidationError : public std::exception {
 public:
-    ValidationError(const std::string& title, InputType input_type, const ValError& val_error);
+    ValidationError(const std::string& title, InputType input_type, const ValError& val_error,
+                    bool hide_input = false);
     // Constructor with raw Python input for accurate error serialization
 #ifdef HAS_PYBIND11
-    ValidationError(const std::string& title, InputType input_type, const ValError& val_error, py::object raw_input);
+    ValidationError(const std::string& title, InputType input_type, const ValError& val_error,
+                    py::object raw_input, bool hide_input = false);
 #endif
     
     const char* what() const noexcept override { return what_message_.c_str(); }
@@ -128,6 +130,9 @@ private:
     InputType input_type_;
     std::vector<ErrorDetails> errors_;
     std::string what_message_;
+    // When set (config hide_input_in_errors), the display message omits the
+    // input_value/input_type segment, matching Rust's pretty() renderer.
+    bool hide_input_ = false;
 
     void build_errors_from_val_error(const ValError& val_error);
 };

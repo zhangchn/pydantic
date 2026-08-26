@@ -57,7 +57,18 @@ SchemaValidator::SchemaValidator(const py::dict& schema,
     if (config.contains("from_attributes") && !config["from_attributes"].is_none()) {
         config_.from_attributes = config["from_attributes"].cast<bool>();
     }
+    if (config.contains("extra_fields_behavior") && !config["extra_fields_behavior"].is_none()) {
+        std::string eb = config["extra_fields_behavior"].cast<std::string>();
+        if (eb == "allow") config_.extra_behavior = ExtraBehavior::Allow;
+        else if (eb == "forbid") config_.extra_behavior = ExtraBehavior::Forbid;
+        else config_.extra_behavior = ExtraBehavior::Ignore;
+    }
     config_.cache_strings = StringCacheMode::All;
+
+    // Parse hide_input_in_errors from the Python config dict
+    if (config.contains("hide_input_in_errors") && !config["hide_input_in_errors"].is_none()) {
+        hide_input_in_errors_ = config["hide_input_in_errors"].cast<bool>();
+    }
 }
 
 void SchemaValidator::build_validator() {
@@ -391,16 +402,26 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
             py::object config = obj.attr("__pydantic_config__");
             if (py::isinstance<py::dict>(config)) {
                 py::dict config_dict = config.cast<py::dict>();
-                if (config_dict.contains("extra")) {
-                    py::object extra_val = config_dict["extra"];
-                    if (py::isinstance<py::str>(extra_val)) {
-                        std::string extra_str = extra_val.cast<std::string>();
-                        if (extra_str == "allow") {
-                            extra_allowed = true;
+                // pydantic v2 uses extra_fields_behavior; accept legacy "extra"
+                for (const char* key : {"extra_fields_behavior", "extra"}) {
+                    if (extra_allowed) break;
+                    if (config_dict.contains(key)) {
+                        py::object extra_val = config_dict[key];
+                        if (py::isinstance<py::str>(extra_val)) {
+                            std::string extra_str = extra_val.cast<std::string>();
+                            if (extra_str == "allow") {
+                                extra_allowed = true;
+                            }
                         }
                     }
                 }
             }
+        }
+
+        // This validator's own config also carries extra_fields_behavior
+        if (!extra_allowed && config_.extra_behavior.has_value() &&
+            *config_.extra_behavior == ExtraBehavior::Allow) {
+            extra_allowed = true;
         }
 
         if (!extra_allowed) {
@@ -409,7 +430,7 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
             Location loc;
             loc.push(field_name);
             auto val_err = ValError::line_error(err_type, loc, py::repr(field_value).cast<std::string>());
-            throw ValidationError(title_, InputType::Python, val_err);
+            throw ValidationError(title_, InputType::Python, val_err, hide_input_in_errors_);
         }
 
         // Extra fields are allowed - validate and set
@@ -447,12 +468,26 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
             }
         }
 
-        // Set the value using object.__setattr__ to bypass custom __setattr__
+        // Set the value: models keep extras in __pydantic_extra__
+        py::str fname(field_name.c_str());
+        if (!py::isinstance<py::dict>(obj) && py::hasattr(obj, "__pydantic_extra__")) {
+            py::object ex = obj.attr("__pydantic_extra__");
+            if (ex.is_none()) {
+                ex = py::dict();
+                py::setattr(obj, "__pydantic_extra__", ex);
+            }
+            ex.cast<py::dict>()[fname] = validated_value;
+            py::object fs = obj.attr("__pydantic_fields_set__");
+            if (!fs.is_none() && py::hasattr(fs, "add")) {
+                fs.attr("add")(fname);
+            }
+            return validated_value;
+        }
         if (py::isinstance<py::dict>(obj)) {
-            obj.cast<py::dict>()[py::str(field_name.c_str())] = validated_value;
+            obj.cast<py::dict>()[fname] = validated_value;
         } else {
             py::module_::import("builtins")
-                .attr("object").attr("__setattr__")(obj, py::str(field_name.c_str()), validated_value);
+                .attr("object").attr("__setattr__")(obj, fname, validated_value);
         }
         return validated_value;
     }
@@ -471,6 +506,18 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
     for (auto item : input_dict) {
         updated_dict[item.first] = item.second;
     }
+    // Merge existing extras so re-validation doesn't drop them
+    if (py::hasattr(obj, "__pydantic_extra__")) {
+        py::object ex = obj.attr("__pydantic_extra__");
+        if (!ex.is_none() && py::isinstance<py::dict>(ex)) {
+            py::dict exd = ex.cast<py::dict>();
+            for (auto item : exd) {
+                if (!updated_dict.contains(item.first)) {
+                    updated_dict[item.first] = item.second;
+                }
+            }
+        }
+    }
     updated_dict[py::str(field_name.c_str())] = field_value;
 
     py::object validated_result = validate_python_object(updated_dict);
@@ -485,8 +532,26 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
         validated_value = validated_result.attr(field_name.c_str());
     }
 
+    // Extras live in __pydantic_extra__; declared fields in __dict__
+    py::str fname(field_name.c_str());
+    bool is_extra_field = false;
+    if (!py::isinstance<py::dict>(obj) && py::hasattr(obj, "__pydantic_extra__")) {
+        py::object d = obj.attr("__dict__");
+        if (!d.contains(fname)) {
+            is_extra_field = true;
+        }
+    }
+    if (is_extra_field) {
+        py::object ex = obj.attr("__pydantic_extra__");
+        if (ex.is_none()) {
+            ex = py::dict();
+            py::setattr(obj, "__pydantic_extra__", ex);
+        }
+        ex.cast<py::dict>()[fname] = validated_value;
+        return validated_value;
+    }
     if (py::isinstance<py::dict>(obj)) {
-        obj.cast<py::dict>()[py::str(field_name.c_str())] = validated_value;
+        obj.cast<py::dict>()[fname] = validated_value;
     } else {
         py::module_::import("builtins")
             .attr("object").attr("__setattr__")(obj, py::str(field_name.c_str()), validated_value);
@@ -508,7 +573,36 @@ bool SchemaValidator::is_root_model() const {
 }
 
 ValidationError SchemaValidator::prepare_error(const ValError& err, InputType input_type) {
-    return ValidationError(title_, input_type, err);
+    return ValidationError(title_, input_type, err, hide_input_in_errors_);
+}
+
+// Populate self_instance from the snapshot taken by the outermost
+// function-after (Rust validate_init semantics): the snapshot is the inner
+// constructed model instance; copy its state onto self_instance.  A validator
+// returning a foreign instance does NOT overwrite these fields.
+bool SchemaValidator::apply_init_snapshot(const py::object& self_instance) {
+    py::object snap = std::move(init_snapshot_);
+    init_snapshot_ = py::none();
+    if (snap.is_none() || !py::hasattr(snap, "__dict__")) return false;
+    try {
+        py::dict d = self_instance.attr("__dict__");
+        py::dict snap_dict = snap.attr("__dict__");
+        for (auto item : snap_dict) {
+            d[item.first] = item.second;
+        }
+        if (py::hasattr(snap, "__pydantic_extra__")) {
+            py::setattr(self_instance, "__pydantic_extra__", snap.attr("__pydantic_extra__"));
+        }
+        if (py::hasattr(snap, "__pydantic_fields_set__")) {
+            py::setattr(self_instance, "__pydantic_fields_set__", snap.attr("__pydantic_fields_set__"));
+        }
+        if (!py::hasattr(self_instance, "__pydantic_private__")) {
+            py::setattr(self_instance, "__pydantic_private__", py::none());
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 // ============================================================================
@@ -520,7 +614,8 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
                                                    std::optional<ExtraBehavior> extra,
                                                    std::optional<bool> from_attributes,
                                                    py::object context,
-                                                   bool coerce_strings) {
+                                                   bool coerce_strings,
+                                                   py::object self_instance) {
     if (!validator_) {
         throw std::runtime_error("Validator not initialized");
     }
@@ -543,11 +638,19 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
         state.set_context_py(context);
     }
     state.set_coerce_strings(coerce_strings);
+    // Seed the top-level input identity so the outermost fields-position
+    // function-after can snapshot pre-func fields (BaseModel.__init__ path).
+    state.set_top_input_ptr(static_cast<const void*>(input.ptr()));
+    if (!self_instance.is_none()) {
+        state.set_init_self_py(self_instance);
+    }
+    init_snapshot_ = py::none();
 
     // Validate using the unified Input interface
     auto result = validator_->validate(py_input, state);
 
     if (result.is_ok()) {
+        init_snapshot_ = state.init_fields_snapshot();
         return result_to_python(result.value());
     } else {
 #ifdef HAS_PYBIND11
@@ -868,8 +971,14 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
         } catch (...) {}
     }
 
-    // Literal type — stored as std::string by LiteralValidator
+    // Literal type — the validator now returns the stored expected Python
+    // object (e.g. an enum member); fall back to plain-string results from
+    // the legacy JSON path.
     if (effective_type == "literal") {
+        try {
+            auto* obj = static_cast<py::object*>(value.get());
+            if (obj) return *obj;
+        } catch (...) {}
         try {
             auto* s = static_cast<std::string*>(value.get());
             if (s) return py::str(*s);

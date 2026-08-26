@@ -37,8 +37,8 @@ std::string ValLineError::message() const {
 }
 
 ValidationError::ValidationError(const std::string& title, InputType input_type,
-                                const ValError& val_error)
-    : title_(title), input_type_(input_type) {
+                                const ValError& val_error, bool hide_input)
+    : title_(title), input_type_(input_type), hide_input_(hide_input) {
     build_errors_from_val_error(val_error);
 
     std::ostringstream oss;
@@ -48,9 +48,12 @@ ValidationError::ValidationError(const std::string& title, InputType input_type,
             oss << err.loc << "\n  ";
         }
         oss << err.msg
-            << " [type=" << err.type
-            << ", input_value=" << err.input
-            << "]\n";
+            << " [type=" << err.type;
+        // Rust: when hide_input is set, omit input_value/input_type entirely
+        if (!hide_input_) {
+            oss << ", input_value=" << err.input;
+        }
+        oss << "]\n";
     }
     // Structured error details (with ctx and typed loc items) — the Python
     // wrapper uses this to build errors() since register_exception instances
@@ -61,8 +64,9 @@ ValidationError::ValidationError(const std::string& title, InputType input_type,
 
 #ifdef HAS_PYBIND11
 ValidationError::ValidationError(const std::string& title, InputType input_type,
-                                const ValError& val_error, py::object raw_input)
-    : ValidationError(title, input_type, val_error) {
+                                const ValError& val_error, py::object raw_input,
+                                bool hide_input)
+    : ValidationError(title, input_type, val_error, hide_input) {
     // Rust parallel: as_val_error(input) — attach the raw Python input to
     // line errors that don't carry their own input object, so errors()
     // can report the actual Python value instead of its string repr.

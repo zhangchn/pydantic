@@ -61,6 +61,9 @@ struct FieldInfo {
     py::object default_factory = py::none();   // Python callable for default_factory
     py::object default_py_obj = py::none();    // Complex Python object default (callables, etc.)
     bool default_factory_takes_data = false;   // Whether factory receives validated data dict
+    // Rust: defaults are used raw unless validate_default is set (field or
+    // config); when set, the default is validated and errors are reported.
+    bool validate_default = false;
 
     std::string display_name() const {
         return alias.empty() ? name : alias;
@@ -281,20 +284,7 @@ public:
                         } else {
                             raw = field.default_factory();
                         }
-                        if (field.schema) {
-                            PythonInput py_in(raw);
-                            auto default_result = field.schema->validate(py_in, state);
-                            if (default_result.is_ok()) {
-                                fv.value = default_result.value();
-                                fv.type_name = field_type_name(field.schema);
-                            } else {
-                                fv.value = std::make_shared<py::object>(std::move(raw));
-                                fv.type_name = "py_object";
-                            }
-                        } else {
-                            fv.value = std::make_shared<py::object>(std::move(raw));
-                            fv.type_name = "py_object";
-                        }
+                        apply_field_default(raw, field, state, fv, combined_errors);
                     } catch (py::error_already_set& e) {
                         if (field.default_factory_takes_data) {
                             // Let exceptions from data-aware factories propagate (e.g. KeyError)
@@ -311,46 +301,26 @@ public:
                     output.field_order.push_back(name);
                     add_to_data(name, output.fields.at(name));
                 } else if (!field.default_py_obj.is_none()) {
-                    // Complex Python object default (callable, etc.)
+                    // Complex Python object default (callable result, date,
+                    // timedelta, etc.) — used raw unless validate_default.
                     ValidatedModelFieldsOutput::FieldValue fv;
-                    py::object raw = field.default_py_obj;
-                    if (field.schema) {
-                        PythonInput py_in(raw);
-                        auto default_result = field.schema->validate(py_in, state);
-                        if (default_result.is_ok()) {
-                            fv.value = default_result.value();
-                            fv.type_name = field_type_name(field.schema);
-                        } else {
-                            fv.value = std::make_shared<py::object>(std::move(raw));
-                            fv.type_name = "py_object";
-                        }
-                    } else {
-                        fv.value = std::make_shared<py::object>(std::move(raw));
-                        fv.type_name = "py_object";
-                    }
+                    apply_field_default(field.default_py_obj, field, state, fv, combined_errors);
                     output.fields[name] = std::move(fv);
                     output.field_order.push_back(name);
                     add_to_data(name, output.fields.at(name));
                 } else if (!field.default_value_str.empty()) {
                     ValidatedModelFieldsOutput::FieldValue fv;
-                    // Parse the default value through the field's validator
-                    // to get a properly typed result (e.g. double* for float fields,
-                    // not a raw string like "0.700000")
+                    // Reconstruct the Python default object from the stored
+                    // JSON text (primitives round-trip; complex types use the
+                    // default_py_obj path instead).
+                    py::object raw = py::none();
                     auto parse_result = parse_json(field.default_value_str);
-                    if (parse_result.is_ok() && field.schema) {
-                        auto json_input = std::move(parse_result.value());
-                        auto default_result = field.schema->validate(*json_input, state);
-                        if (default_result.is_ok()) {
-                            fv.value = default_result.value();
-                            fv.type_name = field_type_name(field.schema);
-                        } else {
-                            fv.value = std::make_shared<std::string>(field.default_value_str);
-                            fv.type_name = "str";
-                        }
-                    } else {
-                        fv.value = std::make_shared<std::string>(field.default_value_str);
-                        fv.type_name = "str";
+                    if (parse_result.is_ok()) {
+                        try {
+                            raw = parse_result.value()->as_python_object();
+                        } catch (...) {}
                     }
+                    apply_field_default(raw, field, state, fv, combined_errors);
                     output.fields[name] = std::move(fv);
                     output.field_order.push_back(name);
                     add_to_data(name, output.fields.at(name));
@@ -409,6 +379,34 @@ public:
     void add_field(const std::string& name, FieldInfo info) {
         fields_[name] = std::move(info);
         field_order_.push_back(name);
+    }
+
+    // Apply a field default (Rust semantics): used raw unless
+    // FieldInfo::validate_default is set, in which case the default is run
+    // through the field schema and failures are reported as line errors at
+    // the field's location (input = the default value itself).
+    void apply_field_default(const py::object& raw, const FieldInfo& field,
+                             ValidationState& state,
+                             ValidatedModelFieldsOutput::FieldValue& fv,
+                             ValError& combined_errors) {
+        if (!field.validate_default || !field.schema) {
+            fv.value = std::make_shared<py::object>(raw);
+            fv.type_name = "py_object";
+            return;
+        }
+        try {
+            PythonInput py_in(raw);
+            auto r = field.schema->validate(py_in, state);
+            if (r.is_ok()) {
+                fv.value = r.value();
+                fv.type_name = field_type_name(field.schema);
+                return;
+            }
+            combined_errors.merge(std::move(r.error()));
+        } catch (...) {
+        }
+        fv.value = std::make_shared<py::object>(raw);
+        fv.type_name = "py_object";
     }
 
     void set_extra_behavior(ExtraBehavior eb) { extra_behavior_ = eb; }
@@ -982,6 +980,9 @@ public:
     }
 
     std::string name() const override { return "model"; }
+
+    // The wrapped fields validator (for reaches_fields_result traversal).
+    std::shared_ptr<Validator> inner_validator() const override { return fields_validator_; }
 
     const std::shared_ptr<Validator>& fields_validator() const { return fields_validator_; }
     const std::string& class_name() const { return class_name_; }

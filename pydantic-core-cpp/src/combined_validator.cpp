@@ -1317,19 +1317,13 @@ static std::shared_ptr<Validator> build_from_py_dict(
 
     // --- Literal ---
     if (type == "literal") {
-        std::vector<std::string> expected;
         std::string expected_repr;
+        py::object expected_obj;
         if (schema.contains("expected")) {
-            auto lst = schema["expected"].cast<py::list>();
+            expected_obj = schema["expected"];
+            auto lst = expected_obj.cast<py::sequence>();
             std::vector<std::string> reprs;
             for (auto item : lst) {
-                // For Enum members, use .value instead of str() (which gives 'ClassName.MEMBER')
-                if (py::hasattr(item, "value")) {
-                    expected.push_back(py::str(py::getattr(item, "value")).cast<std::string>());
-                } else {
-                    expected.push_back(py::str(item).cast<std::string>());
-                }
-                // Build repr for error message
                 reprs.push_back(py::repr(item).cast<std::string>());
             }
             // Build expected_repr like "repr1 or repr2"
@@ -1340,8 +1334,10 @@ static std::shared_ptr<Validator> build_from_py_dict(
                     expected_repr += reprs[i];
                 }
             }
+        } else {
+            expected_obj = py::list();
         }
-        return std::make_shared<LiteralValidator>(std::move(expected), std::move(expected_repr));
+        return std::make_shared<LiteralValidator>(expected_obj, std::move(expected_repr));
     }
 
     // --- Enum ---
@@ -1882,6 +1878,18 @@ static std::shared_ptr<Validator> build_from_py_dict(
                 info.required = required;
                 info.default_value_str = default_val_str;
                 info.frozen = false;
+                // validate_default: per-field flag on the with-default schema
+                // or the top-level config (Rust reads both).
+                if (field_def.contains("schema")) {
+                    auto fsd_vd = field_def["schema"];
+                    if (fsd_vd.contains("validate_default") && py::isinstance<py::bool_>(fsd_vd["validate_default"])) {
+                        info.validate_default = fsd_vd["validate_default"].cast<bool>();
+                    }
+                }
+                if (!info.validate_default && config.contains("validate_default") &&
+                    py::isinstance<py::bool_>(config["validate_default"])) {
+                    info.validate_default = config["validate_default"].cast<bool>();
+                }
                 // Extract default_factory and callable defaults from the field schema
                 if (field_def.contains("schema")) {
                     auto fsd = field_def["schema"].cast<py::dict>();
@@ -2127,6 +2135,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
             py_str(config, "extra_fields_behavior",
                 py_str(config, "extra_behavior", py_str(config, "extra", "ignore"))));
         v->extra = extra_behavior_from_string(extra_str);
+        v->dataclass_mode = true;
         return v;
     }
 

@@ -2419,11 +2419,19 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                 else if (e == "forbid") extra_opt = ExtraBehavior::Forbid;
                 else extra_opt = ExtraBehavior::Ignore;
             }
-            py::object validated = self.validate_python_object(input, pyobj_to_bool(strict), extra_opt, fa_opt, context);
+            py::object validated = self.validate_python_object(input, pyobj_to_bool(strict), extra_opt, fa_opt, context, /*coerce_strings=*/false, self_instance);
 
             // If self_instance provided, populate and return it
             if (!self_instance.is_none() && py::hasattr(self_instance, "__dict__")) {
+                // Rust validate_init semantics: a foreign instance returned
+                // by an after-validator must NOT overwrite the validated
+                // fields already snapshotted onto self.
+                bool snapshot_used = false;
                 try {
+                    if (!self.is_root_model() && !py::isinstance<py::dict>(validated) &&
+                        py::hasattr(validated, "__dict__") && !validated.is(self_instance)) {
+                        snapshot_used = self.apply_init_snapshot(self_instance);
+                    }
                     if (self.is_root_model()) {
                         // Root model: store the whole validated value as 'root'
                         py::dict d = self_instance.attr("__dict__");
@@ -2433,7 +2441,7 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                         }
                         py::setattr(self_instance, "__pydantic_extra__", py::none());
                         py::setattr(self_instance, "__pydantic_fields_set__", py::set(py::make_tuple(py::str("root"))));
-                    } else if (py::isinstance<py::dict>(validated)) {
+                    } else if (!snapshot_used && py::isinstance<py::dict>(validated)) {
                         py::dict d = self_instance.attr("__dict__");
                         py::dict validated_dict = validated.cast<py::dict>();
 
@@ -2471,7 +2479,7 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                         if (!defaults.is_none() && py::isinstance<py::dict>(defaults) && py::len(defaults.cast<py::dict>()) > 0) {
                             py::setattr(self_instance, "__pydantic_defaults__", defaults);
                         }
-                    } else if (py::hasattr(validated, "__dict__")) {
+                    } else if (!snapshot_used && py::hasattr(validated, "__dict__")) {
                         // validated is a model instance (e.g. from FunctionAfterValidator)
                         // Copy its __dict__ to self_instance
                         py::dict d = self_instance.attr("__dict__");
@@ -2499,6 +2507,13 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                 } catch (const std::exception& e) {
                     // If anything fails, just return validated as-is
                     py::print("validate_python self_instance error:", py::str(e.what()));
+                }
+                // Rust validate_init surfaces the after-validator's return value
+                // (main.py warns when it is not self).  self keeps the validated
+                // fields via the snapshot above.
+                if (snapshot_used && py::hasattr(validated, "__dict__") &&
+                    !validated.is(self_instance)) {
+                    return validated;
                 }
                 return self_instance;
             }

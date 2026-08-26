@@ -41,7 +41,13 @@ public:
                                       std::optional<ExtraBehavior> extra = std::nullopt,
                                       std::optional<bool> from_attributes = std::nullopt,
                                       py::object context = py::none(),
-                                      bool coerce_strings = false);
+                                      bool coerce_strings = false,
+                                      py::object self_instance = py::none());
+
+    // Populate self_instance from the fields snapshot taken by the outermost
+    // fields-position function-after (BaseModel.__init__ path).  Returns
+    // false when no snapshot exists (and clears it).
+    bool apply_init_snapshot(const py::object& self_instance);
 
     // isinstance check on Python object directly (NEW - no JSON round-trip)
     bool isinstance_python_object(const py::object& input,
@@ -118,6 +124,13 @@ private:
     std::string post_init_;
 
     ValidationState::Config config_;
+
+    // Pre-func validated-fields snapshot from the outermost fields-position
+    // function-after during the most recent validate_python_object call.
+    py::object init_snapshot_ = py::none();
+
+    // config hide_input_in_errors: omit input_value/input_type from display
+    bool hide_input_in_errors_ = false;
 
     // Build validator from schema
     void build_validator();

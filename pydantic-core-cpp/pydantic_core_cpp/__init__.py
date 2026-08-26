@@ -209,7 +209,14 @@ def _parse_structured_errors(msg: str) -> list[dict] | None:
                 'url': f'https://errors.pydantic.dev/2.14/v/{err["type"]}',
             }
             if err.get('ctx'):
-                d['ctx'] = {k: _parse_input(v) for k, v in err['ctx'].items()}
+                def _parse_ctx_value(v):
+                    # Quoted-string ctx values (e.g. literal_error's expected
+                    # "'foo'") are already Python reprs — keep them verbatim;
+                    # literal_eval would strip the meaningful quotes.
+                    if isinstance(v, str) and v[:1] in ('"', "'"):
+                        return v
+                    return _parse_input(v)
+                d['ctx'] = {k: _parse_ctx_value(v) for k, v in err['ctx'].items()}
                 if d['ctx'].get('error') == '__PYDANTIC_EXC_REF__' and error_objs is not None and i < len(error_objs):
                     d['ctx']['error'] = error_objs[i]
             result.append(d)
@@ -572,13 +579,22 @@ def _format_rust_error(msg: str, model_name: str = '') -> str:
             msg_line = lines[i + 1].strip()
             if msg_line.startswith('  ') or msg_line:
                 msg_line = msg_line.lstrip()
+                # Hidden-input line (config hide_input_in_errors): ends with
+                # [type=x] and carries no input_value segment.  Keep that
+                # shape instead of appending an empty input segment.
+                hidden_seg = _re.search(r'\s*\[type=([^,\]]+)\]$', msg_line)
+                hidden = bool(hidden_seg)
+                if hidden_seg:
+                    msg_line_base = msg_line[:hidden_seg.start()].rstrip()
+                else:
+                    msg_line_base = msg_line
                 # Look up Rust-compatible error info
                 err_type = 'value_error'
-                rust_msg = msg_line
+                rust_msg = msg_line_base
                 input_val = ''
                 input_type = ''
                 for pattern, (etype, emsg, ival, itype) in _ERR_MSG_TO_RUST.items():
-                    if msg_line.startswith(pattern) or pattern in msg_line:
+                    if msg_line_base.startswith(pattern) or pattern in msg_line_base:
                         err_type = etype
                         rust_msg = emsg
                         input_val = ival
@@ -593,11 +609,11 @@ def _format_rust_error(msg: str, model_name: str = '') -> str:
                                 input_type = type(_ast.literal_eval(raw_input)).__name__
                             except Exception:
                                 pass
-                            # Keep the full message text for errors that carry a
-                            # detail after the prefix (e.g. "Value error, foo"
-                            # must not be truncated to "Value error").
-                            if err_type in ('value_error', 'assertion_error'):
-                                rust_msg = msg_line[:seg.start()].strip()
+                        # Keep the full message text for errors that carry a
+                        # detail after the prefix (e.g. "Value error, foo"
+                        # must not be truncated to "Value error").
+                        if err_type in ('value_error', 'assertion_error'):
+                            rust_msg = msg_line[:seg.start()].strip() if seg else msg_line_base
                         break
                 else:
                     # Unmapped message: strip the trailing [type=..., input_value=...]
@@ -614,7 +630,12 @@ def _format_rust_error(msg: str, model_name: str = '') -> str:
                         rust_msg = msg_line[:seg.start()].strip()
 
                 result.append(f'{loc_line}')
-                result.append(f'  {rust_msg} [type={err_type}, input_value={input_val}, input_type={input_type}]')
+                if hidden:
+                    result.append(f'  {rust_msg} [type={err_type}]')
+                else:
+                    result.append(
+                        f'  {rust_msg} [type={err_type}, input_value={input_val}, input_type={input_type}]'
+                    )
                 i += 2
                 continue
         result.append(loc_line)

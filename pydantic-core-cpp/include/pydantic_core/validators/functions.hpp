@@ -102,6 +102,21 @@ inline bool reaches_fields_result(const std::shared_ptr<Validator>& v) {
     return false;
 }
 
+// Returns true when this validator chain terminates in a model validator
+// (function wrappers may intervene).  After-functions over models receive
+// the constructed model INSTANCE (unlike fields positions, which exchange
+// tuples).
+inline bool reaches_model(const std::shared_ptr<Validator>& v) {
+    if (!v) return false;
+    std::string n = v->name();
+    if (n == "model") return true;
+    if (n == "function-after" || n == "function-before" ||
+        n == "function-wrap" || n == "function-plain") {
+        return reaches_model(v->inner_validator());
+    }
+    return false;
+}
+
 // FunctionBeforeValidator - runs Python function before validation
 // Python signature: func(input, info) -> transformed_input
 class FunctionBeforeValidator : public Validator {
@@ -312,14 +327,47 @@ public:
                     validated_obj = input.as_python_object();
                 }
             }
+            if (is_fields_result && !validated_obj.is_none()) {
+                // Outermost fields-position after-function: snapshot the
+                // validated fields BEFORE the callable runs, so BaseModel
+                // __init__ can populate self from them even when the callable
+                // returns a foreign instance (Rust ignores non-self returns).
+                try {
+                    py::object py_in = input.as_python_object();
+                    if (state.top_input_ptr() && py_in.ptr() &&
+                        static_cast<const void*>(py_in.ptr()) == state.top_input_ptr()) {
+                        state.set_init_fields_snapshot(validated_obj);
+                    }
+                } catch (...) {}
+            } else if (!is_fields_result && reaches_model(inner_) && !validated_obj.is_none()) {
+                // After-function over a MODEL: validated_obj is the constructed
+                // inner instance.  Snapshot it — if the callable later returns
+                // a DIFFERENT instance, BaseModel.__init__ populates self from
+                // this one (in-place mutations stay visible: same object).
+                try {
+                    py::object py_in = input.as_python_object();
+                    if (state.top_input_ptr() && py_in.ptr() &&
+                        static_cast<const void*>(py_in.ptr()) == state.top_input_ptr() &&
+                        py::hasattr(validated_obj, "__dict__")) {
+                        state.set_init_fields_snapshot(validated_obj);
+                    }
+                } catch (...) {}
+            }
         }
 
         // If the inner validator is a ModelValidator, construct the model instance
-        // before calling the after-function (model_validator(mode='after') expects self)
+        // before calling the after-function (model_validator(mode='after') expects self).
+        // In the BaseModel.__init__ path the instance IS the caller's self object
+        // (Rust validate_init): populate it in place so validators mutating self
+        // behave naturally and returning self does not look "foreign".
         if (auto* model_validator = dynamic_cast<ModelValidator*>(inner_.get())) {
             py::object model_cls = model_validator->expected_class();
             if (!model_cls.is_none()) {
                 try {
+                    bool have_init_self = !state.init_self_py().is_none() && state.top_input_ptr();
+                    py::object py_in_check = have_init_self ? input.as_python_object() : py::none();
+                    bool is_init_path = have_init_self && py_in_check.ptr() &&
+                        static_cast<const void*>(py_in_check.ptr()) == state.top_input_ptr();
                     // Construct the model instance WITHOUT triggering validation
                     // (to avoid infinite recursion with model_validator)
                     py::object instance;
@@ -329,6 +377,22 @@ public:
                         } else {
                             instance = py::module_::import("builtins").attr("object").attr("__new__")(model_cls);
                             instance.attr("__dict__") = py::dict(py::arg("root") = validated_obj);
+                        }
+                    } else if (is_init_path) {
+                        // Populate the caller's self object in place.
+                        instance = state.init_self_py();
+                        if (py::isinstance<py::dict>(validated_obj)) {
+                            py::dict fields_dict = validated_obj.cast<py::dict>();
+                            py::object extra = fields_dict.attr("pop")("__pydantic_extra__", py::none());
+                            py::object fields_set = fields_dict.attr("pop")("__pydantic_fields_set__", py::set());
+                            fields_dict.attr("pop")("__pydantic_defaults__", py::none());
+                            instance.attr("__dict__").attr("update")(fields_dict);
+                            if (!py::hasattr(instance, "__pydantic_private__")) {
+                                py::setattr(instance, "__pydantic_private__", py::none());
+                            }
+                            py::setattr(instance, "__pydantic_extra__",
+                                extra.is_none() ? py::none() : extra);
+                            py::setattr(instance, "__pydantic_fields_set__", fields_set);
                         }
                     } else {
                         // For BaseModel, use model_construct to avoid validation
@@ -353,6 +417,21 @@ public:
                     // If construction fails, continue with the validated_obj as-is
                 }
             }
+        }
+
+        if (!is_fields_result && reaches_model(inner_) &&
+            !validated_obj.is_none() && py::hasattr(validated_obj, "__dict__")) {
+            try {
+                py::object py_in = input.as_python_object();
+                if (state.top_input_ptr() && py_in.ptr() &&
+                    static_cast<const void*>(py_in.ptr()) == state.top_input_ptr()) {
+                    // Snapshot the constructed INNER instance: if the callable
+                    // returns a DIFFERENT instance, BaseModel.__init__ populates
+                    // self from this one (Rust ignores non-self returns).
+                    // In-place mutations stay visible (same object).
+                    state.set_init_fields_snapshot(validated_obj);
+                }
+            } catch (...) {}
         }
 
         try {
@@ -894,6 +973,10 @@ public:
     ExtraBehavior extra = ExtraBehavior::Forbid;
     bool validate_by_alias = true;
     bool validate_by_name = false;
+    // Dataclass-args mode: missing parameters report the field-style
+    // 'missing' error at the parameter-name location (Rust's
+    // DataClassArgsValidator), not call-style missing_argument.
+    bool dataclass_mode = false;
 
     std::string name() const override { return "arguments"; }
 
@@ -981,8 +1064,12 @@ public:
                     collect_line_errors(result.error(), line_errors);
                 }
             } else {
-                // No value supplied — use default or report missing
+                // No value supplied — use default or report missing.
+                // NB: push the parameter name first so default-validation
+                // failures (validate_default) are located on the field.
+                state.location().push(p.name);
                 ValResult<std::shared_ptr<void>> def = p.validator->default_value(state);
+                state.location().pop();
                 if (def.is_ok()) {
                     py::object val = default_to_python(p.validator, def.value());
                     if (p.positional_only) {
@@ -990,6 +1077,14 @@ public:
                     } else {
                         output_kwargs[py::str(p.name)] = val;
                     }
+                } else if (!def.error().is_omit()) {
+                    // A default exists but failed validation (e.g.
+                    // validate_default=True) — report that error, not a
+                    // missing-parameter error.
+                    collect_line_errors(def.error(), line_errors);
+                } else if (dataclass_mode) {
+                    add_error(ErrorType(ErrorType::Kind::Missing),
+                              loc_of_name(p.name), input.as_error_value().repr);
                 } else if (p.positional_only) {
                     add_error(ErrorType(ErrorType::Kind::MissingPositionalOnlyArgument),
                               loc_of_index(static_cast<int64_t>(index)), input.as_error_value().repr);

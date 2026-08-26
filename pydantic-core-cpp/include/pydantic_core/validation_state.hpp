@@ -140,6 +140,26 @@ public:
     // validators observe previously-validated fields.
     py::object data() const { return data_; }
     void set_data(py::object d) { data_ = std::move(d); }
+
+    // Pointer identity of the TOP-LEVEL user input (seeded by the binding
+    // for BaseModel.__init__ validation).  Used by function-after to detect
+    // that IT is the outermost validator (nested validators see sub-objects).
+    const void* top_input_ptr() const { return top_input_ptr_; }
+    void set_top_input_ptr(const void* p) { top_input_ptr_ = p; }
+
+    // The BaseModel.__init__ self instance (Python object).  When set, the
+    // outermost model-level after-function constructs/populates THIS object
+    // instead of a fresh instance (Rust validate_init semantics).
+    const py::object& init_self_py() const { return init_self_py_; }
+    void set_init_self_py(py::object o) { init_self_py_ = std::move(o); }
+
+    // Pre-function-call snapshot of the validated fields (3-tuple or flattened
+    // dunder-dict) taken by the outermost fields-position function-after.
+    // The BaseModel.__init__ binding uses it to populate self_instance even
+    // when the validator returns a different instance (Rust validate_init
+    // semantics: non-self returns are ignored, self keeps its own fields).
+    const py::object& init_fields_snapshot() const { return init_fields_snapshot_; }
+    void set_init_fields_snapshot(py::object s) { init_fields_snapshot_ = std::move(s); }
 #endif
     
     // Recursion management
@@ -178,6 +198,7 @@ public:
         child.coerce_strings_ = coerce_strings_;
 #ifdef HAS_PYBIND11
         child.data_ = data_;
+        child.top_input_ptr_ = top_input_ptr_;
 #endif
         return child;
     }
@@ -196,6 +217,7 @@ public:
         child.coerce_strings_ = coerce_strings_;
 #ifdef HAS_PYBIND11
         child.data_ = data_;
+        child.top_input_ptr_ = top_input_ptr_;
 #endif
         return child;
     }
@@ -215,6 +237,9 @@ private:
 #ifdef HAS_PYBIND11
     py::object context_py_ = py::none();
     py::object data_ = py::none();
+    const void* top_input_ptr_ = nullptr;
+    py::object init_fields_snapshot_ = py::none();
+    py::object init_self_py_ = py::none();
 #endif
 
     Location location_;
