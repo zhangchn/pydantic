@@ -423,7 +423,23 @@ public:
         // In the BaseModel.__init__ path the instance IS the caller's self object
         // (Rust validate_init): populate it in place so validators mutating self
         // behave naturally and returning self does not look "foreign".
-        if (auto* model_validator = dynamic_cast<ModelValidator*>(inner_.get())) {
+        // Resolve a ModelValidator through function-wrap/before wrappers so
+        // wrapped models are materialized before the after-function runs.
+        std::shared_ptr<Validator> mv_holder = inner_;
+        {
+            std::shared_ptr<Validator> cur = inner_;
+            while (cur) {
+                if (dynamic_cast<ModelValidator*>(cur.get())) break;
+                std::string cn = cur->name();
+                if (cn == "function-wrap" || cn == "function-before") {
+                    cur = cur->inner_validator();
+                } else {
+                    break;
+                }
+            }
+            if (cur) mv_holder = cur;
+        }
+        if (auto* model_validator = dynamic_cast<ModelValidator*>(mv_holder.get())) {
             py::object model_cls = model_validator->expected_class();
             if (!model_cls.is_none()) {
                 try {
