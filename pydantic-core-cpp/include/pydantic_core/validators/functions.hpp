@@ -117,6 +117,33 @@ inline bool reaches_model(const std::shared_ptr<Validator>& v) {
     return false;
 }
 
+// Wrap-function handler error propagation: when the inner validator fails
+// inside a Python wrap-handler, the typed ValError must reach the outer
+// function-wrap validator unchanged (Rust re-raises the ValidationError).
+// A stack of pending errors plus a marker exception text achieves this.
+namespace wrap_detail {
+inline constexpr const char* kMarker = "\x01PYC_WRAP_INNER_ERROR\x01";
+inline std::vector<ValError>& stack() {
+    static thread_local std::vector<ValError> s;
+    return s;
+}
+// If the caught Python exception is our marker, pop and return the inner error.
+inline std::optional<ValError> take_pending(py::error_already_set& e) {
+    std::string msg;
+    try {
+        msg = py::str(e.value()).cast<std::string>();
+    } catch (...) {
+        return std::nullopt;
+    }
+    if (msg != kMarker) return std::nullopt;
+    auto& s = stack();
+    if (s.empty()) return std::nullopt;
+    ValError out = std::move(s.back());
+    s.pop_back();
+    return out;
+}
+} // namespace wrap_detail
+
 // FunctionBeforeValidator - runs Python function before validation
 // Python signature: func(input, info) -> transformed_input
 class FunctionBeforeValidator : public Validator {
@@ -635,9 +662,13 @@ public:
             py::object handler = py::cpp_function([this, &state](py::object v) -> py::object {
                 if (inner_) {
                     auto py_input = std::make_unique<PythonInput>(v);
+                    py_input->set_current_location(state.location());
                     auto result = inner_->validate(*py_input, state);
                     if (result.is_err()) {
-                        throw py::value_error("Inner validator failed");
+                        // Propagate the typed inner error to the enclosing
+                        // function-wrap validator via the pending stack.
+                        wrap_detail::stack().push_back(result.error());
+                        throw py::value_error(wrap_detail::kMarker);
                     }
                     // Convert the validated result to a Python object by its
                     // actual stored type (e.g. EitherDate for date fields).
@@ -651,6 +682,10 @@ public:
                 // Try with info object (general wrap functions)
                 output = py_func_(input.as_python_object(), handler, info_obj);
             } catch (py::error_already_set& e1) {
+                // Inner validation error raised by the handler — propagate it
+                if (auto inner_err = wrap_detail::take_pending(e1)) {
+                    return std::move(*inner_err);
+                }
                 if (!e1.matches(PyExc_TypeError)) {
                     // Genuine exception raised by the validator function —
                     // convert it (ValueError -> value_error, etc.) instead of
@@ -663,6 +698,9 @@ public:
                 try {
                     output = py_func_(input.as_python_object(), handler);
                 } catch (py::error_already_set& e2) {
+                    if (auto inner_err2 = wrap_detail::take_pending(e2)) {
+                        return std::move(*inner_err2);
+                    }
                     return function_error_from_exception(e2, input, state);
                 }
             }
@@ -1002,8 +1040,18 @@ public:
             line_errors.push_back(std::make_shared<ValLineError>(ValLineError{et, loc, input_repr}));
         };
 
+        // Dataclass-args mode scopes a dict of validated arguments as
+        // state.data (Rust DataClassArgsValidator) so nested validators see
+        // previously-validated params; plain call/named-tuple schemas clear
+        // it (ValidationInfo.data is None there).
+        py::dict arg_data;
+        ScopedValidationData data_scope(state,
+            dataclass_mode ? py::object(arg_data) : py::object(py::none()));
+        const std::optional<std::string> outer_field_name = state.field_name();
+
         for (size_t index = 0; index < parameters.size(); ++index) {
             const Parameter& p = parameters[index];
+            state.set_field_name(p.name);
 
             // Value from positional args (by index)
             std::optional<py::object> pos_value;
@@ -1048,7 +1096,11 @@ public:
                 auto result = p.validator->validate(py_in, state);
                 state.location().pop();
                 if (result.is_ok()) {
-                    output_args.append(value_to_python(result.value(), p.validator->effective_result_name(), &*pos_value));
+                    py::object conv = value_to_python(result.value(), p.validator->effective_result_name(), &*pos_value);
+                    output_args.append(conv);
+                    if (dataclass_mode) {
+                        try { arg_data[py::str(p.name)] = conv; } catch (...) {}
+                    }
                 } else {
                     collect_line_errors(result.error(), line_errors);
                 }
@@ -1059,7 +1111,11 @@ public:
                 auto result = p.validator->validate(py_in, state);
                 state.location().pop();
                 if (result.is_ok()) {
-                    output_kwargs[py::str(p.name)] = value_to_python(result.value(), p.validator->effective_result_name(), &*kw_value);
+                    py::object conv = value_to_python(result.value(), p.validator->effective_result_name(), &*kw_value);
+                    output_kwargs[py::str(p.name)] = conv;
+                    if (dataclass_mode) {
+                        try { arg_data[py::str(p.name)] = conv; } catch (...) {}
+                    }
                 } else {
                     collect_line_errors(result.error(), line_errors);
                 }
@@ -1097,6 +1153,10 @@ public:
                 }
             }
         }
+
+        // Restore the outer field name so enclosing validators don't observe
+        // the last parameter's name.
+        state.set_field_name_opt(outer_field_name);
 
         // Extra positional args beyond the declared parameters
         if (n_pos > (py::ssize_t)positional_params_count) {

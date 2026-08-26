@@ -634,6 +634,21 @@ ValResult<ValMatch<std::unique_ptr<ValidatedList>>> PythonInput::validate_list(b
         );
     }
 
+    // Lax mode: any iterable other than str/bytes/dict-like coerces to a
+    // list (Rust accepts arbitrary iterables, rejecting only text types).
+    if (!strict && !py::isinstance<py::str>(obj_) && !py::isinstance<py::bytes>(obj_) &&
+        !py::isinstance<py::bytearray>(obj_) && !py::isinstance<py::dict>(obj_) &&
+        py::hasattr(obj_, "__iter__")) {
+        try {
+            py::list items = py::list(obj_);
+            return ValMatch<std::unique_ptr<ValidatedList>>::lax(
+                std::make_unique<PythonValidatedList>(items)
+            );
+        } catch (const py::error_already_set&) {
+            PyErr_Clear();
+        }
+    }
+
     return type_error(ErrorType::Kind::ListType, *this, this->current_location());
 }
 
