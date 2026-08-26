@@ -1139,9 +1139,11 @@ static std::shared_ptr<DefinitionsRegistry> build_definitions_from_py(
         auto def_dict = item.cast<py::dict>();
         std::string ref = py_str(def_dict, "ref");
         if (ref.empty()) continue;
-        // Some definitions (like enum) are the schema directly; others wrap it in "schema"
+        // Pydantic emits FLAT definitions ({ref, type: ...}) where a
+        // "schema" key belongs to the validator itself (e.g. function-after).
+        // Only unwrap when there is no "type" (hand-written wrapper form).
         py::dict inner;
-        if (def_dict.contains("schema")) {
+        if (!def_dict.contains("type") && def_dict.contains("schema")) {
             inner = def_dict["schema"].cast<py::dict>();
         } else {
             inner = def_dict;
