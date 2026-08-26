@@ -1149,7 +1149,34 @@ private:
         return out;
     }
 
+    // Thread-local stack of object addresses currently being serialized,
+    // mirroring Rust's RecursionGuard: re-entering an ancestor object means
+    // a reference cycle (raise), excessive depth is a safety net (raise).
+    static std::vector<const void*>& json_rec_stack() {
+        static thread_local std::vector<const void*> stack;
+        return stack;
+    }
+
     static std::string infer_json(const py::object& value, bool ensure_ascii, int indent) {
+        std::vector<const void*>& st = json_rec_stack();
+        const void* p = value.ptr();
+        for (const void* q : st) {
+            if (q == p) {
+                throw PydanticSerializationError("Error serializing to JSON: ValueError: Circular reference detected (id repeated)");
+            }
+        }
+        if (st.size() >= 255) {
+            throw PydanticSerializationError("Error serializing to JSON: ValueError: Circular reference detected (depth exceeded)");
+        }
+        st.push_back(p);
+        struct StackPop {
+            std::vector<const void*>& s;
+            ~StackPop() { s.pop_back(); }
+        } popper{st};
+        return infer_json_body(value, ensure_ascii, indent);
+    }
+
+    static std::string infer_json_body(const py::object& value, bool ensure_ascii, int indent) {
         if (value.is_none()) return "null";
         if (py::isinstance<py::bool_>(value)) return value.cast<bool>() ? "true" : "false";
         if (py::isinstance<py::int_>(value)) return py::str(py::repr(value)).cast<std::string>();
@@ -1215,8 +1242,34 @@ private:
     }
 
     // Recursively serialize an arbitrary Python value for use in extra fields
-    // (mirrors Rust's infer_to_python: models → to_python, dicts → recurse, lists → recurse)
+    // (mirrors Rust's infer_to_python: models → to_python, dicts → recurse, lists → recurse).
+    // Cyclic values return the innermost occurrence as-is (Rust infer_to_python
+    // semantics) instead of recursing forever.
+    static std::vector<const void*>& py_rec_stack() {
+        static thread_local std::vector<const void*> stack;
+        return stack;
+    }
+
     static py::object serialize_any_value(const py::object& v, bool exc_none, bool round_trip) {
+        if (v.is_none()) return py::none();
+        if (py::isinstance<py::dict>(v) || py::isinstance<py::list>(v) || py::isinstance<py::tuple>(v) || py::hasattr(v, "__pydantic_serializer__")) {
+            std::vector<const void*>& st = py_rec_stack();
+            const void* p = v.ptr();
+            for (const void* q : st) {
+                if (q == p) return v;  // cycle: stop recursing, mirror Rust
+            }
+            if (st.size() >= 255) return v;
+            st.push_back(p);
+            struct StackPop {
+                std::vector<const void*>& s;
+                ~StackPop() { s.pop_back(); }
+            } popper{st};
+            return serialize_any_value_inner(v, exc_none, round_trip);
+        }
+        return serialize_any_value_inner(v, exc_none, round_trip);
+    }
+
+    static py::object serialize_any_value_inner(const py::object& v, bool exc_none, bool round_trip) {
         if (v.is_none()) return py::none();
         // Model / dataclass instances: use __pydantic_serializer__ if available
         if (py::hasattr(v, "__pydantic_serializer__")) {

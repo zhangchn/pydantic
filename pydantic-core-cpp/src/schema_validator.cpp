@@ -377,7 +377,6 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
     // forward to the model; unknown schemas report "not supported" and we
     // fall back to the legacy whole-model re-validation below).
     if (auto base = validator_->base_validator()) {
-        std::cerr << "[ASG] dispatch base=" << base->name() << "\n";
         ValidationState state(config_);
         auto r = base->validate_assignment(obj, field_name, field_value, state);
         if (!r.is_ok()) {
@@ -390,7 +389,6 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
                     unsupported = true;
                 }
             }
-            std::cerr << "[ASG] err unsupported=" << unsupported << "\n";
             if (!unsupported) {
 #ifdef HAS_PYBIND11
                 try {
@@ -413,7 +411,6 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
                 throw err;
             }
         } else {
-            std::cerr << "[ASG] ok\n";
             try {
                 return *std::static_pointer_cast<py::object>(r.value());
             } catch (...) {

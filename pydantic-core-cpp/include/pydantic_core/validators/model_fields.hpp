@@ -447,7 +447,6 @@ public:
         }
 
         const FieldInfo& field = it->second;
-        std::cerr << "[IMPL] field found, schema=" << (field.schema ? field.schema->name() : "NULL") << "\n";
         if (field.frozen) {
             ErrorType err(ErrorType::Kind::FrozenField);
             Location loc;
@@ -472,7 +471,6 @@ public:
         PythonInput py_in(field_value);
         py_in.set_current_location(state.location());
         auto result = field.schema->validate(py_in, state);
-        std::cerr << "[IMPL] validated ok=" << (result.is_ok()?1:0) << "\n";
         state.set_field_name_opt(std::nullopt);
 
         if (result.is_err()) {

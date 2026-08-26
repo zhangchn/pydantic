@@ -25,7 +25,6 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
 // exception object is attached to the line error so the Python wrapper can
 // surface it as ctx['error'].
 inline ValError function_error_from_exception(py::error_already_set& e, const Input& input, ValidationState& state) {
-    std::cerr << "[FE] enter type=" << Py_TYPE(e.value().ptr())->tp_name << "\n";
     // Keep a reference to the exception object for ctx['error'] — value()
     // returns a new reference, so it stays valid after e.restore().
     py::object exc_value = e.value();
@@ -43,7 +42,6 @@ inline ValError function_error_from_exception(py::error_already_set& e, const In
     } else {
         // Rust convert_err: other exceptions become InternalErr carrying the
         // original exception so it propagates unchanged to the caller.
-        std::cerr << "[FE] -> internal_err\n";
         py::object exc = e.value();
         e.restore();
         PyErr_Clear();
@@ -515,7 +513,6 @@ public:
 
         try {
             py::object info_obj = make_validation_info(state);
-
             py::object output;
             try {
                 // Try with info object (general/no-info-wrapped functions)
@@ -654,9 +651,7 @@ public:
                 PyErr_Clear();
                 try {
                     out = py_func_(v);
-                    std::cerr << "[AFT] retry2 done\n";
                 } catch (py::error_already_set& e2) {
-                    std::cerr << "[AFT] retry2 err\n";
                     return function_error_from_exception(e2, PythonInput(v), state);
                 }
             }
@@ -963,24 +958,50 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
+        // Rust semantics (chain.rs): first step validates the input, each
+        // subsequent step validates the previous step's OUTPUT (as a Python
+        // object), and the chain result is the LAST step's result.
         if (validators_.empty()) {
-            return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
+            return ValResult<std::shared_ptr<void>>(
+                std::make_shared<py::object>(input.as_python_object()));
         }
-        for (auto& v : validators_) {
-            auto result = v->validate(input, state);
-            if (result.is_ok()) return result;
+        py::object current = py::none();
+        bool have_current = false;
+        std::shared_ptr<void> carried;
+        for (size_t i = 0; i < validators_.size(); ++i) {
+            auto& v = validators_[i];
+            std::unique_ptr<PythonInput> step_input;
+            const Input* step_in = &input;
+            if (have_current) {
+                step_input = std::make_unique<PythonInput>(current);
+                step_in = step_input.get();
+            }
+            auto result = v->validate(*step_in, state);
+            if (result.is_err()) return result;
+            carried = result.value();
+            last_used_ = static_cast<int>(i);
+            // Convert via the step's own payload convention so the next step
+            // receives a proper Python object (mirrors Rust's v.bind(py)).
+            current = value_to_python_with_type(carried, v->effective_result_name());
+            have_current = true;
         }
-        return ValError::line_error(
-            ErrorType(ErrorType::Kind::CustomError),
-            state.location(),
-            "No chain validator succeeded"
-        );
+        return ValResult<std::shared_ptr<void>>(std::move(carried));
     }
 
     std::string name() const override { return "chain"; }
 
+    std::string effective_result_name() const override {
+        // The result is whatever the last executed step produced
+        if (last_used_ >= 0 && last_used_ < static_cast<int>(validators_.size())) {
+            return validators_[last_used_]->effective_result_name();
+        }
+        if (!validators_.empty()) return validators_.back()->effective_result_name();
+        return "chain";
+    }
+
 private:
     std::vector<std::shared_ptr<Validator>> validators_;
+    mutable int last_used_ = -1;
 };
 
 // LaxOrStrictValidator - uses different validators for lax/strict mode

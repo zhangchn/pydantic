@@ -566,8 +566,11 @@ public:
                 input.as_error_value().repr
             );
         }
-        // Accept if no class info at all
-        return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
+        // Accept if no class info at all — return the input as an honest
+        // py_raw_object payload so result conversion stays type-safe.
+        PyObject* passthrough = input.as_python_object().inc_ref().ptr();
+        return ValResult<std::shared_ptr<void>>(
+            std::shared_ptr<void>(passthrough, [](void*){}));
     }
 
     std::string name() const override { return "py_raw_object"; }

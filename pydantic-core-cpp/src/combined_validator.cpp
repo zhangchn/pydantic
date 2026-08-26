@@ -1368,8 +1368,14 @@ static std::shared_ptr<Validator> build_from_py_dict(
         auto v = std::make_shared<IsInstanceValidator>();
         if (schema.contains("cls")) {
             py::object cls = schema["cls"];
-            // Type is stored as string or as Python class
-            if (py::isinstance<py::type>(cls)) {
+            // Accept anything usable as the second isinstance argument:
+            // builtin/metaclass types, ABCMeta subclasses (collections.abc)
+            // and typing special forms like Sequence all pass here.
+            bool class_like = false;
+            try {
+                class_like = py::isinstance<py::type>(cls) || py::hasattr(cls, "__mro__");
+            } catch (...) {}
+            if (class_like) {
                 v->set_py_class(cls);
                 // Rust uses the class qualname (no module prefix) for the error ctx
                 try {
@@ -1388,9 +1394,13 @@ static std::shared_ptr<Validator> build_from_py_dict(
         auto v = std::make_shared<IsSubclassValidator>();
         if (schema.contains("cls")) {
             auto cls = schema["cls"];
+            bool sub_like = false;
+            try {
+                sub_like = py::isinstance<py::type>(cls) || py::hasattr(cls, "__mro__");
+            } catch (...) {}
             if (py::isinstance<py::str>(cls)) {
                 v->set_class_name(cls.cast<std::string>());
-            } else if (py::isinstance<py::type>(cls)) {
+            } else if (sub_like) {
                 v->set_py_class(cls);
                 // Rust uses the class qualname (no module prefix) for the error ctx
                 try {
