@@ -9,6 +9,7 @@
 #include <functional>
 #include <optional>
 #include <unordered_set>
+#include <algorithm>
 #include <pybind11/pybind11.h>
 
 namespace py = pybind11;
@@ -496,6 +497,55 @@ public:
             }
         }
 
+        // PyDataclassValidator: in the self_instance (init) path the inner
+        // dataclass returns the (kwargs_dict, post_init_kwargs) tuple. A
+        // model_validator(mode='after') over a dataclass expects the
+        // constructed instance (Rust materializes it before the callable
+        // runs), so populate the caller's self_instance from the tuple and
+        // hand that to the after-function.
+        {
+            std::shared_ptr<Validator> dcur = inner_;
+            while (dcur && !dcur->is_dataclass_validator()) {
+                std::string cn = dcur->name();
+                if (cn == "function-wrap" || cn == "function-before") {
+                    dcur = dcur->inner_validator();
+                } else {
+                    break;
+                }
+            }
+            if (dcur && dcur->is_dataclass_validator()) {
+                py::object dc_cls = dcur->expected_class();
+                if (!dc_cls.is_none()) {
+                    try {
+                        bool have_init_self = !state.init_self_py().is_none() && state.top_input_ptr();
+                        py::object py_in_check = have_init_self ? input.as_python_object() : py::none();
+                        bool is_init_path = have_init_self && py_in_check.ptr() &&
+                            static_cast<const void*>(py_in_check.ptr()) == state.top_input_ptr();
+                        py::object instance = is_init_path ? state.init_self_py()
+                                                           : dc_cls.attr("__new__")(dc_cls);
+                        // Extract the kwargs dict from the (kwargs_dict,
+                        // post_init_kwargs) tuple (or a plain dict).
+                        py::dict kwargs_dict;
+                        if (py::isinstance<py::tuple>(validated_obj) && py::len(validated_obj) == 2) {
+                            py::object first = validated_obj[py::int_(0)];
+                            if (py::isinstance<py::dict>(first)) {
+                                kwargs_dict = first.cast<py::dict>();
+                            }
+                        } else if (py::isinstance<py::dict>(validated_obj)) {
+                            kwargs_dict = validated_obj.cast<py::dict>();
+                        }
+                        if (!kwargs_dict.empty()) {
+                            auto setattr = py::module_::import("builtins").attr("object").attr("__setattr__");
+                            for (auto kv : kwargs_dict) {
+                                setattr(instance, kv.first, kv.second);
+                            }
+                        }
+                        validated_obj = instance;
+                    } catch (...) {}
+                }
+            }
+        }
+
         if (!is_fields_result && reaches_model(inner_) &&
             !validated_obj.is_none() && py::hasattr(validated_obj, "__dict__")) {
             try {
@@ -887,6 +937,11 @@ public:
         } else if (default_value_) {
             raw = typed_default_to_py(default_value_, default_type_);
             has_raw = true;
+        } else if (default_py_obj_.ptr()) {
+            // Callable/complex default stored as a live Python object (e.g. a
+            // function used as a default value) — return it as-is.
+            raw = default_py_obj_;
+            has_raw = true;
         } else if (!default_value_str_.empty()) {
             auto parse_result = parse_json(default_value_str_);
             if (parse_result.is_ok()) {
@@ -914,6 +969,13 @@ public:
         return "with-default";
     }
 
+    // Same delegation for the result-dispatch name: the union/branch inside
+    // may report "py_object" etc. via its own effective_result_name().
+    std::string effective_result_name() const override {
+        if (inner_) return inner_->effective_result_name();
+        return "with-default";
+    }
+
     void set_default_is_none(bool v) { default_is_none_ = v; }
     bool has_none_default() const { return default_is_none_; }
     void set_default_factory(py::object f) { default_factory_ = std::move(f); }
@@ -921,6 +983,7 @@ public:
     void set_default_type(const std::string& t) { default_type_ = t; }
     void set_validate_default(bool v) { validate_default_ = v; }
     bool validate_default() const { return validate_default_; }
+    void set_default_py_obj(py::object o) { default_py_obj_ = std::move(o); }
 
 private:
     std::shared_ptr<Validator> inner_;
@@ -930,6 +993,7 @@ private:
     bool default_is_none_ = false;
     bool validate_default_ = false;
     py::object default_factory_ = py::none();
+    py::object default_py_obj_;
 
     static py::object typed_default_to_py(const std::shared_ptr<void>& value, const std::string& type) {
         if (!value) return py::none();
@@ -1137,6 +1201,8 @@ public:
         std::string name;
         std::vector<std::string> validation_aliases;
         std::shared_ptr<Validator> validator;
+        bool init = true;              // dataclass-args: false -> value comes from default, input key is extra
+    bool init_only = false;        // dataclass-args: InitVar — validated, passed to __post_init__, not stored
     };
 
     std::vector<Parameter> parameters;
@@ -1151,6 +1217,12 @@ public:
     // 'missing' error at the parameter-name location (Rust's
     // DataClassArgsValidator), not call-style missing_argument.
     bool dataclass_mode = false;
+    // Rust validate_dataclass_args names the dataclass in the error
+    // (ErrorType::DataclassType { class_name }).
+    std::string dataclass_name_;
+    // Rust collect_init_only: when true, initvar values are collected and
+    // returned as (output_dict, init_only_args) for __post_init__.
+    bool collect_init_only_ = false;
 
     std::string name() const override { return "arguments"; }
 
@@ -1160,6 +1232,19 @@ public:
     ) override {
         auto args_result = input.validate_args();
         if (args_result.is_err()) {
+            if (dataclass_mode) {
+                ValError err = ValError::line_error(
+                    ErrorType(ErrorType::Kind::DataclassType, std::string("class_name"), dataclass_name_),
+                    state.location(),
+                    input.as_error_value().repr);
+#ifdef HAS_PYBIND11
+                // Preserve the actual input object (Rust: input = Py<PyAny>)
+                if (!err.line_errors().empty()) {
+                    err.line_errors().front()->raw_input_obj = input.as_python_object();
+                }
+#endif
+                return ValResult<std::shared_ptr<void>>(std::move(err));
+            }
             return ValResult<std::shared_ptr<void>>(args_result.error());
         }
         ArgumentsInput args_in = std::move(args_result.value());
@@ -1168,6 +1253,7 @@ public:
 
         py::list output_args;
         py::dict output_kwargs;
+        py::list init_only_values;  // dataclass-args InitVar values (Rust init_only_args)
         std::vector<std::shared_ptr<ValLineError>> line_errors;
         std::unordered_set<std::string> used_kwargs;
         py::ssize_t n_pos = py::len(pos_args);
@@ -1189,9 +1275,11 @@ public:
             const Parameter& p = parameters[index];
             state.set_field_name(p.name);
 
-            // Value from positional args (by index)
+            // Value from positional args (by index).  init=false
+            // dataclass fields never read the input (Rust: default value
+            // only; any input key is treated as an extra).
             std::optional<py::object> pos_value;
-            if (p.positional && (py::ssize_t)index < n_pos) {
+            if (p.init && p.positional && (py::ssize_t)index < n_pos) {
                 pos_value = py::reinterpret_borrow<py::object>(pos_args[index]);
             }
 
@@ -1200,7 +1288,7 @@ public:
             // lookup key only when there is no alias or validate_by_name.
             // positional_only parameters never accept keyword input.
             std::optional<py::object> kw_value;
-            if (!p.positional_only) {
+            if (p.init && !p.positional_only) {
                 std::vector<std::string> lookup_keys;
                 bool has_alias = !p.validation_aliases.empty();
                 if (validate_by_alias) {
@@ -1233,9 +1321,15 @@ public:
                 state.location().pop();
                 if (result.is_ok()) {
                     py::object conv = value_to_python(result.value(), p.validator->effective_result_name(), &*pos_value);
-                    output_args.append(conv);
                     if (dataclass_mode) {
                         try { arg_data[py::str(p.name)] = conv; } catch (...) {}
+                        if (p.init_only) {
+                            if (collect_init_only_) init_only_values.append(conv);
+                        } else {
+                            output_kwargs[py::str(p.name)] = conv;
+                        }
+                    } else {
+                        output_args.append(conv);
                     }
                 } else {
                     collect_line_errors(result.error(), line_errors);
@@ -1248,9 +1342,15 @@ public:
                 state.location().pop();
                 if (result.is_ok()) {
                     py::object conv = value_to_python(result.value(), p.validator->effective_result_name(), &*kw_value);
-                    output_kwargs[py::str(p.name)] = conv;
                     if (dataclass_mode) {
                         try { arg_data[py::str(p.name)] = conv; } catch (...) {}
+                        if (p.init_only) {
+                            if (collect_init_only_) init_only_values.append(conv);
+                        } else {
+                            output_kwargs[py::str(p.name)] = conv;
+                        }
+                    } else {
+                        output_kwargs[py::str(p.name)] = conv;
                     }
                 } else {
                     collect_line_errors(result.error(), line_errors);
@@ -1264,7 +1364,13 @@ public:
                 state.location().pop();
                 if (def.is_ok()) {
                     py::object val = default_to_python(p.validator, def.value());
-                    if (p.positional_only) {
+                    if (dataclass_mode) {
+                        if (p.init_only) {
+                            if (collect_init_only_) init_only_values.append(val);
+                        } else {
+                            output_kwargs[py::str(p.name)] = val;
+                        }
+                    } else if (p.positional_only) {
                         output_args.append(val);
                     } else {
                         output_kwargs[py::str(p.name)] = val;
@@ -1274,9 +1380,13 @@ public:
                     // validate_default=True) — report that error, not a
                     // missing-parameter error.
                     collect_line_errors(def.error(), line_errors);
+                } else if (!p.init) {
+                    // Rust: init=false fields with no default are simply
+                    // absent from the output (Err(Omit) => continue);
+                    // __post_init__ may populate them afterwards.
                 } else if (dataclass_mode) {
                     add_error(ErrorType(ErrorType::Kind::Missing),
-                              loc_of_name(p.name), input.as_error_value().repr);
+                              param_loc(p), input.as_error_value().repr);
                 } else if (p.positional_only) {
                     add_error(ErrorType(ErrorType::Kind::MissingPositionalOnlyArgument),
                               loc_of_index(static_cast<int64_t>(index)), input.as_error_value().repr);
@@ -1310,8 +1420,10 @@ public:
                         collect_line_errors(result.error(), line_errors);
                     }
                 } else {
+                    Location loc = state.location();
+                    loc.push(static_cast<int64_t>(i));
                     add_error(ErrorType(ErrorType::Kind::UnexpectedPositionalArgument),
-                              loc_of_index(i), py::repr(item).cast<std::string>());
+                              loc, py::repr(item).cast<std::string>());
                 }
             }
         }
@@ -1337,8 +1449,15 @@ public:
                     collect_line_errors(result.error(), line_errors);
                 }
             } else if (extra == ExtraBehavior::Forbid) {
+                Location loc = state.location();
+                loc.push(key);
                 add_error(ErrorType(ErrorType::Kind::UnexpectedKeywordArgument),
-                          loc_of_name(key), py::repr(value).cast<std::string>());
+                          loc, py::repr(value).cast<std::string>());
+            } else if (dataclass_mode && extra == ExtraBehavior::Allow) {
+                // Rust dataclass-args: extra=allow stores extras in the
+                // output dict (validated by extras_schema when present,
+                // otherwise raw).
+                output_kwargs[py::str(key)] = value;
             }
         }
 
@@ -1377,6 +1496,18 @@ public:
 
         if (!line_errors.empty()) {
             return ValError::line_errors(std::move(line_errors));
+        }
+        if (dataclass_mode) {
+            // Rust DataclassArgsValidator returns (output_dict,
+            // init_only_args_or_None): initvar values are collected
+            // separately (passed to __post_init__) and never stored on the
+            // instance.
+            py::object post_init_kwargs = py::none();
+            if (collect_init_only_ && py::len(init_only_values) > 0) {
+                post_init_kwargs = py::tuple(init_only_values);
+            }
+            return ValResult<std::shared_ptr<void>>(
+                std::make_shared<py::object>(py::make_tuple(output_kwargs, post_init_kwargs)));
         }
         return ValResult<std::shared_ptr<void>>(
             std::make_shared<py::object>(py::make_tuple(py::tuple(output_args), output_kwargs))
@@ -1559,12 +1690,53 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
+        // Instance handling (Rust `input_as_python_instance` + `revalidate`
+        // in DataclassValidator::validate): if the input is already an
+        // instance of the target class, either pass it through as-is or
+        // revalidate its field values depending on revalidate_instances.
+        const Input* effective_input = &input;
+        std::shared_ptr<PythonInput> reval_input_holder;
+        if (class_.ptr() && !class_.is_none() && !input.is_args_kwargs()) {
+            try {
+                py::object value = input.as_python_object();
+                if (py::isinstance(value, class_)) {
+                    bool should_revalidate = false;
+                    switch (revalidate_) {
+                        case RevalidateInstances::Always:
+                            should_revalidate = true;
+                            break;
+                        case RevalidateInstances::Never:
+                            should_revalidate = false;
+                            break;
+                        case RevalidateInstances::SubclassInstances:
+                            try {
+                                should_revalidate = !py::type::of(value).is(class_);
+                            } catch (...) {
+                                should_revalidate = true;
+                            }
+                            break;
+                    }
+                    if (!should_revalidate) {
+                        return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(value));
+                    }
+                    // Revalidate: extract declared field values into a dict
+                    // (Rust `dataclass_to_dict`) and re-run the args
+                    // validator, then construct a fresh instance below.
+                    py::dict field_dict;
+                    for (const auto& fn : field_names_) {
+                        field_dict[py::str(fn)] = value.attr(py::str(fn));
+                    }
+                    reval_input_holder = std::make_shared<PythonInput>(field_dict);
+                    effective_input = reval_input_holder.get();
+                }
+            } catch (...) {}
+        }
         if (!args_validator_) {
             return ValError::line_error(ErrorType(ErrorType::Kind::CustomError),
                                         state.location(), "Dataclass validator missing arguments validator");
         }
 
-        auto args_result = args_validator_->validate(input, state);
+        auto args_result = args_validator_->validate(*effective_input, state);
         if (args_result.is_err()) {
             return ValResult<std::shared_ptr<void>>(args_result.error());
         }
@@ -1577,15 +1749,23 @@ public:
         }
 
         py::dict kwargs_dict;
+        py::object post_init_kwargs = py::none();
         if (py::isinstance<py::tuple>(validated) && py::len(validated) == 2) {
-            py::tuple args_tuple = py::reinterpret_borrow<py::tuple>(validated[py::int_(0)]);
-            kwargs_dict = py::reinterpret_borrow<py::dict>(validated[py::int_(1)]);
-            // Merge positional args into the kwargs dict by field order
-            py::ssize_t n = py::len(args_tuple);
-            for (py::ssize_t i = 0; i < n; ++i) {
-                if (i >= (py::ssize_t)field_names_.size()) break;
-                kwargs_dict[py::str(field_names_[static_cast<size_t>(i)])] =
-                    py::reinterpret_borrow<py::object>(args_tuple[i]);
+            py::object first = validated[py::int_(0)];
+            if (py::isinstance<py::dict>(first)) {
+                // Rust dataclass-args shape: (output_dict, post_init_kwargs)
+                kwargs_dict = first.cast<py::dict>();
+                post_init_kwargs = validated[py::int_(1)];
+            } else {
+                py::tuple args_tuple = first.cast<py::tuple>();
+                kwargs_dict = py::reinterpret_borrow<py::dict>(validated[py::int_(1)]);
+                // Merge positional args into the kwargs dict by field order
+                py::ssize_t n = py::len(args_tuple);
+                for (py::ssize_t i = 0; i < n; ++i) {
+                    if (i >= (py::ssize_t)field_names_.size()) break;
+                    kwargs_dict[py::str(field_names_[static_cast<size_t>(i)])] =
+                        py::reinterpret_borrow<py::object>(args_tuple[i]);
+                }
             }
         } else if (py::isinstance<py::dict>(validated)) {
             kwargs_dict = validated.cast<py::dict>();
@@ -1595,10 +1775,11 @@ public:
         }
 
         // Construct the instance when validating a dict input (nested
-        // dataclass fields, JSON input).  Top-level calls from the dataclass
-        // __init__ pass ArgsKwargs and rely on the binding's self_instance
-        // path to populate the instance, so return the fields dict there.
-        if (!input.is_args_kwargs() && !class_.is_none()) {
+        // dataclass fields, JSON input, revalidated instances).  Top-level
+        // calls from the dataclass __init__ pass ArgsKwargs and rely on the
+        // binding's self_instance path to populate the instance, so return
+        // the fields dict there.
+        if (!effective_input->is_args_kwargs() && !class_.is_none()) {
             py::object instance;
             try {
                 instance = class_.attr("__new__")(class_);
@@ -1610,11 +1791,20 @@ public:
             }
             auto setattr = py::module_::import("builtins").attr("object").attr("__setattr__");
             for (auto kv : kwargs_dict) {
+                if (!field_names_.empty() &&
+                    std::find(field_names_.begin(), field_names_.end(),
+                              py::str(kv.first).cast<std::string>()) == field_names_.end()) {
+                    continue;  // initvar — not an instance field (Rust)
+                }
                 setattr(instance, kv.first, kv.second);
             }
             if (post_init_) {
                 try {
-                    instance.attr("__post_init__")();
+                    if (!post_init_kwargs.is_none() && py::isinstance<py::tuple>(post_init_kwargs)) {
+                        instance.attr("__post_init__")(*post_init_kwargs.cast<py::tuple>());
+                    } else {
+                        instance.attr("__post_init__")();
+                    }
                 } catch (py::error_already_set& e) {
                     e.restore();
                     PyErr_Clear();
@@ -1625,21 +1815,30 @@ public:
             return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(instance));
         }
 
-        return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(kwargs_dict));
+        // Rust set_dict_call shape: the enclosing binding expects
+        // (output_dict, post_init_kwargs) for the self_instance path.
+        return ValResult<std::shared_ptr<void>>(
+            std::make_shared<py::object>(py::make_tuple(kwargs_dict, post_init_kwargs)));
     }
 
     std::string name() const override { return "dataclass"; }
+
+    const py::object& expected_class() const override { return class_; }
+    bool is_dataclass_validator() const override { return true; }
+    const std::vector<std::string>& dataclass_field_names() const { return field_names_; }
 
     void set_args_validator(std::shared_ptr<Validator> v) { args_validator_ = std::move(v); }
     void set_class(py::object c) { class_ = std::move(c); }
     void set_post_init(bool v) { post_init_ = v; }
     void set_field_names(std::vector<std::string> names) { field_names_ = std::move(names); }
+    void set_revalidate(RevalidateInstances r) { revalidate_ = r; }
 
 private:
     std::shared_ptr<Validator> args_validator_;
     py::object class_ = py::none();
     bool post_init_ = false;
     std::vector<std::string> field_names_;
+    RevalidateInstances revalidate_ = RevalidateInstances::Never;
 };
 
 } // namespace pydantic_core

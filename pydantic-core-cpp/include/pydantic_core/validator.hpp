@@ -100,6 +100,12 @@ public:
         return none;
     }
 
+    // True for the pydantic dataclass validator.  Used by function-after to
+    // materialize the caller's self_instance before running a
+    // model_validator(mode='after') over a dataclass (Rust materializes the
+    // instance before the after-callable runs).
+    virtual bool is_dataclass_validator() const { return false; }
+
     // For validators whose actual result type differs from name() (e.g. a
     // model whose inner is a function-after/wrap/plain validator producing a
     // py::object instead of model fields).  Returns "" when name() is accurate.

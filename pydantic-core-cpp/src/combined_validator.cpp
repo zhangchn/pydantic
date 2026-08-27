@@ -1231,32 +1231,58 @@ static std::shared_ptr<Validator> build_from_py_dict(
     }
 
     if (type == "str" || type == "string" || type == "str-constrained" || type == "constr-str") {
-        if (schema.contains("max_length") || schema.contains("min_length") ||
-            schema.contains("pattern") || schema.contains("strip_whitespace")) {
+        // Mirror Rust's schema_or_config: read constraint from the schema key,
+        // falling back to the config key (str_min_length, str_max_length,
+        // str_strip_whitespace, str_to_lower, str_to_upper).
+        auto cfg_int = [&](const char* cfg_key) -> std::optional<size_t> {
+            if (!config.contains(cfg_key)) return std::nullopt;
+            py::object val = config[cfg_key];
+            if (py::isinstance<py::int_>(val)) {
+                long long i = val.cast<long long>();
+                if (i >= 0) return static_cast<size_t>(i);
+            }
+            return std::nullopt;
+        };
+        auto cfg_bool = [&](const char* cfg_key) -> std::optional<bool> {
+            if (!config.contains(cfg_key)) return std::nullopt;
+            py::object val = config[cfg_key];
+            if (py::isinstance<py::bool_>(val)) return val.cast<bool>();
+            return std::nullopt;
+        };
+        auto sch_int = [&](const char* k) -> std::optional<size_t> {
+            if (!schema.contains(k)) return std::nullopt;
+            py::object val = schema[k];
+            if (py::isinstance<py::int_>(val)) {
+                long long i = val.cast<long long>();
+                if (i >= 0) return static_cast<size_t>(i);
+            }
+            return std::nullopt;
+        };
+        auto sch_bool = [&](const char* k) -> std::optional<bool> {
+            if (!schema.contains(k)) return std::nullopt;
+            py::object val = schema[k];
+            if (py::isinstance<py::bool_>(val)) return val.cast<bool>();
+            return std::nullopt;
+        };
+        std::optional<size_t> min_len = sch_int("min_length");
+        if (!min_len) min_len = cfg_int("str_min_length");
+        std::optional<size_t> max_len = sch_int("max_length");
+        if (!max_len) max_len = cfg_int("str_max_length");
+        std::optional<bool> strip_ws = sch_bool("strip_whitespace");
+        if (!strip_ws) strip_ws = cfg_bool("str_strip_whitespace");
+        std::optional<bool> to_lower = sch_bool("to_lower");
+        if (!to_lower) to_lower = cfg_bool("str_to_lower");
+        std::optional<bool> to_upper = sch_bool("to_upper");
+        if (!to_upper) to_upper = cfg_bool("str_to_upper");
+        bool has_pattern = schema.contains("pattern") && py::isinstance<py::str>(schema["pattern"]);
+        if (min_len || max_len || has_pattern || strip_ws || to_lower || to_upper) {
             auto v = std::make_shared<StrConstrainedValidator>();
-            auto ps = [&](const char* k) -> std::optional<size_t> {
-                if (!schema.contains(k)) return std::nullopt;
-                py::object val = schema[k];
-                if (py::isinstance<py::int_>(val)) {
-                    long long i = val.cast<long long>();
-                    if (i >= 0) return static_cast<size_t>(i);
-                }
-                return std::nullopt;
-            };
-            if (auto mv = ps("min_length")) v->min_length = *mv;
-            if (auto mv = ps("max_length")) v->max_length = *mv;
-            if (schema.contains("pattern") && py::isinstance<py::str>(schema["pattern"])) {
-                v->pattern = schema["pattern"].cast<std::string>();
-            }
-            if (schema.contains("strip_whitespace") && py::isinstance<py::bool_>(schema["strip_whitespace"])) {
-                v->strip_whitespace = schema["strip_whitespace"].cast<bool>();
-            }
-            if (schema.contains("to_lower") && py::isinstance<py::bool_>(schema["to_lower"])) {
-                v->to_lower = schema["to_lower"].cast<bool>();
-            }
-            if (schema.contains("to_upper") && py::isinstance<py::bool_>(schema["to_upper"])) {
-                v->to_upper = schema["to_upper"].cast<bool>();
-            }
+            if (min_len) v->min_length = min_len;
+            if (max_len) v->max_length = max_len;
+            if (has_pattern) v->pattern = schema["pattern"].cast<std::string>();
+            if (strip_ws) v->strip_whitespace = *strip_ws;
+            if (to_lower) v->to_lower = *to_lower;
+            if (to_upper) v->to_upper = *to_upper;
             return v;
         }
         auto v = std::make_shared<StringValidator>();
@@ -1435,6 +1461,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
         std::shared_ptr<void> default_val;
         std::string default_val_str;
         std::string default_type;
+        py::object callable_default;
         if (schema.contains("default")) {
             auto py_default = schema["default"];
             if (py::isinstance<py::str>(py_default)) {
@@ -1450,11 +1477,21 @@ static std::shared_ptr<Validator> build_from_py_dict(
                 default_val = std::make_shared<bool>(py_default.cast<bool>());
                 default_type = "bool";
             } else if (!py_default.is_none()) {
-                // Complex default (list, dict) — serialize to JSON string for later parsing
-                default_val_str = py_default_to_json_str(py_default);
+                if (py::hasattr(py_default, "__call__") &&
+                    !py::isinstance<py::list>(py_default) && !py::isinstance<py::dict>(py_default)) {
+                    // Callable default (e.g. a function) — keep as a live Python
+                    // object; JSON-serializing it would collapse it to {}.
+                    callable_default = py_default;
+                } else {
+                    // Complex default (list, dict) — serialize to JSON string for later parsing
+                    default_val_str = py_default_to_json_str(py_default);
+                }
             }
         }
         auto wd = std::make_shared<WithDefaultValidator>(inner, default_val, default_val_str);
+        if (callable_default.ptr()) {
+            wd->set_default_py_obj(std::move(callable_default));
+        }
         if (!default_type.empty()) {
             wd->set_default_type(default_type);
         }
@@ -2130,8 +2167,37 @@ static std::shared_ptr<Validator> build_from_py_dict(
                 auto f = item.cast<py::dict>();
                 ArgumentsValidator::Parameter p;
                 p.name = py_str(f, "name");
-                bool kw_only = f.contains("kw_only") && py::isinstance<py::bool_>(f["kw_only"]) &&
-                               f["kw_only"].cast<bool>();
+                if (f.contains("init") && py::isinstance<py::bool_>(f["init"])) {
+                    p.init = f["init"].cast<bool>();
+                }
+                if (f.contains("init_only") && py::isinstance<py::bool_>(f["init_only"])) {
+                    p.init_only = f["init_only"].cast<bool>();
+                }
+                // validation_alias: plain string, or AliasChoices as a nested
+                // list of strings. Lookup uses the alias first, then the name.
+                if (f.contains("validation_alias") && !f["validation_alias"].is_none()) {
+                    py::object alias = f["validation_alias"];
+                    if (py::isinstance<py::str>(alias)) {
+                        p.validation_aliases.push_back(alias.cast<std::string>());
+                    } else if (py::isinstance<py::list>(alias)) {
+                        for (auto choice : alias.cast<py::list>()) {
+                            if (py::isinstance<py::str>(choice)) {
+                                p.validation_aliases.push_back(choice.cast<std::string>());
+                            } else if (py::isinstance<py::list>(choice)) {
+                                for (auto inner : choice.cast<py::list>()) {
+                                    p.validation_aliases.push_back(py::str(inner).cast<std::string>());
+                                }
+                            }
+                        }
+                    }
+                }
+                // Rust: `kw_only.unwrap_or(true)` — missing/None means
+                // kw_only; only an explicit false is positional.
+                bool kw_only = true;
+                if (f.contains("kw_only") && !f["kw_only"].is_none() &&
+                    py::isinstance<py::bool_>(f["kw_only"])) {
+                    kw_only = f["kw_only"].cast<bool>();
+                }
                 p.positional = !kw_only;
                 p.positional_only = false;
                 if (f.contains("schema")) {
@@ -2148,6 +2214,10 @@ static std::shared_ptr<Validator> build_from_py_dict(
                 py_str(config, "extra_behavior", py_str(config, "extra", "ignore"))));
         v->extra = extra_behavior_from_string(extra_str);
         v->dataclass_mode = true;
+        v->dataclass_name_ = py_str(schema, "dataclass_name", "");
+        if (schema.contains("collect_init_only") && py::isinstance<py::bool_>(schema["collect_init_only"])) {
+            v->collect_init_only_ = schema["collect_init_only"].cast<bool>();
+        }
         return v;
     }
 
@@ -2174,6 +2244,19 @@ static std::shared_ptr<Validator> build_from_py_dict(
                 names.push_back(py::str(f).cast<std::string>());
             }
             v->set_field_names(std::move(names));
+        }
+        // revalidate_instances (Rust `schema_or_config_same`): "always",
+        // "subclass-instances", or "never" (default).
+        {
+            std::string rv;
+            if (schema.contains("revalidate_instances") && py::isinstance<py::str>(schema["revalidate_instances"])) {
+                rv = schema["revalidate_instances"].cast<std::string>();
+            } else if (inner_config.contains("revalidate_instances") &&
+                       py::isinstance<py::str>(inner_config["revalidate_instances"])) {
+                rv = inner_config["revalidate_instances"].cast<std::string>();
+            }
+            if (rv == "always") v->set_revalidate(RevalidateInstances::Always);
+            else if (rv == "subclass-instances") v->set_revalidate(RevalidateInstances::SubclassInstances);
         }
         return v;
     }

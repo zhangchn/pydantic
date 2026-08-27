@@ -315,13 +315,15 @@ ValResult<ValMatch<EitherString>> PythonInput::validate_str(bool strict, bool co
             }
         }
 
-        if (coerce_numbers && (is_int() || is_float())) {
-            return ValMatch<EitherString>::lax(EitherString(py::str(obj_).cast<std::string>()));
+        // Rust: a plain `str` field accepts only str/bytes/bytearray (it
+        // does NOT coerce int/float/bool/Decimal — `hash: str` with `1`
+        // raises string_type). Number coercion is opt-in via
+        // coerce_numbers_to_str (constrained-str).
+        if (coerce_numbers && (is_int() || is_float() || is_decimal())) {
+            try {
+                return ValMatch<EitherString>::lax(EitherString(py::str(obj_).cast<std::string>()));
+            } catch (...) {}
         }
-
-        try {
-            return ValMatch<EitherString>::lax(EitherString(as_str()));
-        } catch (...) {}
     }
 
     return type_error(ErrorType::Kind::StringType, *this, this->current_location());
@@ -673,61 +675,106 @@ ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> PythonInput::validate_tuple
 // ISO 8601 parsing helpers
 // ============================================================================
 
-/// Try to parse an ISO 8601 datetime string: YYYY-MM-DDTHH:MM:SS[.ffffff][±HH:MM|Z]
+// Parse up to `max_digits` decimal digits starting at `pos`.
+// Advances `pos` and sets `out`. Returns false if no digit was consumed.
+static bool parse_int_field(const std::string& s, size_t& pos, int max_digits, int& out) {
+    if (pos >= s.size() || !std::isdigit(static_cast<unsigned char>(s[pos]))) return false;
+    int val = 0;
+    int digits = 0;
+    while (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos])) && digits < max_digits) {
+        val = val * 10 + (s[pos] - '0');
+        pos++;
+        digits++;
+    }
+    out = val;
+    return true;
+}
+
+/// Parse an ISO 8601 datetime string (speedate-compatible subset).
+/// Accepts:
+///   YYYY-MM-DD
+///   YYYY-MM-DD<T|space>HH:MM[:SS[.ffffff]][Z|±HH[:MM[:SS]]]
+/// Seconds and the time component are optional (matching speedate/Rust).
 static std::optional<DateTime> try_parse_iso8601(const std::string& s) {
-    try {
-        if (s.size() < 19) return std::nullopt;
-        // Must have YYYY-MM-DDTHH:MM:SS format
-        if (s[4] != '-' || s[7] != '-' || s[10] != 'T' || s[13] != ':' || s[16] != ':') {
-            return std::nullopt;
-        }
-        int year = std::stoi(s.substr(0, 4));
-        int month = std::stoi(s.substr(5, 2));
-        int day = std::stoi(s.substr(8, 2));
-        int hour = std::stoi(s.substr(11, 2));
-        int minute = std::stoi(s.substr(14, 2));
-        int second = std::stoi(s.substr(17, 2));
+    size_t pos = 0;
+    // Optional leading '+' (speedate allows it)
+    if (pos < s.size() && s[pos] == '+') pos++;
 
-        int microsecond = 0;
-        size_t pos = 19;
+    int year, month, day;
+    if (!parse_int_field(s, pos, 4, year)) return std::nullopt;
+    if (pos >= s.size() || s[pos] != '-') return std::nullopt;
+    pos++;
+    if (!parse_int_field(s, pos, 2, month)) return std::nullopt;
+    if (pos >= s.size() || s[pos] != '-') return std::nullopt;
+    pos++;
+    if (!parse_int_field(s, pos, 2, day)) return std::nullopt;
 
-        // Parse optional fractional seconds
-        if (pos < s.size() && s[pos] == '.') {
-            std::string frac;
+    if (month < 1 || month > 12 || day < 1 || day > 31) return std::nullopt;
+
+    int hour = 0, minute = 0, second = 0, microsecond = 0;
+    std::optional<int> tz_offset;
+
+    if (pos < s.size()) {
+        // Date/time separator: T, t, or space
+        char sep = s[pos];
+        if (sep != 'T' && sep != 't' && sep != ' ') return std::nullopt;
+        pos++;
+        if (!parse_int_field(s, pos, 2, hour)) return std::nullopt;
+        if (pos >= s.size() || s[pos] != ':') return std::nullopt;
+        pos++;
+        if (!parse_int_field(s, pos, 2, minute)) return std::nullopt;
+        if (hour > 23 || minute > 59) return std::nullopt;
+
+        if (pos < s.size() && s[pos] == ':') {
             pos++;
-            while (pos < s.size() && std::isdigit(s[pos])) {
-                frac += s[pos];
+            if (!parse_int_field(s, pos, 2, second)) return std::nullopt;
+            if (second > 59) return std::nullopt;
+            // Optional fractional seconds
+            if (pos < s.size() && s[pos] == '.') {
                 pos++;
-            }
-            // Pad or truncate to 6 digits for microseconds
-            if (frac.size() > 6) frac = frac.substr(0, 6);
-            while (frac.size() < 6) frac += '0';
-            if (!frac.empty()) {
+                std::string frac;
+                while (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos]))) {
+                    frac += s[pos];
+                    pos++;
+                }
+                if (frac.empty()) return std::nullopt;
+                if (frac.size() > 6) frac = frac.substr(0, 6);
+                while (frac.size() < 6) frac += '0';
                 microsecond = std::stoi(frac);
             }
         }
 
-        // Parse optional timezone offset
-        std::optional<int> tz_offset;
+        // Optional timezone
         if (pos < s.size()) {
-            if (s[pos] == 'Z') {
+            char c = s[pos];
+            if (c == 'Z' || c == 'z') {
                 tz_offset = 0;
-            } else if (s[pos] == '+' || s[pos] == '-') {
-                char sign = s[pos];
+            } else if (c == '+' || c == '-') {
+                char sign = c;
                 pos++;
-                if (pos + 4 < s.size() && s[pos + 2] == ':') {
-                    int tz_hour = std::stoi(s.substr(pos, 2));
-                    int tz_min = std::stoi(s.substr(pos + 3, 2));
-                    int offset = tz_hour * 60 + tz_min;
-                    tz_offset = (sign == '-') ? -offset : offset;
+                int tzh, tzm = 0, tzs = 0;
+                if (!parse_int_field(s, pos, 2, tzh)) return std::nullopt;
+                if (pos < s.size() && s[pos] == ':') pos++;
+                if (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos]))) {
+                    if (!parse_int_field(s, pos, 2, tzm)) return std::nullopt;
+                    if (pos < s.size() && s[pos] == ':') {
+                        pos++;
+                        if (!parse_int_field(s, pos, 2, tzs)) return std::nullopt;
+                    }
                 }
+                // C++ convention: tz_offset is in MINUTES (consumers build
+                // timedelta(minutes=...)), matching the rest of this codebase.
+                int offset = tzh * 60 + tzm + tzs / 60;
+                tz_offset = (sign == '-') ? -offset : offset;
+            } else {
+                return std::nullopt;
             }
         }
-
-        return DateTime{Date{year, month, day}, Time{hour, minute, second, microsecond, tz_offset}};
-    } catch (...) {
-        return std::nullopt;
     }
+
+    if (pos != s.size()) return std::nullopt;
+
+    return DateTime{Date{year, month, day}, Time{hour, minute, second, microsecond, tz_offset}};
 }
 
 // ============================================================================

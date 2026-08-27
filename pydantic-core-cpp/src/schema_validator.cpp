@@ -365,6 +365,38 @@ std::string SchemaValidator::validate_assignment(const std::string& obj_json,
 }
 
 // NEW: Native Python object validate_assignment (no JSON round-trip)
+// Gather an instance's data into a dict, whether it lives in __dict__
+// (regular models/dataclasses) or in __slots__ (slots dataclasses).
+static py::dict collect_instance_data(const py::object& obj) {
+    py::dict result;
+    if (py::isinstance<py::dict>(obj)) {
+        return obj.cast<py::dict>();
+    }
+    if (py::hasattr(obj, "__dict__")) {
+        py::object d = obj.attr("__dict__");
+        if (py::isinstance<py::dict>(d)) {
+            for (auto item : d.cast<py::dict>()) {
+                result[item.first] = item.second;
+            }
+            return result;
+        }
+    }
+    // Slots dataclass: no __dict__; collect data slots (skip dunders).
+    if (py::hasattr(obj, "__slots__")) {
+        py::object slots_obj = obj.attr("__slots__");
+        if (py::isinstance<py::tuple>(slots_obj)) {
+            for (auto s : slots_obj.cast<py::tuple>()) {
+                std::string name = s.cast<std::string>();
+                if (name.rfind("__", 0) == 0) continue;
+                if (py::hasattr(obj, name.c_str())) {
+                    result[py::str(name)] = obj.attr(name.c_str());
+                }
+            }
+        }
+    }
+    return result;
+}
+
 py::object SchemaValidator::validate_assignment_object(const py::object& obj,
                                                        const std::string& field_name,
                                                        const py::object& field_value) {
@@ -483,14 +515,7 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
         }
 
         // Extra fields are allowed - validate and set
-        py::dict input_dict;
-        if (py::isinstance<py::dict>(obj)) {
-            input_dict = obj.cast<py::dict>();
-        } else if (py::hasattr(obj, "__dict__")) {
-            input_dict = obj.attr("__dict__").cast<py::dict>();
-        } else {
-            throw std::runtime_error("validate_assignment: object is not a dict or model");
-        }
+        py::dict input_dict = collect_instance_data(obj);
 
         py::dict updated_dict;
         for (auto item : input_dict) {
@@ -542,14 +567,7 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
     }
 
     // Field exists - validate and set it
-    py::dict input_dict;
-    if (py::isinstance<py::dict>(obj)) {
-        input_dict = obj.cast<py::dict>();
-    } else if (py::hasattr(obj, "__dict__")) {
-        input_dict = obj.attr("__dict__").cast<py::dict>();
-    } else {
-        throw std::runtime_error("validate_assignment: object is not a dict or model");
-    }
+    py::dict input_dict = collect_instance_data(obj);
 
     py::dict updated_dict;
     for (auto item : input_dict) {

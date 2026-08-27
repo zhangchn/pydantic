@@ -282,7 +282,7 @@ std::string ErrorType::message_template() const {
         {Kind::IsSubclassType, "Input should be a subclass of {class}"},
         {Kind::CallableType, "Input should be callable"},
         {Kind::ModelType, "Input should be a valid dictionary or instance of {class_name}"},
-        {Kind::DataclassType, "Input should be a valid dictionary or instance of {class_name}"},
+        {Kind::DataclassType, "Input should be a dictionary or an instance of {class_name}"},
     };
     auto it = templates.find(kind_);
     return it != templates.end() ? it->second : "Validation error";

@@ -120,33 +120,55 @@ def _errors_with_include_url(self, *args, include_url: bool = True, **kwargs):
             raw_input = getattr(_main, '_last_raw_input', None)
             if raw_input is not None:
                 for i, err in enumerate(result):
+                    cur = err.get('input')
+                    # Only restore the raw object when the C++ stored an
+                    # unparseable string repr. If _parse_input already
+                    # reconstructed a real object (ArgsKwargs, dict, None,
+                    # int, ...), keep it — it is the authoritative input.
+                    if not isinstance(cur, str):
+                        continue
                     loc = err.get('loc', ())
                     if isinstance(loc, tuple) and len(loc) > 0:
                         val = _lookup_value_by_loc(raw_input, loc)
-                        if val is not None:
+                        if val is not _LOC_NOT_FOUND:
                             result[i]['input'] = val
-                    elif len(loc) == 0:
+                        elif cur == repr(raw_input):
+                            result[i]['input'] = raw_input
+                    else:
                         # Top-level error: use the raw input itself
-                        result[i]['input'] = raw_input
+                        if cur == repr(raw_input):
+                            result[i]['input'] = raw_input
     if not include_url:
         for err in result:
             err.pop("url", None)
     return result
 
 
+# Sentinel for "location not found" (distinct from a stored value of None).
+_LOC_NOT_FOUND = object()
+
+
 def _lookup_value_by_loc(obj, loc):
-    """Recursively look up a value in a dict/tuple by location path.
+    """Recursively look up a value in a dict/tuple/ArgsKwargs by location path.
     
     E.g. obj={'t': ArbitraryType()}, loc=('t',) → ArbitraryType()
+    Returns _LOC_NOT_FOUND when the path does not resolve.
     """
     current = obj
     for key in loc:
-        if isinstance(current, dict) and key in current:
+        if isinstance(current, ArgsKwargs):
+            if isinstance(key, int) and key < len(current.args):
+                current = current.args[key]
+            elif key in current.kwargs:
+                current = current.kwargs[key]
+            else:
+                return _LOC_NOT_FOUND
+        elif isinstance(current, dict) and key in current:
             current = current[key]
         elif isinstance(current, (list, tuple)) and isinstance(key, int):
             current = current[key]
         else:
-            return None
+            return _LOC_NOT_FOUND
     return current
 
 
@@ -166,10 +188,15 @@ def _parse_input(raw: str):
                 return ArgsKwargs(inner)
         except Exception:
             pass
+    # A value with surrounding whitespace is necessarily a string (a canonical
+    # numeric/bool/None literal has none), so keep it as a string rather than
+    # risk ast.literal_eval coercing it (e.g. " 1 " -> 1).
+    if s != raw:
+        return raw
     try:
-        return _ast.literal_eval(s)
+        return _ast.literal_eval(raw)
     except Exception:
-        return s
+        return raw
 
 
 # C++ message -> Rust-compatible message mapping
@@ -1257,23 +1284,48 @@ class SchemaValidator:
 
         elif self_instance is not None:
             # self_instance was provided and C++ returned it.
-            # Recursively convert nested dicts in __dict__ to model instances
-            saved_defaults = self_instance.__dict__.pop('__pydantic_defaults__', None)
-            processed = self._dict_to_model(dict(self_instance.__dict__), call_post_init=False)
-            if isinstance(processed, dict):
-                self_instance.__dict__.clear()
-                self_instance.__dict__.update(processed)
+            # Recursively convert nested dicts in the instance data to model
+            # instances. Slots dataclasses have no __dict__; their data lives
+            # in slots, so gather the data from whichever container is present.
+            has_dict = hasattr(self_instance, '__dict__')
+            if has_dict:
+                saved_defaults = self_instance.__dict__.pop('__pydantic_defaults__', None)
+                data = dict(self_instance.__dict__)
             else:
-                # _dict_to_model returned a model instance - copy its __dict__
-                if hasattr(processed, '__dict__'):
+                saved_defaults = None
+                slots = tuple(getattr(type(self_instance), '__slots__', ()))
+                data = {}
+                for s in slots:
+                    if s.startswith('__'):
+                        continue
+                    if hasattr(self_instance, s):
+                        data[s] = getattr(self_instance, s)
+            processed = self._dict_to_model(data, call_post_init=False)
+            if isinstance(processed, dict):
+                if has_dict:
                     self_instance.__dict__.clear()
-                    self_instance.__dict__.update(processed.__dict__)
+                    self_instance.__dict__.update(processed)
+                else:
+                    for k, v in processed.items():
+                        if k in data:
+                            object.__setattr__(self_instance, k, v)
+            else:
+                # _dict_to_model returned a model instance - copy its data
+                if has_dict:
+                    if hasattr(processed, '__dict__'):
+                        self_instance.__dict__.clear()
+                        self_instance.__dict__.update(processed.__dict__)
+                else:
+                    for k in data:
+                        pv = getattr(processed, k, None)
+                        if pv is not None:
+                            object.__setattr__(self_instance, k, pv)
                 # NOTE: __pydantic_private__/__pydantic_extra__/__pydantic_fields_set__
                 # are slot attributes already set by the C++ binding; do NOT copy
                 # them from `processed` (a freshly built instance would clobber
                 # C++-populated extras/fields_set with None/default values).
             # Restore __pydantic_defaults__ saved before _dict_to_model
-            if saved_defaults is not None:
+            if saved_defaults is not None and has_dict:
                 self_instance.__dict__['__pydantic_defaults__'] = saved_defaults
 
             # Convert extra field values set by C++ (they live on the instance,

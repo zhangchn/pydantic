@@ -5,6 +5,7 @@
 #include <memory>
 #include <stdexcept>
 #include <unordered_set>
+#include <set>
 #include <cstdio>
 
 #include "pydantic_core/errors.hpp"
@@ -30,6 +31,61 @@ struct PySerializationInfo {
     PySerializationInfo(bool round_trip_, std::string mode_ = "python", std::string field_name_ = "", py::object context_ = py::none()) 
         : round_trip(round_trip_), mode(std::move(mode_)), field_name(std::move(field_name_)), context(std::move(context_)) {}
 };
+
+// Runtime polymorphic-serialization flag for the current top-level
+// to_python/to_json call (mirrors Rust SerializationExtra::polymorphic_serialization).
+static thread_local std::optional<bool> g_polymorphic_serialization{};
+// Recursion guard for the polymorphism trampoline.
+static thread_local int g_trampoline_depth = 0;
+
+// Polymorphism trampoline (mirrors Rust's PolymorphismTrampoline): when
+// polymorphic serialization is enabled (runtime kwarg or schema config) and
+// `value` is a strict subclass of `cls` carrying its own
+// __pydantic_serializer__, return that serializer's output instead.
+static bool try_polymorphic_trampoline(const py::object& value, const py::object& cls,
+                                       bool enabled,
+                                       bool want_json, bool ensure_ascii,
+                                       const py::object& include, const py::object& exclude,
+                                       bool by_alias, bool exclude_unset, bool exclude_defaults,
+                                       bool exc_none, bool round_trip,
+                                       std::optional<py::object>* out) {
+    if (!enabled) return false;
+    if (g_trampoline_depth >= 8) return false;
+    if (!cls.ptr() || cls.is_none()) return false;
+    try {
+        if (py::type::of(value).equal(cls) || !py::hasattr(value, "__pydantic_serializer__")) {
+            return false;
+        }
+        ++g_trampoline_depth;
+        struct DepthGuard { ~DepthGuard() { --g_trampoline_depth; } } guard;
+        py::object sub_ser = py::getattr(value, "__pydantic_serializer__");
+        py::dict kw;
+        kw["include"] = include;
+        kw["exclude"] = exclude;
+        kw["by_alias"] = by_alias;
+        kw["exclude_unset"] = exclude_unset;
+        kw["exclude_defaults"] = exclude_defaults;
+        kw["exclude_none"] = exc_none;
+        kw["round_trip"] = round_trip;
+        if (g_polymorphic_serialization.has_value()) {
+            kw["polymorphic_serialization"] = *g_polymorphic_serialization;
+        }
+        py::object res;
+        if (want_json) {
+            kw["ensure_ascii"] = ensure_ascii;
+            res = sub_ser.attr("to_json")(value, **kw);
+        } else {
+            res = sub_ser.attr("to_python")(value, **kw);
+        }
+        *out = res;
+        return true;
+        return true;
+    } catch (py::error_already_set&) {
+        throw;
+    } catch (...) {
+        return false;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Helper: convert a py::object to JSON string
@@ -392,6 +448,19 @@ static SerFilterResult apply_ser_filter(const py::object& key, const py::object&
     return out;
 }
 
+// Thread-local recursion guard mirroring Rust's RecursionState
+// (recursion_guard.rs): re-entering the same (object, definition node)
+// pair is a cycle; depth over the limit is too deep.  Both surface as
+// ValueError in Rust (serializers/extra.rs).
+struct SerRecursionState {
+    std::set<std::pair<const void*, const void*>> active;
+    size_t depth = 0;
+    static SerRecursionState& get() {
+        static thread_local SerRecursionState s;
+        return s;
+    }
+};
+
 struct SerNode {
     std::string type;
     std::vector<SerRef> children;
@@ -423,6 +492,8 @@ struct SerNode {
     bool root_model = false;
     // For model/dataclass serializers: expected Python class (union discrimination)
     py::object class_;
+    // Polymorphic serialization enabled via schema config (Rust enabled_from_config)
+    bool polymorphic_from_config = false;
     // For inf/nan serialization mode: "constants" (default) or "strings"
     std::string inf_nan_mode = "constants";
     // For bytes serialization: "utf8" (default), "base64", or "hex"
@@ -450,6 +521,7 @@ struct SerNode {
         format_str = other.format_str;
         root_model = other.root_model;
         class_ = other.class_;
+        polymorphic_from_config = other.polymorphic_from_config;
         inf_nan_mode = other.inf_nan_mode;
         ser_json_bytes = other.ser_json_bytes;
         ser_json_timedelta = other.ser_json_timedelta;
@@ -463,6 +535,26 @@ struct SerNode {
                          bool exclude_defaults = false,
                          const py::object& context = py::none()) const {
         // Type-specific logic
+        // definition-ref: apply the recursion guard (Rust definitions.rs:
+        // state.recursion_guard(value, definition.id())), then delegate.
+        if (type == "definition-ref" && !children.empty()) {
+            auto& g = SerRecursionState::get();
+            auto pair = std::make_pair(value.ptr(), children[0].get());
+            if (!g.active.insert(pair).second) {
+                throw py::value_error("Circular reference detected (id repeated)");
+            }
+            ++g.depth;
+            if (g.depth > 255) {
+                --g.depth;
+                g.active.erase(pair);
+                throw py::value_error("Circular reference detected (depth exceeded)");
+            }
+            struct GuardPop {
+                SerRecursionState* g; std::pair<const void*, const void*> pair;
+                ~GuardPop() { --g->depth; g->active.erase(pair); }
+            } pop{&g, pair};
+            return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
+        }
         if (type == "lax-or-strict") {
             if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
         }
@@ -533,6 +625,22 @@ struct SerNode {
         }
         if (!fields.empty()) {
             return serialize_fields(value, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context, json_mode);
+        }
+        // Polymorphism trampoline (Rust PolymorphismTrampoline): a strict
+        // subclass instance with its own __pydantic_serializer__ is serialized
+        // through that serializer when enabled. Applies to model/dataclass
+        // nodes and to function wrappers around them (model_serializer etc.).
+        if (class_.ptr() && !class_.is_none() &&
+            (type == "model" || type == "dataclass" || type == "function-plain" ||
+             type == "function-after" || type == "function-before" || type == "function-wrap")) {
+            std::optional<py::object> poly_out;
+            if (try_polymorphic_trampoline(value, class_,
+                                           g_polymorphic_serialization.value_or(polymorphic_from_config),
+                                           false, false, include, exclude,
+                                           by_alias, exclude_unset, exclude_defaults,
+                                           exc_none, round_trip, &poly_out) && poly_out) {
+                return *poly_out;
+            }
         }
         // Delegate model/dataclass/typed-dict to inner serializer
         if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
@@ -784,6 +892,25 @@ struct SerNode {
                          bool exclude_defaults = false,
                          bool exc_none = false,
                          const py::object& context = py::none()) const {
+        // definition-ref: recursion guard (Rust definitions.rs), then delegate.
+        if (type == "definition-ref" && !children.empty()) {
+            auto& g = SerRecursionState::get();
+            auto pair = std::make_pair(value.ptr(), children[0].get());
+            if (!g.active.insert(pair).second) {
+                throw py::value_error("Circular reference detected (id repeated)");
+            }
+            ++g.depth;
+            if (g.depth > 255) {
+                --g.depth;
+                g.active.erase(pair);
+                throw py::value_error("Circular reference detected (depth exceeded)");
+            }
+            struct GuardPop {
+                SerRecursionState* g; std::pair<const void*, const void*> pair;
+                ~GuardPop() { --g->depth; g->active.erase(pair); }
+            } pop{&g, pair};
+            return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
+        }
         if (type == "lax-or-strict") {
             if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
         }
@@ -1006,6 +1133,19 @@ struct SerNode {
         }
         if (!fields.empty()) {
             return serialize_fields_json(value, ensure_ascii, indent, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
+        }
+        // Polymorphism trampoline (Rust PolymorphismTrampoline), json mode.
+        if (class_.ptr() && !class_.is_none() &&
+            (type == "model" || type == "dataclass" || type == "function-plain" ||
+             type == "function-after" || type == "function-before" || type == "function-wrap")) {
+            std::optional<py::object> poly_out;
+            if (try_polymorphic_trampoline(value, class_,
+                                           g_polymorphic_serialization.value_or(polymorphic_from_config),
+                                           true, ensure_ascii, include, exclude,
+                                           by_alias, exclude_unset, exclude_defaults,
+                                           exc_none, round_trip, &poly_out) && poly_out) {
+                return poly_out->cast<std::string>();
+            }
         }
         // Delegate model/dataclass/typed-dict to inner serializer
         if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
@@ -1839,7 +1979,12 @@ static SerRef build_ser_impl(const py::dict& schema,
                     wrapped->children.push_back(it->second);
                     return wrapped;
                 }
-                return it->second;  // Return stub (will be populated)
+                // Wrap in a definition-ref node so the recursion guard
+                // (Rust definitions.rs) can detect reference cycles.
+                auto wrapper = std::make_shared<SerNode>();
+                wrapper->type = "definition-ref";
+                wrapper->children.push_back(it->second);  // stub (will be populated)
+                return wrapper;
             }
         } catch (...) {}
         return node;
@@ -1976,10 +2121,24 @@ static SerRef build_ser_impl(const py::dict& schema,
     if (type == "model-fields" || type == "typed-dict" || type == "dataclass-args") {
         try {
             if (schema.contains("fields")) {
-                auto fields_dict = schema["fields"].cast<py::dict>();
-                for (auto item : fields_dict) {
-                    std::string k = py::str(item.first).cast<std::string>();
-                    auto fdef = item.second.cast<py::dict>();
+                // Normalize to (name, fielddef) pairs: model-fields/typed-dict
+                // use a dict, while dataclass-args uses a list of
+                // {'name': ..., 'schema': ...} dicts.
+                std::vector<std::pair<std::string, py::dict>> field_defs;
+                py::object fields_obj = schema["fields"];
+                if (py::isinstance<py::dict>(fields_obj)) {
+                    for (auto item : fields_obj.cast<py::dict>()) {
+                        field_defs.emplace_back(py::str(item.first).cast<std::string>(), item.second.cast<py::dict>());
+                    }
+                } else if (!fields_obj.is_none()) {
+                    for (auto item : py::reinterpret_borrow<py::iterable>(fields_obj)) {
+                        auto f = py::reinterpret_borrow<py::dict>(item);
+                        std::string name;
+                        if (f.contains("name")) name = f["name"].cast<std::string>();
+                        field_defs.emplace_back(std::move(name), f);
+                    }
+                }
+                for (auto& [k, fdef] : field_defs) {
                     // Handle both formats:
                     // 1. {'schema': {'type': 'str'}} - pydantic-core format
                     // 2. {'type': 'str'} - simplified format
@@ -2062,6 +2221,23 @@ static SerRef build_ser_impl(const py::dict& schema,
         }
     }
 
+    // When a model/dataclass schema carries a "serialization" function
+    // override, the top-level node is the function wrapper; propagate the
+    // underlying model/dataclass identity so the polymorphism trampoline can
+    // apply (mirrors Rust's PolymorphismTrampoline wrapping the whole model
+    // serializer, function serializer included).
+    if ((original_type == "model" || original_type == "dataclass") && has_ser_dict) {
+        if (!node->class_.ptr() || node->class_.is_none()) {
+            try {
+                if (schema.contains("cls")) {
+                    node->class_ = schema["cls"].cast<py::object>();
+                } else if (!node->children.empty() && node->children[0]) {
+                    node->class_ = node->children[0]->class_;
+                }
+            } catch (...) {}
+        }
+    }
+
     // Extract config options and propagate to all descendants
     if (schema.contains("config")) {
         try {
@@ -2079,6 +2255,9 @@ static SerRef build_ser_impl(const py::dict& schema,
                 }
                 if (config.contains("ser_json_timedelta")) {
                     n->ser_json_timedelta = config["ser_json_timedelta"].cast<std::string>();
+                }
+                if (config.contains("polymorphic_serialization")) {
+                    try { n->polymorphic_from_config = config["polymorphic_serialization"].cast<bool>(); } catch (...) {}
                 }
                 for (auto& child : n->children) set_config(child);
                 for (auto& [k, v] : n->fields) set_config(v);
@@ -2116,7 +2295,8 @@ public:
                          std::optional<py::object> include, std::optional<py::object> exclude,
                          std::optional<bool> by_alias, bool exclude_unset, bool exclude_defaults, bool exc_none,
                          bool, bool round_trip, py::object, std::optional<py::object>,
-                         bool, std::optional<bool>, py::object context) const {
+                         bool, std::optional<bool> polymorphic, py::object context) const {
+        g_polymorphic_serialization = polymorphic;  // reset per call (None -> nullopt)
         if (!ser_) throw std::runtime_error("Serializer not initialized");
 
         // Pass include/exclude through as-is (nested dict/set filters supported)
@@ -2131,7 +2311,8 @@ public:
                       std::optional<py::object> include, std::optional<py::object> exclude,
                       std::optional<bool> by_alias, bool exclude_unset, bool exclude_defaults, bool exc_none,
                       bool, bool round_trip, py::object, std::optional<py::object>,
-                      bool, std::optional<bool>, py::object context) const {
+                      bool, std::optional<bool> polymorphic, py::object context) const {
+        g_polymorphic_serialization = polymorphic;  // reset per call (None -> nullopt)
         if (!ser_) throw std::runtime_error("Serializer not initialized");
 
         // Pass include/exclude through as-is (nested dict/set filters supported)
@@ -2320,7 +2501,11 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
         .def_readonly("round_trip", &PySerializationInfo::round_trip)
         .def_readonly("mode", &PySerializationInfo::mode)
         .def_readonly("field_name", &PySerializationInfo::field_name)
-        .def_readonly("context", &PySerializationInfo::context);
+        .def_readonly("context", &PySerializationInfo::context)
+        .def_property_readonly("polymorphic_serialization", [](const PySerializationInfo&) -> py::object {
+            if (g_polymorphic_serialization.has_value()) return py::object(py::bool_(*g_polymorphic_serialization));
+            return py::none();
+        });
 
     // Register ValidationError as a proper Python exception (inherits from ValueError like Rust)
     py::register_exception<ValidationError>(m, "ValidationError", PyExc_ValueError);
@@ -2349,7 +2534,7 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             }, py::is_method(ve_cls))
         );
         py::setattr(ve_cls, "errors",
-            py::cpp_function([](py::object self) -> py::list {
+            py::cpp_function([](py::object self, bool include_url) -> py::list {
                 const ValidationError* ve = py::cast<const ValidationError*>(self.ptr());
                 if (ve == nullptr) {
                     throw std::runtime_error("Unable to access ValidationError");
@@ -2392,10 +2577,25 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                     } else
 #endif
                     {
-                        // Fallback: parse string repr via ast.literal_eval
-                        try {
-                            d["input"] = py::module_::import("ast").attr("literal_eval")(err.input);
-                        } catch (...) {
+                        // Fallback: parse string repr via ast.literal_eval. A value
+                        // with surrounding whitespace is necessarily a string (a
+                        // canonical numeric/bool/None literal has none), so keep it
+                        // as a string rather than risk ast.literal_eval coercing it
+                        // (e.g. " 1 " -> 1).
+                        auto strip_ws = [](const std::string& s) {
+                            size_t b = s.find_first_not_of(" \t\r\n");
+                            if (b == std::string::npos) return std::string();
+                            size_t e = s.find_last_not_of(" \t\r\n");
+                            return s.substr(b, e - b + 1);
+                        };
+                        bool has_ws = strip_ws(err.input) != err.input;
+                        if (!has_ws) {
+                            try {
+                                d["input"] = py::module_::import("ast").attr("literal_eval")(err.input);
+                            } catch (...) {
+                                d["input"] = py::str(err.input);
+                            }
+                        } else {
                             d["input"] = py::str(err.input);
                         }
                     }
@@ -2406,11 +2606,13 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                         }
                         d["ctx"] = ctx;
                     }
-                    d["url"] = "https://errors.pydantic.dev/2.14/v/" + err.type;
+                    if (include_url) {
+                        d["url"] = "https://errors.pydantic.dev/2.14/v/" + err.type;
+                    }
                     result.append(d);
                 }
                 return result;
-            }, py::is_method(ve_cls))
+            }, py::is_method(ve_cls), py::arg("include_url") = true)
         );
         py::setattr(ve_cls, "to_json",
             py::cpp_function([](py::object self) {
@@ -2480,6 +2682,10 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
 
             // If self_instance provided, populate and return it
             if (!self_instance.is_none() && py::hasattr(self_instance, "__dict__")) {
+                // object.__setattr__ == Rust force_setattr
+                // (PyObject_GenericSetAttr): bypasses dataclass __setattr__
+                // so frozen dataclasses can receive the dunder attributes.
+                py::object force_setattr = py::module_::import("builtins").attr("object").attr("__setattr__");
                 // Rust validate_init semantics: a foreign value returned by
                 // an after-validator must NOT overwrite the validated fields
                 // already snapshotted onto self.
@@ -2496,10 +2702,47 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                         py::dict d = self_instance.attr("__dict__");
                         d[py::str("root")] = validated;
                         if (!py::hasattr(self_instance, "__pydantic_private__")) {
-                            py::setattr(self_instance, "__pydantic_private__", py::none());
+                            force_setattr(self_instance, py::str("__pydantic_private__"), py::none());
                         }
-                        py::setattr(self_instance, "__pydantic_extra__", py::none());
-                        py::setattr(self_instance, "__pydantic_fields_set__", py::set(py::make_tuple(py::str("root"))));
+                        force_setattr(self_instance, py::str("__pydantic_extra__"), py::none());
+                        force_setattr(self_instance, py::str("__pydantic_fields_set__"), py::set(py::make_tuple(py::str("root"))));
+                    } else if (self.is_dataclass() && !foreign_return) {
+                        // Rust DataclassValidator::set_dict_call: the
+                        // dataclass-args validator returns
+                        // (output_dict, post_init_kwargs).  Replace __dict__
+                        // with the validated flat dict (fields + extras for
+                        // extra=allow); plain dataclasses do not receive the
+                        // __pydantic_* attributes.
+                        py::object dc_obj = validated;
+                        py::object post_init_kwargs = py::none();
+                        if (py::isinstance<py::tuple>(dc_obj) && py::len(dc_obj) == 2 &&
+                            py::isinstance<py::dict>(dc_obj[py::int_(0)])) {
+                            post_init_kwargs = dc_obj[py::int_(1)];
+                            dc_obj = dc_obj[py::int_(0)];
+                        }
+                        if (py::isinstance<py::dict>(dc_obj)) {
+                            py::dict validated_dict = dc_obj.cast<py::dict>();
+                            if (validated_dict.contains("__pydantic_defaults__")) validated_dict.attr("pop")("__pydantic_defaults__");
+                            if (validated_dict.contains("__pydantic_extra__")) {
+                                py::object extra_val = validated_dict["__pydantic_extra__"];
+                                validated_dict.attr("pop")("__pydantic_extra__");
+                                if (!extra_val.is_none() && py::isinstance<py::dict>(extra_val)) {
+                                    for (auto item : extra_val.cast<py::dict>()) {
+                                        validated_dict[item.first] = item.second;
+                                    }
+                                }
+                            }
+                            if (validated_dict.contains("__pydantic_fields_set__")) validated_dict.attr("pop")("__pydantic_fields_set__");
+                            force_setattr(self_instance, py::str("__dict__"), validated_dict);
+                            // Rust: __post_init__(*post_init_kwargs)
+                            if (py::hasattr(self_instance, "__post_init__")) {
+                                if (!post_init_kwargs.is_none() && py::isinstance<py::tuple>(post_init_kwargs)) {
+                                    self_instance.attr("__post_init__")(*post_init_kwargs.cast<py::tuple>());
+                                } else {
+                                    self_instance.attr("__post_init__")();
+                                }
+                            }
+                        }
                     } else if (!foreign_return && py::isinstance<py::dict>(validated)) {
                         py::dict d = self_instance.attr("__dict__");
                         py::dict validated_dict = validated.cast<py::dict>();
@@ -2529,14 +2772,14 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
 
                         // Set pydantic slot attributes
                         if (!py::hasattr(self_instance, "__pydantic_private__")) {
-                            py::setattr(self_instance, "__pydantic_private__", py::none());
+                            force_setattr(self_instance, py::str("__pydantic_private__"), py::none());
                         }
-                        py::setattr(self_instance, "__pydantic_extra__",
+                        force_setattr(self_instance, py::str("__pydantic_extra__"),
                             extra_fields.is_none() ? py::none() : extra_fields);
-                        py::setattr(self_instance, "__pydantic_fields_set__", fields_set);
+                        force_setattr(self_instance, py::str("__pydantic_fields_set__"), fields_set);
                         // Store defaults for exclude_defaults serialization
                         if (!defaults.is_none() && py::isinstance<py::dict>(defaults) && py::len(defaults.cast<py::dict>()) > 0) {
-                            py::setattr(self_instance, "__pydantic_defaults__", defaults);
+                            force_setattr(self_instance, py::str("__pydantic_defaults__"), defaults);
                         }
                     } else if (!foreign_return && py::hasattr(validated, "__dict__")) {
                         // validated is a model instance (e.g. from FunctionAfterValidator)
@@ -2548,18 +2791,14 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                         }
                         // Copy pydantic slot attributes
                         if (py::hasattr(validated, "__pydantic_extra__")) {
-                            py::setattr(self_instance, "__pydantic_extra__", validated.attr("__pydantic_extra__"));
+                            force_setattr(self_instance, py::str("__pydantic_extra__"), validated.attr("__pydantic_extra__"));
                         }
                         if (py::hasattr(validated, "__pydantic_fields_set__")) {
-                            py::setattr(self_instance, "__pydantic_fields_set__", validated.attr("__pydantic_fields_set__"));
+                            force_setattr(self_instance, py::str("__pydantic_fields_set__"), validated.attr("__pydantic_fields_set__"));
                         }
                         if (!py::hasattr(self_instance, "__pydantic_private__")) {
-                            py::setattr(self_instance, "__pydantic_private__", py::none());
+                            force_setattr(self_instance, py::str("__pydantic_private__"), py::none());
                         }
-                    }
-                    // Dataclass __init__: call __post_init__ after fields are set
-                    if (self.is_dataclass() && py::hasattr(self_instance, "__post_init__")) {
-                        self_instance.attr("__post_init__")();
                     }
                     // NOTE: model_post_init is called from the Python wrapper after
                     // nested models are processed, to ensure correct call order.
@@ -2576,20 +2815,34 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                 return self_instance;
             }
             // Slots dataclasses have no __dict__ — populate via object.__setattr__
-            if (!self_instance.is_none() && self.is_dataclass() && py::isinstance<py::dict>(validated)) {
-                try {
-                    py::dict validated_dict = validated.cast<py::dict>();
-                    auto setattr = py::module_::import("builtins").attr("object").attr("__setattr__");
-                    for (auto item : validated_dict) {
-                        setattr(self_instance, item.first, item.second);
-                    }
-                    if (py::hasattr(self_instance, "__post_init__")) {
-                        self_instance.attr("__post_init__")();
-                    }
-                } catch (const std::exception& e) {
-                    py::print("validate_python slots dataclass error:", py::str(e.what()));
+            if (!self_instance.is_none() && self.is_dataclass()) {
+                // Unpack the (output_dict, post_init_kwargs) shape when present
+                py::object dc_obj = validated;
+                py::object post_init_kwargs = py::none();
+                if (py::isinstance<py::tuple>(dc_obj) && py::len(dc_obj) == 2 &&
+                    py::isinstance<py::dict>(dc_obj[py::int_(0)])) {
+                    post_init_kwargs = dc_obj[py::int_(1)];
+                    dc_obj = dc_obj[py::int_(0)];
                 }
-                return self_instance;
+                if (py::isinstance<py::dict>(dc_obj)) {
+                    try {
+                        py::dict validated_dict = dc_obj.cast<py::dict>();
+                        auto setattr = py::module_::import("builtins").attr("object").attr("__setattr__");
+                        for (auto item : validated_dict) {
+                            setattr(self_instance, item.first, item.second);
+                        }
+                        if (py::hasattr(self_instance, "__post_init__")) {
+                            if (!post_init_kwargs.is_none() && py::isinstance<py::tuple>(post_init_kwargs)) {
+                                self_instance.attr("__post_init__")(*post_init_kwargs.cast<py::tuple>());
+                            } else {
+                                self_instance.attr("__post_init__")();
+                            }
+                        }
+                    } catch (const std::exception& e) {
+                        py::print("validate_python slots dataclass error:", py::str(e.what()));
+                    }
+                    return self_instance;
+                }
             }
 
             // If validated result is a simple value (like int for dict size), return original input.

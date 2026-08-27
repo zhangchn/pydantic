@@ -974,8 +974,11 @@ public:
                     }
                 } else {
                     // Input is a model instance of a different class — reject with model_type error
-                    // (unless it's a dict, which is valid model input)
-                    if (!py::isinstance<py::dict>(obj) && py::hasattr(obj, "__pydantic_validator__")) {
+                    // (unless it's a dict, which is valid model input). A root model is
+                    // different: its input is the root value, validated against the inner
+                    // schema, so a non-RootModel value (e.g. the root type's own instance)
+                    // falls through to the fields validator rather than being rejected.
+                    if (!root_model_ && !py::isinstance<py::dict>(obj) && py::hasattr(obj, "__pydantic_validator__")) {
                         ErrorType err(ErrorType::Kind::ModelType);
                         err.context()["class_name"] = class_name_.empty() ? "Model" : class_name_;
                         auto line_err = std::make_shared<ValLineError>(ValLineError{err, state.location(), input.as_error_value().repr});
