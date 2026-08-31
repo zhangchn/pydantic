@@ -350,19 +350,41 @@ ValResult<ValMatch<bool>> PythonInput::validate_bool(bool strict) const {
     }
 
     if (!strict) {
-        if (is_int()) {
-            int64_t v = as_int();
-            return ValMatch<bool>::lax(v != 0);
-        }
-
         if (is_str()) {
+            // Rust shared.rs::str_as_bool token set (case-insensitive, except 0/1)
             std::string s = as_str();
-            if (s == "true" || s == "1" || s == "True") {
-                return ValMatch<bool>::lax(true);
-            }
-            if (s == "false" || s == "0" || s == "False") {
+            std::string lower = s;
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+            if (s == "0" || lower == "f" || lower == "n" || lower == "no" ||
+                lower == "off" || lower == "false") {
                 return ValMatch<bool>::lax(false);
             }
+            if (s == "1" || lower == "t" || lower == "y" || lower == "on" ||
+                lower == "yes" || lower == "true") {
+                return ValMatch<bool>::lax(true);
+            }
+            return ValError::line_error(ErrorType(ErrorType::Kind::BoolParsing),
+                                       this->current_location(), as_error_value().repr);
+        }
+        if (is_int()) {
+            // Rust shared.rs::int_as_bool — only 0/1 are valid bools
+            int64_t v = as_int();
+            if (v == 0) return ValMatch<bool>::lax(false);
+            if (v == 1) return ValMatch<bool>::lax(true);
+            return ValError::line_error(ErrorType(ErrorType::Kind::BoolParsing),
+                                       this->current_location(), as_error_value().repr);
+        }
+        if (is_float()) {
+            // Rust: float -> integer value -> int_as_bool
+            double d = as_float();
+            if (std::isfinite(d) && std::floor(d) == d) {
+                int64_t v = static_cast<int64_t>(d);
+                if (v == 0) return ValMatch<bool>::lax(false);
+                if (v == 1) return ValMatch<bool>::lax(true);
+            }
+            return ValError::line_error(ErrorType(ErrorType::Kind::BoolParsing),
+                                       this->current_location(), as_error_value().repr);
         }
     }
 
@@ -400,7 +422,46 @@ ValResult<ValMatch<EitherInt>> PythonInput::validate_int(bool strict) const {
         if (is_str()) {
             try {
                 std::string s = as_str();
-                int64_t v = std::stoll(s);
+                std::string cleaned = s;
+                // strip leading/trailing whitespace and underscores (Rust clean_int_str)
+                size_t start = cleaned.find_first_not_of(" \t\n");
+                if (start == std::string::npos) cleaned = "";
+                else {
+                    size_t end = cleaned.find_last_not_of(" \t\n");
+                    cleaned = cleaned.substr(start, end - start + 1);
+                }
+                cleaned.erase(std::remove(cleaned.begin(), cleaned.end(), '_'), cleaned.end());
+                if (cleaned.empty()) {
+                    return type_error(ErrorType::Kind::IntParsing, *this, this->current_location());
+                }
+                errno = 0;
+                char* endp = nullptr;
+                long long v = std::strtoll(cleaned.c_str(), &endp, 10);
+                if (errno == ERANGE && v > 0) {
+                    // Beyond i64 — fall back to Python's arbitrary-precision int
+                    // (Rust EitherInt::BigInt via jiter)
+                    try {
+                        py::object py_int = py::module_::import("builtins").attr("int")(cleaned);
+                        return ValMatch<EitherInt>::lax(EitherInt(py_int));
+                    } catch (...) {}
+                    ErrorType err(ErrorType::Kind::IntParsingSize);
+                    return ValError::line_error(err, this->current_location(),
+                                                as_error_value().repr);
+                }
+                if (errno == ERANGE && v < 0) {
+                    try {
+                        py::object py_int = py::module_::import("builtins").attr("int")(cleaned);
+                        return ValMatch<EitherInt>::lax(EitherInt(py_int));
+                    } catch (...) {}
+                    ErrorType err(ErrorType::Kind::IntParsingSize);
+                    return ValError::line_error(err, this->current_location(),
+                                                as_error_value().repr);
+                }
+                if (endp && *endp != '\0') {
+                    // Not a plain integer (e.g. "1.5", "12abc") — Rust tries Python int()
+                    // for strings with underscores/whitespace; reject otherwise.
+                    return type_error(ErrorType::Kind::IntParsing, *this, this->current_location());
+                }
                 return ValMatch<EitherInt>::lax(EitherInt(v));
             } catch (...) {
                 return type_error(ErrorType::Kind::IntParsing, *this, this->current_location());

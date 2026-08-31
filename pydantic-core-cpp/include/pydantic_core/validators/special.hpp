@@ -215,13 +215,34 @@ private:
 // UrlValidator - validates URL values
 class UrlValidator : public Validator {
 public:
+    std::optional<size_t> max_length;
+    std::vector<std::string> allowed_schemes;
+
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
     ) override {
-        // Validate URL using Python's urllib.parse
+        // Accept an already-validated Url object (Rust downcast_python_input::<PyUrl>)
         py::object input_py = input.as_python_object();
-        
+        try {
+            py::object mod = py::module_::import("pydantic_core_cpp._pydantic_core_cpp");
+            py::object url_class = mod.attr("Url");
+            if (py::isinstance(input_py, url_class)) {
+                if (max_length.has_value()) {
+                    std::string s = py::str(input_py).cast<std::string>();
+                    if (s.size() > max_length.value()) {
+                        ErrorType err(ErrorType::Kind::UrlTooLong);
+                        err.context()["max_length"] = std::to_string(max_length.value());
+                        err.context()["s"] = max_length.value() == 1 ? "" : "s";
+                        return ValError::line_error(err, state.location(),
+                                                    input.as_error_value().repr);
+                    }
+                }
+                return ValResult<std::shared_ptr<void>>(
+                    std::make_shared<py::object>(std::move(input_py)));
+            }
+        } catch (...) {}
+
         if (!py::isinstance<py::str>(input_py)) {
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::UrlType),
@@ -229,35 +250,68 @@ public:
                 input.as_error_value().repr
             );
         }
-        
+
         std::string url_str = py::str(input_py).cast<std::string>();
-        
-        // Basic URL validation - check for scheme and netloc
+
+        // Length check happens BEFORE parsing (Rust UrlValidator::check_length)
+        if (max_length.has_value() && url_str.size() > max_length.value()) {
+            ErrorType err(ErrorType::Kind::UrlTooLong);
+            err.context()["max_length"] = std::to_string(max_length.value());
+            err.context()["s"] = max_length.value() == 1 ? "" : "s";
+            return ValError::line_error(err, state.location(), url_str);
+        }
+
+        auto url_parsing_err = [&](const std::string& error) {
+            ErrorType err(ErrorType::Kind::UrlParsing);
+            err.context()["error"] = error;
+            return ValError::line_error(err, state.location(), url_str);
+        };
+        auto syntax_violation_err = [&](const std::string& error) {
+            ErrorType err(ErrorType::Kind::UrlSyntaxViolation);
+            err.context()["error"] = error;
+            return ValError::line_error(err, state.location(), url_str);
+        };
+
+        // Parse using Python's urllib (mimics url::Url::parse + syntax violations)
         try {
             py::object urllib = py::module_::import("urllib.parse");
             py::object parsed = urllib.attr("urlparse")(url_str);
-            
+
             std::string scheme = py::str(parsed.attr("scheme")).cast<std::string>();
             std::string netloc = py::str(parsed.attr("netloc")).cast<std::string>();
-            
-            // URL must have a scheme (http, https, ftp, etc.)
+
+            // URL must have a scheme (Rust: ParseError::RelativeUrlWithoutBase -> UrlParsing)
             if (scheme.empty()) {
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::UrlScheme),
-                    state.location(),
-                    url_str + " (missing scheme)"
-                );
+                return url_parsing_err("relative URL without a base");
             }
-            
-            // URL must have a netloc (host) for most schemes
+
+            // Scheme allow-list (Rust: UrlScheme with expected_schemes)
+            if (!allowed_schemes.empty()) {
+                bool ok = false;
+                for (const auto& s : allowed_schemes) {
+                    if (scheme == s) { ok = true; break; }
+                }
+                if (!ok) {
+                    ErrorType err(ErrorType::Kind::UrlScheme);
+                    std::string expected;
+                    for (size_t i = 0; i < allowed_schemes.size(); ++i) {
+                        if (i > 0) expected += i == allowed_schemes.size() - 1 ? " and " : ", ";
+                        expected += "'" + allowed_schemes[i] + "'";
+                    }
+                    err.context()["expected_schemes"] = expected;
+                    return ValError::line_error(err, state.location(), url_str);
+                }
+            }
+
+            // Host requirements (Rust: special schemes need a host;
+            // strict mode reports an empty host as a syntax violation)
             if (netloc.empty() && scheme != "file" && scheme != "data") {
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::UrlHost),
-                    state.location(),
-                    url_str + " (missing host)"
-                );
+                if (state.strict_or(false)) {
+                    return syntax_violation_err("empty host");
+                }
+                return url_parsing_err("empty host");
             }
-            
+
             // Valid URL - return Url object
             auto url_obj = std::make_shared<Url>(url_str);
             return ValResult<std::shared_ptr<void>>(
@@ -267,11 +321,7 @@ public:
             std::string msg = e.what();
             e.restore();
             PyErr_Clear();
-            return ValError::line_error(
-                ErrorType(ErrorType::Kind::UrlType),
-                state.location(),
-                "URL parsing failed: " + msg
-            );
+            return url_parsing_err(msg);
         }
     }
 
@@ -375,8 +425,9 @@ public:
         } catch (py::error_already_set& e) {
             e.restore();
             PyErr_Clear();
+            // String/int/float that failed to parse -> DecimalParsing (Rust)
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::DecimalType),
+                ErrorType(ErrorType::Kind::DecimalParsing),
                 state.location(),
                 input.as_error_value().repr
             );
@@ -410,7 +461,7 @@ public:
             }
         } catch (...) {}
 
-        // In strict mode, only accept UUID objects
+        // In strict mode (python input), only accept UUID objects (Rust: IsInstanceOf)
         if (state.strict_or(strict)) {
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::IsInstanceType, "class", "UUID"),
@@ -419,26 +470,54 @@ public:
             );
         }
 
-        // If string, validate format (lax mode only)
+        // String: parse it (Rust: UuidParsing on failure)
         if (py::isinstance<py::str>(input_py)) {
             std::string uuid_str = py::str(input_py).cast<std::string>();
             try {
                 py::object uuid_mod = py::module_::import("uuid");
                 py::object uuid_obj = uuid_mod.attr("UUID")(uuid_str);
                 return ValResult<std::shared_ptr<void>>(
-                    std::make_shared<std::string>(uuid_str)
+                    std::make_shared<std::string>(py::str(uuid_obj).cast<std::string>())
                 );
             } catch (py::error_already_set& e) {
+                std::string msg = e.what();
                 // Swallow the error: restore() releases the fetched refs so
                 // the destructor is a no-op and the error indicator stays clear
                 e.restore();
                 PyErr_Clear();
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::UuidType),
-                    state.location(),
-                    "Invalid UUID format: " + uuid_str
-                );
+                ErrorType err(ErrorType::Kind::UuidParsing);
+                err.context()["error"] = msg;
+                return ValError::line_error(err, state.location(), uuid_str);
             }
+        }
+
+        // Bytes: parse (Rust: UuidType when not bytes, UuidParsing when invalid)
+        if (py::isinstance<py::bytes>(input_py)) {
+            std::string b = input_py.cast<std::string>();
+            try {
+                py::object uuid_mod = py::module_::import("uuid");
+                py::object uuid_obj;
+                try {
+                    uuid_obj = uuid_mod.attr("UUID")(py::bytes(b));
+                } catch (py::error_already_set& e1) {
+                    e1.restore();
+                    PyErr_Clear();
+                    try {
+                        uuid_obj = uuid_mod.attr("UUID")(b);
+                    } catch (py::error_already_set& e2) {
+                        std::string msg = e2.what();
+                        e2.restore();
+                        PyErr_Clear();
+                        ErrorType err(ErrorType::Kind::UuidParsing);
+                        err.context()["error"] = msg;
+                        return ValError::line_error(err, state.location(),
+                                                    input.as_error_value().repr);
+                    }
+                }
+                return ValResult<std::shared_ptr<void>>(
+                    std::make_shared<std::string>(py::str(uuid_obj).cast<std::string>())
+                );
+            } catch (...) {}
         }
 
         return ValError::line_error(

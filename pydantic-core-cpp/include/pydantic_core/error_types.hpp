@@ -37,7 +37,18 @@ public:
         // Parsing errors - string/input could not be parsed to target type
         BoolParsing,
         IntParsing,
+        IntParsingSize,
         FloatParsing,
+        ComplexType,
+        ComplexStrParsing,
+
+        // String/bytes encoding errors
+        StringSubType,
+        StringUnicode,
+        BytesInvalidEncoding,
+        SetItemNotHashable,
+        MissingSentinelError,
+        JsonType,
         
         // Integer constraint errors
         IntMultipleOf,
@@ -103,6 +114,7 @@ public:
         // Date/Time errors
         DateType,
         DateParsing,
+        DateFromDatetimeParsing,
         DateFromDatetimeInexact,
         DatePast,
         DateFuture,
@@ -122,22 +134,44 @@ public:
         
         // URL errors
         UrlType,
+        UrlParsing,
+        UrlSyntaxViolation,
+        UrlTooLong,
         UrlScheme,
         UrlHost,
         
         // UUID errors
         UuidType,
+        UuidParsing,
+        UuidVersion,
 
         // Decimal errors
         DecimalType,
         DecimalParsing,
         DecimalMaxDigits,
         DecimalMaxPlaces,
+        DecimalWholeDigits,
 
         // Type checking errors
         IsInstanceType,
         IsSubclassType,
         CallableType,
+
+        // Collection type errors (Rust-named)
+        IterableType,
+        IterationError,
+        MappingType,
+
+        // Model / attribute-extraction errors
+        ModelAttributesType,
+        GetAttributeError,
+        NeedsPythonObject,
+        DataclassExactType,
+        DefaultFactoryNotCalled,
+
+        // Union discriminator errors
+        UnionTagInvalid,
+        UnionTagNotFound,
 
         // Other errors
         JsonInvalid,

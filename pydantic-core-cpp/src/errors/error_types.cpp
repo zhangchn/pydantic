@@ -71,14 +71,37 @@ std::string ErrorType::type_name() const {
         // Literal errors
         {Kind::LiteralMismatch, "literal_mismatch"},
         {Kind::LiteralError, "literal_error"},
+        {Kind::EnumError, "enum"},
         
+        // Collection / string / bytes errors (Rust names)
+        {Kind::IterableType, "iterable_type"},
+        {Kind::IterationError, "iteration_error"},
+        {Kind::MappingType, "mapping_type"},
+        {Kind::StringSubType, "string_sub_type"},
+        {Kind::StringUnicode, "string_unicode"},
+        {Kind::BytesInvalidEncoding, "bytes_invalid_encoding"},
+        {Kind::SetItemNotHashable, "set_item_not_hashable"},
+        {Kind::MissingSentinelError, "missing_sentinel_error"},
+        {Kind::JsonType, "json_type"},
+        {Kind::IntParsingSize, "int_parsing_size"},
+        {Kind::ComplexType, "complex_type"},
+        {Kind::ComplexStrParsing, "complex_str_parsing"},
+
         // Field errors
         {Kind::DictKeysMissing, "dict_keys_missing"},
         {Kind::DictKeysUnexpected, "dict_keys_unexpected"},
         {Kind::FieldRequired, "field_required"},
         {Kind::Missing, "missing"},
         {Kind::ExtraForbidden, "extra_forbidden"},
+        {Kind::InvalidKey, "invalid_key"},
         {Kind::NoSuchAttribute, "no_such_attribute"},
+        {Kind::ModelAttributesType, "model_attributes_type"},
+        {Kind::GetAttributeError, "get_attribute_error"},
+        {Kind::NeedsPythonObject, "needs_python_object"},
+        {Kind::DataclassExactType, "dataclass_exact_type"},
+        {Kind::DefaultFactoryNotCalled, "default_factory_not_called"},
+        {Kind::UnionTagInvalid, "union_tag_invalid"},
+        {Kind::UnionTagNotFound, "union_tag_not_found"},
 
         // Arguments errors
         {Kind::ArgumentsType, "arguments_type"},
@@ -92,6 +115,7 @@ std::string ErrorType::type_name() const {
         // Date/Time errors
         {Kind::DateType, "date_type"},
         {Kind::DateParsing, "date_parsing"},
+        {Kind::DateFromDatetimeParsing, "date_from_datetime_parsing"},
         {Kind::DateFromDatetimeInexact, "date_from_datetime_inexact"},
         {Kind::DatePast, "date_past"},
         {Kind::DateFuture, "date_future"},
@@ -106,14 +130,28 @@ std::string ErrorType::type_name() const {
         {Kind::TimezoneAware, "timezone_aware"},
         {Kind::TimezoneNaive, "timezone_naive"},
         {Kind::TimezoneOffset, "timezone_offset"},
-        {Kind::TimedeltaType, "timedelta_type"},
-        {Kind::TimedeltaParsing, "timedelta_parsing"},
+        {Kind::TimedeltaType, "time_delta_type"},
+        {Kind::TimedeltaParsing, "time_delta_parsing"},
+
+        // URL errors
+        {Kind::UrlType, "url_type"},
+        {Kind::UrlParsing, "url_parsing"},
+        {Kind::UrlSyntaxViolation, "url_syntax_violation"},
+        {Kind::UrlTooLong, "url_too_long"},
+        {Kind::UrlScheme, "url_scheme"},
+        {Kind::UrlHost, "url_host"},
+
+        // UUID errors
+        {Kind::UuidType, "uuid_type"},
+        {Kind::UuidParsing, "uuid_parsing"},
+        {Kind::UuidVersion, "uuid_version"},
 
         // Decimal errors
         {Kind::DecimalType, "decimal_type"},
         {Kind::DecimalParsing, "decimal_parsing"},
         {Kind::DecimalMaxDigits, "decimal_max_digits"},
         {Kind::DecimalMaxPlaces, "decimal_max_places"},
+        {Kind::DecimalWholeDigits, "decimal_whole_digits"},
 
         // Type checking errors
         {Kind::IsInstanceType, "is_instance_of"},
@@ -213,14 +251,37 @@ std::string ErrorType::message_template() const {
         // Literal errors
         {Kind::LiteralMismatch, "Input should match one of the allowed values"},
         {Kind::LiteralError, "Input should be {expected}"},
-        
+        {Kind::EnumError, "Input should be {expected}"},
+
+        // Collection / string / bytes errors (Rust messages)
+        {Kind::IterableType, "Input should be iterable"},
+        {Kind::IterationError, "Error iterating over object, error: {error}"},
+        {Kind::MappingType, "Input should be a valid mapping, error: {error}"},
+        {Kind::StringSubType, "Input should be a string, not an instance of a subclass of str"},
+        {Kind::StringUnicode, "Input should be a valid string, unable to parse raw data as a unicode string"},
+        {Kind::BytesInvalidEncoding, "Data should be valid {encoding}: {encoding_error}"},
+        {Kind::SetItemNotHashable, "Set items should be hashable"},
+        {Kind::MissingSentinelError, "Input should be the 'MISSING' sentinel"},
+        {Kind::JsonType, "JSON input should be string, bytes or bytearray"},
+        {Kind::IntParsingSize, "Unable to parse input string as an integer, exceeded maximum size"},
+        {Kind::ComplexType, "Input should be a valid python complex object, a number, or a valid complex string following the rules at https://docs.python.org/3/library/functions.html#complex"},
+        {Kind::ComplexStrParsing, "Input should be a valid complex string following the rules at https://docs.python.org/3/library/functions.html#complex"},
+
         // Field errors
         {Kind::DictKeysMissing, "Missing required keys"},
         {Kind::DictKeysUnexpected, "Unexpected keys provided"},
         {Kind::FieldRequired, "Field required"},
         {Kind::Missing, "Missing field"},
         {Kind::ExtraForbidden, "Extra inputs are not permitted"},
+        {Kind::InvalidKey, "Keys should be strings"},
         {Kind::NoSuchAttribute, "Object has no attribute '{attribute}'"},
+        {Kind::ModelAttributesType, "Input should be a valid dictionary or object to extract fields from"},
+        {Kind::GetAttributeError, "Error extracting attribute: {error}"},
+        {Kind::NeedsPythonObject, "Cannot check `{method_name}` when validating from json, use a JsonOrPython validator instead"},
+        {Kind::DataclassExactType, "Input should be an instance of {class_name}"},
+        {Kind::DefaultFactoryNotCalled, "The default factory uses validated data, but at least one validation error occurred"},
+        {Kind::UnionTagInvalid, "Input tag '{tag}' found using {discriminator} does not match any of the expected tags: {expected_tags}"},
+        {Kind::UnionTagNotFound, "Unable to extract tag using discriminator {discriminator}"},
 
         // Arguments errors
         {Kind::ArgumentsType, "Arguments must be a tuple, list or a dictionary"},
@@ -254,6 +315,7 @@ std::string ErrorType::message_template() const {
         // Date/Time errors
         {Kind::DateType, "Input should be a valid date"},
         {Kind::DateParsing, "Input should be a valid date in YYYY-MM-DD format"},
+        {Kind::DateFromDatetimeParsing, "Input should be a valid date or datetime, {error}"},
         {Kind::DateFromDatetimeInexact, "Input should be a date with no time component"},
         {Kind::DatePast, "Date should be in the past"},
         {Kind::DateFuture, "Date should be in the future"},
@@ -271,11 +333,25 @@ std::string ErrorType::message_template() const {
         {Kind::TimedeltaType, "Input should be a valid timedelta"},
         {Kind::TimedeltaParsing, "Input should be a valid timedelta, unable to parse string as an ISO 8601 duration"},
 
-        // Decimal errors
-        {Kind::DecimalType, "Input should be a valid decimal"},
-        {Kind::DecimalParsing, "Input should be a valid decimal, unable to parse string as a decimal"},
-        {Kind::DecimalMaxDigits, "Decimal should have no more than {max_digits} digit{s}"},
-        {Kind::DecimalMaxPlaces, "Decimal should have no more than {decimal_places} decimal place{s}"},
+        // URL errors (Rust messages)
+        {Kind::UrlType, "URL input should be a string or URL"},
+        {Kind::UrlParsing, "Input should be a valid URL, {error}"},
+        {Kind::UrlSyntaxViolation, "Input violated strict URL syntax rules, {error}"},
+        {Kind::UrlTooLong, "URL should have at most {max_length} character{s}"},
+        {Kind::UrlScheme, "URL scheme should be {expected_schemes}"},
+        {Kind::UrlHost, "URL host should be valid, {error}"},
+
+        // UUID errors (Rust messages)
+        {Kind::UuidType, "UUID input should be a string, bytes or UUID object"},
+        {Kind::UuidParsing, "Input should be a valid UUID, {error}"},
+        {Kind::UuidVersion, "UUID version {expected_version} expected"},
+
+        // Decimal errors (Rust messages)
+        {Kind::DecimalType, "Decimal input should be an integer, float, string or Decimal object"},
+        {Kind::DecimalParsing, "Input should be a valid decimal"},
+        {Kind::DecimalMaxDigits, "Decimal input should have no more than {max_digits} digit{s} in total"},
+        {Kind::DecimalMaxPlaces, "Decimal input should have no more than {decimal_places} decimal place{s}"},
+        {Kind::DecimalWholeDigits, "Decimal input should have no more than {whole_digits} digit{s} before the decimal point"},
 
         // Type checking errors
         {Kind::IsInstanceType, "Input should be an instance of {class}"},
@@ -338,7 +414,8 @@ ErrorType ErrorType::build_known_type(const std::string& type_str) {
         {"unexpected_positional_argument", Kind::UnexpectedPositionalArgument},
         {"unexpected_keyword_argument", Kind::UnexpectedKeywordArgument},
         {"multiple_argument_values", Kind::MultipleArgumentValues},
-        {"date_parsing", Kind::DateParsing},        {"date_from_datetime_inexact", Kind::DateFromDatetimeInexact},
+        {"date_parsing", Kind::DateParsing},        {"date_from_datetime_parsing", Kind::DateFromDatetimeParsing},
+        {"date_from_datetime_inexact", Kind::DateFromDatetimeInexact},
         {"date_past", Kind::DatePast},              {"date_future", Kind::DateFuture},
         {"time_parsing", Kind::TimeParsing},        {"datetime_parsing", Kind::DateTimeParsing},
         {"datetime_from_date_parsing", Kind::DatetimeFromDateParsing},
@@ -347,12 +424,28 @@ ErrorType ErrorType::build_known_type(const std::string& type_str) {
         {"timezone_aware", Kind::TimezoneAware},    {"timezone_naive", Kind::TimezoneNaive},
         {"timezone_offset", Kind::TimezoneOffset},  {"timedelta_type", Kind::TimedeltaType},
         {"timedelta_parsing", Kind::TimedeltaParsing},
-        {"url_type", Kind::UrlType},               {"url_scheme", Kind::UrlScheme},
-        {"url_host", Kind::UrlHost},               {"uuid_type", Kind::UuidType},
-        {"decimal_type", Kind::DecimalType},       {"decimal_parsing", Kind::DecimalParsing},
+        {"time_delta_type", Kind::TimedeltaType},   {"time_delta_parsing", Kind::TimedeltaParsing},
+        {"url_type", Kind::UrlType},                {"url_parsing", Kind::UrlParsing},
+        {"url_syntax_violation", Kind::UrlSyntaxViolation}, {"url_too_long", Kind::UrlTooLong},
+        {"url_scheme", Kind::UrlScheme},            {"url_host", Kind::UrlHost},
+        {"uuid_type", Kind::UuidType},              {"uuid_parsing", Kind::UuidParsing},
+        {"uuid_version", Kind::UuidVersion},
+        {"decimal_type", Kind::DecimalType},        {"decimal_parsing", Kind::DecimalParsing},
         {"decimal_max_digits", Kind::DecimalMaxDigits}, {"decimal_max_places", Kind::DecimalMaxPlaces},
+        {"decimal_whole_digits", Kind::DecimalWholeDigits},
         {"is_instance_of", Kind::IsInstanceType},   {"is_subclass_of", Kind::IsSubclassType},
         {"callable_type", Kind::CallableType},      {"json_invalid", Kind::JsonInvalid},
+        {"enum", Kind::EnumError},                  {"invalid_key", Kind::InvalidKey},
+        {"iterable_type", Kind::IterableType},      {"iteration_error", Kind::IterationError},
+        {"mapping_type", Kind::MappingType},        {"string_sub_type", Kind::StringSubType},
+        {"string_unicode", Kind::StringUnicode},    {"bytes_invalid_encoding", Kind::BytesInvalidEncoding},
+        {"set_item_not_hashable", Kind::SetItemNotHashable}, {"missing_sentinel_error", Kind::MissingSentinelError},
+        {"json_type", Kind::JsonType},              {"int_parsing_size", Kind::IntParsingSize},
+        {"complex_type", Kind::ComplexType},        {"complex_str_parsing", Kind::ComplexStrParsing},
+        {"model_attributes_type", Kind::ModelAttributesType}, {"get_attribute_error", Kind::GetAttributeError},
+        {"needs_python_object", Kind::NeedsPythonObject}, {"dataclass_exact_type", Kind::DataclassExactType},
+        {"default_factory_not_called", Kind::DefaultFactoryNotCalled},
+        {"union_tag_invalid", Kind::UnionTagInvalid}, {"union_tag_not_found", Kind::UnionTagNotFound},
         {"invalid_json_value", Kind::InvalidJsonValue},
         {"recursion_error", Kind::RecursionError},  {"recursion_loop", Kind::RecursionLoop},
         {"greater_than", Kind::GreaterThan},

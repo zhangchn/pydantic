@@ -124,7 +124,31 @@ static std::shared_ptr<Validator> build_from_flat_dict(
     if (type == "time") return std::make_shared<TimeValidator>();
     if (type == "datetime") return std::make_shared<DatetimeValidator>();
     if (type == "timedelta") return std::make_shared<TimedeltaValidator>();
-    if (type == "url") return std::make_shared<UrlValidator>();
+    if (type == "url") {
+        auto v = std::make_shared<UrlValidator>();
+        auto ml_it = schema.find("max_length");
+        if (ml_it != schema.end()) {
+            try {
+                long long ml = std::stoll(ml_it->second);
+                if (ml >= 0) v->max_length = static_cast<size_t>(ml);
+            } catch (...) {}
+        }
+        auto as_it = schema.find("allowed_schemes");
+        if (as_it != schema.end()) {
+            // Stored as a JSON array string by element_to_dict, e.g. ["http","https"]
+            auto as_doc = simdjson::padded_string(as_it->second);
+            simdjson::dom::parser as_parser;
+            auto as_res = as_parser.parse(as_doc);
+            if (!as_res.error() && as_res.value().is_array()) {
+                for (auto s : as_res.value().get_array().value()) {
+                    if (s.is_string()) {
+                        v->allowed_schemes.push_back(std::string(s.get_string().value()));
+                    }
+                }
+            }
+        }
+        return v;
+    }
     if (type == "multi-host-url") return std::make_shared<MultiHostUrlValidator>();
     if (type == "uuid") {
         auto v = std::make_shared<UuidValidator>();
@@ -478,7 +502,17 @@ static std::shared_ptr<Validator> build_from_element(
     if (type == "time") return std::make_shared<TimeValidator>();
     if (type == "datetime") return std::make_shared<DatetimeValidator>();
     if (type == "timedelta") return std::make_shared<TimedeltaValidator>();
-    if (type == "url") return std::make_shared<UrlValidator>();
+    if (type == "url") {
+        auto v = std::make_shared<UrlValidator>();
+        auto it = flat_schema.find("max_length");
+        if (it != flat_schema.end()) {
+            try {
+                long long ml = std::stoll(it->second);
+                if (ml >= 0) v->max_length = static_cast<size_t>(ml);
+            } catch (...) {}
+        }
+        return v;
+    }
     if (type == "multi-host-url") return std::make_shared<MultiHostUrlValidator>();
     if (type == "uuid") {
         auto v = std::make_shared<UuidValidator>();
@@ -1322,7 +1356,23 @@ static std::shared_ptr<Validator> build_from_py_dict(
     if (type == "timedelta") return std::make_shared<TimedeltaValidator>();
 
     // --- URL validators ---
-    if (type == "url") return std::make_shared<UrlValidator>();
+    if (type == "url") {
+        auto v = std::make_shared<UrlValidator>();
+        if (schema.contains("max_length") && py::isinstance<py::int_>(schema["max_length"])) {
+            long long ml = schema["max_length"].cast<long long>();
+            if (ml >= 0) v->max_length = static_cast<size_t>(ml);
+        }
+        if (schema.contains("allowed_schemes") &&
+            (py::isinstance<py::list>(schema["allowed_schemes"]) ||
+             py::isinstance<py::tuple>(schema["allowed_schemes"]))) {
+            for (auto item : py::cast<py::sequence>(schema["allowed_schemes"])) {
+                if (py::isinstance<py::str>(item)) {
+                    v->allowed_schemes.push_back(item.cast<std::string>());
+                }
+            }
+        }
+        return v;
+    }
     if (type == "multi-host-url") return std::make_shared<MultiHostUrlValidator>();
 
     // --- UUID ---

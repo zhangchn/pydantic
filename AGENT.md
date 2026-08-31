@@ -1,0 +1,9 @@
+- The c++ sources are in folder `pydantic-core-cpp`, and rust implementation is in `pydantic-core`. They are parallel implementations which should not interact with each other;
+- The c++ backend is the default (opt-out with env var `PYDANTIC_USE_CPP_CORE=0`).
+- To test pydantic-core-cpp, use virtual env in .venv;
+- To build pydantic-core-cpp, run `.venv/bin/pip install -e pydantic-core-cpp --no-build-isolation --force-reinstall --no-deps`;
+- Reference implementation in Rust at dir `pydantic-core`, read these if you get confused about its behaviors. Do not guess;
+- To run with rust implementation: `env PYDANTIC_USE_CPP_CORE=0 {pytest,python} TEST_CASES.py`;
+- The python source `pydantic/_pydantic_core_shim.py` use `PYDANTIC_USE_CPP_CORE` for implementation selection between c++ and rust.
+- To build with debug symbols: `CMAKE_ARGS="-DPDC_DEBUG=ON" .venv/bin/pip install -e pydantic-core-cpp --no-build-isolation --force-reinstall --no-deps`;
+- After successful changes, do a git commit.

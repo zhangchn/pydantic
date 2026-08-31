@@ -76,10 +76,25 @@ struct EitherBytes {
 
 // Integer representation
 struct EitherInt {
-    std::variant<int64_t, uint64_t> value;
+    // The py::object alternative holds a Python int for values beyond
+    // uint64 range (Rust EitherInt::BigInt) — arbitrary precision.
+    std::variant<int64_t, uint64_t, py::object> value;
     
     EitherInt(int64_t i) : value(i) {}
-    EitherInt(uint64_t i) : value(i) {}
+    EitherInt(uint64_t u) : value(u) {}
+    EitherInt(py::object o) : value(std::move(o)) {}
+    
+    bool is_python() const { return std::holds_alternative<py::object>(value); }
+    const py::object& as_python() const { return std::get<py::object>(value); }
+    
+    // Python int value (any representation) — used for result conversion
+    py::object to_python() const {
+        if (auto* i = std::get_if<int64_t>(&value)) return py::int_(*i);
+        if (auto* u = std::get_if<uint64_t>(&value)) {
+            return py::reinterpret_steal<py::object>(PyLong_FromUnsignedLongLong(*u));
+        }
+        return std::get<py::object>(value);
+    }
     
     std::optional<int64_t> as_i64() const {
         if (auto* i = std::get_if<int64_t>(&value)) {

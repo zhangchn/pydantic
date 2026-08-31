@@ -141,27 +141,51 @@ ValResult<ValMatch<bool>> JsonInput::validate_bool(bool strict) const {
     if (element_.type() == simdjson::dom::element_type::BOOL) {
         return ValMatch<bool>::exact(element_.get_bool().value_unsafe());
     }
-    
-    // Lax mode - coerce from strings/ints
+
+    // Lax mode - coerce from strings/ints (Rust: str_as_bool / int_as_bool)
     if (!strict) {
         if (element_.type() == simdjson::dom::element_type::INT64) {
             int64_t i = element_.get_int64().value_unsafe();
-            if (i == 0 || i == 1) {
-                return ValMatch<bool>::lax(static_cast<bool>(i));
-            }
+            if (i == 0) return ValMatch<bool>::lax(false);
+            if (i == 1) return ValMatch<bool>::lax(true);
+            return ValError::line_error(ErrorType(ErrorType::Kind::BoolParsing),
+                                       Location(), as_error_value().repr);
+        }
+        if (element_.type() == simdjson::dom::element_type::UINT64) {
+            uint64_t i = element_.get_uint64().value_unsafe();
+            if (i == 0) return ValMatch<bool>::lax(false);
+            if (i == 1) return ValMatch<bool>::lax(true);
+            return ValError::line_error(ErrorType(ErrorType::Kind::BoolParsing),
+                                       Location(), as_error_value().repr);
         }
         if (element_.type() == simdjson::dom::element_type::STRING) {
             auto str = std::string(element_.get_string().value_unsafe());
-            std::transform(str.begin(), str.end(), str.begin(), ::tolower);
-            if (str == "true" || str == "1") {
-                return ValMatch<bool>::lax(true);
-            }
-            if (str == "false" || str == "0") {
+            std::string lower = str;
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+            if (str == "0" || lower == "f" || lower == "n" || lower == "no" ||
+                lower == "off" || lower == "false") {
                 return ValMatch<bool>::lax(false);
             }
+            if (str == "1" || lower == "t" || lower == "y" || lower == "on" ||
+                lower == "yes" || lower == "true") {
+                return ValMatch<bool>::lax(true);
+            }
+            return ValError::line_error(ErrorType(ErrorType::Kind::BoolParsing),
+                                       Location(), as_error_value().repr);
+        }
+        if (element_.type() == simdjson::dom::element_type::DOUBLE) {
+            double d = element_.get_double().value_unsafe();
+            if (std::isfinite(d) && std::floor(d) == d) {
+                int64_t i = static_cast<int64_t>(d);
+                if (i == 0) return ValMatch<bool>::lax(false);
+                if (i == 1) return ValMatch<bool>::lax(true);
+            }
+            return ValError::line_error(ErrorType(ErrorType::Kind::BoolParsing),
+                                       Location(), as_error_value().repr);
         }
     }
-    
+
     return ValError::line_error(PydanticKnownError::bool_type(),
                                Location(), as_error_value().repr);
 }

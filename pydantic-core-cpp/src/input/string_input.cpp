@@ -68,14 +68,18 @@ ValResult<ValMatch<EitherBytes>> StringInput::validate_bytes(bool strict) const 
 ValResult<ValMatch<bool>> StringInput::validate_bool(bool strict) const {
     if (single_value_) {
         std::string v = *single_value_;
-        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-        
-        // Check boolean strings
-        if (v == "true" || v == "1" || v == "on" || v == "yes") {
-            return ValMatch<bool>::lax(true);
-        }
-        if (v == "false" || v == "0" || v == "off" || v == "no") {
+        std::string lower = v;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+
+        // Rust shared.rs::str_as_bool token set
+        if (v == "0" || lower == "f" || lower == "n" || lower == "no" ||
+            lower == "off" || lower == "false") {
             return ValMatch<bool>::lax(false);
+        }
+        if (v == "1" || lower == "t" || lower == "y" || lower == "on" ||
+            lower == "yes" || lower == "true") {
+            return ValMatch<bool>::lax(true);
         }
     }
     
