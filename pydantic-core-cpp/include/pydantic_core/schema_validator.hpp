@@ -42,7 +42,9 @@ public:
                                       std::optional<bool> from_attributes = std::nullopt,
                                       py::object context = py::none(),
                                       bool coerce_strings = false,
-                                      py::object self_instance = py::none());
+                                      py::object self_instance = py::none(),
+                                      std::optional<bool> by_alias = std::nullopt,
+                                      std::optional<bool> by_name = std::nullopt);
 
     // Populate self_instance from the fields snapshot taken by the outermost
     // fields-position function-after (BaseModel.__init__ path).  Returns

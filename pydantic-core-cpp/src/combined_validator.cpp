@@ -726,10 +726,53 @@ static std::shared_ptr<Validator> build_from_element(
                 info.frozen = frozen_val.value().get_bool();
             }
 
-            // Parse validation_alias
+            // Parse validation_alias (string, AliasPath = flat list, or AliasChoices = list of lists)
             auto alias_val = field_def_elem["validation_alias"];
-            if (!alias_val.error() && alias_val.value().is_string()) {
-                info.alias = std::string(alias_val.value().get_string().value());
+            if (!alias_val.error()) {
+                if (alias_val.value().is_string()) {
+                    info.alias = std::string(alias_val.value().get_string().value());
+                    info.validation_paths.push_back({info.alias});
+                    info.has_alias = true;
+                } else if (alias_val.value().is_array()) {
+                    // Determine if it's an AliasPath (flat list of scalars) or
+                    // AliasChoices (list of lists).
+                    bool is_choices = false;
+                    for (auto a : alias_val.value().get_array().value()) {
+                        if (a.is_array()) { is_choices = true; break; }
+                    }
+                    if (is_choices) {
+                        // AliasChoices: each element is a path
+                        for (auto a : alias_val.value().get_array().value()) {
+                            std::vector<std::string> path;
+                            if (a.is_array()) {
+                                for (auto inner : a.get_array().value()) {
+                                    if (inner.is_string()) path.push_back(std::string(inner.get_string().value()));
+                                    else if (inner.is_int64()) path.push_back(std::to_string(inner.get_int64()));
+                                    else if (inner.is_uint64()) path.push_back(std::to_string(inner.get_uint64()));
+                                }
+                            } else if (a.is_string()) {
+                                path.push_back(std::string(a.get_string().value()));
+                            }
+                            if (!path.empty()) {
+                                info.validation_paths.push_back(path);
+                                if (info.alias.empty()) info.alias = path[0];
+                            }
+                        }
+                    } else {
+                        // AliasPath: flat list of scalars
+                        std::vector<std::string> path;
+                        for (auto a : alias_val.value().get_array().value()) {
+                            if (a.is_string()) path.push_back(std::string(a.get_string().value()));
+                            else if (a.is_int64()) path.push_back(std::to_string(a.get_int64()));
+                            else if (a.is_uint64()) path.push_back(std::to_string(a.get_uint64()));
+                        }
+                        if (!path.empty()) {
+                            info.validation_paths.push_back(path);
+                            info.alias = path[0];
+                        }
+                    }
+                    info.has_alias = !info.validation_paths.empty();
+                }
             }
 
             // Parse default value — check both field_def_elem["default"] and schema_elem["default"]
@@ -839,8 +882,47 @@ static std::shared_ptr<Validator> build_from_element(
             }
 
             auto alias_val = field_def_elem["validation_alias"];
-            if (!alias_val.error() && alias_val.value().is_string()) {
-                info.alias = std::string(alias_val.value().get_string().value());
+            if (!alias_val.error()) {
+                if (alias_val.value().is_string()) {
+                    info.alias = std::string(alias_val.value().get_string().value());
+                    info.validation_paths.push_back({info.alias});
+                    info.has_alias = true;
+                } else if (alias_val.value().is_array()) {
+                    bool is_choices = false;
+                    for (auto a : alias_val.value().get_array().value()) {
+                        if (a.is_array()) { is_choices = true; break; }
+                    }
+                    if (is_choices) {
+                        for (auto a : alias_val.value().get_array().value()) {
+                            std::vector<std::string> path;
+                            if (a.is_array()) {
+                                for (auto inner : a.get_array().value()) {
+                                    if (inner.is_string()) path.push_back(std::string(inner.get_string().value()));
+                                    else if (inner.is_int64()) path.push_back(std::to_string(inner.get_int64()));
+                                    else if (inner.is_uint64()) path.push_back(std::to_string(inner.get_uint64()));
+                                }
+                            } else if (a.is_string()) {
+                                path.push_back(std::string(a.get_string().value()));
+                            }
+                            if (!path.empty()) {
+                                info.validation_paths.push_back(path);
+                                if (info.alias.empty()) info.alias = path[0];
+                            }
+                        }
+                    } else {
+                        std::vector<std::string> path;
+                        for (auto a : alias_val.value().get_array().value()) {
+                            if (a.is_string()) path.push_back(std::string(a.get_string().value()));
+                            else if (a.is_int64()) path.push_back(std::to_string(a.get_int64()));
+                            else if (a.is_uint64()) path.push_back(std::to_string(a.get_uint64()));
+                        }
+                        if (!path.empty()) {
+                            info.validation_paths.push_back(path);
+                            info.alias = path[0];
+                        }
+                    }
+                    info.has_alias = !info.validation_paths.empty();
+                }
             }
 
             fields_map[fname] = std::move(info);
@@ -1867,6 +1949,22 @@ static std::shared_ptr<Validator> build_from_py_dict(
                 }
             }
         }
+        // Propagate alias lookup mode (validate_by_name/validate_by_alias/
+        // loc_by_alias) from the model config to the inner ModelFieldsValidator.
+        // Read from inner_config (parent + this model's own config merged).
+        {
+            if (auto mfv = std::dynamic_pointer_cast<ModelFieldsValidator>(inner)) {
+                if (inner_config.contains("validate_by_name") && py::isinstance<py::bool_>(inner_config["validate_by_name"])) {
+                    mfv->set_validate_by_name(inner_config["validate_by_name"].cast<bool>());
+                }
+                if (inner_config.contains("validate_by_alias") && py::isinstance<py::bool_>(inner_config["validate_by_alias"])) {
+                    mfv->set_validate_by_alias(inner_config["validate_by_alias"].cast<bool>());
+                }
+                if (inner_config.contains("loc_by_alias") && py::isinstance<py::bool_>(inner_config["loc_by_alias"])) {
+                    mfv->set_loc_by_alias(inner_config["loc_by_alias"].cast<bool>());
+                }
+            }
+        }
         bool root_model = false;
         if (schema.contains("root_model")) {
             root_model = schema["root_model"].cast<bool>();
@@ -2016,11 +2114,51 @@ static std::shared_ptr<Validator> build_from_py_dict(
                         }
                     }
                 }
-                // Parse validation_alias
+                // Parse validation_alias (string, AliasPath = flat list, or AliasChoices = list of lists)
                 if (field_def.contains("validation_alias")) {
                     auto alias_val = field_def["validation_alias"];
                     if (py::isinstance<py::str>(alias_val)) {
                         info.alias = alias_val.cast<std::string>();
+                        info.validation_paths.push_back({info.alias});
+                        info.has_alias = true;
+                    } else if (py::isinstance<py::list>(alias_val) ||
+                               py::isinstance<py::tuple>(alias_val)) {
+                        py::sequence seq = py::cast<py::sequence>(alias_val);
+                        bool is_choices = false;
+                        for (auto item : seq) {
+                            if (py::isinstance<py::list>(item) || py::isinstance<py::tuple>(item)) {
+                                is_choices = true;
+                                break;
+                            }
+                        }
+                        if (is_choices) {
+                            for (auto item : seq) {
+                                std::vector<std::string> path;
+                                if (py::isinstance<py::list>(item) || py::isinstance<py::tuple>(item)) {
+                                    for (auto inner : py::cast<py::sequence>(item)) {
+                                        if (py::isinstance<py::str>(inner)) path.push_back(inner.cast<std::string>());
+                                        else if (py::isinstance<py::int_>(inner)) path.push_back(std::to_string(inner.cast<long>()));
+                                    }
+                                } else if (py::isinstance<py::str>(item)) {
+                                    path.push_back(item.cast<std::string>());
+                                }
+                                if (!path.empty()) {
+                                    info.validation_paths.push_back(path);
+                                    if (info.alias.empty()) info.alias = path[0];
+                                }
+                            }
+                        } else {
+                            std::vector<std::string> path;
+                            for (auto item : seq) {
+                                if (py::isinstance<py::str>(item)) path.push_back(item.cast<std::string>());
+                                else if (py::isinstance<py::int_>(item)) path.push_back(std::to_string(item.cast<long>()));
+                            }
+                            if (!path.empty()) {
+                                info.validation_paths.push_back(path);
+                                info.alias = path[0];
+                            }
+                        }
+                        info.has_alias = !info.validation_paths.empty();
                     }
                 }
                 v->add_field(field_name, std::move(info));

@@ -58,7 +58,13 @@ struct FieldInfo {
                                                 // "null" = explicit null default.
                                                 // Strings stored raw (no JSON quotes).
     bool frozen = false;                       // Whether field can be reassigned
-    std::string alias;                         // Alternative name for lookup
+    std::string alias;                         // Primary/display alias (first key of first path)
+    // Validation lookup paths. Each path is a sequence of keys (strings; ints
+    // stored as their string form). A single-key path is a flat alias; a
+    // multi-key path is an AliasPath (nested lookup). Multiple paths are
+    // AliasChoices (first match wins).
+    std::vector<std::vector<std::string>> validation_paths;
+    bool has_alias = false;                     // Whether an alias is set (true even if "")
     py::object default_factory = py::none();   // Python callable for default_factory
     py::object default_py_obj = py::none();    // Complex Python object default (callables, etc.)
     bool default_factory_takes_data = false;   // Whether factory receives validated data dict
@@ -67,7 +73,7 @@ struct FieldInfo {
     bool validate_default = false;
 
     std::string display_name() const {
-        return alias.empty() ? name : alias;
+        return has_alias ? alias : name;
     }
 };
 
@@ -111,6 +117,42 @@ public:
         return "null_schema";
     }
 
+    // Resolve a lookup path (sequence of keys) against the input dict.
+    // The first key is looked up in the dict; subsequent keys navigate into
+    // the nested value (dict key or list/tuple index). Returns the resolved
+    // value, or std::nullopt if any step fails.
+    static std::optional<py::object> resolve_path(ValidatedDict& dict, const std::vector<std::string>& path) {
+        if (path.empty()) return std::nullopt;
+        auto first = dict.get_value(path[0]);
+        if (!first) return std::nullopt;
+        py::object current = *first;
+        for (size_t i = 1; i < path.size(); i++) {
+            const std::string& key = path[i];
+            if (py::isinstance<py::dict>(current)) {
+                py::dict d = current.cast<py::dict>();
+                if (!d.contains(py::str(key))) return std::nullopt;
+                current = d[py::str(key)];
+            } else if (py::isinstance<py::list>(current)) {
+                try {
+                    long idx = std::stol(key);
+                    py::list l = current.cast<py::list>();
+                    if (idx < 0 || idx >= (long)l.size()) return std::nullopt;
+                    current = l[(size_t)idx];
+                } catch (...) { return std::nullopt; }
+            } else if (py::isinstance<py::tuple>(current)) {
+                try {
+                    long idx = std::stol(key);
+                    py::tuple t = current.cast<py::tuple>();
+                    if (idx < 0 || idx >= (long)t.size()) return std::nullopt;
+                    current = t[(size_t)idx];
+                } catch (...) { return std::nullopt; }
+            } else {
+                return std::nullopt;
+            }
+        }
+        return current;
+    }
+
     ModelFieldsValidator(
         std::unordered_map<std::string, FieldInfo> fields,
         ExtraBehavior extra_behavior = ExtraBehavior::Ignore,
@@ -150,15 +192,24 @@ public:
                 py::dict filtered;
                 for (const auto& name : field_order_) {
                     const auto& field = fields_.at(name);
-                    std::string lookup_key = field.alias.empty() ? name : field.alias;
-                    try {
-                        py::object value = obj.attr(lookup_key.c_str());
-                        filtered[py::str(lookup_key)] = value;
-                    } catch (...) {}
-                    if (!field.alias.empty() && lookup_key != name) {
+                    // Same lookup-key set as validate_dict (Rust semantics).
+                    // For from_attributes, use the first key of each path
+                    // (flat attribute access).
+                    std::vector<std::string> lookup_keys;
+                    if (validate_by_alias_) {
+                        for (const auto& p : field.validation_paths) {
+                            if (!p.empty()) lookup_keys.push_back(p[0]);
+                        }
+                    }
+                    if (!field.has_alias || validate_by_name_) {
+                        lookup_keys.push_back(name);
+                    }
+                    std::unordered_set<std::string> seen_keys;
+                    for (const auto& key : lookup_keys) {
+                        if (!seen_keys.insert(key).second) continue;
                         try {
-                            py::object value = obj.attr(name.c_str());
-                            filtered[py::str(name)] = value;
+                            py::object value = obj.attr(key.c_str());
+                            filtered[py::str(key)] = value;
                         } catch (...) {}
                     }
                 }
@@ -224,26 +275,50 @@ public:
 
         for (const auto& name : field_order_) {
             const auto& field = fields_.at(name);
-            state.push_loc(name);
+            // Error location uses the alias when loc_by_alias (default true),
+            // else the field name (Rust: loc_by_alias config).
+            std::string loc_name = (loc_by_alias_ && field.has_alias) ? field.alias : name;
+            state.push_loc(loc_name);
             // Expose the current field name to validators via ValidationInfo
             // (Rust: scoped_set_field_name).  Restored after the loop.
             state.set_field_name(name);
 
-            std::string lookup_key = field.alias.empty() ? name : field.alias;
-            bool has_entry = false;
+            // Runtime by_alias/by_name (from model_validate) override the
+            // config-level settings.
+            bool use_by_alias = validate_by_alias_;
+            bool use_by_name = validate_by_name_;
+            if (state.by_alias().has_value()) use_by_alias = state.by_alias().value();
+            if (state.by_name().has_value()) use_by_name = state.by_name().value();
+            // Build lookup paths (Rust LookupPathCollection semantics):
+            // - each validation path is a lookup path when validate_by_alias
+            //   (default true);
+            // - the field name is a lookup path only when there is no alias
+            //   or validate_by_name is set.
+            std::vector<std::vector<std::string>> lookup_paths;
+            if (use_by_alias) {
+                for (const auto& p : field.validation_paths) {
+                    lookup_paths.push_back(p);
+                }
+            }
+            if (!field.has_alias || use_by_name) {
+                lookup_paths.push_back({name});
+            }
 
-            if (dict->has_key(lookup_key)) {
-                has_entry = true;
-                used_keys.insert(lookup_key);
-            } else if (!field.alias.empty() && dict->has_key(name)) {
-                has_entry = true;
-                used_keys.insert(name);
+            // Try each path in order; first match wins.
+            bool has_entry = false;
+            std::optional<py::object> resolved_value;
+            for (const auto& path : lookup_paths) {
+                auto resolved = resolve_path(*dict, path);
+                if (resolved) {
+                    has_entry = true;
+                    resolved_value = *resolved;
+                    used_keys.insert(path[0]);
+                    break;
+                }
             }
 
             if (has_entry) {
-                // Use whichever key was actually found (alias or canonical)
-                std::string actual_key = dict->has_key(lookup_key) ? lookup_key : name;
-                auto validate_result = validate_field_value_result(*dict, actual_key, field, state, combined_errors);
+                auto validate_result = validate_field_value_from_object(*resolved_value, field, state, combined_errors);
 
                 if (validate_result.has_value()) {
                     // Validation succeeded (value may be nullptr for nullable)
@@ -496,6 +571,9 @@ public:
     void set_extras_keys_validator(std::shared_ptr<Validator> v) { extras_keys_validator_ = std::move(v); }
     void set_from_attributes(bool value) { from_attributes_ = value; }
     bool from_attributes() const { return from_attributes_; }
+    void set_validate_by_name(bool value) { validate_by_name_ = value; }
+    void set_validate_by_alias(bool value) { validate_by_alias_ = value; }
+    void set_loc_by_alias(bool value) { loc_by_alias_ = value; }
 
 protected:
     std::optional<std::shared_ptr<void>> validate_field_value_result(
@@ -611,6 +689,54 @@ protected:
                 );
                 combined_errors.merge(std::move(new_err));
             }
+        }
+        return std::nullopt;
+    }
+
+    // Validate a pre-resolved py::object value (used for AliasPath/AliasChoices
+    // where the value was navigated out of the input dict).
+    std::optional<std::shared_ptr<void>> validate_field_value_from_object(
+        const py::object& value,
+        const FieldInfo& field,
+        ValidationState& state,
+        ValError& combined_errors
+    ) {
+        if (state.coerce_strings() && py::isinstance<py::str>(value)) {
+            StringInput str_input(py::str(value).cast<std::string>());
+            str_input.set_current_location(state.location());
+            auto result = field.schema->validate(str_input, state);
+            if (result.is_ok()) return result.value();
+            auto& err = result.error();
+            if (err.is_omit()) return std::nullopt;
+            else if (err.has_line_errors()) {
+                auto mutable_err = const_cast<ValError*>(&err);
+                combined_errors.merge(std::move(*mutable_err));
+            } else if (err.is_internal()) {
+                auto new_err = ValError::line_error(
+                    ErrorType(ErrorType::Kind::CustomError),
+                    state.location(),
+                    err.internal_message()
+                );
+                combined_errors.merge(std::move(new_err));
+            }
+            return std::nullopt;
+        }
+        PythonInput field_input(value);
+        field_input.set_current_location(state.location());
+        auto result = field.schema->validate(field_input, state);
+        if (result.is_ok()) return result.value();
+        auto& err = result.error();
+        if (err.is_omit()) return std::nullopt;
+        else if (err.has_line_errors()) {
+            auto mutable_err = const_cast<ValError*>(&err);
+            combined_errors.merge(std::move(*mutable_err));
+        } else if (err.is_internal()) {
+            auto new_err = ValError::line_error(
+                ErrorType(ErrorType::Kind::CustomError),
+                state.location(),
+                err.internal_message()
+            );
+            combined_errors.merge(std::move(new_err));
         }
         return std::nullopt;
     }
@@ -848,6 +974,14 @@ protected:
     std::shared_ptr<Validator> extras_keys_validator_;
     std::string model_name_;
     bool from_attributes_ = false;  // from_attributes setting from schema
+    // Alias lookup mode (Rust LookupPathCollection semantics):
+    // - validate_by_alias (default true): the alias(es) are lookup keys.
+    // - validate_by_name (default false): the field name is a lookup key
+    //   only when there is no alias or validate_by_name is set.
+    // - loc_by_alias (default true): error locations use the alias, else name.
+    bool validate_by_alias_ = true;
+    bool validate_by_name_ = false;
+    bool loc_by_alias_ = true;
 };
 
 // ============================================================================

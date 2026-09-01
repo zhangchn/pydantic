@@ -1533,6 +1533,13 @@ private:
             bool has_value = true;
             if (main.contains(key)) {
                 fv = main[key];
+            } else if (computed_fields_.count(k)) {
+                // Computed field: read the property from the model instance
+                try {
+                    fv = py::getattr(value, key);
+                } catch (...) {
+                    has_value = false;
+                }
             } else if (ser->has_default()) {
                 fv = ser->get_default_value();
             } else {
@@ -1730,6 +1737,13 @@ private:
             bool has_value = true;
             if (main.contains(key)) {
                 fv = main[key];
+            } else if (computed_fields_.count(k)) {
+                // Computed field: read the property from the model instance
+                try {
+                    fv = py::getattr(value, key);
+                } catch (...) {
+                    has_value = false;
+                }
             } else if (ser->has_default()) {
                 fv = ser->get_default_value();
             } else {
@@ -2185,9 +2199,14 @@ static SerRef build_ser_impl(const py::dict& schema,
                     auto cf = cf_item.cast<py::dict>();
                     std::string prop = cf["property_name"].cast<std::string>();
                     node->computed_fields_.insert(prop);
+                    // Computed field alias (from alias generator): serialization_alias takes precedence
+                    if (cf.contains("serialization_alias")) {
+                        node->field_aliases[prop] = cf["serialization_alias"].cast<std::string>();
+                    } else if (cf.contains("alias")) {
+                        node->field_aliases[prop] = cf["alias"].cast<std::string>();
+                    }
                     try {
                         node->fields[prop] = build_ser(cf["return_schema"].cast<py::dict>(), defs);
-                        node->field_order.push_back(prop);
                     } catch (...) {
                         // If no return_schema, fall back to any
                         py::dict any_schema;
@@ -2288,7 +2307,14 @@ public:
         : schema_(schema) {
         std::unordered_map<std::string, SerRef> defs;
         ser_ = build_ser(schema, defs);
-        (void)cfg;
+        if (cfg.has_value()) {
+            try {
+                py::dict c = *cfg;
+                if (c.contains("serialize_by_alias")) {
+                    serialize_by_alias_ = c["serialize_by_alias"].cast<bool>();
+                }
+            } catch (...) { PyErr_Clear(); }
+        }
     }
 
     py::object to_python(const py::object& value, std::optional<std::string> mode,
@@ -2302,7 +2328,7 @@ public:
         // Pass include/exclude through as-is (nested dict/set filters supported)
         py::object inc = (include && !include->is_none()) ? *include : py::none();
         py::object exc = (exclude && !exclude->is_none()) ? *exclude : py::none();
-        bool use_alias = by_alias.value_or(false);
+        bool use_alias = by_alias.value_or(serialize_by_alias_);
 
         return ser_->to_python(value, mode && *mode == "json", exc_none, round_trip, inc, exc, use_alias, exclude_unset, exclude_defaults, context);
     }
@@ -2318,7 +2344,7 @@ public:
         // Pass include/exclude through as-is (nested dict/set filters supported)
         py::object inc = (include && !include->is_none()) ? *include : py::none();
         py::object exc = (exclude && !exclude->is_none()) ? *exclude : py::none();
-        bool use_alias = by_alias.value_or(false);
+        bool use_alias = by_alias.value_or(serialize_by_alias_);
 
         bool e = ea.value_or(false);
         std::string json = ser_->to_json(value, e, -1, round_trip, inc, exc, use_alias, exclude_unset, exclude_defaults, exc_none, context);
@@ -2334,6 +2360,7 @@ public:
 private:
     SerRef ser_;
     py::object schema_;  // Store schema for pickle support
+    bool serialize_by_alias_ = false;  // config default for by_alias=None
 };
 
 // ---------------------------------------------------------------------------
@@ -2662,7 +2689,6 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
         .def("validate_python", [](SchemaValidator& self, const py::object& input, py::object strict, py::object context, py::object self_instance,
                                     py::object extra, py::object from_attributes, py::object by_alias, py::object by_name) -> py::object {
             // NEW: Use native PythonInput - no JSON round-trip!
-            (void)by_alias; (void)by_name;
             {
                 py::module_ m = py::module_::import("__main__");
                 m.attr("_last_assignment_error") = false;
@@ -2678,7 +2704,16 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                 else if (e == "forbid") extra_opt = ExtraBehavior::Forbid;
                 else extra_opt = ExtraBehavior::Ignore;
             }
-            py::object validated = self.validate_python_object(input, pyobj_to_bool(strict), extra_opt, fa_opt, context, /*coerce_strings=*/false, self_instance);
+            // Runtime by_alias/by_name override the config-level settings.
+            std::optional<bool> by_alias_opt;
+            if (!by_alias.is_none()) {
+                by_alias_opt = pyobj_to_bool(by_alias);
+            }
+            std::optional<bool> by_name_opt;
+            if (!by_name.is_none()) {
+                by_name_opt = pyobj_to_bool(by_name);
+            }
+            py::object validated = self.validate_python_object(input, pyobj_to_bool(strict), extra_opt, fa_opt, context, /*coerce_strings=*/false, self_instance, by_alias_opt, by_name_opt);
 
             // If self_instance provided, populate and return it
             if (!self_instance.is_none() && py::hasattr(self_instance, "__dict__")) {

@@ -682,7 +682,9 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
                                                    std::optional<bool> from_attributes,
                                                    py::object context,
                                                    bool coerce_strings,
-                                                   py::object self_instance) {
+                                                   py::object self_instance,
+                                                   std::optional<bool> by_alias,
+                                                   std::optional<bool> by_name) {
     if (!validator_) {
         throw std::runtime_error("Validator not initialized");
     }
@@ -700,6 +702,12 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
     }
     if (from_attributes.has_value()) {
         state.set_from_attributes(*from_attributes);
+    }
+    if (by_alias.has_value()) {
+        state.set_by_alias(*by_alias);
+    }
+    if (by_name.has_value()) {
+        state.set_by_name(*by_name);
     }
     if (!context.is_none()) {
         state.set_context_py(context);

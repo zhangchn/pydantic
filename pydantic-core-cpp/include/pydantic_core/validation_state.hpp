@@ -52,7 +52,9 @@ public:
     void set_from_attributes(bool value) { config_.from_attributes = value; }
     StringCacheMode cache_strings() const { return config_.cache_strings; }
     std::optional<bool> by_alias() const { return config_.by_alias; }
+    void set_by_alias(bool value) { config_.by_alias = value; }
     std::optional<bool> by_name() const { return config_.by_name; }
+    void set_by_name(bool value) { config_.by_name = value; }
     
     // Determine strict mode - use state setting or validator's default
     bool strict_or(bool default_strict) const {
