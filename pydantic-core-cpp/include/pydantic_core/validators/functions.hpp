@@ -20,11 +20,25 @@ namespace pydantic_core {
 // object by type name (used here to pass the validated value to after-functions).
 py::object value_to_python_with_type(const std::shared_ptr<void>& value, const std::string& type_name);
 
+// Stringify a Python context dict into an ErrorType context (the Python
+// error-reconstruction layer re-parses the values from the JSON form).
+inline void error_type_context_from_py(ErrorType& et, const py::object& ctx) {
+    if (ctx.is_none() || !py::isinstance<py::dict>(ctx)) return;
+    for (auto item : ctx.cast<py::dict>()) {
+        std::string k;
+        try { k = py::str(item.first).cast<std::string>(); } catch (...) { continue; }
+        std::string v;
+        try { v = py::str(item.second).cast<std::string>(); } catch (...) { v = ""; }
+        et.context()[k] = v;
+    }
+}
+
 // Convert a Python exception raised by a validator function into a ValError,
-// mirroring Rust's convert_err: ValueError -> value_error, AssertionError ->
-// assertion_error, anything else -> custom_error carrying the message. The
-// exception object is attached to the line error so the Python wrapper can
-// surface it as ctx['error'].
+// mirroring Rust's convert_err: PydanticCustomError / PydanticKnownError
+// carry their own error type + message, plain ValueError -> value_error,
+// AssertionError -> assertion_error, anything else -> InternalErr so the
+// original exception propagates unchanged. The exception object is attached
+// to the line error so the Python wrapper can surface it as ctx['error'].
 inline ValError function_error_from_exception(py::error_already_set& e, const Input& input, ValidationState& state) {
     // Keep a reference to the exception object for ctx['error'] — value()
     // returns a new reference, so it stays valid after e.restore().
@@ -35,28 +49,62 @@ inline ValError function_error_from_exception(py::error_already_set& e, const In
     } catch (...) {
         exc_str = "";
     }
-    ErrorType::Kind kind;
     if (e.matches(PyExc_ValueError)) {
-        kind = ErrorType::Kind::ValueError;
-    } else if (e.matches(PyExc_AssertionError)) {
-        kind = ErrorType::Kind::AssertionError;
-    } else {
-        // Rust convert_err: other exceptions become InternalErr carrying the
-        // original exception so it propagates unchanged to the caller.
-        py::object exc = e.value();
+        // Rust convert_err: PydanticCustomError / PydanticKnownError carry
+        // their own error type and message; only a plain ValueError maps to
+        // value_error. str(exc) is already the formatted message.
+        try {
+            py::object m = py::module_::import("pydantic_core_cpp");
+            py::object custom_cls = m.attr("PydanticCustomError");
+            if (py::isinstance(exc_value, custom_cls)) {
+                std::string custom_type = py::str(exc_value.attr("type")).cast<std::string>();
+                ErrorType et(custom_type, exc_str);
+                error_type_context_from_py(et, py::getattr(exc_value, "context", py::none()));
+                auto err = ValError::line_error(et, state.location(), input.as_error_value().repr);
+                e.restore();
+                PyErr_Clear();
+                return err;
+            }
+            py::object known_cls = m.attr("PydanticKnownError");
+            if (py::isinstance(exc_value, known_cls)) {
+                std::string ktype = py::str(exc_value.attr("type")).cast<std::string>();
+                ErrorType et = ErrorType::build_known_type(ktype);
+                error_type_context_from_py(et, py::getattr(exc_value, "context", py::none()));
+                auto err = ValError::line_error(et, state.location(), input.as_error_value().repr);
+                e.restore();
+                PyErr_Clear();
+                return err;
+            }
+        } catch (...) {
+            PyErr_Clear();
+        }
+        ErrorType et(ErrorType::Kind::ValueError);
+        et.context()["error"] = exc_str;
+        auto err = ValError::line_error(et, state.location(), input.as_error_value().repr);
+        err.line_errors()[0]->raw_error_obj = exc_value;
+        // Swallow the exception: restore() + PyErr_Clear() leaves the Python error
+        // indicator clear so the destructor's restore is a no-op.
         e.restore();
         PyErr_Clear();
-        return ValError::internal_err(std::move(exc));
+        return err;
     }
-    ErrorType et(kind);
-    et.context()["error"] = exc_str;
-    auto err = ValError::line_error(et, state.location(), input.as_error_value().repr);
-    err.line_errors()[0]->raw_error_obj = exc_value;
-    // Swallow the exception: restore() + PyErr_Clear() leaves the Python error
-    // indicator clear so the destructor's restore is a no-op.
+    if (e.matches(PyExc_AssertionError)) {
+        ErrorType et(ErrorType::Kind::AssertionError);
+        et.context()["error"] = exc_str;
+        auto err = ValError::line_error(et, state.location(), input.as_error_value().repr);
+        err.line_errors()[0]->raw_error_obj = exc_value;
+        // Swallow the exception: restore() + PyErr_Clear() leaves the Python error
+        // indicator clear so the destructor's restore is a no-op.
+        e.restore();
+        PyErr_Clear();
+        return err;
+    }
+    // Rust convert_err: other exceptions become InternalErr carrying the
+    // original exception so it propagates unchanged to the caller.
+    py::object exc = e.value();
     e.restore();
     PyErr_Clear();
-    return err;
+    return ValError::internal_err(std::move(exc));
 }
 
 // Build a ValidationInfo object for Python callable validators, mirroring

@@ -345,6 +345,37 @@ def _parse_errors_from_message(msg: str) -> list[dict]:
 ValidationError.errors = _errors_with_include_url
 
 
+def _validation_error_count(self) -> int:
+    # pybind11 register_exception only carries what() on the Python instance,
+    # so the C++ accessors' py::cast always fails; derive from the message.
+    cpp_msg = getattr(self, '_cpp_msg', '') or _orig_str(self)
+    m = _re.match(r'(\d+) validation error', cpp_msg.split('\n', 1)[0])
+    if m:
+        return int(m.group(1))
+    try:
+        return len(self.errors())
+    except Exception:
+        return 0
+
+
+ValidationError.error_count = _validation_error_count
+
+
+def _validation_error_title(self) -> str:
+    title = getattr(self, '_title', None)
+    if isinstance(title, str):
+        return title
+    model_name = getattr(self, '_model_name', None)
+    if isinstance(model_name, str):
+        return model_name
+    cpp_msg = getattr(self, '_cpp_msg', '') or _orig_str(self)
+    m = _re.match(r'\d+ validation error(?:\(s\)|s)? for (.*)$', cpp_msg.split('\n', 1)[0])
+    return m.group(1) if m else ''
+
+
+ValidationError.title = property(_validation_error_title)
+
+
 # ============================================================================
 # Add ValidationError.from_exception_data classmethod
 # ============================================================================
