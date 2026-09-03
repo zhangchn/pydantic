@@ -270,7 +270,8 @@ std::string SchemaValidator::validate_strings(const std::string& string_data,
 // strict (matching Rust's StringInput semantics) and extras keep raw strings.
 py::object SchemaValidator::validate_strings_object(const py::object& input,
                                                     std::optional<bool> strict,
-                                                    std::optional<ExtraBehavior> extra) {
+                                                    std::optional<ExtraBehavior> extra,
+                                                    PartialMode allow_partial) {
     if (!validator_) {
         throw std::runtime_error("Validator not initialized");
     }
@@ -287,6 +288,7 @@ py::object SchemaValidator::validate_strings_object(const py::object& input,
             state.set_extra_behavior(*extra);
         }
         state.set_coerce_strings(true);
+        state.set_allow_partial(allow_partial);
         auto result = validator_->validate(str_input, state);
         if (result.is_ok()) {
             return result_to_python(result.value());
@@ -298,7 +300,7 @@ py::object SchemaValidator::validate_strings_object(const py::object& input,
     // Dict (or any other) input: validate as-is in strings mode.  Declared
     // fields coerce string values via StringInput; extra fields keep the raw
     // string value.
-    return validate_python_object(input, strict, extra, std::nullopt, py::none(), /*coerce_strings=*/true);
+    return validate_python_object(input, strict, extra, std::nullopt, py::none(), /*coerce_strings=*/true, py::none(), std::nullopt, std::nullopt, allow_partial);
 }
 
 bool SchemaValidator::isinstance_python(const std::string& input_json,
@@ -684,7 +686,8 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
                                                    bool coerce_strings,
                                                    py::object self_instance,
                                                    std::optional<bool> by_alias,
-                                                   std::optional<bool> by_name) {
+                                                   std::optional<bool> by_name,
+                                                   PartialMode allow_partial) {
     if (!validator_) {
         throw std::runtime_error("Validator not initialized");
     }
@@ -713,6 +716,7 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
         state.set_context_py(context);
     }
     state.set_coerce_strings(coerce_strings);
+    state.set_allow_partial(allow_partial);
     // Seed the top-level input identity so the outermost fields-position
     // function-after can snapshot pre-func fields (BaseModel.__init__ path).
     state.set_top_input_ptr(static_cast<const void*>(input.ptr()));
@@ -1001,29 +1005,30 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
                     const auto& fv = mfo->fields.at(key);
                     out[py::str(key)] = value_to_python_with_type(fv.value, fv.type_name);
                 }
-                // Attach __pydantic_fields_set__ for exclude_unset support
-                py::set fields_set;
-                for (const auto& fname : mfo->fields_set) {
-                    fields_set.add(py::str(fname));
-                }
-                out[py::str("__pydantic_fields_set__")] = std::move(fields_set);
-
-                // Attach __pydantic_defaults__ for exclude_defaults support
-                // Use the defaults map populated by ModelFieldsValidator
-                // TEMPORARILY DISABLED for debugging bus error
-                // py::dict defaults_dict;
-                // for (const auto& [key, def_val] : mfo->defaults) {
-                //     defaults_dict[py::str(key)] = def_val;
-                // }
-                // out[py::str("__pydantic_defaults__")] = std::move(defaults_dict);
-
-                // Include extra fields in separate __pydantic_extra__ dict
-                if (!mfo->extra.empty()) {
-                    py::dict extra_dict;
+                if (effective_type == "typed-dict") {
+                    // TypedDict: Rust returns a plain dict — no
+                    // __pydantic_fields_set__, and extra fields are merged
+                    // directly into the output dict (not a separate
+                    // __pydantic_extra__ dict).
                     for (const auto& [key, fv] : mfo->extra) {
-                        extra_dict[py::str(key)] = value_to_python_with_type(fv.value, fv.type_name);
+                        out[py::str(key)] = value_to_python_with_type(fv.value, fv.type_name);
                     }
-                    out[py::str("__pydantic_extra__")] = std::move(extra_dict);
+                } else {
+                    // Model/model-fields: attach __pydantic_fields_set__ for
+                    // exclude_unset support and keep extras in a separate
+                    // __pydantic_extra__ dict.
+                    py::set fields_set;
+                    for (const auto& fname : mfo->fields_set) {
+                        fields_set.add(py::str(fname));
+                    }
+                    out[py::str("__pydantic_fields_set__")] = std::move(fields_set);
+                    if (!mfo->extra.empty()) {
+                        py::dict extra_dict;
+                        for (const auto& [key, fv] : mfo->extra) {
+                            extra_dict[py::str(key)] = value_to_python_with_type(fv.value, fv.type_name);
+                        }
+                        out[py::str("__pydantic_extra__")] = std::move(extra_dict);
+                    }
                 }
                 return std::move(out);
             }
@@ -1193,28 +1198,30 @@ py::object SchemaValidator::result_to_python(const std::shared_ptr<void>& result
                     py::object py_val = value_to_python_with_type(fv.value, fv.type_name);
                     out[py::str(key)] = py_val;
                 }
-                // Attach __pydantic_fields_set__ for exclude_unset support
-                py::set fields_set;
-                for (const auto& fname : mfo->fields_set) {
-                    fields_set.add(py::str(fname));
-                }
-                out[py::str("__pydantic_fields_set__")] = std::move(fields_set);
-
-                // Attach __pydantic_defaults__ for exclude_defaults support
-                // Use the defaults map populated by ModelFieldsValidator
-                py::dict defaults_dict;
-                for (const auto& [key, def_val] : mfo->defaults) {
-                    defaults_dict[py::str(key)] = def_val;
-                }
-                out[py::str("__pydantic_defaults__")] = std::move(defaults_dict);
-
-                // Include extra fields in separate __pydantic_extra__ dict
-                if (!mfo->extra.empty()) {
-                    py::dict extra_dict;
+                if (effective_vname == "typed-dict") {
+                    // TypedDict: Rust returns a plain dict — no
+                    // __pydantic_fields_set__, and extra fields are merged
+                    // directly into the output dict (not a separate
+                    // __pydantic_extra__ dict).
                     for (const auto& [key, fv] : mfo->extra) {
-                        extra_dict[py::str(key)] = value_to_python_with_type(fv.value, fv.type_name);
+                        out[py::str(key)] = value_to_python_with_type(fv.value, fv.type_name);
                     }
-                    out[py::str("__pydantic_extra__")] = std::move(extra_dict);
+                } else {
+                    // Model/model-fields: attach __pydantic_fields_set__ for
+                    // exclude_unset support and keep extras in a separate
+                    // __pydantic_extra__ dict.
+                    py::set fields_set;
+                    for (const auto& fname : mfo->fields_set) {
+                        fields_set.add(py::str(fname));
+                    }
+                    out[py::str("__pydantic_fields_set__")] = std::move(fields_set);
+                    if (!mfo->extra.empty()) {
+                        py::dict extra_dict;
+                        for (const auto& [key, fv] : mfo->extra) {
+                            extra_dict[py::str(key)] = value_to_python_with_type(fv.value, fv.type_name);
+                        }
+                        out[py::str("__pydantic_extra__")] = std::move(extra_dict);
+                    }
                 }
 
                 return std::move(out);

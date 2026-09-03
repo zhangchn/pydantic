@@ -2015,7 +2015,16 @@ static std::shared_ptr<Validator> build_from_py_dict(
     // (dataclass-args is handled separately below — its fields are a list,
     // not a dict, so the model-fields path must not intercept it)
     if (type == "model-fields" || type == "typed-dict") {
-        auto v = std::make_shared<ModelFieldsValidator>();
+        // TypedDict must use TypedDictValidator (name "typed-dict") so result
+        // conversion produces a plain dict (no __pydantic_fields_set__, extras
+        // merged in) matching Rust. ModelFieldsValidator names itself
+        // "model-fields" and would leak __pydantic_fields_set__ into the output.
+        std::shared_ptr<ModelFieldsValidator> v;
+        if (type == "typed-dict") {
+            v = std::make_shared<TypedDictValidator>();
+        } else {
+            v = std::make_shared<ModelFieldsValidator>();
+        }
         if (schema.contains("fields")) {
             auto fields_dict = schema["fields"].cast<py::dict>();
             for (auto item : fields_dict) {

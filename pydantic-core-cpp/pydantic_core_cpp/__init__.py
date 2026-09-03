@@ -1269,7 +1269,8 @@ class SchemaValidator:
             _main._last_raw_input = obj
             result = self._base.validate_python(
                 obj, strict=strict, context=context, self_instance=self_instance,
-                extra=extra, from_attributes=from_attributes, by_alias=by_alias, by_name=by_name)
+                extra=extra, from_attributes=from_attributes, by_alias=by_alias, by_name=by_name,
+                allow_partial=allow_partial)
         except ValidationError as e:
             # Store original C++ message and model name for formatting
             e._cpp_msg = _orig_str(e)
@@ -1320,10 +1321,8 @@ class SchemaValidator:
             # in slots, so gather the data from whichever container is present.
             has_dict = hasattr(self_instance, '__dict__')
             if has_dict:
-                saved_defaults = self_instance.__dict__.pop('__pydantic_defaults__', None)
                 data = dict(self_instance.__dict__)
             else:
-                saved_defaults = None
                 slots = tuple(getattr(type(self_instance), '__slots__', ()))
                 data = {}
                 for s in slots:
@@ -1355,9 +1354,6 @@ class SchemaValidator:
                 # are slot attributes already set by the C++ binding; do NOT copy
                 # them from `processed` (a freshly built instance would clobber
                 # C++-populated extras/fields_set with None/default values).
-            # Restore __pydantic_defaults__ saved before _dict_to_model
-            if saved_defaults is not None and has_dict:
-                self_instance.__dict__['__pydantic_defaults__'] = saved_defaults
 
             # Convert extra field values set by C++ (they live on the instance,
             # not in __dict__, e.g. __pydantic_extra__: dict[str, Foo])
@@ -1416,7 +1412,7 @@ class SchemaValidator:
         return result
 
     def validate_strings(self, string_data, *, strict=None, extra=None, context=None, by_alias=None, by_name=None, allow_partial=None):
-        result = self._base.validate_strings(string_data, strict=strict, extra=extra)
+        result = self._base.validate_strings(string_data, strict=strict, extra=extra, allow_partial=allow_partial)
         if isinstance(result, dict):
             result = self._dict_to_model(result)
             if not isinstance(result, dict):
@@ -1465,6 +1461,12 @@ class SchemaValidator:
 
     def __repr__(self):
         return self._base.__repr__()
+
+    def __reduce__(self):
+        # Reconstruct from the original schema dict + config (pure Python),
+        # avoiding the C++ __reduce__ path which relies on schema_json() —
+        # empty for validators built from a Python dict (the common path).
+        return (SchemaValidator, (self._schema, self._config))
 
 
 def _schema_clean_cls_keys(d):

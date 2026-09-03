@@ -44,7 +44,8 @@ public:
                                       bool coerce_strings = false,
                                       py::object self_instance = py::none(),
                                       std::optional<bool> by_alias = std::nullopt,
-                                      std::optional<bool> by_name = std::nullopt);
+                                      std::optional<bool> by_name = std::nullopt,
+                                      PartialMode allow_partial = PartialMode::Off);
 
     // Populate self_instance from the fields snapshot taken by the outermost
     // fields-position function-after (BaseModel.__init__ path).  Returns
@@ -67,7 +68,8 @@ public:
     // Validate strings on Python object directly (NEW - no JSON round-trip)
     py::object validate_strings_object(const py::object& input,
                                        std::optional<bool> strict = std::nullopt,
-                                       std::optional<ExtraBehavior> extra = std::nullopt);
+                                       std::optional<ExtraBehavior> extra = std::nullopt,
+                                       PartialMode allow_partial = PartialMode::Off);
 
     // isinstance check - returns bool instead of raising
     bool isinstance_python(const std::string& input_json,

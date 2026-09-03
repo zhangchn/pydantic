@@ -65,6 +65,7 @@ public:
             auto entries = list->entries();
             py::list result_list;
             std::vector<std::shared_ptr<ValLineError>> errors;
+            size_t last_index = entries.empty() ? 0 : entries.back().index;
             // In strings mode (validate_strings), items always coerce regardless of strict
             for (const auto& entry : entries) {
                 state.location().push(entry.index);
@@ -80,16 +81,22 @@ public:
                 element_input->set_current_location(state.location());
                 auto item_result = items_schema->validate(*element_input, item_state);
                 if (item_result.is_err()) {
-                    if (fail_fast) {
+                    // Partial mode: drop line errors for the last item (Rust:
+                    // enumerate_last_partial — the last element is omitted from
+                    // the output when its validation fails).
+                    bool is_last_partial = state.is_partial() && (entry.index == last_index);
+                    if (fail_fast && !is_last_partial) {
                         state.location().pop();
                         return item_result.error();
                     }
                     // Collect errors in non-fail-fast mode (Rust aggregates them)
                     if (item_result.error().has_line_errors()) {
-                        for (auto& le : item_result.error().line_errors()) {
-                            errors.push_back(le);
+                        if (!is_last_partial) {
+                            for (auto& le : item_result.error().line_errors()) {
+                                errors.push_back(le);
+                            }
                         }
-                    } else {
+                    } else if (!is_last_partial) {
                         errors.push_back(std::make_shared<ValLineError>(ValLineError{
                             ErrorType(ErrorType::Kind::CustomError), state.location(), "Item validation failed"}));
                     }
@@ -277,11 +284,19 @@ public:
         if (keys_schema || values_schema) {
             py::dict result_dict;
             std::vector<std::shared_ptr<ValLineError>> errors;
-            for (const auto& entry : entries) {
+            // Partial mode: the last entry's value errors are dropped (Rust:
+            // enumerate_last_partial — the last item is omitted from the output
+            // when its value validation fails).
+            bool last_entry = false;
+            for (size_t ei = 0; ei < entries.size(); ei++) {
+                const auto& entry = entries[ei];
+                last_entry = (ei == entries.size() - 1);
+                bool is_last_partial = state.is_partial() && last_entry;
                 state.location().push(entry.key);
                 ValidationState sub_state = state.sub_copy(state.coerce_strings());
                 py::object key_obj = dict->get_key(entry.key).value_or(py::str(entry.key));
                 py::object val_obj = dict->get_value(entry.key).value_or(py::none());
+                bool skip_entry = false;
 
                 // Validate key against keys_schema
                 if (keys_schema) {
@@ -289,41 +304,45 @@ public:
                     key_input->set_current_location(state.location());
                     auto key_result = keys_schema->validate(*key_input, sub_state);
                     if (key_result.is_err()) {
-                        if (fail_fast) {
+                        if (fail_fast && !is_last_partial) {
                             state.location().pop();
                             return key_result.error();
                         }
-                        if (key_result.error().has_line_errors()) {
+                        if (!is_last_partial && key_result.error().has_line_errors()) {
                             for (auto& le : key_result.error().line_errors()) {
                                 errors.push_back(le);
                             }
                         }
+                        skip_entry = true;
                     } else {
                         auto converted = validated_to_py(key_result.value(), keys_schema->effective_result_name());
                         if (converted) key_obj = *converted;
                     }
                 }
                 // Validate value against values_schema
-                if (values_schema) {
+                if (values_schema && !skip_entry) {
                     auto val_input = make_sub_input(val_obj);
                     val_input->set_current_location(state.location());
                     auto val_result = values_schema->validate(*val_input, sub_state);
                     if (val_result.is_err()) {
-                        if (fail_fast) {
+                        if (fail_fast && !is_last_partial) {
                             state.location().pop();
                             return val_result.error();
                         }
-                        if (val_result.error().has_line_errors()) {
+                        if (!is_last_partial && val_result.error().has_line_errors()) {
                             for (auto& le : val_result.error().line_errors()) {
                                 errors.push_back(le);
                             }
                         }
+                        skip_entry = true;
                     } else {
                         auto converted = validated_to_py(val_result.value(), values_schema->effective_result_name());
                         if (converted) val_obj = *converted;
                     }
                 }
-                result_dict[key_obj] = val_obj;
+                if (!skip_entry) {
+                    result_dict[key_obj] = val_obj;
+                }
                 state.location().pop();
             }
             if (!errors.empty()) {
@@ -589,7 +608,10 @@ public:
         auto& tuple = tuple_match.value();
         size_t tuple_size = tuple->size();
 
-        // Build result tuple, validating items if we have item schemas
+        // Build result tuple, validating items if we have item schemas.
+        // Collect all errors (Rust aggregates them) so partial mode can
+        // suppress the last-partial-key errors.
+        std::vector<std::shared_ptr<ValLineError>> errors;
         py::tuple result_tuple(tuple_size);
         auto entries = tuple->entries();
         for (size_t i = 0; i < entries.size(); i++) {
@@ -604,13 +626,43 @@ public:
                     if (item_result.is_ok()) {
                         element = value_to_python_with_type(item_result.value(), items[schema_idx]->effective_result_name());
                     } else {
-                        return item_result.error();
+                        if (item_result.error().has_line_errors()) {
+                            for (auto& le : item_result.error().line_errors()) {
+                                errors.push_back(le);
+                            }
+                        } else {
+                            return item_result.error();
+                        }
                     }
                 }
             }
             result_tuple[i] = element;
         }
 
+        // Enforce fixed tuple length (Rust: tuple.rs pushes Missing for absent
+        // items, Extra for surplus items when not variadic).
+        if (!items.empty() && !variadic) {
+            size_t expected = items.size();
+            if (tuple_size < expected) {
+                for (size_t i = tuple_size; i < expected; i++) {
+                    state.push_loc(static_cast<int64_t>(i));
+                    errors.push_back(std::make_shared<ValLineError>(
+                        ValLineError{PydanticKnownError::missing(), state.location(), input.as_error_value().repr}));
+                    state.pop_loc();
+                }
+            } else if (tuple_size > expected) {
+                for (size_t i = expected; i < tuple_size; i++) {
+                    state.push_loc(static_cast<int64_t>(i));
+                    errors.push_back(std::make_shared<ValLineError>(
+                        ValLineError{ErrorType(ErrorType::Kind::ExtraForbidden), state.location(), input.as_error_value().repr}));
+                    state.pop_loc();
+                }
+            }
+        }
+
+        if (!errors.empty()) {
+            return ValError::line_errors(std::move(errors));
+        }
         return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(std::move(result_tuple)));
     }
 

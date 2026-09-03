@@ -112,6 +112,158 @@ static py::object json_to_pyobj(const std::string& json_str) {
     return json_mod.attr("loads")(json_str);
 }
 
+// Partial JSON parsing (Rust: jiter::JsonValue::parse_with_config with
+// allow_partial).  Tries json.loads first; on failure, repairs truncated JSON
+// by closing open brackets/braces/quotes and dropping incomplete trailing
+// key-value pairs, then retries.
+static py::object json_to_pyobj_partial(const std::string& json_str) {
+    py::object json_mod = py::module_::import("json");
+    try {
+        return json_mod.attr("loads")(json_str);
+    } catch (const py::error_already_set&) {
+        // Fall through to repair
+    }
+
+    // Walk the string tracking bracket/brace/quote state.  Build a repaired
+    // string by closing any open containers and dropping an incomplete
+    // trailing key-value pair (a key with no complete value, or a value that
+    // is an unterminated string).
+    std::string repaired;
+    repaired.reserve(json_str.size() + 8);
+    std::vector<char> open_stack;  // '{' or '['
+    bool in_string = false;
+    bool string_terminated = true;  // whether the last string was closed
+    size_t i = 0;
+    size_t n = json_str.size();
+    // Track the position where the last complete value ended (for dropping
+    // incomplete trailing pairs).
+    size_t last_complete_end = 0;
+
+    while (i < n) {
+        char c = json_str[i];
+        if (in_string) {
+            if (c == '\\') {
+                repaired += c;
+                if (i + 1 < n) {
+                    repaired += json_str[i + 1];
+                    i += 2;
+                    continue;
+                }
+                // Truncated escape sequence — drop the rest
+                break;
+            } else if (c == '"') {
+                in_string = false;
+                string_terminated = true;
+                repaired += c;
+            } else {
+                repaired += c;
+            }
+        } else {
+            if (c == '"') {
+                in_string = true;
+                string_terminated = false;
+                repaired += c;
+            } else if (c == '{' || c == '[') {
+                open_stack.push_back(c);
+                repaired += c;
+            } else if (c == '}' || c == ']') {
+                if (!open_stack.empty()) open_stack.pop_back();
+                repaired += c;
+                last_complete_end = repaired.size();
+            } else if (c == ',' || c == ':') {
+                repaired += c;
+            } else {
+                repaired += c;
+                // Track end of a scalar value (number, true, false, null)
+                if ((c >= '0' && c <= '9') || c == '-' || c == '.' ||
+                    c == 't' || c == 'f' || c == 'n') {
+                    last_complete_end = repaired.size();
+                }
+            }
+        }
+        i++;
+    }
+
+    // If we ended inside an unterminated string, drop back to the last
+    // complete value (the key before the incomplete value).
+    if (in_string) {
+        // Find the last ':' or ',' before the unterminated string and truncate.
+        // The incomplete value is the last key-value pair; drop it.
+        size_t truncate_at = 0;
+        // Walk back to find the last ',' or '{' that starts the incomplete pair.
+        for (size_t j = repaired.size(); j > 0; j--) {
+            if (repaired[j - 1] == ',' || repaired[j - 1] == '{') {
+                truncate_at = (repaired[j - 1] == ',') ? (j - 1) : j;
+                break;
+            }
+        }
+        repaired = repaired.substr(0, truncate_at);
+    }
+
+    // Close any open containers.
+    while (!open_stack.empty()) {
+        char c = open_stack.back();
+        open_stack.pop_back();
+        repaired += (c == '{') ? '}' : ']';
+    }
+
+    // Trim trailing whitespace and a dangling comma.
+    auto trim_trailing = [](std::string& s) {
+        while (!s.empty() && (s.back() == ' ' || s.back() == '\n' ||
+                              s.back() == '\t' || s.back() == '\r')) {
+            s.pop_back();
+        }
+        if (!s.empty() && s.back() == ',') {
+            s.pop_back();
+        }
+    };
+    trim_trailing(repaired);
+
+    try {
+        return json_mod.attr("loads")(repaired);
+    } catch (const py::error_already_set&) {
+        // If the repaired JSON is still invalid (e.g., a key with no value
+        // like {"a": 1, "b": }), drop the last incomplete key-value pair and
+        // retry.
+        // Find the last ',' or '{' and truncate.
+        for (size_t j = repaired.size(); j > 0; j--) {
+            if (repaired[j - 1] == ',' || repaired[j - 1] == '{') {
+                std::string truncated = (repaired[j - 1] == ',')
+                    ? repaired.substr(0, j - 1)
+                    : repaired.substr(0, j);
+                // Re-close any open containers in the truncated string.
+                std::vector<char> stack2;
+                bool in_str2 = false;
+                for (size_t k = 0; k < truncated.size(); k++) {
+                    char c = truncated[k];
+                    if (in_str2) {
+                        if (c == '\\') { k++; continue; }
+                        if (c == '"') in_str2 = false;
+                    } else {
+                        if (c == '"') in_str2 = true;
+                        else if (c == '{' || c == '[') stack2.push_back(c);
+                        else if (c == '}' || c == ']') { if (!stack2.empty()) stack2.pop_back(); }
+                    }
+                }
+                while (!stack2.empty()) {
+                    char c = stack2.back();
+                    stack2.pop_back();
+                    truncated += (c == '{') ? '}' : ']';
+                }
+                trim_trailing(truncated);
+                try {
+                    return json_mod.attr("loads")(truncated);
+                } catch (const py::error_already_set&) {
+                    // Continue trying earlier truncation points
+                }
+                break;
+            }
+        }
+        // If all repair attempts failed, re-raise the original error
+        throw;
+    }
+}
+
 static std::optional<bool> pyobj_to_bool(const py::object& obj) {
     if (obj.is_none()) return std::nullopt;
     return obj.cast<bool>();
@@ -486,6 +638,9 @@ struct SerNode {
     // For default
     py::object default_val;
     bool has_default_val = false;
+    // For default: default_factory (Rust DefaultType::DefaultFactory)
+    py::object default_factory;
+    bool default_factory_takes_data = false;
     // For format
     std::string format_str;
     // For root models
@@ -518,6 +673,8 @@ struct SerNode {
         when_used = other.when_used;
         default_val = other.default_val;
         has_default_val = other.has_default_val;
+        default_factory = other.default_factory;
+        default_factory_takes_data = other.default_factory_takes_data;
         format_str = other.format_str;
         root_model = other.root_model;
         class_ = other.class_;
@@ -1239,6 +1396,30 @@ struct SerNode {
         return false;
     }
 
+    // Default used for the exclude_defaults comparison. Mirrors Rust
+    // WithDefaultSerializer::get_default: a factory taking data yields no
+    // default; a plain factory is called; otherwise the stored default is
+    // returned (a None default still counts as "has default").
+    bool ser_default(py::object& out) const {
+        if (type != "default" && type != "with-default") return false;
+        if (has_default_val) {
+            out = default_val;
+            return true;
+        }
+        // Note: default_factory may be a default-constructed py::object (null
+        // handle) when the schema had no factory, so check ptr() rather than
+        // is_none() (which is false for a null handle).
+        if (default_factory.ptr() && !default_factory.is_none() && !default_factory_takes_data) {
+            try {
+                out = default_factory();
+            } catch (...) {
+                return false;
+            }
+            return true;
+        }
+        return false;
+    }
+
 private:
     static std::string json_escape(const std::string& s, bool ensure_ascii) {
         std::string out = "\"";
@@ -1494,27 +1675,19 @@ private:
                 }
             }
 
-            // exclude_defaults: skip fields whose value equals their default
+            // exclude_defaults: skip fields whose value equals their default.
+            // Rust: exclude_default reads the default from the field's own
+            // serializer (WithDefaultSerializer::get_default) — never from the
+            // value or the instance.
             if (exclude_defaults) {
-                py::object defaults = py::none();
-                if (py::isinstance<py::dict>(value)) {
-                    py::dict vd = value.cast<py::dict>();
-                    py::str d_key("__pydantic_defaults__");
-                    if (vd.contains(d_key)) defaults = vd[d_key];
-                } else if (py::hasattr(value, "__pydantic_defaults__")) {
-                    defaults = py::getattr(value, "__pydantic_defaults__");
-                }
-                if (!defaults.is_none() && py::isinstance<py::dict>(defaults)) {
+                py::object def_val = py::none();
+                if (ser && ser->ser_default(def_val)) {
                     py::str key(k);
-                    py::dict dd = defaults.cast<py::dict>();
-                    if (dd.contains(key)) {
-                        py::object def_val = dd[key];
-                        if (main.contains(key)) {
-                            py::object cur = main[key];
-                            try {
-                                if (cur.equal(def_val)) continue;
-                            } catch (...) {}
-                        }
+                    if (main.contains(key)) {
+                        py::object cur = main[key];
+                        try {
+                            if (cur.equal(def_val)) continue;
+                        } catch (...) {}
                     }
                 }
             }
@@ -1698,27 +1871,19 @@ private:
                 }
             }
             
-            // exclude_defaults: skip fields whose value equals their default
+            // exclude_defaults: skip fields whose value equals their default.
+            // Rust: exclude_default reads the default from the field's own
+            // serializer (WithDefaultSerializer::get_default) — never from the
+            // value or the instance.
             if (exclude_defaults) {
-                py::object defaults = py::none();
-                if (py::isinstance<py::dict>(value)) {
-                    py::dict vd = value.cast<py::dict>();
-                    py::str d_key("__pydantic_defaults__");
-                    if (vd.contains(d_key)) defaults = vd[d_key];
-                } else if (py::hasattr(value, "__pydantic_defaults__")) {
-                    defaults = py::getattr(value, "__pydantic_defaults__");
-                }
-                if (!defaults.is_none() && py::isinstance<py::dict>(defaults)) {
+                py::object def_val = py::none();
+                if (ser && ser->ser_default(def_val)) {
                     py::str key(k);
-                    py::dict dd = defaults.cast<py::dict>();
-                    if (dd.contains(key)) {
-                        py::object def_val = dd[key];
-                        if (main.contains(key)) {
-                            py::object cur = main[key];
-                            try {
-                                if (cur.equal(def_val)) continue;
-                            } catch (...) {}
-                        }
+                    if (main.contains(key)) {
+                        py::object cur = main[key];
+                        try {
+                            if (cur.equal(def_val)) continue;
+                        } catch (...) {}
                     }
                 }
             }
@@ -2077,6 +2242,8 @@ static SerRef build_ser_impl(const py::dict& schema,
 
     if (type == "default" || type == "with-default") {
         try { node->default_val = schema["default"]; node->has_default_val = true; } catch (...) {}
+        try { node->default_factory = schema["default_factory"]; } catch (...) {}
+        try { node->default_factory_takes_data = schema["default_factory_takes_data"].cast<bool>(); } catch (...) {}
     }
     if (type == "format") {
         try { node->format_str = schema["formatting"].cast<std::string>(); } catch (...) {}
@@ -2687,7 +2854,8 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             return std::make_unique<SchemaValidator>(schema, config);
         }), py::arg("schema"), py::arg("config") = py::none(), py::arg("_use_prebuilt") = true)
         .def("validate_python", [](SchemaValidator& self, const py::object& input, py::object strict, py::object context, py::object self_instance,
-                                    py::object extra, py::object from_attributes, py::object by_alias, py::object by_name) -> py::object {
+                                    py::object extra, py::object from_attributes, py::object by_alias, py::object by_name,
+                                    py::object allow_partial) -> py::object {
             // NEW: Use native PythonInput - no JSON round-trip!
             {
                 py::module_ m = py::module_::import("__main__");
@@ -2713,7 +2881,20 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             if (!by_name.is_none()) {
                 by_name_opt = pyobj_to_bool(by_name);
             }
-            py::object validated = self.validate_python_object(input, pyobj_to_bool(strict), extra_opt, fa_opt, context, /*coerce_strings=*/false, self_instance, by_alias_opt, by_name_opt);
+            // Parse allow_partial: None/False → Off, True → On,
+            // "off" → Off, "on" → On, "trailing-strings" → TrailingStrings.
+            PartialMode partial_mode = PartialMode::Off;
+            if (!allow_partial.is_none()) {
+                if (py::isinstance<py::bool_>(allow_partial)) {
+                    partial_mode = allow_partial.cast<bool>() ? PartialMode::On : PartialMode::Off;
+                } else if (py::isinstance<py::str>(allow_partial)) {
+                    std::string s = allow_partial.cast<std::string>();
+                    if (s == "on") partial_mode = PartialMode::On;
+                    else if (s == "trailing-strings") partial_mode = PartialMode::TrailingStrings;
+                    else partial_mode = PartialMode::Off;
+                }
+            }
+            py::object validated = self.validate_python_object(input, pyobj_to_bool(strict), extra_opt, fa_opt, context, /*coerce_strings=*/false, self_instance, by_alias_opt, by_name_opt, partial_mode);
 
             // If self_instance provided, populate and return it
             if (!self_instance.is_none() && py::hasattr(self_instance, "__dict__")) {
@@ -2785,7 +2966,6 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                         // Extract special keys before copying to __dict__
                         py::object extra_fields = py::none();
                         py::object fields_set = py::set();
-                        py::object defaults = py::dict();
 
                         if (validated_dict.contains("__pydantic_extra__")) {
                             extra_fields = validated_dict["__pydantic_extra__"];
@@ -2794,10 +2974,6 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                         if (validated_dict.contains("__pydantic_fields_set__")) {
                             fields_set = validated_dict["__pydantic_fields_set__"];
                             validated_dict.attr("pop")("__pydantic_fields_set__");
-                        }
-                        if (validated_dict.contains("__pydantic_defaults__")) {
-                            defaults = validated_dict["__pydantic_defaults__"];
-                            validated_dict.attr("pop")("__pydantic_defaults__");
                         }
 
                         // Copy only declared fields to __dict__
@@ -2812,10 +2988,6 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                         force_setattr(self_instance, py::str("__pydantic_extra__"),
                             extra_fields.is_none() ? py::none() : extra_fields);
                         force_setattr(self_instance, py::str("__pydantic_fields_set__"), fields_set);
-                        // Store defaults for exclude_defaults serialization
-                        if (!defaults.is_none() && py::isinstance<py::dict>(defaults) && py::len(defaults.cast<py::dict>()) > 0) {
-                            force_setattr(self_instance, py::str("__pydantic_defaults__"), defaults);
-                        }
                     } else if (!foreign_return && py::hasattr(validated, "__dict__")) {
                         // validated is a model instance (e.g. from FunctionAfterValidator)
                         // Copy its __dict__ to self_instance
@@ -2889,13 +3061,36 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
 
             return validated;
         }, py::arg("object"), py::arg("strict") = py::none(), py::arg("context") = py::none(), py::arg("self_instance") = py::none(),
-             py::arg("extra") = py::none(), py::arg("from_attributes") = py::none(), py::arg("by_alias") = py::none(), py::arg("by_name") = py::none())
+             py::arg("extra") = py::none(), py::arg("from_attributes") = py::none(), py::arg("by_alias") = py::none(), py::arg("by_name") = py::none(),
+             py::arg("allow_partial") = py::none())
         .def("validate_json", [](SchemaValidator& self, const py::object& jd, py::object strict, py::object context, py::object extra,
                                   py::object allow_partial, py::object by_alias, py::object by_name) {
             std::string js = py::isinstance<py::bytes>(jd) ? jd.cast<std::string>() : jd.cast<std::string>();
+            // Parse allow_partial to decide whether to use partial JSON parsing.
+            bool partial_active = false;
+            if (!allow_partial.is_none()) {
+                if (py::isinstance<py::bool_>(allow_partial)) {
+                    partial_active = allow_partial.cast<bool>();
+                } else if (py::isinstance<py::str>(allow_partial)) {
+                    std::string s = allow_partial.cast<std::string>();
+                    partial_active = (s == "on" || s == "trailing-strings");
+                }
+            }
             // Parse JSON to Python object first, then validate as Python
             // This ensures proper type coercion (e.g., "Infinity" string -> float inf)
-            py::object py_input = json_to_pyobj(js);
+            py::object py_input;
+            try {
+                py_input = partial_active ? json_to_pyobj_partial(js) : json_to_pyobj(js);
+            } catch (const py::error_already_set& e) {
+                // Malformed JSON: convert JSONDecodeError to a ValidationError
+                // with json_invalid type (Rust: validate_json throws ValidationError
+                // for malformed JSON, not a raw JSONDecodeError).
+                std::string err_msg = py::str(e.value()).cast<std::string>();
+                ErrorType error_type(ErrorType::Kind::JsonInvalid, "error", err_msg);
+                Location location;
+                ValError val_error = ValError::line_error(error_type, location, js);
+                throw ValidationError(self.title(), InputType::Json, val_error, false);
+            }
             std::optional<ExtraBehavior> extra_opt;
             if (!extra.is_none()) {
                 std::string e = extra.cast<std::string>();
@@ -2903,10 +3098,23 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                 else if (e == "forbid") extra_opt = ExtraBehavior::Forbid;
                 else extra_opt = ExtraBehavior::Ignore;
             }
-            return self.validate_python_object(py_input, pyobj_to_bool(strict), extra_opt, std::nullopt, context);
+            // Parse allow_partial (same logic as validate_python).
+            PartialMode partial_mode = PartialMode::Off;
+            if (!allow_partial.is_none()) {
+                if (py::isinstance<py::bool_>(allow_partial)) {
+                    partial_mode = allow_partial.cast<bool>() ? PartialMode::On : PartialMode::Off;
+                } else if (py::isinstance<py::str>(allow_partial)) {
+                    std::string s = allow_partial.cast<std::string>();
+                    if (s == "on") partial_mode = PartialMode::On;
+                    else if (s == "trailing-strings") partial_mode = PartialMode::TrailingStrings;
+                    else partial_mode = PartialMode::Off;
+                }
+            }
+            return self.validate_python_object(py_input, pyobj_to_bool(strict), extra_opt, std::nullopt, context, /*coerce_strings=*/false, py::none(), std::nullopt, std::nullopt, partial_mode);
         }, py::arg("json_data"), py::arg("strict") = py::none(), py::arg("context") = py::none(), py::arg("extra") = py::none(),
              py::arg("allow_partial") = py::none(), py::arg("by_alias") = py::none(), py::arg("by_name") = py::none())
-        .def("validate_strings", [](SchemaValidator& self, const py::object& sd, py::object strict, py::object extra) {
+        .def("validate_strings", [](SchemaValidator& self, const py::object& sd, py::object strict, py::object extra,
+                                     py::object allow_partial) {
             std::optional<ExtraBehavior> extra_opt;
             if (!extra.is_none()) {
                 std::string e = extra.cast<std::string>();
@@ -2914,8 +3122,20 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                 else if (e == "forbid") extra_opt = ExtraBehavior::Forbid;
                 else extra_opt = ExtraBehavior::Ignore;
             }
-            return self.validate_strings_object(sd, pyobj_to_bool(strict), extra_opt);
-        }, py::arg("string_data"), py::arg("strict") = py::none(), py::arg("extra") = py::none())
+            PartialMode partial_mode = PartialMode::Off;
+            if (!allow_partial.is_none()) {
+                if (py::isinstance<py::bool_>(allow_partial)) {
+                    partial_mode = allow_partial.cast<bool>() ? PartialMode::On : PartialMode::Off;
+                } else if (py::isinstance<py::str>(allow_partial)) {
+                    std::string s = allow_partial.cast<std::string>();
+                    if (s == "on") partial_mode = PartialMode::On;
+                    else if (s == "trailing-strings") partial_mode = PartialMode::TrailingStrings;
+                    else partial_mode = PartialMode::Off;
+                }
+            }
+            return self.validate_strings_object(sd, pyobj_to_bool(strict), extra_opt, partial_mode);
+        }, py::arg("string_data"), py::arg("strict") = py::none(), py::arg("extra") = py::none(),
+             py::arg("allow_partial") = py::none())
         .def("isinstance_python", [](SchemaValidator& self, const py::object& input, py::object strict) {
             // NEW: Use native PythonInput - no JSON round-trip!
             return self.isinstance_python_object(input, pyobj_to_bool(strict));

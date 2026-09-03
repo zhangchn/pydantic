@@ -293,7 +293,7 @@ std::string ErrorType::message_template() const {
         {Kind::MultipleArgumentValues, "Got multiple values for argument"},
         
         // Other errors
-        {Kind::JsonInvalid, "Invalid JSON"},
+        {Kind::JsonInvalid, "Invalid JSON: {error}"},
         {Kind::InvalidJsonValue, "input was not a valid JSON value"},
         {Kind::CustomError, "{message}"},
         {Kind::RecursionError, "Recursion depth exceeded"},

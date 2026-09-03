@@ -73,9 +73,10 @@ public:
     
     // Partial validation
     PartialMode allow_partial() const { return allow_partial_; }
+    void set_allow_partial(PartialMode mode) { allow_partial_ = mode; }
     bool is_partial() const { return allow_partial_ != PartialMode::Off; }
-    bool is_partial_trailing_strings() const { 
-        return allow_partial_ == PartialMode::TrailingStrings; 
+    bool is_partial_trailing_strings() const {
+        return allow_partial_ == PartialMode::TrailingStrings;
     }
     
     // Field name (for error context)
