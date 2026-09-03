@@ -878,7 +878,10 @@ class SchemaValidator:
             config_dict = dict(config) if hasattr(config, 'items') else {}
 
         # Pass schema dict directly to C++ — no JSON serialization (like Rust!)
-        cpp_schema = _copy.deepcopy(schema)
+        # Pre-seed memo so non-copyable sentinels (e.g. MISSING) are treated
+        # as atomic instead of triggering __getstate__.
+        _memo = {id(MISSING): MISSING}
+        cpp_schema = _copy.deepcopy(schema, _memo)
         _schema_clean_cls_keys(cpp_schema)
         self._base = _SchemaValidatorBase(cpp_schema, config_dict)
 
@@ -1506,7 +1509,12 @@ except ImportError:
 # ============================================================================
 
 from typing_extensions import Sentinel
-MISSING = Sentinel('MISSING')
+try:
+    # Reuse the Rust pydantic_core MISSING so identity checks in the Rust
+    # serializer (which imports pydantic_core.MISSING) match our field values.
+    from pydantic_core import MISSING
+except ImportError:
+    MISSING = Sentinel('MISSING')
 
 # ============================================================================
 # 3. Rust backend fallback (lazy, only on first access)

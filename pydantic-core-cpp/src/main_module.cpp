@@ -613,6 +613,13 @@ struct SerRecursionState {
     }
 };
 
+// The MISSING sentinel object, shared with pydantic_core_cpp.MISSING. Used by
+// the serializer to omit MISSING-valued fields (Rust exclude_field_by_value)
+// and to validate standalone 'missing-sentinel' values.
+static py::object missing_sentinel_obj() {
+    return py::module_::import("pydantic_core_cpp").attr("MISSING");
+}
+
 struct SerNode {
     std::string type;
     std::vector<SerRef> children;
@@ -717,6 +724,13 @@ struct SerNode {
         }
         if (type == "is-instance" || type == "is-subclass") {
             return value;
+        }
+        if (type == "missing-sentinel") {
+            py::object missing = missing_sentinel_obj();
+            if (value.is(missing)) return value;
+            py::object exc_type = py::module_::import("pydantic_core_cpp").attr("PydanticSerializationUnexpectedValue");
+            PyErr_SetString(exc_type.ptr(), "Expected 'MISSING' sentinel");
+            throw py::error_already_set();
         }
         if (type == "nullable" || type == "nullable-union") {
             if (value.is_none()) return py::none();
@@ -1644,6 +1658,7 @@ private:
         py::dict main;
         if (py::isinstance<py::dict>(value)) main = value.cast<py::dict>();
         else if (py::hasattr(value, "__dict__")) main = py::getattr(value, "__dict__").cast<py::dict>();
+        py::object missing_obj = missing_sentinel_obj();
 
         for (const auto& k : field_order) {
             const auto& ser = fields.at(k);
@@ -1720,6 +1735,8 @@ private:
             }
             if (!has_value) continue;
             if (exc_none && fv.is_none()) continue;
+            // Rust exclude_field_by_value: omit fields whose value is the MISSING sentinel.
+            if (fv.is(missing_obj)) continue;
 
             // Apply exclude_if callable
             {
@@ -1840,6 +1857,7 @@ private:
         py::dict main;
         if (py::isinstance<py::dict>(value)) main = value.cast<py::dict>();
         else if (py::hasattr(value, "__dict__")) main = py::getattr(value, "__dict__").cast<py::dict>();
+        py::object missing_obj = missing_sentinel_obj();
 
         for (const auto& k : field_order) {
             const auto& ser = fields.at(k);
@@ -1916,6 +1934,8 @@ private:
             }
             if (!has_value) continue;
             if (exc_none && fv.is_none()) continue;
+            // Rust exclude_field_by_value: omit fields whose value is the MISSING sentinel.
+            if (fv.is(missing_obj)) continue;
 
             // Apply exclude_if callable
             {

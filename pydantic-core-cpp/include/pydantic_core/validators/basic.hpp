@@ -669,4 +669,28 @@ public:
     std::string name() const override { return "callable"; }
 };
 
+// MissingSentinelValidator - validates that input is the MISSING sentinel
+class MissingSentinelValidator : public Validator {
+public:
+    ValResult<std::shared_ptr<void>> validate(
+        const Input& input,
+        ValidationState& state
+    ) override {
+        py::object input_py = input.as_python_object();
+        py::object missing = py::module_::import("pydantic_core_cpp").attr("MISSING");
+        if (input_py.is(missing)) {
+            return ValResult<std::shared_ptr<void>>(
+                std::make_shared<py::object>(input_py)
+            );
+        }
+        return ValError::line_error(
+            ErrorType(ErrorType::Kind::MissingSentinelError),
+            state.location(),
+            input.as_error_value().repr
+        );
+    }
+
+    std::string name() const override { return "py_object"; }
+};
+
 } // namespace pydantic_core
