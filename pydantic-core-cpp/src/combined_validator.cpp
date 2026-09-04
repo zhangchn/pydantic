@@ -148,6 +148,13 @@ static std::shared_ptr<Validator> build_from_flat_dict(
                 }
             }
         }
+        auto pep_it = schema.find("preserve_empty_path");
+        if (pep_it != schema.end()) {
+            v->preserve_empty_path = (pep_it->second == "true" || pep_it->second == "1");
+        } else {
+            auto cfg_it = config.find("url_preserve_empty_path");
+            if (cfg_it != config.end()) v->preserve_empty_path = (cfg_it->second == "true" || cfg_it->second == "1");
+        }
         return v;
     }
     if (type == "multi-host-url") return std::make_shared<MultiHostUrlValidator>();
@@ -1455,6 +1462,11 @@ static std::shared_ptr<Validator> build_from_py_dict(
                     v->allowed_schemes.push_back(item.cast<std::string>());
                 }
             }
+        }
+        if (schema.contains("preserve_empty_path") && py::isinstance<py::bool_>(schema["preserve_empty_path"])) {
+            v->preserve_empty_path = schema["preserve_empty_path"].cast<bool>();
+        } else if (config.contains("url_preserve_empty_path") && py::isinstance<py::bool_>(config["url_preserve_empty_path"])) {
+            v->preserve_empty_path = config["url_preserve_empty_path"].cast<bool>();
         }
         return v;
     }

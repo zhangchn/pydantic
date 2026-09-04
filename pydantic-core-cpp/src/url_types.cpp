@@ -2,10 +2,23 @@
 #include <sstream>
 #include <regex>
 #include <stdexcept>
+#include <algorithm>
+#include <cctype>
 
 namespace pydantic_core {
 
-Url::Url(const std::string& url_str) : url_(url_str) {
+static std::string to_lower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return s;
+}
+
+// WHATWG special schemes: their empty path normalizes to "/" (url.rs scheme_is_special).
+static bool is_special_scheme(const std::string& s) {
+    return s == "http" || s == "https" || s == "ws" || s == "wss" || s == "ftp" || s == "file";
+}
+
+Url::Url(const std::string& url_str, bool preserve_empty_path) : url_(url_str) {
     // Parse URL using Python's urllib.parse via pybind11
     py::object urllib = py::module_::import("urllib.parse");
     py::object parsed = urllib.attr("urlparse")(url_str);
@@ -58,6 +71,28 @@ Url::Url(const std::string& url_str) : url_(url_str) {
     path_ = py::str(parsed.attr("path")).cast<std::string>();
     query_ = py::str(parsed.attr("query")).cast<std::string>();
     fragment_ = py::str(parsed.attr("fragment")).cast<std::string>();
+
+    // Canonicalize to match Rust's `url` crate serialization: lowercase the
+    // scheme and host, and an empty path on an authority becomes "/". The
+    // component getters above are left untouched; only the string form changes.
+    scheme_ = to_lower(scheme_);
+    host_ = to_lower(host_);
+    if (!host_.empty() && path_.empty() && is_special_scheme(scheme_) && !preserve_empty_path) path_ = "/";
+
+    std::string out = scheme_ + "://";
+    bool has_user = user_ && !user_->empty();
+    bool has_pass = password_ && !password_->empty();
+    if (has_user || has_pass) {
+        if (has_user) out += *user_;
+        if (has_pass) out += ":" + *password_;
+        out += "@";
+    }
+    out += host_;
+    if (port_) out += ":" + std::to_string(*port_);
+    out += path_;
+    if (!query_.empty()) out += "?" + query_;
+    if (!fragment_.empty()) out += "#" + fragment_;
+    url_ = out;
 }
 
 MultiHostUrl::MultiHostUrl(const std::string& url_str) : url_(url_str) {

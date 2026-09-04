@@ -18,7 +18,7 @@ struct HostSpec {
 // Url class - single URL with parsing and validation
 class Url {
 public:
-    explicit Url(const std::string& url_str);
+    explicit Url(const std::string& url_str, bool preserve_empty_path = false);
     
     std::string str() const { return url_; }
     std::string scheme() const { return scheme_; }

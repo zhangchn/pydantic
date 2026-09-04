@@ -217,6 +217,7 @@ class UrlValidator : public Validator {
 public:
     std::optional<size_t> max_length;
     std::vector<std::string> allowed_schemes;
+    bool preserve_empty_path = false;
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -313,7 +314,7 @@ public:
             }
 
             // Valid URL - return Url object
-            auto url_obj = std::make_shared<Url>(url_str);
+            auto url_obj = std::make_shared<Url>(url_str, preserve_empty_path);
             return ValResult<std::shared_ptr<void>>(
                 std::static_pointer_cast<void>(url_obj)
             );
