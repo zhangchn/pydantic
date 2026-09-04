@@ -24,6 +24,8 @@ public:
     std::string scheme() const { return scheme_; }
     std::string host() const { return host_; }
     std::optional<int> port() const { return port_; }
+    std::optional<int> port_or_default() const;
+    std::string unicode_string() const { return url_; }
     std::string path() const { return path_; }
     std::string query() const { return query_; }
     std::string fragment() const { return fragment_; }

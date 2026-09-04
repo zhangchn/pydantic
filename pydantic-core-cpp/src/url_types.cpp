@@ -18,6 +18,16 @@ static bool is_special_scheme(const std::string& s) {
     return s == "http" || s == "https" || s == "ws" || s == "wss" || s == "ftp" || s == "file";
 }
 
+// url crate port_or_known_default: scheme-inherent default ports.
+static std::optional<int> default_port_for_scheme(const std::string& s) {
+    if (s == "http") return 80;
+    if (s == "https") return 443;
+    if (s == "ws") return 80;
+    if (s == "wss") return 443;
+    if (s == "ftp") return 21;
+    return std::nullopt;
+}
+
 Url::Url(const std::string& url_str, bool preserve_empty_path) : url_(url_str) {
     // Parse URL using Python's urllib.parse via pybind11
     py::object urllib = py::module_::import("urllib.parse");
@@ -88,11 +98,15 @@ Url::Url(const std::string& url_str, bool preserve_empty_path) : url_(url_str) {
         out += "@";
     }
     out += host_;
-    if (port_) out += ":" + std::to_string(*port_);
+    if (port_ && *port_ != default_port_for_scheme(scheme_).value_or(-1)) out += ":" + std::to_string(*port_);
     out += path_;
     if (!query_.empty()) out += "?" + query_;
     if (!fragment_.empty()) out += "#" + fragment_;
     url_ = out;
+}
+
+std::optional<int> Url::port_or_default() const {
+    return port_ ? port_ : default_port_for_scheme(scheme_);
 }
 
 MultiHostUrl::MultiHostUrl(const std::string& url_str) : url_(url_str) {

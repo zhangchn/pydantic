@@ -3236,6 +3236,7 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
         }), py::arg("url"))
         .def("__repr__", [](const Url& u) { return "Url('" + u.str() + "')"; })
         .def("__str__", &Url::str)
+        .def("unicode_string", &Url::unicode_string)
         .def("__eq__", [](const Url& u, const py::object& other) {
             if (py::isinstance<Url>(other)) return u.str() == other.cast<Url>().str();
             if (py::isinstance<py::str>(other)) return u.str() == other.cast<std::string>();
@@ -3245,11 +3246,14 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
         .def_property_readonly("scheme", &Url::scheme)
         .def_property_readonly("host", &Url::host)
         .def_property_readonly("port", [](const Url& u) -> py::object {
-            auto port = u.port();
+            auto port = u.port_or_default();
             return port ? py::cast(*port) : py::none();
         })
         .def_property_readonly("path", &Url::path)
-        .def_property_readonly("query", &Url::query)
+        .def_property_readonly("query", [](const Url& u) -> py::object {
+            auto q = u.query();
+            return q.empty() ? py::none() : py::cast(q);
+        })
         .def_property_readonly("fragment", &Url::fragment)
         .def_property_readonly("username", [](const Url& u) -> py::object {
             auto user = u.user();
