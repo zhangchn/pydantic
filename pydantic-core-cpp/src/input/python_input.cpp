@@ -436,7 +436,7 @@ ValResult<ValMatch<EitherInt>> PythonInput::validate_int(bool strict) const {
                 }
                 errno = 0;
                 char* endp = nullptr;
-                long long v = std::strtoll(cleaned.c_str(), &endp, 10);
+                int64_t v = std::strtoll(cleaned.c_str(), &endp, 10);
                 if (errno == ERANGE && v > 0) {
                     // Beyond i64 — fall back to Python's arbitrary-precision int
                     // (Rust EitherInt::BigInt via jiter)
