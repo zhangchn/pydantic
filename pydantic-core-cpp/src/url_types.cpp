@@ -8,14 +8,29 @@
 namespace pydantic_core {
 
 static std::string to_lower(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    // ASCII-only: bytes >= 0x80 are left untouched so UTF-8 stays valid.
+    for (char& ch : s) {
+        unsigned char u = static_cast<unsigned char>(ch);
+        if (u >= 0x41 && u <= 0x5A) ch = static_cast<char>(u + 32);
+    }
     return s;
 }
 
 // WHATWG special schemes: their empty path normalizes to "/" (url.rs scheme_is_special).
 static bool is_special_scheme(const std::string& s) {
     return s == "http" || s == "https" || s == "ws" || s == "wss" || s == "ftp" || s == "file";
+}
+
+void strip_url_whitespace(std::string& s) {
+    size_t b = 0, e = s.size();
+    while (b < e && static_cast<unsigned char>(s[b]) <= 0x20) ++b;
+    while (e > b && static_cast<unsigned char>(s[e - 1]) <= 0x20) --e;
+    s = s.substr(b, e - b);
+}
+
+static bool has_non_ascii(const std::string& s) {
+    for (unsigned char c : s) if (c >= 0x80) return true;
+    return false;
 }
 
 // url crate port_or_known_default: scheme-inherent default ports.
@@ -30,8 +45,10 @@ static std::optional<int> default_port_for_scheme(const std::string& s) {
 
 Url::Url(const std::string& url_str, bool preserve_empty_path) : url_(url_str) {
     // Parse URL using Python's urllib.parse via pybind11
+    std::string trimmed = url_str;
+    strip_url_whitespace(trimmed);
     py::object urllib = py::module_::import("urllib.parse");
-    py::object parsed = urllib.attr("urlparse")(url_str);
+    py::object parsed = urllib.attr("urlparse")(trimmed);
     
     scheme_ = py::str(parsed.attr("scheme")).cast<std::string>();
     if (scheme_.empty()) {
@@ -87,6 +104,18 @@ Url::Url(const std::string& url_str, bool preserve_empty_path) : url_(url_str) {
     // component getters above are left untouched; only the string form changes.
     scheme_ = to_lower(scheme_);
     host_ = to_lower(host_);
+    // IDN -> punycode for non-ASCII hosts (matches url crate idna handling).
+    if (has_non_ascii(host_)) {
+        PyObject* decoded = PyUnicode_DecodeUTF8(host_.c_str(), host_.size(), nullptr);
+        if (decoded) {
+            try {
+                py::object h = py::reinterpret_steal<py::object>(decoded);
+                host_ = h.attr("encode")("idna").attr("decode")("ascii").cast<std::string>();
+            } catch (...) { if (PyErr_Occurred()) PyErr_Clear(); }
+        } else {
+            PyErr_Clear();  // invalid UTF-8: keep raw host
+        }
+    }
     if (!host_.empty() && path_.empty() && is_special_scheme(scheme_) && !preserve_empty_path) path_ = "/";
 
     std::string out = scheme_ + "://";

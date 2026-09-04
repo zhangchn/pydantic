@@ -244,7 +244,7 @@ public:
             }
         } catch (...) {}
 
-        if (!py::isinstance<py::str>(input_py)) {
+        if (!py::isinstance<py::str>(input_py) && !py::isinstance<py::bytes>(input_py)) {
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::UrlType),
                 state.location(),
@@ -252,7 +252,10 @@ public:
             );
         }
 
-        std::string url_str = py::str(input_py).cast<std::string>();
+        // Lax bytes -> str coercion (matches input.validate_str).
+        std::string url_str = py::cast<std::string>(input_py);
+        // url crate trims leading/trailing C0 control + space before parsing.
+        strip_url_whitespace(url_str);
 
         // Length check happens BEFORE parsing (Rust UrlValidator::check_length)
         if (max_length.has_value() && url_str.size() > max_length.value()) {

@@ -9,6 +9,9 @@ namespace py = pybind11;
 
 namespace pydantic_core {
 
+// Strip leading/trailing C0 control + space chars (url crate input trimming).
+void strip_url_whitespace(std::string& s);
+
 // Host specification for MultiHostUrl
 struct HostSpec {
     std::string host;
