@@ -12,6 +12,9 @@ namespace pydantic_core {
 // Strip leading/trailing C0 control + space chars (url crate input trimming).
 void strip_url_whitespace(std::string& s);
 
+// WHATWG special schemes (url.rs scheme_is_special).
+bool is_special_scheme(const std::string& s);
+
 // Host specification for MultiHostUrl
 struct HostSpec {
     std::string host;

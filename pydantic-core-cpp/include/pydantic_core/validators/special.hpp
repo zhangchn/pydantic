@@ -218,6 +218,7 @@ public:
     std::optional<size_t> max_length;
     std::vector<std::string> allowed_schemes;
     bool preserve_empty_path = false;
+    std::optional<bool> host_required;
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -299,7 +300,7 @@ public:
                     ErrorType err(ErrorType::Kind::UrlScheme);
                     std::string expected;
                     for (size_t i = 0; i < allowed_schemes.size(); ++i) {
-                        if (i > 0) expected += i == allowed_schemes.size() - 1 ? " and " : ", ";
+                        if (i > 0) expected += i == allowed_schemes.size() - 1 ? " or " : ", ";
                         expected += "'" + allowed_schemes[i] + "'";
                     }
                     err.context()["expected_schemes"] = expected;
@@ -309,7 +310,8 @@ public:
 
             // Host requirements (Rust: special schemes need a host;
             // strict mode reports an empty host as a syntax violation)
-            if (netloc.empty() && scheme != "file" && scheme != "data") {
+            bool host_req = host_required.value_or(is_special_scheme(scheme) && scheme != "file");
+            if (netloc.empty() && host_req) {
                 if (state.strict_or(false)) {
                     return syntax_violation_err("empty host");
                 }

@@ -148,6 +148,8 @@ static std::shared_ptr<Validator> build_from_flat_dict(
                 }
             }
         }
+        auto hr_it = schema.find("host_required");
+        if (hr_it != schema.end()) v->host_required = (hr_it->second == "true" || hr_it->second == "1");
         auto pep_it = schema.find("preserve_empty_path");
         if (pep_it != schema.end()) {
             v->preserve_empty_path = (pep_it->second == "true" || pep_it->second == "1");
@@ -1462,6 +1464,9 @@ static std::shared_ptr<Validator> build_from_py_dict(
                     v->allowed_schemes.push_back(item.cast<std::string>());
                 }
             }
+        }
+        if (schema.contains("host_required") && py::isinstance<py::bool_>(schema["host_required"])) {
+            v->host_required = schema["host_required"].cast<bool>();
         }
         if (schema.contains("preserve_empty_path") && py::isinstance<py::bool_>(schema["preserve_empty_path"])) {
             v->preserve_empty_path = schema["preserve_empty_path"].cast<bool>();

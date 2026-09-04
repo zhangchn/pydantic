@@ -17,7 +17,7 @@ static std::string to_lower(std::string s) {
 }
 
 // WHATWG special schemes: their empty path normalizes to "/" (url.rs scheme_is_special).
-static bool is_special_scheme(const std::string& s) {
+bool is_special_scheme(const std::string& s) {
     return s == "http" || s == "https" || s == "ws" || s == "wss" || s == "ftp" || s == "file";
 }
 
@@ -117,6 +117,9 @@ Url::Url(const std::string& url_str, bool preserve_empty_path) : url_(url_str) {
         }
     }
     if (!host_.empty() && path_.empty() && is_special_scheme(scheme_) && !preserve_empty_path) path_ = "/";
+
+    // file scheme: a "localhost" host is dropped (url crate normalization).
+    if (scheme_ == "file" && host_ == "localhost") host_ = "";
 
     std::string out = scheme_ + "://";
     bool has_user = user_ && !user_->empty();

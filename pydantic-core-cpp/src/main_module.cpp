@@ -3242,9 +3242,16 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             if (py::isinstance<py::str>(other)) return u.str() == other.cast<std::string>();
             return false;
         })
+        .def("__lt__", [](const Url& u, const Url& o) { return u.str() < o.str(); })
+        .def("__le__", [](const Url& u, const Url& o) { return u.str() <= o.str(); })
+        .def("__gt__", [](const Url& u, const Url& o) { return u.str() > o.str(); })
+        .def("__ge__", [](const Url& u, const Url& o) { return u.str() >= o.str(); })
         .def("__hash__", [](const Url& u) { return py::hash(py::str(u.str())); })
         .def_property_readonly("scheme", &Url::scheme)
-        .def_property_readonly("host", &Url::host)
+        .def_property_readonly("host", [](const Url& u) -> py::object {
+            auto h = u.host();
+            return h.empty() ? py::none() : py::cast(h);
+        })
         .def_property_readonly("port", [](const Url& u) -> py::object {
             auto port = u.port_or_default();
             return port ? py::cast(*port) : py::none();
@@ -3279,10 +3286,21 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
         })
         .def("__hash__", [](const MultiHostUrl& u) { return py::hash(py::str(u.str())); })
         .def_property_readonly("scheme", &MultiHostUrl::scheme)
-        .def_property_readonly("hosts", [](const MultiHostUrl& u) {
+        .def("hosts", [](const MultiHostUrl& u) {
             py::list result;
+            bool first = true;
+            auto user = u.user();
+            auto pw = u.password();
             for (const auto& h : u.hosts()) {
                 py::dict host_dict;
+                if (first) {
+                    host_dict["username"] = (user && !user->empty()) ? py::cast(*user) : py::none();
+                    host_dict["password"] = (pw && !pw->empty()) ? py::cast(*pw) : py::none();
+                } else {
+                    host_dict["username"] = py::none();
+                    host_dict["password"] = py::none();
+                }
+                first = false;
                 host_dict["host"] = h.host;
                 if (h.port) host_dict["port"] = *h.port;
                 else host_dict["port"] = py::none();
