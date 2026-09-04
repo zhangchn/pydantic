@@ -1473,9 +1473,51 @@ static std::shared_ptr<Validator> build_from_py_dict(
         } else if (config.contains("url_preserve_empty_path") && py::isinstance<py::bool_>(config["url_preserve_empty_path"])) {
             v->preserve_empty_path = config["url_preserve_empty_path"].cast<bool>();
         }
+        if (schema.contains("default_host") && !schema["default_host"].is_none()) {
+            v->default_host = schema["default_host"].cast<std::string>();
+        }
+        if (schema.contains("default_port") && py::isinstance<py::int_>(schema["default_port"])) {
+            v->default_port = schema["default_port"].cast<int>();
+        }
+        if (schema.contains("default_path") && !schema["default_path"].is_none()) {
+            v->default_path = schema["default_path"].cast<std::string>();
+        }
         return v;
     }
-    if (type == "multi-host-url") return std::make_shared<MultiHostUrlValidator>();
+    if (type == "multi-host-url") {
+        auto v = std::make_shared<MultiHostUrlValidator>();
+        if (schema.contains("max_length") && py::isinstance<py::int_>(schema["max_length"])) {
+            long long ml = schema["max_length"].cast<long long>();
+            if (ml >= 0) v->max_length = static_cast<size_t>(ml);
+        }
+        if (schema.contains("allowed_schemes") &&
+            (py::isinstance<py::list>(schema["allowed_schemes"]) ||
+             py::isinstance<py::tuple>(schema["allowed_schemes"]))) {
+            for (auto item : py::cast<py::sequence>(schema["allowed_schemes"])) {
+                if (py::isinstance<py::str>(item)) {
+                    v->allowed_schemes.push_back(item.cast<std::string>());
+                }
+            }
+        }
+        if (schema.contains("host_required") && py::isinstance<py::bool_>(schema["host_required"])) {
+            v->host_required = schema["host_required"].cast<bool>();
+        }
+        if (schema.contains("preserve_empty_path") && py::isinstance<py::bool_>(schema["preserve_empty_path"])) {
+            v->preserve_empty_path = schema["preserve_empty_path"].cast<bool>();
+        } else if (config.contains("url_preserve_empty_path") && py::isinstance<py::bool_>(config["url_preserve_empty_path"])) {
+            v->preserve_empty_path = config["url_preserve_empty_path"].cast<bool>();
+        }
+        if (schema.contains("default_host") && !schema["default_host"].is_none()) {
+            v->default_host = schema["default_host"].cast<std::string>();
+        }
+        if (schema.contains("default_port") && py::isinstance<py::int_>(schema["default_port"])) {
+            v->default_port = schema["default_port"].cast<int>();
+        }
+        if (schema.contains("default_path") && !schema["default_path"].is_none()) {
+            v->default_path = schema["default_path"].cast<std::string>();
+        }
+        return v;
+    }
 
     // --- UUID ---
     if (type == "uuid") {

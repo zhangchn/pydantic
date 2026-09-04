@@ -219,6 +219,9 @@ public:
     std::vector<std::string> allowed_schemes;
     bool preserve_empty_path = false;
     std::optional<bool> host_required;
+    std::optional<std::string> default_host;
+    std::optional<int> default_port;
+    std::optional<std::string> default_path;
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -240,8 +243,14 @@ public:
                                                     input.as_error_value().repr);
                     }
                 }
+                UrlDefaults dflt;
+                dflt.host = default_host;
+                dflt.port = default_port;
+                dflt.path = default_path;
+                auto re = std::make_shared<Url>(py::str(input_py).cast<std::string>(),
+                                                preserve_empty_path, dflt);
                 return ValResult<std::shared_ptr<void>>(
-                    std::make_shared<py::object>(std::move(input_py)));
+                    std::static_pointer_cast<void>(re));
             }
         } catch (...) {}
 
@@ -309,17 +318,23 @@ public:
             }
 
             // Host requirements (Rust: special schemes need a host;
-            // strict mode reports an empty host as a syntax violation)
+            // strict mode reports an empty host as a syntax violation).
+            // A default_host substitutes for an empty host before the check.
             bool host_req = host_required.value_or(is_special_scheme(scheme) && scheme != "file");
-            if (netloc.empty() && host_req) {
+            if (netloc.empty() && !default_host && host_req) {
                 if (state.strict_or(false)) {
                     return syntax_violation_err("empty host");
                 }
                 return url_parsing_err("empty host");
             }
 
+            UrlDefaults defaults;
+            defaults.host = default_host;
+            defaults.port = default_port;
+            defaults.path = default_path;
+
             // Valid URL - return Url object
-            auto url_obj = std::make_shared<Url>(url_str, preserve_empty_path);
+            auto url_obj = std::make_shared<Url>(url_str, preserve_empty_path, defaults);
             return ValResult<std::shared_ptr<void>>(
                 std::static_pointer_cast<void>(url_obj)
             );
@@ -337,51 +352,113 @@ public:
 // MultiHostUrlValidator - validates multi-host URLs (e.g., mongodb://host1,host2,host3/db)
 class MultiHostUrlValidator : public Validator {
 public:
+    std::optional<size_t> max_length;
+    std::vector<std::string> allowed_schemes;
+    bool preserve_empty_path = false;
+    std::optional<bool> host_required;
+    std::optional<std::string> default_host;
+    std::optional<int> default_port;
+    std::optional<std::string> default_path;
+
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
     ) override {
         py::object input_py = input.as_python_object();
-        
+
         // Check if already a MultiHostUrl object
         try {
             py::object mod = py::module_::import("pydantic_core_cpp._pydantic_core_cpp");
             py::object mh_class = mod.attr("MultiHostUrl");
             if (py::isinstance(input_py, mh_class)) {
+                std::string s = py::str(input_py).cast<std::string>();
+                if (max_length.has_value() && s.size() > max_length.value()) {
+                    ErrorType err(ErrorType::Kind::UrlTooLong);
+                    err.context()["max_length"] = std::to_string(max_length.value());
+                    err.context()["s"] = max_length.value() == 1 ? "" : "s";
+                    return ValError::line_error(err, state.location(), input.as_error_value().repr);
+                }
+                UrlDefaults dflt;
+                dflt.host = default_host;
+                dflt.port = default_port;
+                dflt.path = default_path;
+                auto re = std::make_shared<MultiHostUrl>(py::str(input_py).cast<std::string>(),
+                                                         preserve_empty_path, dflt);
                 return ValResult<std::shared_ptr<void>>(
-                    std::make_shared<std::string>(py::str(input_py).cast<std::string>())
-                );
+                    std::static_pointer_cast<void>(re));
             }
         } catch (...) {}
-        
-        if (!py::isinstance<py::str>(input_py)) {
+
+        if (!py::isinstance<py::str>(input_py) && !py::isinstance<py::bytes>(input_py)) {
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::UrlType),
                 state.location(),
                 input.as_error_value().repr
             );
         }
-        
-        std::string url_str = py::str(input_py).cast<std::string>();
-        
+
+        std::string url_str = py::cast<std::string>(input_py);
+        strip_url_whitespace(url_str);
+
+        if (max_length.has_value() && url_str.size() > max_length.value()) {
+            ErrorType err(ErrorType::Kind::UrlTooLong);
+            err.context()["max_length"] = std::to_string(max_length.value());
+            err.context()["s"] = max_length.value() == 1 ? "" : "s";
+            return ValError::line_error(err, state.location(), url_str);
+        }
+
+        UrlDefaults defaults;
+        defaults.host = default_host;
+        defaults.port = default_port;
+        defaults.path = default_path;
+
+        std::shared_ptr<MultiHostUrl> url_obj;
         try {
-            auto url_obj = std::make_shared<MultiHostUrl>(url_str);
-            return ValResult<std::shared_ptr<void>>(
-                std::static_pointer_cast<void>(url_obj)
-            );
+            url_obj = std::make_shared<MultiHostUrl>(url_str, preserve_empty_path, defaults);
+        } catch (const UrlEmptyHostError&) {
+            ErrorType err(ErrorType::Kind::UrlParsing);
+            err.context()["error"] = "empty host";
+            return ValError::line_error(err, state.location(), url_str);
         } catch (const std::invalid_argument& e) {
-            return ValError::line_error(
-                ErrorType(ErrorType::Kind::UrlScheme),
-                state.location(),
-                e.what()
-            );
+            ErrorType err(ErrorType::Kind::UrlParsing);
+            err.context()["error"] = e.what();
+            return ValError::line_error(err, state.location(), url_str);
         } catch (...) {
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::UrlType),
-                state.location(),
-                "Multi-host URL parsing failed: " + url_str
-            );
+                state.location(), url_str);
         }
+
+        // Scheme allow-list (checked after parsing, matching Rust order)
+        if (!allowed_schemes.empty()) {
+            std::string scheme = url_obj->scheme();
+            bool ok = false;
+            for (const auto& s : allowed_schemes) {
+                if (scheme == s) { ok = true; break; }
+            }
+            if (!ok) {
+                ErrorType err(ErrorType::Kind::UrlScheme);
+                std::string expected;
+                for (size_t i = 0; i < allowed_schemes.size(); ++i) {
+                    if (i > 0) expected += i == allowed_schemes.size() - 1 ? " or " : ", ";
+                    expected += "'" + allowed_schemes[i] + "'";
+                }
+                err.context()["expected_schemes"] = expected;
+                return ValError::line_error(err, state.location(), url_str);
+            }
+        }
+
+        // host_required: a single empty host (no default) is an empty-host parsing error
+        bool host_req = host_required.value_or(false);
+        if (host_req && !url_obj->has_host()) {
+            ErrorType err(ErrorType::Kind::UrlParsing);
+            err.context()["error"] = "empty host";
+            return ValError::line_error(err, state.location(), url_str);
+        }
+
+        return ValResult<std::shared_ptr<void>>(
+            std::static_pointer_cast<void>(url_obj)
+        );
     }
 
     std::string name() const override { return "multi-host-url"; }

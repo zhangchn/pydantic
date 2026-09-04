@@ -3256,7 +3256,10 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             auto port = u.port_or_default();
             return port ? py::cast(*port) : py::none();
         })
-        .def_property_readonly("path", &Url::path)
+        .def_property_readonly("path", [](const Url& u) -> py::object {
+            auto pth = u.path();
+            return pth.empty() ? py::none() : py::cast(pth);
+        })
         .def_property_readonly("query", [](const Url& u) -> py::object {
             auto q = u.query();
             return q.empty() ? py::none() : py::cast(q);
@@ -3270,7 +3273,8 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             auto pw = u.password();
             return pw && !pw->empty() ? py::cast(*pw) : py::none();
         })
-        .def_property_readonly("url", &Url::str);
+        .def_property_readonly("url", &Url::str)
+        .def("__len__", [](const Url& u) { return u.str().size(); });
 
     // MultiHostUrl class - URL with multiple hosts
     py::class_<MultiHostUrl>(m, "MultiHostUrl")
@@ -3288,19 +3292,10 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
         .def_property_readonly("scheme", &MultiHostUrl::scheme)
         .def("hosts", [](const MultiHostUrl& u) {
             py::list result;
-            bool first = true;
-            auto user = u.user();
-            auto pw = u.password();
             for (const auto& h : u.hosts()) {
                 py::dict host_dict;
-                if (first) {
-                    host_dict["username"] = (user && !user->empty()) ? py::cast(*user) : py::none();
-                    host_dict["password"] = (pw && !pw->empty()) ? py::cast(*pw) : py::none();
-                } else {
-                    host_dict["username"] = py::none();
-                    host_dict["password"] = py::none();
-                }
-                first = false;
+                host_dict["username"] = (h.username && !h.username->empty()) ? py::cast(*h.username) : py::none();
+                host_dict["password"] = (h.password) ? py::cast(*h.password) : py::none();
                 host_dict["host"] = h.host;
                 if (h.port) host_dict["port"] = *h.port;
                 else host_dict["port"] = py::none();
@@ -3308,7 +3303,10 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             }
             return result;
         })
-        .def_property_readonly("path", &MultiHostUrl::path)
+        .def_property_readonly("path", [](const MultiHostUrl& u) -> py::object {
+            auto pth = u.path();
+            return pth.empty() ? py::none() : py::cast(pth);
+        })
         .def_property_readonly("query", &MultiHostUrl::query)
         .def_property_readonly("fragment", &MultiHostUrl::fragment)
         .def_property_readonly("username", [](const MultiHostUrl& u) -> py::object {
@@ -3319,5 +3317,62 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             auto pw = u.password();
             return pw && !pw->empty() ? py::cast(*pw) : py::none();
         })
-        .def_property_readonly("url", &MultiHostUrl::str);
+        .def_property_readonly("url", &MultiHostUrl::str)
+        .def("__len__", [](const MultiHostUrl& u) { return u.str().size(); })
+        .def_static("build",
+            [](const std::string& scheme,
+               py::object hosts,
+               py::object path,
+               py::object query,
+               py::object fragment,
+               py::object host,
+               py::object username,
+               py::object password,
+               py::object port) {
+                auto is_none=[](const py::object& o){ return o.is_none(); };
+                std::string url = scheme + "://";
+                if (!is_none(hosts) && (!is_none(host) || !is_none(username) || !is_none(password) || !is_none(port))) {
+                    throw py::value_error("expected one of `hosts` or singular values to be set.");
+                }
+                if (!is_none(hosts)) {
+                    std::vector<std::string> parts;
+                    for (auto item : py::cast<py::list>(hosts)) {
+                        py::dict d = py::cast<py::dict>(item);
+                        bool any = false;
+                        std::string seg;
+                        auto getu=[&](const char* k)->bool{ return d.contains(k) && !d[k].is_none(); };
+                        if (getu("username") || getu("password")) {
+                            if (getu("username")) { seg += py::cast<std::string>(d["username"]); }
+                            if (getu("password")) { if (!seg.empty()) seg += ":"; seg += py::cast<std::string>(d["password"]); }
+                            seg += "@";
+                        }
+                        if (getu("host")) { seg += py::cast<std::string>(d["host"]); any = true; }
+                        if (getu("port")) { seg += ":" + std::to_string(py::cast<int>(d["port"])); any = true; }
+                        if (!any) throw py::value_error("expected one of 'host', 'username', 'password' or 'port' to be set");
+                        parts.push_back(seg);
+                    }
+                    for (size_t i=0;i<parts.size();++i){ url += parts[i]; if (i+1<parts.size()) url += ","; }
+                } else if (!is_none(host)) {
+                    if (!is_none(username)) url += py::cast<std::string>(username);
+                    if (!is_none(password)) { if (!url.empty() && url.back()!='/' ) {} url += ":" + py::cast<std::string>(password); }
+                    if (!is_none(username) || !is_none(password)) url += "@";
+                    url += py::cast<std::string>(host);
+                    if (!is_none(port)) url += ":" + std::to_string(py::cast<int>(port));
+                } else {
+                    throw py::value_error("expected either `host` or `hosts` to be set");
+                }
+                if (!is_none(path)) { url += "/"; url += py::cast<std::string>(path); }
+                if (!is_none(query)) { url += "?"; url += py::cast<std::string>(query); }
+                if (!is_none(fragment)) { url += "#"; url += py::cast<std::string>(fragment); }
+                return MultiHostUrl(url);
+            },
+            py::arg("scheme"),
+            py::arg("hosts") = py::none(),
+            py::arg("path") = py::none(),
+            py::arg("query") = py::none(),
+            py::arg("fragment") = py::none(),
+            py::arg("host") = py::none(),
+            py::arg("username") = py::none(),
+            py::arg("password") = py::none(),
+            py::arg("port") = py::none());
 }
