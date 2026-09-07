@@ -120,6 +120,7 @@ public:
         std::string msg;
         std::string input;
         std::unordered_map<std::string, std::string> ctx;
+        bool is_custom = false;
 #ifdef HAS_PYBIND11
         bool has_raw_input = false;
         py::object raw_input_obj;

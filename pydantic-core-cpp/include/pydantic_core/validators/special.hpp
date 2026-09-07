@@ -10,6 +10,9 @@
 #include <pybind11/pybind11.h>
 #include <cstdio>
 #include <stdexcept>
+#include <regex>
+#include <algorithm>
+#include <cctype>
 
 namespace py = pybind11;
 namespace pydantic_core {
@@ -222,6 +225,7 @@ public:
     std::optional<std::string> default_host;
     std::optional<int> default_port;
     std::optional<std::string> default_path;
+    bool strict = false;
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -263,7 +267,9 @@ public:
         }
 
         // Lax bytes -> str coercion (matches input.validate_str).
-        std::string url_str = py::cast<std::string>(input_py);
+        std::string raw = py::cast<std::string>(input_py);
+        bool raw_empty = raw.empty();
+        std::string url_str = raw;
         // url crate trims leading/trailing C0 control + space before parsing.
         strip_url_whitespace(url_str);
 
@@ -285,64 +291,130 @@ public:
             err.context()["error"] = error;
             return ValError::line_error(err, state.location(), url_str);
         };
+        auto scheme_err = [&]() {
+            ErrorType err(ErrorType::Kind::UrlScheme);
+            std::string expected;
+            for (size_t i = 0; i < allowed_schemes.size(); ++i) {
+                if (i > 0) expected += i == allowed_schemes.size() - 1 ? " or " : ", ";
+                expected += "'" + allowed_schemes[i] + "'";
+            }
+            err.context()["expected_schemes"] = expected;
+            return ValError::line_error(err, state.location(), url_str);
+        };
 
-        // Parse using Python's urllib (mimics url::Url::parse + syntax violations)
-        try {
-            py::object urllib = py::module_::import("urllib.parse");
-            py::object parsed = urllib.attr("urlparse")(url_str);
+        const bool strict = state.strict_or(this->strict);
 
-            std::string scheme = py::str(parsed.attr("scheme")).cast<std::string>();
-            std::string netloc = py::str(parsed.attr("netloc")).cast<std::string>();
+        // Empty input: url crate checks the raw input before trimming.
+        if (raw_empty) {
+            return url_parsing_err("input is empty");
+        }
+        // Strict mode surfaces leading/trailing whitespace as a syntax violation.
+        if (strict && url_str != raw) {
+            return syntax_violation_err("leading or trailing control or space character are ignored in URLs");
+        }
+        if (url_str.empty()) {
+            return url_parsing_err("relative URL without a base");
+        }
 
-            // URL must have a scheme (Rust: ParseError::RelativeUrlWithoutBase -> UrlParsing)
-            if (scheme.empty()) {
-                return url_parsing_err("relative URL without a base");
+        // Scheme must start with an ASCII letter (url crate); otherwise no base.
+        std::regex scheme_re("^([a-zA-Z][a-zA-Z0-9+.-]*):");
+        std::smatch sm;
+        if (!std::regex_search(url_str, sm, scheme_re)) {
+            return url_parsing_err("relative URL without a base");
+        }
+        std::string scheme = sm[1].str();
+        for (char& ch : scheme) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        std::string rest = url_str.substr(sm[0].length());
+        bool special = is_special_scheme(scheme);
+
+        // Authority region (optional userinfo@host[:port]), terminated by / ? #
+        std::string authority;
+        if (special) {
+            size_t k = 0;
+            while (k < rest.size() && (rest[k] == '/' || rest[k] == '\\')) ++k;
+            // special schemes require exactly "//"; extra/missing slashes are a strict violation
+            if (strict && k != 2) {
+                return syntax_violation_err("expected //");
+            }
+            std::string after = rest.substr(k);
+            size_t e = after.find_first_of("/?#");
+            authority = (e == std::string::npos) ? after : after.substr(0, e);
+        } else if (rest.size() >= 2 && rest[0] == '/' && rest[1] == '/') {
+            std::string after = rest.substr(2);
+            size_t e = after.find_first_of("/?#");
+            authority = (e == std::string::npos) ? after : after.substr(0, e);
+        }
+
+        // Validate the authority (userinfo@host[:port]) when there is one.
+        if (!authority.empty() || special) {
+            std::string hostport = authority;
+            size_t at = hostport.rfind('@');
+            if (at != std::string::npos) hostport = hostport.substr(at + 1);
+
+            std::string host;
+            std::string port_str;
+            bool has_port = false;
+            if (!hostport.empty() && hostport[0] == '[') {
+                size_t be = hostport.find(']');
+                if (be == std::string::npos) {
+                    return url_parsing_err("invalid IPv6 address");
+                }
+                std::string inner = hostport.substr(1, be - 1);
+                if (!is_valid_ipv6(inner)) {
+                    return url_parsing_err("invalid IPv6 address");
+                }
+                host = hostport.substr(0, be + 1);
+                std::string r = hostport.substr(be + 1);
+                if (!r.empty()) {
+                    if (r[0] != ':') return url_parsing_err("invalid port number");
+                    port_str = r.substr(1);
+                    has_port = true;
+                }
+            } else {
+                size_t colon = hostport.find(':');
+                if (colon != std::string::npos) {
+                    host = hostport.substr(0, colon);
+                    port_str = hostport.substr(colon + 1);
+                    has_port = true;
+                } else {
+                    host = hostport;
+                }
             }
 
-            // Scheme allow-list (Rust: UrlScheme with expected_schemes)
-            if (!allowed_schemes.empty()) {
-                bool ok = false;
-                for (const auto& s : allowed_schemes) {
-                    if (scheme == s) { ok = true; break; }
-                }
-                if (!ok) {
-                    ErrorType err(ErrorType::Kind::UrlScheme);
-                    std::string expected;
-                    for (size_t i = 0; i < allowed_schemes.size(); ++i) {
-                        if (i > 0) expected += i == allowed_schemes.size() - 1 ? " or " : ", ";
-                        expected += "'" + allowed_schemes[i] + "'";
-                    }
-                    err.context()["expected_schemes"] = expected;
-                    return ValError::line_error(err, state.location(), url_str);
+            if (has_port) {
+                bool digits = !port_str.empty() && std::all_of(port_str.begin(), port_str.end(),
+                    [](char c) { return std::isdigit(static_cast<unsigned char>(c)); });
+                long p = 0;
+                if (digits) { try { p = std::stol(port_str); } catch (...) { digits = false; } }
+                if (!digits || p > 65535) {
+                    return url_parsing_err("invalid port number");
                 }
             }
 
-            // Host requirements (Rust: special schemes need a host;
-            // strict mode reports an empty host as a syntax violation).
-            // A default_host substitutes for an empty host before the check.
-            bool host_req = host_required.value_or(is_special_scheme(scheme) && scheme != "file");
-            if (netloc.empty() && !default_host && host_req) {
-                if (state.strict_or(false)) {
-                    return syntax_violation_err("empty host");
-                }
+            // Empty host: required for special schemes (file exempt; default_host substitutes).
+            bool host_req = host_required.value_or(special && scheme != "file");
+            if (host.empty() && !default_host && host_req) {
                 return url_parsing_err("empty host");
             }
+        }
 
-            UrlDefaults defaults;
-            defaults.host = default_host;
-            defaults.port = default_port;
-            defaults.path = default_path;
+        // Scheme allow-list (checked after parsing, matching Rust order).
+        if (!allowed_schemes.empty()) {
+            bool ok = false;
+            for (const auto& s : allowed_schemes) { if (scheme == s) { ok = true; break; } }
+            if (!ok) return scheme_err();
+        }
 
-            // Valid URL - return Url object
+        UrlDefaults defaults;
+        defaults.host = default_host;
+        defaults.port = default_port;
+        defaults.path = default_path;
+
+        try {
             auto url_obj = std::make_shared<Url>(url_str, preserve_empty_path, defaults);
-            return ValResult<std::shared_ptr<void>>(
-                std::static_pointer_cast<void>(url_obj)
-            );
-        } catch (py::error_already_set& e) {
-            std::string msg = e.what();
-            e.restore();
-            PyErr_Clear();
-            return url_parsing_err(msg);
+            return ValResult<std::shared_ptr<void>>(std::static_pointer_cast<void>(url_obj));
+        } catch (const std::exception& e) {
+            return url_parsing_err(e.what());
         }
     }
 
@@ -359,6 +431,7 @@ public:
     std::optional<std::string> default_host;
     std::optional<int> default_port;
     std::optional<std::string> default_path;
+    bool strict = false;
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,

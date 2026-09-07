@@ -1482,6 +1482,9 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("default_path") && !schema["default_path"].is_none()) {
             v->default_path = schema["default_path"].cast<std::string>();
         }
+        if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
+            v->strict = schema["strict"].cast<bool>();
+        }
         return v;
     }
     if (type == "multi-host-url") {
@@ -1515,6 +1518,9 @@ static std::shared_ptr<Validator> build_from_py_dict(
         }
         if (schema.contains("default_path") && !schema["default_path"].is_none()) {
             v->default_path = schema["default_path"].cast<std::string>();
+        }
+        if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
+            v->strict = schema["strict"].cast<bool>();
         }
         return v;
     }
@@ -1816,7 +1822,13 @@ static std::shared_ptr<Validator> build_from_py_dict(
                 choices.push_back(choice);
             }
         }
-        return std::make_shared<UnionValidator>(std::move(choices));
+        auto uv = std::make_shared<UnionValidator>(std::move(choices));
+        if (schema.contains("custom_error_type") && !schema["custom_error_type"].is_none()) {
+            std::string cmsg = schema.contains("custom_error_message") && !schema["custom_error_message"].is_none()
+                ? schema["custom_error_message"].cast<std::string>() : std::string();
+            uv->set_custom_error(schema["custom_error_type"].cast<std::string>(), cmsg);
+        }
+        return uv;
     }
 
     // --- TaggedUnion ---

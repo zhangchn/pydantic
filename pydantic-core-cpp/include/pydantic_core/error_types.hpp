@@ -238,6 +238,7 @@ public:
     
     // Get type name for error
     std::string type_name() const;
+    bool is_custom() const { return !custom_type_name_.empty(); }
     
     // Get message template
     std::string message_template() const;

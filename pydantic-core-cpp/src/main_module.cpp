@@ -1561,9 +1561,10 @@ private:
             out += "}";
             return out;
         }
-        if (py::hasattr(value, "__dict__")) return infer_json(value.attr("__dict__"), ensure_ascii, indent);
-
-        // Check for Url and MultiHostUrl objects
+        // URL objects serialize as their string form, not their __dict__.
+        // This must run before the __dict__ fallback below: both the pybind11
+        // Url/MultiHostUrl and Python wrappers (HttpUrl, AnyUrl, ...) expose a
+        // __dict__ that would otherwise be emitted as a JSON object.
         try {
             py::object url_mod = py::module_::import("pydantic_core_cpp._pydantic_core_cpp");
             py::object url_cls = url_mod.attr("Url");
@@ -1571,7 +1572,16 @@ private:
             if (py::isinstance(value, url_cls) || py::isinstance(value, murl_cls)) {
                 return json_escape(py::str(value).cast<std::string>(), ensure_ascii);
             }
+            // Python URL wrapper classes hold the pybind11 Url in a _url attribute.
+            if (py::hasattr(value, "_url")) {
+                auto inner = py::getattr(value, "_url");
+                if (py::isinstance(inner, url_cls) || py::isinstance(inner, murl_cls)) {
+                    return json_escape(py::str(value).cast<std::string>(), ensure_ascii);
+                }
+            }
         } catch (...) {}
+
+        if (py::hasattr(value, "__dict__")) return infer_json(value.attr("__dict__"), ensure_ascii, indent);
 
         return json_escape(py::repr(value).cast<std::string>(), ensure_ascii);
     }
@@ -2820,7 +2830,7 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                         }
                         d["ctx"] = ctx;
                     }
-                    if (include_url) {
+                    if (include_url && !err.is_custom) {
                         d["url"] = "https://errors.pydantic.dev/2.14/v/" + err.type;
                     }
                     result.append(d);

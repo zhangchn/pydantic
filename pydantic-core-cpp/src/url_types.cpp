@@ -4,6 +4,8 @@
 #include <stdexcept>
 #include <algorithm>
 #include <cctype>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 
 namespace pydantic_core {
 
@@ -19,6 +21,12 @@ static std::string to_lower(std::string s) {
 // WHATWG special schemes: their empty path normalizes to "/" (url.rs scheme_is_special).
 bool is_special_scheme(const std::string& s) {
     return s == "http" || s == "https" || s == "ws" || s == "wss" || s == "ftp" || s == "file";
+}
+
+bool is_valid_ipv6(const std::string& host) {
+    if (host.empty()) return false;
+    struct in6_addr dst;
+    return inet_pton(AF_INET6, host.c_str(), &dst) == 1;
 }
 
 void strip_url_whitespace(std::string& s) {
@@ -201,6 +209,13 @@ Url::Url(const std::string& url_str, bool preserve_empty_path, const UrlDefaults
 
     // file scheme: a "localhost" host is dropped (url crate normalization).
     if (scheme_ == "file" && host_ == "localhost") host_ = "";
+
+    // file scheme: the path is normalized to start with exactly one slash.
+    if (scheme_ == "file") {
+        size_t lead = 0;
+        while (lead < path_.size() && path_[lead] == '/') ++lead;
+        path_ = "/" + path_.substr(lead);
+    }
 
     std::string out = scheme_ + "://";
     bool has_user = user_.has_value();

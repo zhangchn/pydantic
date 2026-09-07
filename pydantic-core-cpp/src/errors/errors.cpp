@@ -102,6 +102,7 @@ std::string ValidationError::errors_to_json() const {
         oss << "]"
             << ",\"msg\":" << json_quote(err.msg)
             << ",\"input\":" << json_quote(err.input)
+            << ",\"is_custom\":" << (err.is_custom ? "true" : "false")
             << ",\"ctx\":{";
         bool cfirst = true;
         // Exceptions cannot be JSON-serialized, so emit a marker that the
@@ -137,6 +138,7 @@ void ValidationError::build_errors_from_val_error(const ValError& val_error) {
             details.loc_items = line_err->location.items;
             details.msg = line_err->error_type.message();
             details.input = line_err->input_value;
+            details.is_custom = line_err->error_type.is_custom();
 #ifdef HAS_PYBIND11
             // Preserve original Python object for accurate serialization (Rust parallel)
             // Note: default-constructed py::object has a null handle, so check ptr()

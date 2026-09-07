@@ -16,6 +16,9 @@ void strip_url_whitespace(std::string& s);
 // WHATWG special schemes (url.rs scheme_is_special).
 bool is_special_scheme(const std::string& s);
 
+// Validate an IPv6 literal (no brackets), matching url crate host parsing.
+bool is_valid_ipv6(const std::string& host);
+
 // Thrown when a host is required to be non-empty but is empty.
 // Maps to the url_parsing error with message "empty host".
 struct UrlEmptyHostError : public std::invalid_argument {

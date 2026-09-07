@@ -308,8 +308,8 @@ std::string ErrorType::message_template() const {
         {Kind::LessThanEqual, "Input should be less than or equal to {le}"},
         {Kind::MultipleOf, "Input should be a multiple of {multiple_of}"},
         {Kind::FiniteNumber, "Input should be a finite number"},
-        {Kind::TooShort, "Input should have at least {value} items"},
-        {Kind::TooLong, "Input should have at most {value} items"},
+        {Kind::TooShort, "{field_type} should have at least {min_length} items after validation, not {actual_length}"},
+        {Kind::TooLong, "{field_type} should have at most {max_length} items after validation, not {actual_length}"},
         {Kind::StringNotAscii, "Input should be ASCII"},
 
         // Date/Time errors

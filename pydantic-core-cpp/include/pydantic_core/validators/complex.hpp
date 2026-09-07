@@ -82,6 +82,10 @@ public:
                 return result;
             }
         }
+        if (custom_error_type_) {
+            ErrorType et(*custom_error_type_, custom_error_message_.value_or(""));
+            return ValError::line_error(et, state.location(), input.as_error_value().repr);
+        }
         return ValError::line_error(
             ErrorType(ErrorType::Kind::CustomError),
             state.location(),
@@ -100,9 +104,16 @@ public:
         return last_type_name_.empty() ? "union" : last_type_name_;
     }
 
+    void set_custom_error(std::string type, std::string message) {
+        custom_error_type_ = std::move(type);
+        custom_error_message_ = std::move(message);
+    }
+
 private:
     std::vector<std::shared_ptr<Validator>> validators_;
     mutable std::string last_type_name_;
+    std::optional<std::string> custom_error_type_;
+    std::optional<std::string> custom_error_message_;
 };
 
 // TaggedUnionValidator - union with discriminator tag

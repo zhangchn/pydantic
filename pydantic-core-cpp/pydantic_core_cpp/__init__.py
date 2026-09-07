@@ -233,8 +233,10 @@ def _parse_structured_errors(msg: str) -> list[dict] | None:
                 'loc': tuple(err['loc']),
                 'msg': _ERR_MSG_MAP.get(err['msg'], err['msg']),
                 'input': _parse_input(err['input']),
-                'url': f'https://errors.pydantic.dev/2.14/v/{err["type"]}',
             }
+            # Rust omits the url key for custom error types.
+            if not err.get('is_custom'):
+                d['url'] = f'https://errors.pydantic.dev/2.14/v/{err["type"]}'
             if err.get('ctx'):
                 def _parse_ctx_value(v):
                     # Quoted-string ctx values (e.g. literal_error's expected
