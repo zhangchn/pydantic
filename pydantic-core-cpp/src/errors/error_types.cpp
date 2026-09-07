@@ -229,7 +229,7 @@ std::string ErrorType::message_template() const {
         // String constraint errors
         {Kind::StringTooShort, "String should have at least {min_length} character{s}"},
         {Kind::StringTooLong, "String should have at most {max_length} character{s}"},
-        {Kind::StringPatternMismatch, "String should match pattern"},
+        {Kind::StringPatternMismatch, "String should match pattern '{pattern}'"},
         
         // Bytes constraint errors
         {Kind::BytesTooShort, "Data should have at least {min_length} bytes"},

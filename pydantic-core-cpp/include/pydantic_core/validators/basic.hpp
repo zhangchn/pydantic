@@ -295,6 +295,27 @@ public:
     std::string name() const override { return "str"; }
 };
 
+
+// Convert a std::string to its Python repr (single-quoted, escaped) so that
+// error input values round-trip correctly through the Python wrapper's
+// ast.literal_eval reconstruction (e.g. "00" must stay the string '00',
+// not become the int 0).
+inline std::string python_str_repr(const std::string& s) {
+    std::string result = "'";
+    for (char c : s) {
+        switch (c) {
+            case '\'' : result += "\\'"; break;
+            case '\\' : result += "\\\\"; break;
+            case '\n' : result += "\\n"; break;
+            case '\r' : result += "\\r"; break;
+            case '\t' : result += "\\t"; break;
+            default : result += c;
+        }
+    }
+    result += "'";
+    return result;
+}
+
 // StrConstrainedValidator - validates string with min_length/max_length/pattern/strip_whitespace/to_lower/to_upper
 class StrConstrainedValidator : public Validator {
 public:
@@ -337,7 +358,7 @@ public:
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::StringTooShort, "min_length", std::to_string(min_length.value()), "s", s),
                 state.location(),
-                str
+                python_str_repr(str)
             );
         }
         if (max_length.has_value() && char_count > max_length.value()) {
@@ -345,7 +366,7 @@ public:
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::StringTooLong, "max_length", std::to_string(max_length.value()), "s", s),
                 state.location(),
-                str
+                python_str_repr(str)
             );
         }
 
@@ -355,7 +376,7 @@ public:
                     return ValError::line_error(
                         ErrorType(ErrorType::Kind::StringNotAscii),
                         state.location(),
-                        str
+                        python_str_repr(str)
                     );
                 }
             }
@@ -375,9 +396,9 @@ public:
                 std::regex re(pattern);
                 if (!std::regex_search(str, re)) {
                     return ValError::line_error(
-                        ErrorType(ErrorType::Kind::StringPatternMismatch),
+                        ErrorType(ErrorType::Kind::StringPatternMismatch, "pattern", pattern),
                         state.location(),
-                        str
+                        python_str_repr(str)
                     );
                 }
             } catch (const std::regex_error&) {

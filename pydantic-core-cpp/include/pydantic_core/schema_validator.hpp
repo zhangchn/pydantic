@@ -75,8 +75,8 @@ public:
     bool isinstance_python(const std::string& input_json,
                           std::optional<bool> strict = std::nullopt);
 
-    // Get default value
-    std::optional<std::string> get_default_value(std::optional<bool> strict = std::nullopt);
+    // Get default value (returns the raw default as a Python object, or None)
+    py::object get_default_value(std::optional<bool> strict = std::nullopt, py::object context = py::none());
 
     // Validate assignment to field - legacy JSON path
     std::string validate_assignment(const std::string& obj_json,

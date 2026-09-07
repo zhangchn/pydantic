@@ -174,17 +174,35 @@ inline std::vector<ValError>& stack() {
     static thread_local std::vector<ValError> s;
     return s;
 }
-// If the caught Python exception is our marker, pop and return the inner error.
+// If the caught Python exception is the inner ValidationError (raised by the
+// handler, possibly re-raised by the Python wrap function), pop and return
+// the inner error. The pending stack being non-empty is the signal that the
+// inner validation failed; we additionally require the exception to be a
+// ValidationError (not e.g. a TypeError raised by the wrap function itself).
 inline std::optional<ValError> take_pending(py::error_already_set& e) {
-    std::string msg;
-    try {
-        msg = py::str(e.value()).cast<std::string>();
-    } catch (...) {
-        return std::nullopt;
-    }
-    if (msg != kMarker) return std::nullopt;
     auto& s = stack();
     if (s.empty()) return std::nullopt;
+    // The handler raises the actual ValidationError; accept it (or the legacy
+    // marker ValueError) so the typed inner error reaches the outer validator.
+    // We identify the inner error by its exception type name ("ValidationError")
+    // or the legacy marker message, since py::type::of<ValidationError> is not
+    // available for register_exception-registered types.
+    bool is_inner = false;
+    try {
+        py::object exc_type = e.type();
+        std::string type_name = py::str(exc_type.attr("__name__")).cast<std::string>();
+        is_inner = (type_name == "ValidationError");
+    } catch (...) {
+        // Fall back to the marker check if the type name lookup fails.
+        std::string msg;
+        try {
+            msg = py::str(e.value()).cast<std::string>();
+        } catch (...) {
+            return std::nullopt;
+        }
+        is_inner = (msg == kMarker);
+    }
+    if (!is_inner) return std::nullopt;
     ValError out = std::move(s.back());
     s.pop_back();
     return out;
@@ -864,9 +882,13 @@ public:
                     auto result = inner_->validate(*py_input, state);
                     if (result.is_err()) {
                         // Propagate the typed inner error to the enclosing
-                        // function-wrap validator via the pending stack.
+                        // function-wrap validator via the pending stack, AND
+                        // raise the actual ValidationError so the Python wrap
+                        // function can inspect it (Rust re-raises the
+                        // ValidationError, e.g. for constraint-incompatibility
+                        // detection in pydantic's apply_known_metadata).
                         wrap_detail::stack().push_back(result.error());
-                        throw py::value_error(wrap_detail::kMarker);
+                        throw ValidationError("Schema", InputType::Python, result.error(), v, false);
                     }
                     // Convert the validated result to a Python object by its
                     // actual stored type (e.g. EitherDate for date fields).

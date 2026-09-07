@@ -340,20 +340,38 @@ bool SchemaValidator::isinstance_python_object(const py::object& input,
     }
 }
 
-std::optional<std::string> SchemaValidator::get_default_value(std::optional<bool> strict) {
+// Forward declaration (defined below)
+py::object value_to_python_with_type(const std::shared_ptr<void>& value, const std::string& type_name);
+
+py::object SchemaValidator::get_default_value(std::optional<bool> strict, py::object context) {
     (void)strict;
-    
+    (void)context;
+
     if (!validator_) {
-        return std::nullopt;
+        return py::none();
     }
-    
+
     ValidationState state(config_);
     auto result = validator_->default_value(state);
-    
-    if (result.is_ok()) {
-        return std::nullopt; // Placeholder
+
+    if (!result.is_ok()) {
+        // Omit / no default
+        return py::none();
     }
-    return std::nullopt;
+
+    auto value = result.value();
+    if (!value) {
+        return py::none();
+    }
+
+    // The default is stored as a live Python object by WithDefaultValidator.
+    try {
+        auto* py_obj = static_cast<py::object*>(value.get());
+        if (py_obj) return *py_obj;
+    } catch (...) {}
+
+    // Fallback: convert by the validator's effective result type.
+    return value_to_python_with_type(value, validator_->effective_result_name());
 }
 
 std::string SchemaValidator::validate_assignment(const std::string& obj_json,
@@ -870,6 +888,11 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
         try {
             auto* edt = static_cast<EitherDateTime*>(value.get());
             if (edt) {
+                // Preserve the original Python datetime object (keeps named
+                // tzinfo like America/Los_Angeles instead of a fixed offset).
+                if (!edt->original_obj.is_none()) {
+                    return edt->original_obj;
+                }
                 auto& dt = edt->value;
                 if (dt.time.tz_offset.has_value()) {
                     py::object datetime_mod = py::module_::import("datetime");

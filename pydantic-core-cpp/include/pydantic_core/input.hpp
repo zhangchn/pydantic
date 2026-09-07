@@ -185,6 +185,10 @@ struct EitherTime {
 struct EitherDateTime {
     DateTime value;
     bool is_lax = false;
+    // When the input was already a Python datetime object, keep the original
+    // object so its tzinfo (e.g. a named zone like America/Los_Angeles) is
+    // preserved instead of being replaced by a fixed UTC offset.
+    py::object original_obj = py::none();
 
     EitherDateTime() : value{{0, 0, 0}, {0, 0, 0}} {}
     explicit EitherDateTime(DateTime dt) : value(dt) {}

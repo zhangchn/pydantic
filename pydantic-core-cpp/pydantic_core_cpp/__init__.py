@@ -1458,8 +1458,11 @@ class SchemaValidator:
     def isinstance_python(self, obj, *, strict=None):
         return self._base.isinstance_python(obj, strict=strict)
 
-    def get_default_value(self, *, strict=None):
-        return self._base.get_default_value(strict=strict)
+    def get_default_value(self, *, strict=None, context=None):
+        value = self._base.get_default_value(strict=strict, context=context)
+        if value is None:
+            return None
+        return Some(value)
 
     def validate_assignment(self, obj, field_name, field_value):
         return self._base.validate_assignment(obj, field_name, field_value)

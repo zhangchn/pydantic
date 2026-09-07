@@ -3170,10 +3170,9 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             // NEW: Use native PythonInput - no JSON round-trip!
             return self.isinstance_python_object(input, pyobj_to_bool(strict));
         }, py::arg("object"), py::arg("strict") = py::none())
-        .def("get_default_value", [](SchemaValidator& self, py::object strict) -> py::object {
-            auto r = self.get_default_value(pyobj_to_bool(strict));
-            return r ? json_to_pyobj(*r) : py::none();
-        }, py::arg("strict") = py::none())
+        .def("get_default_value", [](SchemaValidator& self, py::object strict, py::object context) -> py::object {
+            return self.get_default_value(pyobj_to_bool(strict), context);
+        }, py::arg("strict") = py::none(), py::arg("context") = py::none())
         .def("validate_assignment", [](SchemaValidator& self, const py::object& obj, const std::string& fn, const py::object& fv) {
             // NEW: Use native PythonInput - no JSON round-trip!
             return self.validate_assignment_object(obj, fn, fv);

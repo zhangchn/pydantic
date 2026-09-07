@@ -956,7 +956,11 @@ ValResult<ValMatch<EitherDateTime>> PythonInput::validate_datetime(bool strict) 
         }
 
         DateTime dt = {Date{year, month, day}, Time{hour, minute, second, microsecond, tz_offset}};
-        return ValMatch<EitherDateTime>::exact(EitherDateTime(dt));
+        EitherDateTime edt(dt);
+        // Preserve the original Python datetime object so its tzinfo (e.g. a
+        // named zone) is kept rather than replaced by a fixed UTC offset.
+        edt.original_obj = py_dt;
+        return ValMatch<EitherDateTime>::exact(std::move(edt));
     }
 
     if (is_date() && !strict) {
