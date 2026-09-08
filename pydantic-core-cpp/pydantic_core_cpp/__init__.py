@@ -1125,6 +1125,12 @@ class SchemaValidator:
         extracts its model-fields schema, recursively processes nested fields,
         and creates the model instance.
         """
+        # If the C++ validator already reused an existing instance (Rust
+        # revalidate_instances='never'), keep that object: rebuilding it would
+        # break shared references between fields (e.g. Outer(a=x, b=x) must
+        # keep a is b after the dict -> model conversion here).
+        if isinstance(data, cls):
+            return data
         instance = object.__new__(cls)
 
         # Find the definition by ref in the top-level definitions list

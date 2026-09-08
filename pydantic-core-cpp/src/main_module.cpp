@@ -1764,6 +1764,37 @@ private:
         return v;
     }
 
+    // Rust's leaf serializers type-check each value they serialize and warn on
+    // a mismatch ("Expected `X` - serialized value may not be as expected").
+    // Wrapper nodes ("default"/"with-default"/"lax-or-strict"/"nullable"/
+    // "json-or-python"/definitions) forward non-None values to an inner node,
+    // so resolve the node that actually receives the value before applying the
+    // declared-type check.  Returns nullptr when a wrapper intercepts the value
+    // (e.g. None with a default returns the default without reaching a leaf).
+    static SerRef ser_leaf_for_value(const SerRef& n, const py::object& v, bool json_mode) {
+        SerRef cur = n;
+        while (cur) {
+            const std::string& t = cur->type;
+            if (t == "default" || t == "with-default") {
+                if (v.is_none() && cur->has_default_val) return nullptr;
+                cur = cur->children.empty() ? nullptr : cur->children[0];
+            } else if (t == "lax-or-strict" || t == "definitions" || t == "definition-ref") {
+                cur = cur->children.empty() ? nullptr : cur->children[0];
+            } else if (t == "json-or-python") {
+                // Python mode uses children[1], JSON mode children[0].
+                cur = cur->children.empty() ? nullptr
+                    : (json_mode ? cur->children[0]
+                       : (cur->children.size() > 1 ? cur->children[1] : cur->children[0]));
+            } else if (t == "nullable" || t == "nullable-union") {
+                if (v.is_none()) return nullptr;
+                cur = cur->children.empty() ? nullptr : cur->children[0];
+            } else {
+                break;
+            }
+        }
+        return cur;
+    }
+
     py::object serialize_fields(const py::object& value, bool exc_none, bool round_trip = false,
                                  const py::object& include = py::none(),
                                  const py::object& exclude = py::none(),
@@ -1846,9 +1877,10 @@ private:
                 } catch (...) {
                     has_value = false;
                 }
-            } else if (ser->has_default()) {
-                fv = ser->get_default_value();
             } else {
+                // Rust iterates the instance's own __dict__: a declared field
+                // that is absent from it (e.g. removed by copy(exclude=...))
+                // is NOT emitted, even when the schema declares a default.
                 has_value = false;
             }
             if (!has_value) continue;
@@ -1867,13 +1899,19 @@ private:
                 }
             }
 
+            // Field values are type-checked against the node that actually
+            // receives them (wrappers forward the value inward).  Applies to
+            // regular fields as well as computed fields, mirroring the Rust
+            // leaf-serializer checks.
+            SerRef type_leaf = (ser && !fv.is_none())
+                ? ser_leaf_for_value(ser, fv, json_mode) : nullptr;
             bool ser_type_mismatch = false;
-            if (computed_fields_.count(k) && ser &&
-                ser->type != "function-plain" && ser->type != "function-wrap" &&
-                ser->type != "function-after" && ser->type != "function-before" &&
-                !fv.is_none() && !SerNode::value_matches_type(ser, fv)) {
+            if (type_leaf &&
+                type_leaf->type != "function-plain" && type_leaf->type != "function-wrap" &&
+                type_leaf->type != "function-after" && type_leaf->type != "function-before" &&
+                !SerNode::value_matches_type(type_leaf, fv)) {
                 ser_type_mismatch = true;
-                ser_warn_unexpected_value(k, SerNode::type_name_for_warning(ser), fv);
+                ser_warn_unexpected_value(k, SerNode::type_name_for_warning(type_leaf), fv);
             }
 
             py::object serialized;
@@ -1894,8 +1932,8 @@ private:
             }
 
             if (ser_type_mismatch) {
-                // Computed field value does not match its declared return type:
-                // warn and fall back to infer serialization (Rust behavior).
+                // Field value does not match its declared type: warn and fall
+                // back to infer serialization (Rust behavior).
                 serialized = serialize_any_value(fv, exc_none, round_trip);
             } else if (use_field_serializer) {
                 // Try field serializer call with model instance first
@@ -2058,9 +2096,10 @@ private:
                 } catch (...) {
                     has_value = false;
                 }
-            } else if (ser->has_default()) {
-                fv = ser->get_default_value();
             } else {
+                // Rust iterates the instance's own __dict__: a declared field
+                // that is absent from it (e.g. removed by copy(exclude=...))
+                // is NOT emitted, even when the schema declares a default.
                 has_value = false;
             }
             if (!has_value) continue;
@@ -2079,13 +2118,19 @@ private:
                 }
             }
 
+            // Field values are type-checked against the node that actually
+            // receives them (wrappers forward the value inward).  Applies to
+            // regular fields as well as computed fields, mirroring the Rust
+            // leaf-serializer checks.
+            SerRef type_leaf = (ser && !fv.is_none())
+                ? ser_leaf_for_value(ser, fv, true) : nullptr;
             bool ser_type_mismatch = false;
-            if (computed_fields_.count(k) && ser &&
-                ser->type != "function-plain" && ser->type != "function-wrap" &&
-                ser->type != "function-after" && ser->type != "function-before" &&
-                !fv.is_none() && !SerNode::value_matches_type(ser, fv)) {
+            if (type_leaf &&
+                type_leaf->type != "function-plain" && type_leaf->type != "function-wrap" &&
+                type_leaf->type != "function-after" && type_leaf->type != "function-before" &&
+                !SerNode::value_matches_type(type_leaf, fv)) {
                 ser_type_mismatch = true;
-                ser_warn_unexpected_value(k, SerNode::type_name_for_warning(ser), fv);
+                ser_warn_unexpected_value(k, SerNode::type_name_for_warning(type_leaf), fv);
             }
 
             std::string field_json;
@@ -2158,8 +2203,8 @@ private:
                     field_json = ser->to_json(fv, ensure_ascii, -1, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
                 }
             } else if (ser_type_mismatch) {
-                // Computed field value does not match its declared return type:
-                // warn and fall back to infer serialization (Rust behavior).
+                // Field value does not match its declared type: warn and fall
+                // back to infer serialization (Rust behavior).
                 field_json = infer_json(fv, ensure_ascii, -1);
             } else {
                 // Use the field serializer directly (handles list/dict iteration, etc.)
