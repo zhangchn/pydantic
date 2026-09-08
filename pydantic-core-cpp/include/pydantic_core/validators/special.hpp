@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pydantic_core/validator.hpp"
+#include "pydantic_core/py_compat.hpp"
 #include "pydantic_core/url_types.hpp"
 #include <memory>
 #include <string>
@@ -841,7 +842,7 @@ public:
         // e.g. `MyEnum.val` passed as input regardless of strict mode.
         try {
             py::object py_in = input.as_python_object();
-            if (!py_in.is_none() && py::hasattr(py_in, "_name_") && py::hasattr(py_in, "_value_")) {
+            if (!py_in.is_none() && py_hasattr(py_in, "_name_") && py_hasattr(py_in, "_value_")) {
                 std::string name = py::str(py_in).cast<std::string>();
                 if (valid_values_.count(name)) {
                     return ValResult<std::shared_ptr<void>>(std::make_shared<std::string>(name));

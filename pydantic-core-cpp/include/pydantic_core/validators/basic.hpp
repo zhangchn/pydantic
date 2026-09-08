@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pydantic_core/validator.hpp"
+#include "pydantic_core/py_compat.hpp"
 #include <memory>
 #include <optional>
 #include <string>
@@ -675,7 +676,7 @@ public:
     ) override {
         // Check if input is callable
         py::object input_py = input.as_python_object();
-        if (!py::hasattr(input_py, "__call__")) {
+        if (!py_hasattr(input_py, "__call__")) {
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::CallableType),
                 state.location(),

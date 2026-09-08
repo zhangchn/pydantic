@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pydantic_core/validator.hpp"
+#include "pydantic_core/py_compat.hpp"
 #include "pydantic_core/json_input.hpp"
 #include "pydantic_core/string_input.hpp"
 // Note: python_input.hpp is included in the .cpp file that uses it
@@ -1123,7 +1124,7 @@ public:
                     // different: its input is the root value, validated against the inner
                     // schema, so a non-RootModel value (e.g. the root type's own instance)
                     // falls through to the fields validator rather than being rejected.
-                    if (!root_model_ && !py::isinstance<py::dict>(obj) && py::hasattr(obj, "__pydantic_validator__")) {
+                    if (!root_model_ && !py::isinstance<py::dict>(obj) && py_hasattr(obj, "__pydantic_validator__")) {
                         ErrorType err(ErrorType::Kind::ModelType);
                         err.context()["class_name"] = class_name_.empty() ? "Model" : class_name_;
                         auto line_err = std::make_shared<ValLineError>(ValLineError{err, state.location(), input.as_error_value().repr});
@@ -1179,7 +1180,7 @@ public:
             }
         }
         py::object existing_extra = py::none();
-        if (py::hasattr(obj, "__pydantic_extra__")) {
+        if (py_hasattr(obj, "__pydantic_extra__")) {
             existing_extra = obj.attr("__pydantic_extra__");
             if (!existing_extra.is_none() && py::isinstance<py::dict>(existing_extra)) {
                 py::dict exd = existing_extra.cast<py::dict>();
@@ -1242,16 +1243,16 @@ public:
             }
         }
         auto setattr_fn = py::module_::import("builtins").attr("object").attr("__setattr__");
-        if (!py::hasattr(obj, "__pydantic_private__")) {
+        if (!py_hasattr(obj, "__pydantic_private__")) {
             setattr_fn(obj, py::str("__pydantic_private__"), py::none());
         }
         py::object final_extra = new_extra.is_none()
             ? (existing_extra.is_none() ? py::object(py::none()) : existing_extra)
             : new_extra;
         setattr_fn(obj, py::str("__pydantic_extra__"), final_extra);
-        py::object fs = py::hasattr(obj, "__pydantic_fields_set__")
+        py::object fs = py_hasattr(obj, "__pydantic_fields_set__")
             ? py::object(obj.attr("__pydantic_fields_set__")) : py::object(py::none());
-        if (!fs.is_none() && py::hasattr(fs, "add")) {
+        if (!fs.is_none() && py_hasattr(fs, "add")) {
             fs.attr("add")(py::str(field_name));
         }
         return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(obj));

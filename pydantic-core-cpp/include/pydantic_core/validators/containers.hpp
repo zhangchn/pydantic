@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pydantic_core/validator.hpp"
+#include "pydantic_core/py_compat.hpp"
 #include "pydantic_core/python_input.hpp"
 #include "pydantic_core/string_input.hpp"
 #include <memory>
@@ -681,7 +682,7 @@ public:
         py::object py_in = input.as_python_object();
 
         // Accept any iterable (generators, lists, tuples, etc.)
-        if (!py::hasattr(py_in, "__iter__") && !py::hasattr(py_in, "__next__")) {
+        if (!py_hasattr(py_in, "__iter__") && !py_hasattr(py_in, "__next__")) {
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::ListType),
                 state.location(),

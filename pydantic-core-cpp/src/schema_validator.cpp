@@ -1,4 +1,5 @@
 #include "pydantic_core/schema_validator.hpp"
+#include "pydantic_core/py_compat.hpp"
 #include "pydantic_core/errors.hpp"
 #include "pydantic_core/combined_validator.hpp"
 #include "pydantic_core/json_input.hpp"
@@ -392,7 +393,7 @@ static py::dict collect_instance_data(const py::object& obj) {
     if (py::isinstance<py::dict>(obj)) {
         return obj.cast<py::dict>();
     }
-    if (py::hasattr(obj, "__dict__")) {
+    if (py_hasattr(obj, "__dict__")) {
         py::object d = obj.attr("__dict__");
         if (py::isinstance<py::dict>(d)) {
             for (auto item : d.cast<py::dict>()) {
@@ -402,13 +403,13 @@ static py::dict collect_instance_data(const py::object& obj) {
         }
     }
     // Slots dataclass: no __dict__; collect data slots (skip dunders).
-    if (py::hasattr(obj, "__slots__")) {
+    if (py_hasattr(obj, "__slots__")) {
         py::object slots_obj = obj.attr("__slots__");
         if (py::isinstance<py::tuple>(slots_obj)) {
             for (auto s : slots_obj.cast<py::tuple>()) {
                 std::string name = s.cast<std::string>();
                 if (name.rfind("__", 0) == 0) continue;
-                if (py::hasattr(obj, name.c_str())) {
+                if (py_hasattr(obj, name.c_str())) {
                     result[py::str(name)] = obj.attr(name.c_str());
                 }
             }
@@ -473,9 +474,9 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
 
     // Check if the field exists on the object
     bool field_exists = false;
-    if (py::hasattr(obj, field_name.c_str())) {
+    if (py_hasattr(obj, field_name.c_str())) {
         field_exists = true;
-    } else if (py::hasattr(obj, "__pydantic_extra__")) {
+    } else if (py_hasattr(obj, "__pydantic_extra__")) {
         py::object extra = obj.attr("__pydantic_extra__");
         if (!extra.is_none() && py::isinstance<py::dict>(extra)) {
             py::dict extra_dict = extra.cast<py::dict>();
@@ -491,7 +492,7 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
         bool extra_allowed = false;
 
         // First check __pydantic_extra__ - if it's a dict (even empty), extra='allow'
-        if (py::hasattr(obj, "__pydantic_extra__")) {
+        if (py_hasattr(obj, "__pydantic_extra__")) {
             py::object extra = obj.attr("__pydantic_extra__");
             if (py::isinstance<py::dict>(extra)) {
                 extra_allowed = true;
@@ -499,7 +500,7 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
         }
 
         // If not determined yet, check the config
-        if (!extra_allowed && py::hasattr(obj, "__pydantic_config__")) {
+        if (!extra_allowed && py_hasattr(obj, "__pydantic_config__")) {
             py::object config = obj.attr("__pydantic_config__");
             if (py::isinstance<py::dict>(config)) {
                 py::dict config_dict = config.cast<py::dict>();
@@ -552,7 +553,7 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
             if (result_dict.contains(py::str(field_name.c_str()))) {
                 validated_value = result_dict[py::str(field_name.c_str())];
             }
-        } else if (py::hasattr(validated_result, "__pydantic_extra__")) {
+        } else if (py_hasattr(validated_result, "__pydantic_extra__")) {
             py::object extra = validated_result.attr("__pydantic_extra__");
             if (!extra.is_none() && py::isinstance<py::dict>(extra)) {
                 py::dict extra_dict = extra.cast<py::dict>();
@@ -564,7 +565,7 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
 
         // Set the value: models keep extras in __pydantic_extra__
         py::str fname(field_name.c_str());
-        if (!py::isinstance<py::dict>(obj) && py::hasattr(obj, "__pydantic_extra__")) {
+        if (!py::isinstance<py::dict>(obj) && py_hasattr(obj, "__pydantic_extra__")) {
             py::object ex = obj.attr("__pydantic_extra__");
             if (ex.is_none()) {
                 ex = py::dict();
@@ -572,7 +573,7 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
             }
             ex.cast<py::dict>()[fname] = validated_value;
             py::object fs = obj.attr("__pydantic_fields_set__");
-            if (!fs.is_none() && py::hasattr(fs, "add")) {
+            if (!fs.is_none() && py_hasattr(fs, "add")) {
                 fs.attr("add")(fname);
             }
             return validated_value;
@@ -594,7 +595,7 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
         updated_dict[item.first] = item.second;
     }
     // Merge existing extras so re-validation doesn't drop them
-    if (py::hasattr(obj, "__pydantic_extra__")) {
+    if (py_hasattr(obj, "__pydantic_extra__")) {
         py::object ex = obj.attr("__pydantic_extra__");
         if (!ex.is_none() && py::isinstance<py::dict>(ex)) {
             py::dict exd = ex.cast<py::dict>();
@@ -615,14 +616,14 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
         if (result_dict.contains(py::str(field_name.c_str()))) {
             validated_value = result_dict[py::str(field_name.c_str())];
         }
-    } else if (py::hasattr(validated_result, field_name.c_str())) {
+    } else if (py_hasattr(validated_result, field_name.c_str())) {
         validated_value = validated_result.attr(field_name.c_str());
     }
 
     // Extras live in __pydantic_extra__; declared fields in __dict__
     py::str fname(field_name.c_str());
     bool is_extra_field = false;
-    if (!py::isinstance<py::dict>(obj) && py::hasattr(obj, "__pydantic_extra__")) {
+    if (!py::isinstance<py::dict>(obj) && py_hasattr(obj, "__pydantic_extra__")) {
         py::object d = obj.attr("__dict__");
         if (!d.contains(fname)) {
             is_extra_field = true;
@@ -670,20 +671,20 @@ ValidationError SchemaValidator::prepare_error(const ValError& err, InputType in
 bool SchemaValidator::apply_init_snapshot(const py::object& self_instance) {
     py::object snap = std::move(init_snapshot_);
     init_snapshot_ = py::none();
-    if (snap.is_none() || !py::hasattr(snap, "__dict__")) return false;
+    if (snap.is_none() || !py_hasattr(snap, "__dict__")) return false;
     try {
         py::dict d = self_instance.attr("__dict__");
         py::dict snap_dict = snap.attr("__dict__");
         for (auto item : snap_dict) {
             d[item.first] = item.second;
         }
-        if (py::hasattr(snap, "__pydantic_extra__")) {
+        if (py_hasattr(snap, "__pydantic_extra__")) {
             py::setattr(self_instance, "__pydantic_extra__", snap.attr("__pydantic_extra__"));
         }
-        if (py::hasattr(snap, "__pydantic_fields_set__")) {
+        if (py_hasattr(snap, "__pydantic_fields_set__")) {
             py::setattr(self_instance, "__pydantic_fields_set__", snap.attr("__pydantic_fields_set__"));
         }
-        if (!py::hasattr(self_instance, "__pydantic_private__")) {
+        if (!py_hasattr(self_instance, "__pydantic_private__")) {
             py::setattr(self_instance, "__pydantic_private__", py::none());
         }
         return true;

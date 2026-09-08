@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pydantic_core/validator.hpp"
+#include "pydantic_core/py_compat.hpp"
 #include "pydantic_core/validation_state.hpp"
 #include "pydantic_core/python_input.hpp"
 #include "pydantic_core/json_input.hpp"
@@ -476,7 +477,7 @@ public:
                     py::object py_in = input.as_python_object();
                     if (state.top_input_ptr() && py_in.ptr() &&
                         static_cast<const void*>(py_in.ptr()) == state.top_input_ptr() &&
-                        py::hasattr(validated_obj, "__dict__")) {
+                        py_hasattr(validated_obj, "__dict__")) {
                         state.set_init_fields_snapshot(validated_obj);
                     }
                 } catch (...) {}
@@ -516,7 +517,7 @@ public:
                     // (to avoid infinite recursion with model_validator)
                     py::object instance;
                     if (model_validator->root_model()) {
-                        if (py::hasattr(model_cls, "model_construct")) {
+                        if (py_hasattr(model_cls, "model_construct")) {
                             instance = model_cls.attr("model_construct")(validated_obj);
                         } else {
                             instance = py::module_::import("builtins").attr("object").attr("__new__")(model_cls);
@@ -531,7 +532,7 @@ public:
                             py::object fields_set = fields_dict.attr("pop")("__pydantic_fields_set__", py::set());
                             fields_dict.attr("pop")("__pydantic_defaults__", py::none());
                             instance.attr("__dict__").attr("update")(fields_dict);
-                            if (!py::hasattr(instance, "__pydantic_private__")) {
+                            if (!py_hasattr(instance, "__pydantic_private__")) {
                                 py::setattr(instance, "__pydantic_private__", py::none());
                             }
                             py::setattr(instance, "__pydantic_extra__",
@@ -613,7 +614,7 @@ public:
         }
 
         if (!is_fields_result && reaches_model(inner_) &&
-            !validated_obj.is_none() && py::hasattr(validated_obj, "__dict__")) {
+            !validated_obj.is_none() && py_hasattr(validated_obj, "__dict__")) {
             try {
                 py::object py_in = input.as_python_object();
                 if (state.top_input_ptr() && py_in.ptr() &&
@@ -712,7 +713,7 @@ public:
                     py::object model_cls = mv->expected_class();
                     if (!model_cls.is_none()) {
                         try {
-                            if (py::isinstance(output, model_cls) && py::hasattr(output, "root")) {
+                            if (py::isinstance(output, model_cls) && py_hasattr(output, "root")) {
                                 output = output.attr("root");
                             }
                         } catch (...) {}

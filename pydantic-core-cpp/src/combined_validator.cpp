@@ -1,4 +1,5 @@
 #include "pydantic_core/combined_validator.hpp"
+#include "pydantic_core/py_compat.hpp"
 #include "pydantic_core/json_input.hpp"
 #include "pydantic_core/validators/model_fields.hpp"
 #include "pydantic_core/validators/special.hpp"
@@ -20,11 +21,11 @@ static std::string py_default_to_json_str(const py::object& py_default) {
             // Decode UTF-8 (matches ser_json_bytes='utf8' default)
             return py::object(py::reinterpret_borrow<py::object>(o)).attr("decode")("utf-8");
         }
-        if (py::hasattr(o, "_value_") && py::hasattr(o, "_name_")) {
+        if (py_hasattr(o, "_value_") && py_hasattr(o, "_name_")) {
             // Enum member — use its name so the enum validator can rebuild it
             return py::getattr(o, "name");
         }
-        if (py::hasattr(o, "__dict__")) {
+        if (py_hasattr(o, "__dict__")) {
             return py::getattr(o, "__dict__");
         }
         return py::str(py::repr(o));
@@ -1583,7 +1584,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
                 // For Enum members, use .value instead of str() (which gives 'ClassName.MEMBER');
                 // plain strings (e.g. manually built schemas) are used as-is.
                 std::string member_str;
-                if (py::hasattr(item, "value")) {
+                if (py_hasattr(item, "value")) {
                     member_str = py::str(py::getattr(item, "value")).cast<std::string>();
                 } else {
                     member_str = py::str(item).cast<std::string>();
@@ -1605,7 +1606,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
             // and typing special forms like Sequence all pass here.
             bool class_like = false;
             try {
-                class_like = py::isinstance<py::type>(cls) || py::hasattr(cls, "__mro__");
+                class_like = py::isinstance<py::type>(cls) || py_hasattr(cls, "__mro__");
             } catch (...) {}
             if (class_like) {
                 v->set_py_class(cls);
@@ -1628,7 +1629,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
             auto cls = schema["cls"];
             bool sub_like = false;
             try {
-                sub_like = py::isinstance<py::type>(cls) || py::hasattr(cls, "__mro__");
+                sub_like = py::isinstance<py::type>(cls) || py_hasattr(cls, "__mro__");
             } catch (...) {}
             if (py::isinstance<py::str>(cls)) {
                 v->set_class_name(cls.cast<std::string>());
@@ -1683,7 +1684,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
                 default_val = std::make_shared<bool>(py_default.cast<bool>());
                 default_type = "bool";
             } else if (!py_default.is_none()) {
-                if (py::hasattr(py_default, "__call__") &&
+                if (py_hasattr(py_default, "__call__") &&
                     !py::isinstance<py::list>(py_default) && !py::isinstance<py::dict>(py_default)) {
                     // Callable default (e.g. a function) — keep as a live Python
                     // object; JSON-serializing it would collapse it to {}.
@@ -1841,7 +1842,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
     if (type == "tagged-union") {
         auto disc_obj = schema["discriminator"];
         // Callable discriminator: build a tag->validator map
-        if (py::isinstance<py::function>(disc_obj) || py::hasattr(disc_obj, "__call__")) {
+        if (py::isinstance<py::function>(disc_obj) || py_hasattr(disc_obj, "__call__")) {
             std::unordered_map<std::string, std::shared_ptr<Validator>> choice_map;
             if (schema.contains("choices")) {
                 auto choices_obj = schema["choices"];
@@ -2003,7 +2004,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
             model_name = py::str(schema["model_name"]).cast<std::string>();
         } else if (schema.contains("cls") && !schema["cls"].is_none()) {
             auto cls = schema["cls"];
-            if (py::hasattr(cls, "__name__")) {
+            if (py_hasattr(cls, "__name__")) {
                 model_name = cls.attr("__name__").cast<std::string>();
             } else {
                 model_name = py::str(cls).cast<std::string>();
@@ -2133,7 +2134,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
                             auto py_default = field_schema_dict["default"];
                             if (py_default.is_none()) {
                                 default_val_str = "null";
-                            } else if (py::hasattr(py_default, "__call__")) {
+                            } else if (py_hasattr(py_default, "__call__")) {
                                 // Callable default — store as Python object, not JSON string
                                 // (will be handled by default_py_obj in missing-field path)
                             } else if (py::isinstance<py::str>(py_default) || py::isinstance<py::int_>(py_default) ||
@@ -2189,7 +2190,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
                     } else if (fsd.contains("default")) {
                         auto py_default = fsd["default"];
                         if (!py_default.is_none()) {
-                            if (py::hasattr(py_default, "__call__")) {
+                            if (py_hasattr(py_default, "__call__")) {
                                 info.default_py_obj = py_default;
                                 info.required = false;
                             } else if (!py::isinstance<py::str>(py_default) && !py::isinstance<py::int_>(py_default) &&

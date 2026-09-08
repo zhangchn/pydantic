@@ -9,6 +9,7 @@
 #include <cstdio>
 
 #include "pydantic_core/errors.hpp"
+#include "pydantic_core/py_compat.hpp"
 #include "pydantic_core/error_types.hpp"
 #include "pydantic_core/types.hpp"
 #include "pydantic_core/schema_validator.hpp"
@@ -54,7 +55,7 @@ static bool try_polymorphic_trampoline(const py::object& value, const py::object
     if (g_trampoline_depth >= 8) return false;
     if (!cls.ptr() || cls.is_none()) return false;
     try {
-        if (py::type::of(value).equal(cls) || !py::hasattr(value, "__pydantic_serializer__")) {
+        if (py::type::of(value).equal(cls) || !py_hasattr(value, "__pydantic_serializer__")) {
             return false;
         }
         ++g_trampoline_depth;
@@ -99,7 +100,7 @@ static std::string pyobj_to_json_str(const py::object& obj) {
     // Otherwise convert via json.dumps
     py::object json_mod = py::module_::import("json");
     auto default_fn = py::cpp_function([](py::handle o) -> py::object {
-        if (py::hasattr(o, "__dict__")) {
+        if (py_hasattr(o, "__dict__")) {
             py::object d = py::getattr(o, "__dict__");
             return d;
         }
@@ -633,7 +634,7 @@ static SerFilterResult apply_ser_filter(const py::object& key, const py::object&
                 out.omit = true;
                 return out;
             }
-        } else if (py::hasattr(exclude, "__contains__")) {
+        } else if (py_hasattr(exclude, "__contains__")) {
             bool c1 = false, c2 = false;
             try { c1 = py::cast<bool>(exclude.attr("__contains__")(key)); } catch (...) {}
             try { c2 = py::cast<bool>(exclude.attr("__contains__")(py::str("__all__"))); } catch (...) {}
@@ -678,7 +679,7 @@ static SerFilterResult apply_ser_filter(const py::object& key, const py::object&
             out.omit = true;  // key not in include
             return out;
         }
-        if (py::hasattr(include, "__contains__")) {
+        if (py_hasattr(include, "__contains__")) {
             bool c1 = false, c2 = false;
             try { c1 = py::cast<bool>(include.attr("__contains__")(key)); } catch (...) {}
             try { c2 = py::cast<bool>(include.attr("__contains__")(py::str("__all__"))); } catch (...) {}
@@ -892,7 +893,7 @@ struct SerNode {
                 // Python mode: return the Enum member as-is
                 return value;
             }
-            if (py::hasattr(value, "value")) {
+            if (py_hasattr(value, "value")) {
                 auto ev = py::getattr(value, "value");
                 if (!children.empty()) return children[0]->to_python(ev, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
                 return ev;
@@ -927,7 +928,7 @@ struct SerNode {
                 throw std::runtime_error("Value is not an instance of the expected model class");
             }
             // For root models, extract the 'root' attribute before delegating
-            if (root_model && py::hasattr(value, "root")) {
+            if (root_model && py_hasattr(value, "root")) {
                 auto root_val = py::getattr(value, "root");
                 // If the child is a field serializer, pass the model instance
                 if (!children.empty() && children[0]->is_field_serializer && children[0]->py_func.ptr() && !children[0]->py_func.is_none()) {
@@ -1142,7 +1143,7 @@ struct SerNode {
                 return converted;
             }
             // Enum members serialize as their value
-            if (type == "enum" && py::hasattr(value, "value")) {
+            if (type == "enum" && py_hasattr(value, "value")) {
                 auto ev = py::getattr(value, "value");
                 if (!children.empty()) {
                     return children[0]->to_python(ev, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
@@ -1295,7 +1296,7 @@ struct SerNode {
             return json_escape(py::str(inner).cast<std::string>(), ensure_ascii);
         }
         if (type == "enum") {
-            if (py::hasattr(value, "value")) {
+            if (py_hasattr(value, "value")) {
                 auto ev = py::getattr(value, "value");
                 if (!children.empty()) return children[0]->to_json(ev, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
                 return infer_json(ev, ensure_ascii, indent);
@@ -1434,7 +1435,7 @@ struct SerNode {
                 throw std::runtime_error("Value is not an instance of the expected model class");
             }
             // For root models, extract the 'root' attribute before delegating
-            if (root_model && py::hasattr(value, "root")) {
+            if (root_model && py_hasattr(value, "root")) {
                 auto root_val = py::getattr(value, "root");
                 // If the child is a field serializer, pass the model instance
                 if (!children.empty() && children[0]->is_field_serializer && children[0]->py_func.ptr() && !children[0]->py_func.is_none()) {
@@ -1681,7 +1682,7 @@ private:
                 return json_escape(py::str(value).cast<std::string>(), ensure_ascii);
             }
             // Python URL wrapper classes hold the pybind11 Url in a _url attribute.
-            if (py::hasattr(value, "_url")) {
+            if (py_hasattr(value, "_url")) {
                 auto inner = py::getattr(value, "_url");
                 if (py::isinstance(inner, url_cls) || py::isinstance(inner, murl_cls)) {
                     return json_escape(py::str(value).cast<std::string>(), ensure_ascii);
@@ -1689,7 +1690,7 @@ private:
             }
         } catch (...) {}
 
-        if (py::hasattr(value, "__dict__")) return infer_json(value.attr("__dict__"), ensure_ascii, indent);
+        if (py_hasattr(value, "__dict__")) return infer_json(value.attr("__dict__"), ensure_ascii, indent);
 
         return json_escape(py::repr(value).cast<std::string>(), ensure_ascii);
     }
@@ -1705,7 +1706,7 @@ private:
 
     static py::object serialize_any_value(const py::object& v, bool exc_none, bool round_trip) {
         if (v.is_none()) return py::none();
-        if (py::isinstance<py::dict>(v) || py::isinstance<py::list>(v) || py::isinstance<py::tuple>(v) || py::hasattr(v, "__pydantic_serializer__")) {
+        if (py::isinstance<py::dict>(v) || py::isinstance<py::list>(v) || py::isinstance<py::tuple>(v) || py_hasattr(v, "__pydantic_serializer__")) {
             std::vector<const void*>& st = py_rec_stack();
             const void* p = v.ptr();
             for (const void* q : st) {
@@ -1725,7 +1726,7 @@ private:
     static py::object serialize_any_value_inner(const py::object& v, bool exc_none, bool round_trip) {
         if (v.is_none()) return py::none();
         // Model / dataclass instances: use __pydantic_serializer__ if available
-        if (py::hasattr(v, "__pydantic_serializer__")) {
+        if (py_hasattr(v, "__pydantic_serializer__")) {
             auto ser = py::getattr(v, "__pydantic_serializer__");
             try {
                 return ser.attr("to_python")(v, py::arg("mode") = "python",
@@ -1806,7 +1807,7 @@ private:
         py::dict result;
         py::dict main;
         if (py::isinstance<py::dict>(value)) main = value.cast<py::dict>();
-        else if (py::hasattr(value, "__dict__")) main = py::getattr(value, "__dict__").cast<py::dict>();
+        else if (py_hasattr(value, "__dict__")) main = py::getattr(value, "__dict__").cast<py::dict>();
         py::object missing_obj = missing_sentinel_obj();
 
         for (const auto& k : field_order) {
@@ -1831,7 +1832,7 @@ private:
                     py::dict vd = value.cast<py::dict>();
                     py::str fs_key("__pydantic_fields_set__");
                     if (vd.contains(fs_key)) fs = vd[fs_key];
-                } else if (py::hasattr(value, "__pydantic_fields_set__")) {
+                } else if (py_hasattr(value, "__pydantic_fields_set__")) {
                     fs = py::getattr(value, "__pydantic_fields_set__");
                 }
                 if (!fs.is_none() && py::isinstance<py::set>(fs)) {
@@ -1997,7 +1998,7 @@ private:
             result[py::str(output_key)] = serialized;
         }
         // Extra fields - also apply include/exclude if they match by name
-        if (py::hasattr(value, "__pydantic_extra__")) {
+        if (py_hasattr(value, "__pydantic_extra__")) {
             auto extra = py::getattr(value, "__pydantic_extra__");
             if (!extra.is_none()) {
                 for (auto item : extra.cast<py::dict>()) {
@@ -2025,7 +2026,7 @@ private:
         bool first = true;
         py::dict main;
         if (py::isinstance<py::dict>(value)) main = value.cast<py::dict>();
-        else if (py::hasattr(value, "__dict__")) main = py::getattr(value, "__dict__").cast<py::dict>();
+        else if (py_hasattr(value, "__dict__")) main = py::getattr(value, "__dict__").cast<py::dict>();
         py::object missing_obj = missing_sentinel_obj();
 
         for (const auto& k : field_order) {
@@ -2050,7 +2051,7 @@ private:
                     py::dict vd = value.cast<py::dict>();
                     py::str fs_key("__pydantic_fields_set__");
                     if (vd.contains(fs_key)) fs = vd[fs_key];
-                } else if (py::hasattr(value, "__pydantic_fields_set__")) {
+                } else if (py_hasattr(value, "__pydantic_fields_set__")) {
                     fs = py::getattr(value, "__pydantic_fields_set__");
                 }
                 if (!fs.is_none() && py::isinstance<py::set>(fs)) {
@@ -2215,7 +2216,7 @@ private:
             first = false;
             out += json_escape(output_key, ensure_ascii) + ":" + field_json;
         }
-        if (py::hasattr(value, "__pydantic_extra__")) {
+        if (py_hasattr(value, "__pydantic_extra__")) {
             auto extra = py::getattr(value, "__pydantic_extra__");
             if (!extra.is_none()) {
                 for (auto item : extra.cast<py::dict>()) {
@@ -2602,7 +2603,7 @@ static SerRef build_ser_impl(const py::dict& schema,
                     // Extract serialization_exclude_if callable (for exclude_if support)
                     if (fdef.contains("serialization_exclude_if")) {
                         py::object eif = fdef["serialization_exclude_if"];
-                        if (py::isinstance<py::function>(eif) || py::hasattr(eif, "__call__")) {
+                        if (py::isinstance<py::function>(eif) || py_hasattr(eif, "__call__")) {
                             node->field_exclude_if[k] = eif;
                         }
                     }
@@ -2633,7 +2634,7 @@ static SerRef build_ser_impl(const py::dict& schema,
                     // Computed field serialization_exclude_if (Field(exclude_if=...))
                     if (cf.contains("serialization_exclude_if")) {
                         py::object eif = cf["serialization_exclude_if"];
-                        if (py::isinstance<py::function>(eif) || py::hasattr(eif, "__call__")) {
+                        if (py::isinstance<py::function>(eif) || py_hasattr(eif, "__call__")) {
                             node->field_exclude_if[prop] = eif;
                         }
                     }
@@ -2878,7 +2879,7 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
         if (py::isinstance(v, mod.attr("Url")) || py::isinstance(v, mod.attr("MultiHostUrl"))) return py::str(v);
     } catch (...) { PyErr_Clear(); }
     // datetime/date/time expose isoformat()
-    if (py::hasattr(v, "isoformat")) {
+    if (py_hasattr(v, "isoformat")) {
         try {
             py::object iso = v.attr("isoformat")();
             std::string s = py::str(iso).cast<std::string>();
@@ -2887,13 +2888,13 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
         } catch (...) { PyErr_Clear(); }
     }
     // timedelta (duck-typed via its components)
-    if (py::hasattr(v, "days") && py::hasattr(v, "seconds") && py::hasattr(v, "microseconds")
-        && !py::hasattr(v, "isoformat")) {
+    if (py_hasattr(v, "days") && py_hasattr(v, "seconds") && py_hasattr(v, "microseconds")
+        && !py_hasattr(v, "isoformat")) {
         py::object out;
         if (json_leaf_convert("timedelta", v, "utf8", timedelta_mode, out)) return out;
     }
     // Enum members convert as their value
-    if (py::hasattr(v, "_value_")) {
+    if (py_hasattr(v, "_value_")) {
         return infer_jsonable_python(py::getattr(v, "_value_"), bytes_mode, timedelta_mode,
                                      inf_nan_mode, serialize_unknown);
     }
@@ -2920,7 +2921,7 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
         return std::move(out);
     }
     // Model/dataclass instances: delegate to their serializer in json mode
-    if (py::hasattr(v, "__pydantic_serializer__")) {
+    if (py_hasattr(v, "__pydantic_serializer__")) {
         try {
             auto ser = py::getattr(v, "__pydantic_serializer__");
             return ser.attr("to_python")(v, py::arg("mode") = "json");
@@ -2931,7 +2932,7 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
     // Plain instances with state: mirror infer_json's __dict__ handling.
     // Note: functions/lambdas have an empty __dict__, so they fall through
     // to the error below — matching Rust's refusal to serialize callables.
-    if (py::hasattr(v, "__dict__")) {
+    if (py_hasattr(v, "__dict__")) {
         try {
             py::dict d = py::getattr(v, "__dict__").cast<py::dict>();
             if (!d.empty()) {
@@ -3181,7 +3182,7 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             py::object validated = self.validate_python_object(input, pyobj_to_bool(strict), extra_opt, fa_opt, context, /*coerce_strings=*/false, self_instance, by_alias_opt, by_name_opt, partial_mode);
 
             // If self_instance provided, populate and return it
-            if (!self_instance.is_none() && py::hasattr(self_instance, "__dict__")) {
+            if (!self_instance.is_none() && py_hasattr(self_instance, "__dict__")) {
                 // object.__setattr__ == Rust force_setattr
                 // (PyObject_GenericSetAttr): bypasses dataclass __setattr__
                 // so frozen dataclasses can receive the dunder attributes.
@@ -3201,7 +3202,7 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                         // Root model: store the whole validated value as 'root'
                         py::dict d = self_instance.attr("__dict__");
                         d[py::str("root")] = validated;
-                        if (!py::hasattr(self_instance, "__pydantic_private__")) {
+                        if (!py_hasattr(self_instance, "__pydantic_private__")) {
                             force_setattr(self_instance, py::str("__pydantic_private__"), py::none());
                         }
                         force_setattr(self_instance, py::str("__pydantic_extra__"), py::none());
@@ -3235,7 +3236,7 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                             if (validated_dict.contains("__pydantic_fields_set__")) validated_dict.attr("pop")("__pydantic_fields_set__");
                             force_setattr(self_instance, py::str("__dict__"), validated_dict);
                             // Rust: __post_init__(*post_init_kwargs)
-                            if (py::hasattr(self_instance, "__post_init__")) {
+                            if (py_hasattr(self_instance, "__post_init__")) {
                                 if (!post_init_kwargs.is_none() && py::isinstance<py::tuple>(post_init_kwargs)) {
                                     self_instance.attr("__post_init__")(*post_init_kwargs.cast<py::tuple>());
                                 } else {
@@ -3266,13 +3267,13 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                         }
 
                         // Set pydantic slot attributes
-                        if (!py::hasattr(self_instance, "__pydantic_private__")) {
+                        if (!py_hasattr(self_instance, "__pydantic_private__")) {
                             force_setattr(self_instance, py::str("__pydantic_private__"), py::none());
                         }
                         force_setattr(self_instance, py::str("__pydantic_extra__"),
                             extra_fields.is_none() ? py::none() : extra_fields);
                         force_setattr(self_instance, py::str("__pydantic_fields_set__"), fields_set);
-                    } else if (!foreign_return && py::hasattr(validated, "__dict__")) {
+                    } else if (!foreign_return && py_hasattr(validated, "__dict__")) {
                         // validated is a model instance (e.g. from FunctionAfterValidator)
                         // Copy its __dict__ to self_instance
                         py::dict d = self_instance.attr("__dict__");
@@ -3281,13 +3282,13 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                             d[item.first] = item.second;
                         }
                         // Copy pydantic slot attributes
-                        if (py::hasattr(validated, "__pydantic_extra__")) {
+                        if (py_hasattr(validated, "__pydantic_extra__")) {
                             force_setattr(self_instance, py::str("__pydantic_extra__"), validated.attr("__pydantic_extra__"));
                         }
-                        if (py::hasattr(validated, "__pydantic_fields_set__")) {
+                        if (py_hasattr(validated, "__pydantic_fields_set__")) {
                             force_setattr(self_instance, py::str("__pydantic_fields_set__"), validated.attr("__pydantic_fields_set__"));
                         }
-                        if (!py::hasattr(self_instance, "__pydantic_private__")) {
+                        if (!py_hasattr(self_instance, "__pydantic_private__")) {
                             force_setattr(self_instance, py::str("__pydantic_private__"), py::none());
                         }
                     }
@@ -3322,7 +3323,7 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                         for (auto item : validated_dict) {
                             setattr(self_instance, item.first, item.second);
                         }
-                        if (py::hasattr(self_instance, "__post_init__")) {
+                        if (py_hasattr(self_instance, "__post_init__")) {
                             if (!post_init_kwargs.is_none() && py::isinstance<py::tuple>(post_init_kwargs)) {
                                 self_instance.attr("__post_init__")(*post_init_kwargs.cast<py::tuple>());
                             } else {

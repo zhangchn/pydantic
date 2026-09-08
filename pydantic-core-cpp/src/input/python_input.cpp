@@ -1,4 +1,5 @@
 #include "pydantic_core/python_input.hpp"
+#include "pydantic_core/py_compat.hpp"
 #include "pydantic_core/errors.hpp"
 #include <memory>
 #include <string>
@@ -176,7 +177,7 @@ bool PythonInput::is_frozenset() const {
 }
 
 bool PythonInput::is_sequence() const {
-    return is_list() || is_tuple() || py::hasattr(obj_, "__iter__");
+    return is_list() || is_tuple() || py_hasattr(obj_, "__iter__");
 }
 
 // Special type detection
@@ -205,11 +206,11 @@ bool PythonInput::is_decimal() const {
 }
 
 bool PythonInput::is_complex() const {
-    return py::hasattr(obj_, "real") && py::hasattr(obj_, "imag");
+    return py_hasattr(obj_, "real") && py_hasattr(obj_, "imag");
 }
 
 bool PythonInput::is_callable() const {
-    return py::hasattr(obj_, "__call__");
+    return py_hasattr(obj_, "__call__");
 }
 
 // Value extraction
@@ -513,7 +514,7 @@ ValResult<std::unique_ptr<ValidatedDict>> PythonInput::validate_dict(bool strict
     }
 
     // Accept pydantic model instances for revalidation (they have __pydantic_validator__)
-    if (!strict && py::hasattr(obj_, "__pydantic_validator__") && py::hasattr(obj_, "__dict__")) {
+    if (!strict && py_hasattr(obj_, "__pydantic_validator__") && py_hasattr(obj_, "__dict__")) {
         auto dict = obj_.attr("__dict__").cast<py::dict>();
         std::unique_ptr<ValidatedDict> result = std::make_unique<PythonValidatedDict>(dict);
         return result;
@@ -537,7 +538,7 @@ ValResult<std::unique_ptr<ValidatedDict>> PythonInput::validate_dict_from_attrib
     }
     
     // Try __dict__ attribute
-    if (py::hasattr(obj_, "__dict__")) {
+    if (py_hasattr(obj_, "__dict__")) {
         try {
             py::dict d = obj_.attr("__dict__").cast<py::dict>();
             return ValResult<std::unique_ptr<ValidatedDict>>(
@@ -551,7 +552,7 @@ ValResult<std::unique_ptr<ValidatedDict>> PythonInput::validate_dict_from_attrib
 
 ValResult<ArgumentsInput> PythonInput::validate_args() const {
     // ArgsKwargs container (pydantic_core.ArgsKwargs): has args + kwargs attributes
-    if (py::hasattr(obj_, "args") && py::hasattr(obj_, "kwargs")) {
+    if (py_hasattr(obj_, "args") && py_hasattr(obj_, "kwargs")) {
         try {
             py::object cls = py::getattr(obj_, "__class__");
             std::string cls_name = py::str(py::getattr(cls, "__name__")).cast<std::string>();
@@ -574,7 +575,7 @@ ValResult<ArgumentsInput> PythonInput::validate_args() const {
 }
 
 bool PythonInput::is_args_kwargs() const {
-    if (!py::hasattr(obj_, "args") || !py::hasattr(obj_, "kwargs")) return false;
+    if (!py_hasattr(obj_, "args") || !py_hasattr(obj_, "kwargs")) return false;
     try {
         py::object cls = py::getattr(obj_, "__class__");
         std::string cls_name = py::str(py::getattr(cls, "__name__")).cast<std::string>();
@@ -588,11 +589,11 @@ bool PythonInput::is_args_kwargs() const {
 // from_attributes support methods
 bool PythonInput::has_attributes() const {
     // Check if object has __dict__ or is not a built-in type
-    if (py::hasattr(obj_, "__dict__")) {
+    if (py_hasattr(obj_, "__dict__")) {
         return true;
     }
     // Check if object has_slots (slots objects can have attributes too)
-    if (py::hasattr(obj_, "__slots__")) {
+    if (py_hasattr(obj_, "__slots__")) {
         return true;
     }
     // Use dir() to check for attributes beyond built-in methods
@@ -608,7 +609,7 @@ bool PythonInput::has_attributes() const {
             try {
                 py::object value = obj_.attr(name.c_str());
                 // Skip bound methods (have __self__)
-                if (py::hasattr(value, "__self__")) {
+                if (py_hasattr(value, "__self__")) {
                     continue;
                 }
                 // It's a property or data attribute
@@ -627,7 +628,7 @@ py::dict PythonInput::get_attributes_as_dict() const {
     py::dict result;
     
     // First, try __dict__ if it exists
-    if (py::hasattr(obj_, "__dict__")) {
+    if (py_hasattr(obj_, "__dict__")) {
         try {
             py::dict d = obj_.attr("__dict__").cast<py::dict>();
             for (auto item : d) {
@@ -638,7 +639,7 @@ py::dict PythonInput::get_attributes_as_dict() const {
     }
     
     // Then, check for slots-defined attributes
-    if (py::hasattr(obj_, "__slots__")) {
+    if (py_hasattr(obj_, "__slots__")) {
         try {
             py::object slots = obj_.attr("__slots__");
             if (py::isinstance<py::str>(slots)) {
@@ -678,7 +679,7 @@ py::dict PythonInput::get_attributes_as_dict() const {
             try {
                 py::object value = obj_.attr(name.c_str());
                 // Skip bound methods (but allow properties which might have __call__)
-                if (py::hasattr(value, "__self__") && py::hasattr(value, "__func__")) {
+                if (py_hasattr(value, "__self__") && py_hasattr(value, "__func__")) {
                     continue;
                 }
                 // Include the attribute
@@ -701,7 +702,7 @@ ValResult<ValMatch<std::unique_ptr<ValidatedList>>> PythonInput::validate_list(b
     // list (Rust accepts arbitrary iterables, rejecting only text types).
     if (!strict && !py::isinstance<py::str>(obj_) && !py::isinstance<py::bytes>(obj_) &&
         !py::isinstance<py::bytearray>(obj_) && !py::isinstance<py::dict>(obj_) &&
-        py::hasattr(obj_, "__iter__")) {
+        py_hasattr(obj_, "__iter__")) {
         try {
             py::list items = py::list(obj_);
             return ValMatch<std::unique_ptr<ValidatedList>>::lax(
@@ -938,15 +939,15 @@ ValResult<ValMatch<EitherDateTime>> PythonInput::validate_datetime(bool strict) 
         int minute = py_dt.attr("minute").cast<int>();
         int second = py_dt.attr("second").cast<int>();
         int microsecond = 0;
-        if (py::hasattr(py_dt, "microsecond")) {
+        if (py_hasattr(py_dt, "microsecond")) {
             microsecond = py_dt.attr("microsecond").cast<int>();
         }
 
         // Extract timezone offset if available
         std::optional<int> tz_offset;
-        if (py::hasattr(py_dt, "tzinfo") && !py_dt.attr("tzinfo").is_none()) {
+        if (py_hasattr(py_dt, "tzinfo") && !py_dt.attr("tzinfo").is_none()) {
             py::object tzinfo = py_dt.attr("tzinfo");
-            if (py::hasattr(tzinfo, "utcoffset")) {
+            if (py_hasattr(tzinfo, "utcoffset")) {
                 py::object offset = tzinfo.attr("utcoffset")(py_dt);
                 if (!offset.is_none()) {
                     // Convert timedelta to minutes
@@ -1023,13 +1024,13 @@ ValResult<ValMatch<EitherTime>> PythonInput::validate_time(bool strict) const {
         int minute = py_time.attr("minute").cast<int>();
         int second = py_time.attr("second").cast<int>();
         int microsecond = 0;
-        if (py::hasattr(py_time, "microsecond")) {
+        if (py_hasattr(py_time, "microsecond")) {
             microsecond = py_time.attr("microsecond").cast<int>();
         }
         std::optional<int> tz_offset;
-        if (py::hasattr(py_time, "tzinfo") && !py_time.attr("tzinfo").is_none()) {
+        if (py_hasattr(py_time, "tzinfo") && !py_time.attr("tzinfo").is_none()) {
             py::object tzinfo = py_time.attr("tzinfo");
-            if (py::hasattr(tzinfo, "utcoffset")) {
+            if (py_hasattr(tzinfo, "utcoffset")) {
                 py::object offset = tzinfo.attr("utcoffset")(py_time);
                 if (!offset.is_none()) {
                     tz_offset = static_cast<int>(offset.attr("total_seconds")().cast<double>() / 60);
