@@ -1359,6 +1359,14 @@ static std::shared_ptr<Validator> build_from_py_dict(
         return v;
     }
 
+    if (type == "complex") {
+        auto v = std::make_shared<ComplexValidator>();
+        if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
+            v->strict = schema["strict"].cast<bool>();
+        }
+        return v;
+    }
+
     if (type == "str" || type == "string" || type == "str-constrained" || type == "constr-str") {
         // Mirror Rust's schema_or_config: read constraint from the schema key,
         // falling back to the config key (str_min_length, str_max_length,
@@ -1547,6 +1555,10 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
             v->strict = schema["strict"].cast<bool>();
         }
+        if (schema.contains("gt") && !schema["gt"].is_none()) v->gt = schema["gt"];
+        if (schema.contains("lt") && !schema["lt"].is_none()) v->lt = schema["lt"];
+        if (schema.contains("ge") && !schema["ge"].is_none()) v->ge = schema["ge"];
+        if (schema.contains("le") && !schema["le"].is_none()) v->le = schema["le"];
         return v;
     }
 
@@ -1684,15 +1696,11 @@ static std::shared_ptr<Validator> build_from_py_dict(
                 default_val = std::make_shared<bool>(py_default.cast<bool>());
                 default_type = "bool";
             } else if (!py_default.is_none()) {
-                if (py_hasattr(py_default, "__call__") &&
-                    !py::isinstance<py::list>(py_default) && !py::isinstance<py::dict>(py_default)) {
-                    // Callable default (e.g. a function) — keep as a live Python
-                    // object; JSON-serializing it would collapse it to {}.
-                    callable_default = py_default;
-                } else {
-                    // Complex default (list, dict) — serialize to JSON string for later parsing
-                    default_val_str = py_default_to_json_str(py_default);
-                }
+                // Non-primitive default (list, dict, callable, custom object) —
+                // keep as a live Python object. JSON-serializing fails for dicts
+                // with non-serializable keys (e.g. Path, function) and loses the
+                // original types; a live object matches Rust's behavior.
+                callable_default = py_default;
             }
         }
         auto wd = std::make_shared<WithDefaultValidator>(inner, default_val, default_val_str);
@@ -2116,6 +2124,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
                 std::shared_ptr<Validator> field_validator;
                 py::dict field_schema_dict;
                 std::string default_val_str;
+                py::object field_default_py_obj = py::none();
                 bool required = true;
 
                 // typed-dict fields declare requiredness explicitly
@@ -2140,8 +2149,17 @@ static std::shared_ptr<Validator> build_from_py_dict(
                             } else if (py::isinstance<py::str>(py_default) || py::isinstance<py::int_>(py_default) ||
                                        py::isinstance<py::float_>(py_default) || py::isinstance<py::bool_>(py_default) ||
                                        py::isinstance<py::list>(py_default) || py::isinstance<py::dict>(py_default)) {
-                                // JSON-native types — safe to convert to JSON string
-                                default_val_str = py_default_to_json_str(py_default);
+                                // JSON-native types — try to convert to JSON string.
+                                // Dicts with non-serializable keys (e.g. Path, function)
+                                // fail; fall back to a live Python object.
+                                try {
+                                    default_val_str = py_default_to_json_str(py_default);
+                                } catch (py::error_already_set& e) {
+                                    e.restore();
+                                    PyErr_Clear();
+                                    default_val_str.clear();
+                                    field_default_py_obj = py_default;
+                                }
                             } else {
                                 // Non-JSON types (timedelta, date, datetime, Decimal, etc.)
                                 // Store as Python object for proper validation later
@@ -2190,7 +2208,12 @@ static std::shared_ptr<Validator> build_from_py_dict(
                     } else if (fsd.contains("default")) {
                         auto py_default = fsd["default"];
                         if (!py_default.is_none()) {
-                            if (py_hasattr(py_default, "__call__")) {
+                            if (!field_default_py_obj.is_none()) {
+                                // JSON serialization failed (e.g. dict with
+                                // non-serializable keys) — use the live object.
+                                info.default_py_obj = field_default_py_obj;
+                                info.required = false;
+                            } else if (py_hasattr(py_default, "__call__")) {
                                 info.default_py_obj = py_default;
                                 info.required = false;
                             } else if (!py::isinstance<py::str>(py_default) && !py::isinstance<py::int_>(py_default) &&

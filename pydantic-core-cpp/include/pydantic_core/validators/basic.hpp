@@ -272,6 +272,75 @@ public:
     std::string name() const override { return "constrained-float"; }
 };
 
+// ComplexValidator - validates complex values
+class ComplexValidator : public Validator {
+public:
+    bool strict = false;
+
+    ValResult<std::shared_ptr<void>> validate(
+        const Input& input,
+        ValidationState& state
+    ) override {
+        py::object input_py = input.as_python_object();
+        py::object complex_cls = py::module_::import("builtins").attr("complex");
+
+        // If already a complex object, accept it
+        if (py::isinstance(input_py, complex_cls)) {
+            return ValResult<std::shared_ptr<void>>(
+                std::make_shared<py::object>(std::move(input_py))
+            );
+        }
+
+        if (state.strict_or(strict)) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::ComplexType),
+                state.location(),
+                input.as_error_value().repr
+            );
+        }
+
+        // Lax mode: coerce from string, number, or (real, imag) pair
+        try {
+            py::object result;
+            if (py::isinstance<py::str>(input_py) || py::isinstance<py::int_>(input_py) ||
+                py::isinstance<py::float_>(input_py)) {
+                result = complex_cls(input_py);
+            } else if (py::isinstance<py::tuple>(input_py) || py::isinstance<py::list>(input_py)) {
+                auto seq = py::cast<py::sequence>(input_py);
+                if (seq.size() == 2) {
+                    result = complex_cls(seq[0], seq[1]);
+                } else {
+                    return ValError::line_error(
+                        ErrorType(ErrorType::Kind::ComplexType),
+                        state.location(),
+                        input.as_error_value().repr
+                    );
+                }
+            } else {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::ComplexType),
+                    state.location(),
+                    input.as_error_value().repr
+                );
+            }
+            return ValResult<std::shared_ptr<void>>(
+                std::make_shared<py::object>(std::move(result))
+            );
+        } catch (py::error_already_set& e) {
+            e.restore();
+            PyErr_Clear();
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::ComplexStrParsing),
+                state.location(),
+                input.as_error_value().repr
+            );
+        }
+    }
+
+    std::string name() const override { return "complex"; }
+    std::string effective_result_name() const override { return "py_object"; }
+};
+
 // StringValidator - validates string values
 class StringValidator : public Validator {
 public:

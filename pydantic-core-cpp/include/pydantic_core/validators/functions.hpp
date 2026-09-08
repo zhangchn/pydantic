@@ -135,14 +135,15 @@ inline py::object make_validation_info(ValidationState& state) {
     }
 }
 
-// Returns true when this validator chain terminates in a model-fields or
-// typed-dict validator through any number of function wrappers (i.e. a V1
-// post root-validator position where after-functions exchange fields
-// semantics: 3-tuple in, flattened dict out).
+// Returns true when this validator chain terminates in a model-fields
+// validator through any number of function wrappers (i.e. a V1 post
+// root-validator position where after-functions exchange fields semantics:
+// 3-tuple in, flattened dict out). Typed-dict validators are NOT included:
+// Rust passes their result to after-functions as a plain dict, not a tuple.
 inline bool reaches_fields_result(const std::shared_ptr<Validator>& v) {
     if (!v) return false;
     std::string n = v->name();
-    if (n == "model-fields" || n.rfind("typed-dict", 0) == 0) return true;
+    if (n == "model-fields") return true;
     if (n == "function-after" || n == "function-before" ||
         n == "function-wrap" || n == "function-plain") {
         return reaches_fields_result(v->inner_validator());
@@ -977,10 +978,21 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        if (input.is_none() && default_value_) {
-            return ValResult<std::shared_ptr<void>>(default_value_);
+        if (input.is_none()) {
+            if (default_value_) {
+                return ValResult<std::shared_ptr<void>>(default_value_);
+            }
+            if (default_py_obj_.ptr()) {
+                return ValResult<std::shared_ptr<void>>(
+                    std::make_shared<py::object>(default_py_obj_));
+            }
         }
         if (inner_) return inner_->validate(input, state);
+        if (default_value_) return ValResult<std::shared_ptr<void>>(default_value_);
+        if (default_py_obj_.ptr()) {
+            return ValResult<std::shared_ptr<void>>(
+                std::make_shared<py::object>(default_py_obj_));
+        }
         return ValResult<std::shared_ptr<void>>(default_value_);
     }
 

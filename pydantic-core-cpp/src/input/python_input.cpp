@@ -571,6 +571,18 @@ ValResult<ArgumentsInput> PythonInput::validate_args() const {
         return ValResult<ArgumentsInput>(ArgumentsInput{py::tuple(), as_dict()});
     }
 
+    // Tuple/list input (including namedtuple instances, which are tuple
+    // subclasses) is treated as positional args.
+    if (py::isinstance<py::tuple>(obj_) || py::isinstance<py::list>(obj_)) {
+        py::tuple args;
+        if (py::isinstance<py::tuple>(obj_)) {
+            args = py::reinterpret_borrow<py::tuple>(obj_);
+        } else {
+            args = py::cast<py::tuple>(py::tuple(obj_));
+        }
+        return ValResult<ArgumentsInput>(ArgumentsInput{std::move(args), py::dict()});
+    }
+
     return type_error(ErrorType::Kind::ArgumentsType, *this, this->current_location());
 }
 

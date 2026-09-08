@@ -879,12 +879,11 @@ class SchemaValidator:
         else:
             config_dict = dict(config) if hasattr(config, 'items') else {}
 
-        # Pass schema dict directly to C++ — no JSON serialization (like Rust!)
-        # Pre-seed memo so non-copyable sentinels (e.g. MISSING) are treated
-        # as atomic instead of triggering __getstate__.
-        _memo = {id(MISSING): MISSING}
-        cpp_schema = _copy.deepcopy(schema, _memo)
-        _schema_clean_cls_keys(cpp_schema)
+        # Pass schema dict directly to C++ — no JSON serialization (like Rust!).
+        # Structural copy (not deepcopy): deepcopy fails on enum members with
+        # non-picklable values (e.g. ListEnum.a = [123]) and is slower. The
+        # copy also strips ``cls`` keys in one pass (see _schema_copy_clean).
+        cpp_schema = _schema_copy_clean(schema)
         self._base = _SchemaValidatorBase(cpp_schema, config_dict)
 
     @staticmethod
@@ -1481,6 +1480,30 @@ class SchemaValidator:
         # avoiding the C++ __reduce__ path which relies on schema_json() —
         # empty for validators built from a Python dict (the common path).
         return (SchemaValidator, (self._schema, self._config))
+
+
+def _schema_copy_clean(schema):
+    """Recursively copy a schema structure, stripping ``cls`` keys.
+
+    Replaces ``copy.deepcopy`` + ``_schema_clean_cls_keys``. deepcopy fails on
+    enum members whose values are not picklable (e.g. ``ListEnum.a = [123]``)
+    and is slower than a targeted structural copy. Non-container objects
+    (enum members, the MISSING sentinel, callables, classes) are returned as-is
+    — they are singletons or live references that C++ needs to keep.
+    """
+    if isinstance(schema, dict):
+        keep_cls = schema.get("type") in ("is-instance", "is-subclass", "model", "dataclass")
+        result = {}
+        for k, v in schema.items():
+            if k == "cls" and not keep_cls:
+                continue
+            result[k] = _schema_copy_clean(v)
+        return result
+    if isinstance(schema, list):
+        return [_schema_copy_clean(item) for item in schema]
+    if isinstance(schema, tuple):
+        return tuple(_schema_copy_clean(item) for item in schema)
+    return schema
 
 
 def _schema_clean_cls_keys(d):

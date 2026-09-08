@@ -2729,10 +2729,40 @@ class PySchemaSerializer {
 public:
     PySchemaSerializer() = default;
 
-    explicit PySchemaSerializer(const py::dict& schema, const std::optional<py::dict>& = std::nullopt)
+    explicit PySchemaSerializer(const py::dict& schema, const std::optional<py::dict>& cfg = std::nullopt)
         : schema_(schema) {
         std::unordered_map<std::string, SerRef> defs;
         ser_ = build_ser(schema, defs);
+        if (cfg.has_value()) {
+            try {
+                py::dict c = *cfg;
+                if (c.contains("serialize_by_alias")) {
+                    serialize_by_alias_ = c["serialize_by_alias"].cast<bool>();
+                }
+                // Propagate ser_json_* config to all serializer nodes (the config
+                // is not embedded in the schema when a TypeAdapter is created with
+                // an explicit config).
+                std::unordered_set<SerRef> visited;
+                std::function<void(SerRef)> set_config = [&](SerRef n) {
+                    if (!n) return;
+                    if (visited.count(n)) return;
+                    visited.insert(n);
+                    if (c.contains("ser_json_inf_nan")) {
+                        n->inf_nan_mode = c["ser_json_inf_nan"].cast<std::string>();
+                    }
+                    if (c.contains("ser_json_bytes")) {
+                        n->ser_json_bytes = c["ser_json_bytes"].cast<std::string>();
+                    }
+                    if (c.contains("ser_json_timedelta")) {
+                        n->ser_json_timedelta = c["ser_json_timedelta"].cast<std::string>();
+                    }
+                    for (auto& child : n->children) set_config(child);
+                    for (auto& [k, v] : n->fields) set_config(v);
+                    for (auto& [k, v] : n->tagged) set_config(v);
+                };
+                set_config(ser_);
+            } catch (...) { PyErr_Clear(); }
+        }
     }
 
     // Overload that accepts _use_prebuilt (unused but needed for pydantic API)
@@ -2746,6 +2776,28 @@ public:
                 if (c.contains("serialize_by_alias")) {
                     serialize_by_alias_ = c["serialize_by_alias"].cast<bool>();
                 }
+                // Propagate ser_json_* config to all serializer nodes. The config
+                // is not embedded in the schema when a TypeAdapter is created with
+                // an explicit config, so build_ser's schema["config"] path misses it.
+                std::unordered_set<SerRef> visited;
+                std::function<void(SerRef)> set_config = [&](SerRef n) {
+                    if (!n) return;
+                    if (visited.count(n)) return;
+                    visited.insert(n);
+                    if (c.contains("ser_json_inf_nan")) {
+                        n->inf_nan_mode = c["ser_json_inf_nan"].cast<std::string>();
+                    }
+                    if (c.contains("ser_json_bytes")) {
+                        n->ser_json_bytes = c["ser_json_bytes"].cast<std::string>();
+                    }
+                    if (c.contains("ser_json_timedelta")) {
+                        n->ser_json_timedelta = c["ser_json_timedelta"].cast<std::string>();
+                    }
+                    for (auto& child : n->children) set_config(child);
+                    for (auto& [k, v] : n->fields) set_config(v);
+                    for (auto& [k, v] : n->tagged) set_config(v);
+                };
+                set_config(ser_);
             } catch (...) { PyErr_Clear(); }
         }
     }
@@ -2834,7 +2886,7 @@ static py::bytes to_json_fn(const py::object& value, std::optional<size_t>, std:
 static py::object infer_jsonable_python(const py::object& v, const std::string& bytes_mode,
                                         const std::string& timedelta_mode,
                                         const std::string& inf_nan_mode,
-                                        bool serialize_unknown) {
+                                        bool serialize_unknown, bool by_alias) {
     if (v.is_none()) return py::none();
     if (py::isinstance<py::bool_>(v) || py::isinstance<py::int_>(v) || py::isinstance<py::str>(v)) return v;
     if (py::isinstance<py::float_>(v)) {
@@ -2896,7 +2948,7 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
     // Enum members convert as their value
     if (py_hasattr(v, "_value_")) {
         return infer_jsonable_python(py::getattr(v, "_value_"), bytes_mode, timedelta_mode,
-                                     inf_nan_mode, serialize_unknown);
+                                     inf_nan_mode, serialize_unknown, by_alias);
     }
     // Sets/tuples/lists/sequences → arrays; dicts → objects (recursively)
     if (py::isinstance<py::set>(v) || py::isinstance<py::frozenset>(v)
@@ -2905,7 +2957,7 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
         py::list out;
         for (auto item : py::reinterpret_borrow<py::iterable>(v)) {
             out.append(infer_jsonable_python(py::reinterpret_borrow<py::object>(item), bytes_mode,
-                                             timedelta_mode, inf_nan_mode, serialize_unknown));
+                                             timedelta_mode, inf_nan_mode, serialize_unknown, by_alias));
         }
         return std::move(out);
     }
@@ -2913,9 +2965,9 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
         py::dict out;
         for (auto item : v.cast<py::dict>()) {
             auto k = infer_jsonable_python(py::reinterpret_borrow<py::object>(item.first), bytes_mode,
-                                           timedelta_mode, inf_nan_mode, serialize_unknown);
+                                           timedelta_mode, inf_nan_mode, serialize_unknown, by_alias);
             auto val = infer_jsonable_python(py::reinterpret_borrow<py::object>(item.second), bytes_mode,
-                                             timedelta_mode, inf_nan_mode, serialize_unknown);
+                                             timedelta_mode, inf_nan_mode, serialize_unknown, by_alias);
             out[k] = val;
         }
         return std::move(out);
@@ -2924,7 +2976,7 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
     if (py_hasattr(v, "__pydantic_serializer__")) {
         try {
             auto ser = py::getattr(v, "__pydantic_serializer__");
-            return ser.attr("to_python")(v, py::arg("mode") = "json");
+            return ser.attr("to_python")(v, py::arg("mode") = "json", py::arg("by_alias") = by_alias);
         } catch (const py::error_already_set&) {
             PyErr_Clear();
         }
@@ -2937,7 +2989,7 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
             py::dict d = py::getattr(v, "__dict__").cast<py::dict>();
             if (!d.empty()) {
                 return infer_jsonable_python(py::reinterpret_borrow<py::object>(d), bytes_mode,
-                                             timedelta_mode, inf_nan_mode, serialize_unknown);
+                                             timedelta_mode, inf_nan_mode, serialize_unknown, by_alias);
             }
         } catch (...) { PyErr_Clear(); }
     }
@@ -2946,14 +2998,14 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
 }
 
 static py::object to_jsonable_fn(const py::object& value, std::optional<py::object>, std::optional<py::object>,
-    bool, bool, bool round_trip, std::string timedelta_mode, std::string temporal_mode, std::string bytes_mode,
+    bool by_alias, bool, bool round_trip, std::string timedelta_mode, std::string temporal_mode, std::string bytes_mode,
     std::string inf_nan_mode, bool serialize_unknown,
     std::optional<py::object> fallback, bool serialize_as_any, std::optional<bool>, std::optional<py::object>) {
     (void)round_trip;
     (void)temporal_mode;
     (void)fallback;
     (void)serialize_as_any;
-    return infer_jsonable_python(value, bytes_mode, timedelta_mode, inf_nan_mode, serialize_unknown);
+    return infer_jsonable_python(value, bytes_mode, timedelta_mode, inf_nan_mode, serialize_unknown, by_alias);
 }
 
 PYBIND11_MODULE(_pydantic_core_cpp, m) {
@@ -3335,13 +3387,6 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                     }
                     return self_instance;
                 }
-            }
-
-            // If validated result is a simple value (like int for dict size), return original input.
-            // Call validators produce real function results which may be ints — exclude them.
-            // Function validators (before/after/wrap/plain) also produce real results — exclude them.
-            if (py::isinstance<py::int_>(validated) && !py::isinstance<py::bool_>(input) && !self.is_call() && !self.is_function_wrapper()) {
-                return input;
             }
 
             return validated;

@@ -542,6 +542,10 @@ public:
 class DecimalValidator : public Validator {
 public:
     bool strict = false;
+    py::object gt = py::none();
+    py::object lt = py::none();
+    py::object ge = py::none();
+    py::object le = py::none();
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -551,44 +555,86 @@ public:
         py::object decimal_mod = py::module_::import("decimal");
         py::object decimal_cls = decimal_mod.attr("Decimal");
 
+        py::object result;
         if (py::isinstance(input_py, decimal_cls)) {
-            return ValResult<std::shared_ptr<void>>(
-                std::make_shared<py::object>(std::move(input_py))
-            );
-        }
-
-        if (state.strict_or(strict)) {
+            result = input_py;
+        } else if (state.strict_or(strict)) {
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::IsInstanceType, "class", "Decimal"),
                 state.location(),
                 input.as_error_value().repr
             );
-        }
-
-        try {
-            py::object result;
-            if (py::isinstance<py::str>(input_py) || py::isinstance<py::int_>(input_py) || py::isinstance<py::float_>(input_py)) {
-                result = decimal_cls(input_py);
-            } else {
+        } else {
+            try {
+                if (py::isinstance<py::str>(input_py) || py::isinstance<py::int_>(input_py) || py::isinstance<py::float_>(input_py)) {
+                    result = decimal_cls(input_py);
+                } else {
+                    return ValError::line_error(
+                        ErrorType(ErrorType::Kind::DecimalType),
+                        state.location(),
+                        input.as_error_value().repr
+                    );
+                }
+            } catch (py::error_already_set& e) {
+                e.restore();
+                PyErr_Clear();
+                // String/int/float that failed to parse -> DecimalParsing (Rust)
                 return ValError::line_error(
-                    ErrorType(ErrorType::Kind::DecimalType),
+                    ErrorType(ErrorType::Kind::DecimalParsing),
                     state.location(),
                     input.as_error_value().repr
                 );
             }
-            return ValResult<std::shared_ptr<void>>(
-                std::make_shared<py::object>(std::move(result))
-            );
+        }
+
+        // Apply gt/lt/ge/le constraints using Python's rich comparison
+        // (Decimal vs int/float/Decimal all compare correctly in Python).
+        // Use PyObject_RichCompare because pybind11's operator> returns a
+        // C++ bool and may not route through Python's __gt__ for Decimals.
+        auto py_cmp = [](const py::object& a, const py::object& b, int op) -> bool {
+            PyObject* r = PyObject_RichCompare(a.ptr(), b.ptr(), op);
+            if (!r) return false;
+            bool out = (r != Py_False);
+            Py_DECREF(r);
+            return out;
+        };
+        try {
+            if (!gt.is_none() && !py_cmp(result, gt, Py_GT)) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::GreaterThan, "gt", py::str(gt).cast<std::string>()),
+                    state.location(),
+                    input.as_error_value().repr
+                );
+            }
+            if (!lt.is_none() && !py_cmp(result, lt, Py_LT)) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::LessThan, "lt", py::str(lt).cast<std::string>()),
+                    state.location(),
+                    input.as_error_value().repr
+                );
+            }
+            if (!ge.is_none() && !py_cmp(result, ge, Py_GE)) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::GreaterThanEqual, "ge", py::str(ge).cast<std::string>()),
+                    state.location(),
+                    input.as_error_value().repr
+                );
+            }
+            if (!le.is_none() && !py_cmp(result, le, Py_LE)) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::LessThanEqual, "le", py::str(le).cast<std::string>()),
+                    state.location(),
+                    input.as_error_value().repr
+                );
+            }
         } catch (py::error_already_set& e) {
             e.restore();
             PyErr_Clear();
-            // String/int/float that failed to parse -> DecimalParsing (Rust)
-            return ValError::line_error(
-                ErrorType(ErrorType::Kind::DecimalParsing),
-                state.location(),
-                input.as_error_value().repr
-            );
         }
+
+        return ValResult<std::shared_ptr<void>>(
+            std::make_shared<py::object>(std::move(result))
+        );
     }
 
     std::string name() const override { return "decimal"; }
