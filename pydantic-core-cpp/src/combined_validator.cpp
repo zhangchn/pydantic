@@ -1459,9 +1459,51 @@ static std::shared_ptr<Validator> build_from_py_dict(
     }
 
     // --- Date/time validators ---
-    if (type == "date") return std::make_shared<DateValidator>();
-    if (type == "time") return std::make_shared<TimeValidator>();
-    if (type == "datetime") return std::make_shared<DatetimeValidator>();
+    if (type == "date") {
+        auto v = std::make_shared<DateValidator>();
+        for (const char* k : {"gt", "lt", "ge", "le"}) {
+            if (schema.contains(k) && !schema[k].is_none()) {
+                if (std::string(k) == "gt") v->gt = schema[k];
+                else if (std::string(k) == "lt") v->lt = schema[k];
+                else if (std::string(k) == "ge") v->ge = schema[k];
+                else v->le = schema[k];
+            }
+        }
+        if (schema.contains("now_op") && py::isinstance<py::str>(schema["now_op"])) {
+            v->now_op = schema["now_op"].cast<std::string>();
+        }
+        return v;
+    }
+    if (type == "time") {
+        auto v = std::make_shared<TimeValidator>();
+        for (const char* k : {"gt", "lt", "ge", "le"}) {
+            if (schema.contains(k) && !schema[k].is_none()) {
+                if (std::string(k) == "gt") v->gt = schema[k];
+                else if (std::string(k) == "lt") v->lt = schema[k];
+                else if (std::string(k) == "ge") v->ge = schema[k];
+                else v->le = schema[k];
+            }
+        }
+        return v;
+    }
+    if (type == "datetime") {
+        auto v = std::make_shared<DatetimeValidator>();
+        for (const char* k : {"gt", "lt", "ge", "le"}) {
+            if (schema.contains(k) && !schema[k].is_none()) {
+                if (std::string(k) == "gt") v->gt = schema[k];
+                else if (std::string(k) == "lt") v->lt = schema[k];
+                else if (std::string(k) == "ge") v->ge = schema[k];
+                else v->le = schema[k];
+            }
+        }
+        if (schema.contains("now_op") && py::isinstance<py::str>(schema["now_op"])) {
+            v->now_op = schema["now_op"].cast<std::string>();
+        }
+        if (schema.contains("tz_constraint") && py::isinstance<py::str>(schema["tz_constraint"])) {
+            v->tz_constraint = schema["tz_constraint"].cast<std::string>();
+        }
+        return v;
+    }
     if (type == "timedelta") return std::make_shared<TimedeltaValidator>();
 
     // --- URL validators ---

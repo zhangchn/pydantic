@@ -937,6 +937,18 @@ ValResult<ValMatch<EitherDate>> PythonInput::validate_date(bool strict) const {
         );
     }
 
+    // NaN float input -> date_from_datetime_parsing (Rust behavior)
+    if (is_float() && !strict) {
+        double ts = as_float();
+        if (std::isnan(ts)) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::DateFromDatetimeParsing, "error", "NaN values not permitted"),
+                this->current_location(),
+                this->as_error_value().repr
+            );
+        }
+    }
+
     return type_error(ErrorType::Kind::DateType, *this, this->current_location());
 }
 
@@ -989,6 +1001,13 @@ ValResult<ValMatch<EitherDateTime>> PythonInput::validate_datetime(bool strict) 
     if ((is_int() || is_float()) && !strict) {
         // Lax mode: unix timestamp -> UTC datetime
         double ts = is_int() ? static_cast<double>(as_int()) : as_float();
+        if (std::isnan(ts)) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::DateTimeParsing, "error", "NaN values not permitted"),
+                this->current_location(),
+                this->as_error_value().repr
+            );
+        }
         try {
             py::object dt_mod = py::module_::import("datetime");
             py::object utc = dt_mod.attr("timezone").attr("utc");
@@ -1004,7 +1023,7 @@ ValResult<ValMatch<EitherDateTime>> PythonInput::validate_datetime(bool strict) 
             return ValMatch<EitherDateTime>::lax(EitherDateTime(dt));
         } catch (py::error_already_set&) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::DateTimeParsing),
+                ErrorType(ErrorType::Kind::DateTimeParsing, "error", "unable to parse"),
                 this->current_location(),
                 this->as_error_value().repr
             );
@@ -1019,7 +1038,7 @@ ValResult<ValMatch<EitherDateTime>> PythonInput::validate_datetime(bool strict) 
             return ValMatch<EitherDateTime>::lax(EitherDateTime(*parsed));
         }
         return ValError::line_error(
-            ErrorType(ErrorType::Kind::DateTimeParsing),
+            ErrorType(ErrorType::Kind::DateTimeParsing, "error", "unable to parse"),
             this->current_location(),
             this->as_error_value().repr
         );
@@ -1120,8 +1139,11 @@ ValResult<ValMatch<EitherTimedelta>> PythonInput::validate_timedelta(bool strict
         if (parsed) {
             return ValMatch<EitherTimedelta>::lax(EitherTimedelta(*parsed));
         }
+        // A bare number (e.g. "30") expects a "day" identifier (e.g. "30d").
+        std::string err_msg = "unable to parse string as an ISO 8601 duration";
+        if (is_bare_number(s)) err_msg = "\"day\" identifier";
         return ValError::line_error(
-            ErrorType(ErrorType::Kind::TimedeltaParsing),
+            ErrorType(ErrorType::Kind::TimedeltaParsing, "error", err_msg),
             this->current_location(),
             this->as_error_value().repr
         );
@@ -1134,8 +1156,10 @@ ValResult<ValMatch<EitherTimedelta>> PythonInput::validate_timedelta(bool strict
         if (parsed) {
             return ValMatch<EitherTimedelta>::lax(EitherTimedelta(*parsed));
         }
+        std::string err_msg = "unable to parse string as an ISO 8601 duration";
+        if (is_bare_number(s)) err_msg = "\"day\" identifier";
         return ValError::line_error(
-            ErrorType(ErrorType::Kind::TimedeltaParsing),
+            ErrorType(ErrorType::Kind::TimedeltaParsing, "error", err_msg),
             this->current_location(),
             this->as_error_value().repr
         );

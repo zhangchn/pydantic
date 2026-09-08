@@ -114,10 +114,120 @@ private:
     std::shared_ptr<DefinitionsRegistry> definitions_;
 };
 
+// ---- Helpers for date/time/datetime constraint & now_op & tz_constraint ----
+// Convert a C++ Date to a Python datetime.date
+static py::object date_to_python_obj(const Date& d) {
+    py::object datetime_mod = py::module_::import("datetime");
+    return datetime_mod.attr("date")(d.year, d.month, d.day);
+}
+
+// Convert a C++ DateTime to a Python datetime.datetime
+static py::object datetime_to_python_obj(const DateTime& dt) {
+    py::object datetime_mod = py::module_::import("datetime");
+    if (dt.time.tz_offset.has_value()) {
+        py::object timezone = datetime_mod.attr("timezone");
+        py::object tz_delta = datetime_mod.attr("timedelta")(py::arg("minutes") = *dt.time.tz_offset);
+        py::object tz = timezone(tz_delta);
+        return datetime_mod.attr("datetime")(
+            dt.date.year, dt.date.month, dt.date.day,
+            dt.time.hour, dt.time.minute, dt.time.second, dt.time.microsecond, tz);
+    }
+    return datetime_mod.attr("datetime")(
+        dt.date.year, dt.date.month, dt.date.day,
+        dt.time.hour, dt.time.minute, dt.time.second, dt.time.microsecond);
+}
+
+// Convert a C++ Time to a Python datetime.time
+static py::object time_to_python_obj(const Time& t) {
+    py::object datetime_mod = py::module_::import("datetime");
+    if (t.tz_offset.has_value()) {
+        py::object timezone = datetime_mod.attr("timezone");
+        py::object tz_delta = datetime_mod.attr("timedelta")(py::arg("minutes") = *t.tz_offset);
+        py::object tz = timezone(tz_delta);
+        return datetime_mod.attr("time")(t.hour, t.minute, t.second, t.microsecond, tz);
+    }
+    return datetime_mod.attr("time")(t.hour, t.minute, t.second, t.microsecond);
+}
+
+// Parse a constraint value (ISO string or already a Python object) into a
+// comparable Python object of the given kind ("date"/"datetime"/"time").
+static py::object parse_temporal_constraint(const py::object& val, const std::string& kind) {
+    if (py::isinstance<py::str>(val)) {
+        std::string s = val.cast<std::string>();
+        py::object datetime_mod = py::module_::import("datetime");
+        if (kind == "date") return datetime_mod.attr("date").attr("fromisoformat")(s);
+        if (kind == "datetime") return datetime_mod.attr("datetime").attr("fromisoformat")(s);
+        if (kind == "time") return datetime_mod.attr("time").attr("fromisoformat")(s);
+    }
+    return val;
+}
+
+// Apply gt/lt/ge/le constraints to a Python temporal object. Returns a
+// ValError on the first violated constraint, or nullopt if all pass.
+static std::optional<ValError> apply_temporal_constraints(
+    const py::object& result,
+    const py::object& gt, const py::object& lt,
+    const py::object& ge, const py::object& le,
+    const std::string& kind,
+    const Input& input,
+    ValidationState& state) {
+    auto py_cmp = [](const py::object& a, const py::object& b, int op) -> bool {
+        PyObject* r = PyObject_RichCompare(a.ptr(), b.ptr(), op);
+        if (!r) return false;
+        bool out = (r != Py_False);
+        Py_DECREF(r);
+        return out;
+    };
+    try {
+        if (!gt.is_none()) {
+            auto c = parse_temporal_constraint(gt, kind);
+            if (!py_cmp(result, c, Py_GT)) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::GreaterThan, "gt", py::str(gt).cast<std::string>()),
+                    state.location(), input.as_error_value().repr);
+            }
+        }
+        if (!lt.is_none()) {
+            auto c = parse_temporal_constraint(lt, kind);
+            if (!py_cmp(result, c, Py_LT)) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::LessThan, "lt", py::str(lt).cast<std::string>()),
+                    state.location(), input.as_error_value().repr);
+            }
+        }
+        if (!ge.is_none()) {
+            auto c = parse_temporal_constraint(ge, kind);
+            if (!py_cmp(result, c, Py_GE)) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::GreaterThanEqual, "ge", py::str(ge).cast<std::string>()),
+                    state.location(), input.as_error_value().repr);
+            }
+        }
+        if (!le.is_none()) {
+            auto c = parse_temporal_constraint(le, kind);
+            if (!py_cmp(result, c, Py_LE)) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::LessThanEqual, "le", py::str(le).cast<std::string>()),
+                    state.location(), input.as_error_value().repr);
+            }
+        }
+    } catch (py::error_already_set& e) {
+        e.restore();
+        PyErr_Clear();
+    }
+    return std::nullopt;
+}
+
 // DateValidator - validates date values
 class DateValidator : public Validator {
 public:
     explicit DateValidator(bool strict = false) : strict_(strict) {}
+
+    py::object gt = py::none();
+    py::object lt = py::none();
+    py::object ge = py::none();
+    py::object le = py::none();
+    std::string now_op;  // "", "past", "future"
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -129,6 +239,39 @@ public:
             return result.error();
         }
         auto match = std::move(result.value());
+        Date d = match.value().value;
+
+        // Apply gt/lt/ge/le constraints
+        try {
+            py::object py_date = date_to_python_obj(d);
+            auto err = apply_temporal_constraints(py_date, gt, lt, ge, le, "date", input, state);
+            if (err) return *err;
+
+            // Apply now_op (past/future) check
+            if (!now_op.empty()) {
+                py::object datetime_mod = py::module_::import("datetime");
+                py::object today = datetime_mod.attr("date").attr("today")();
+                auto py_cmp = [](const py::object& a, const py::object& b, int op) -> bool {
+                    PyObject* r = PyObject_RichCompare(a.ptr(), b.ptr(), op);
+                    if (!r) return false;
+                    bool out = (r != Py_False);
+                    Py_DECREF(r);
+                    return out;
+                };
+                if (now_op == "past" && !py_cmp(py_date, today, Py_LT)) {
+                    return ValError::line_error(ErrorType(ErrorType::Kind::DatePast),
+                        state.location(), input.as_error_value().repr);
+                }
+                if (now_op == "future" && !py_cmp(py_date, today, Py_GT)) {
+                    return ValError::line_error(ErrorType(ErrorType::Kind::DateFuture),
+                        state.location(), input.as_error_value().repr);
+                }
+            }
+        } catch (py::error_already_set& e) {
+            e.restore();
+            PyErr_Clear();
+        }
+
         // Store as internal Date value (will be converted to Python datetime.date by result_to_python)
         return ValResult<std::shared_ptr<void>>(
             std::make_shared<EitherDate>(std::move(match.value()))
@@ -146,6 +289,11 @@ class TimeValidator : public Validator {
 public:
     explicit TimeValidator(bool strict = false) : strict_(strict) {}
 
+    py::object gt = py::none();
+    py::object lt = py::none();
+    py::object ge = py::none();
+    py::object le = py::none();
+
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
@@ -155,6 +303,17 @@ public:
             return result.error();
         }
         auto match = std::move(result.value());
+        Time t = match.value().value;
+
+        try {
+            py::object py_time = time_to_python_obj(t);
+            auto err = apply_temporal_constraints(py_time, gt, lt, ge, le, "time", input, state);
+            if (err) return *err;
+        } catch (py::error_already_set& e) {
+            e.restore();
+            PyErr_Clear();
+        }
+
         return ValResult<std::shared_ptr<void>>(
             std::make_shared<EitherTime>(std::move(match.value()))
         );
@@ -171,6 +330,13 @@ class DatetimeValidator : public Validator {
 public:
     explicit DatetimeValidator(bool strict = false) : strict_(strict) {}
 
+    py::object gt = py::none();
+    py::object lt = py::none();
+    py::object ge = py::none();
+    py::object le = py::none();
+    std::string now_op;        // "", "past", "future"
+    std::string tz_constraint; // "", "aware", "naive"
+
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
@@ -180,6 +346,57 @@ public:
             return result.error();
         }
         auto match = std::move(result.value());
+        DateTime dt = match.value().value;
+
+        try {
+            py::object py_dt = datetime_to_python_obj(dt);
+            auto py_cmp = [](const py::object& a, const py::object& b, int op) -> bool {
+                PyObject* r = PyObject_RichCompare(a.ptr(), b.ptr(), op);
+                if (!r) return false;
+                bool out = (r != Py_False);
+                Py_DECREF(r);
+                return out;
+            };
+
+            // Apply gt/lt/ge/le constraints
+            auto err = apply_temporal_constraints(py_dt, gt, lt, ge, le, "datetime", input, state);
+            if (err) return *err;
+
+            // Apply tz_constraint (aware/naive)
+            bool is_aware = dt.time.tz_offset.has_value();
+            if (tz_constraint == "aware" && !is_aware) {
+                return ValError::line_error(ErrorType(ErrorType::Kind::TimezoneAware),
+                    state.location(), input.as_error_value().repr);
+            }
+            if (tz_constraint == "naive" && is_aware) {
+                return ValError::line_error(ErrorType(ErrorType::Kind::TimezoneNaive),
+                    state.location(), input.as_error_value().repr);
+            }
+
+            // Apply now_op (past/future) check
+            if (!now_op.empty()) {
+                py::object datetime_mod = py::module_::import("datetime");
+                py::object now;
+                if (is_aware) {
+                    py::object utc = datetime_mod.attr("timezone").attr("utc");
+                    now = datetime_mod.attr("datetime").attr("now")(utc);
+                } else {
+                    now = datetime_mod.attr("datetime").attr("now")();
+                }
+                if (now_op == "past" && !py_cmp(py_dt, now, Py_LT)) {
+                    return ValError::line_error(ErrorType(ErrorType::Kind::DatetimePast),
+                        state.location(), input.as_error_value().repr);
+                }
+                if (now_op == "future" && !py_cmp(py_dt, now, Py_GT)) {
+                    return ValError::line_error(ErrorType(ErrorType::Kind::DatetimeFuture),
+                        state.location(), input.as_error_value().repr);
+                }
+            }
+        } catch (py::error_already_set& e) {
+            e.restore();
+            PyErr_Clear();
+        }
+
         return ValResult<std::shared_ptr<void>>(
             std::make_shared<EitherDateTime>(std::move(match.value()))
         );

@@ -463,7 +463,7 @@ ValResult<ValMatch<EitherTimedelta>> JsonInput::validate_timedelta(bool strict) 
         return ValMatch<EitherTimedelta>::lax(EitherTimedelta(*parsed));
     }
     return ValError::line_error(
-        ErrorType(ErrorType::Kind::TimedeltaParsing),
+        ErrorType(ErrorType::Kind::TimedeltaParsing, "error", "unable to parse string as an ISO 8601 duration"),
         this->current_location(), this->as_error_value().repr
     );
 }

@@ -216,6 +216,28 @@ struct EitherTimedelta {
 // Parse a timedelta string: ISO 8601 duration (P4Y/P4M/P4W/P4D/P0.5D/PT5H...),
 // HH:MM:SS[.frac] with optional "[Nd,]HH:MM:SS" days prefix, or either form
 // with a leading '-'. Returns nullopt when the string is not a valid duration.
+// Returns true if the string is a bare number (optional sign, digits,
+// optional fractional part) with no other characters — e.g. "30", "-5", "1.5".
+inline bool is_bare_number(const std::string& s) {
+    if (s.empty()) return false;
+    size_t i = 0;
+    if (s[0] == '-' || s[0] == '+') i = 1;
+    if (i >= s.size()) return false;
+    bool seen_digit = false;
+    bool seen_dot = false;
+    for (; i < s.size(); ++i) {
+        char c = s[i];
+        if (c >= '0' && c <= '9') {
+            seen_digit = true;
+        } else if (c == '.' && !seen_dot) {
+            seen_dot = true;
+        } else {
+            return false;
+        }
+    }
+    return seen_digit;
+}
+
 inline std::optional<Timedelta> try_parse_timedelta_str(const std::string& input) {
     std::string s = input;
     bool negative = false;

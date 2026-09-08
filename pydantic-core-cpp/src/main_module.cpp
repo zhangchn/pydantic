@@ -298,9 +298,46 @@ static std::string b64_encode_string(const std::string& b) {
 // Convert one typed leaf value for JSON-mode serialization (SchemaSerializer
 // mode="json" and to_jsonable_python). Returns true and sets `out` when the
 // (type, value) pair has a JSON-compatible form; false otherwise.
+// Convert a datetime/date/time to a float timestamp (seconds or milliseconds).
+// Naive datetimes are treated as UTC (matches Rust ser_json_temporal behavior).
+// Returns false if the type is not a temporal type.
+static bool temporal_to_float(const std::string& type, const py::object& value,
+                              const std::string& ser_json_temporal, double& out) {
+    if (type != "datetime" && type != "date" && type != "time") return false;
+    py::object datetime_mod = py::module_::import("datetime");
+    long long whole_seconds = 0;
+    long long microseconds = 0;
+    if (type == "datetime") {
+        py::object dt = value;
+        if (value.attr("tzinfo").is_none()) {
+            dt = value.attr("replace")(py::arg("tzinfo") = datetime_mod.attr("timezone").attr("utc"));
+        }
+        whole_seconds = static_cast<long long>(dt.attr("timestamp")().cast<double>());
+        microseconds = dt.attr("microsecond").cast<long long>();
+    } else if (type == "date") {
+        py::object dt = datetime_mod.attr("datetime")(
+            value.attr("year"), value.attr("month"), value.attr("day"),
+            py::arg("tzinfo") = datetime_mod.attr("timezone").attr("utc"));
+        whole_seconds = static_cast<long long>(dt.attr("timestamp")().cast<double>());
+        microseconds = 0;
+    } else { // time
+        whole_seconds = value.attr("hour").cast<long long>() * 3600 +
+                        value.attr("minute").cast<long long>() * 60 +
+                        value.attr("second").cast<long long>();
+        microseconds = value.attr("microsecond").cast<long long>();
+    }
+    if (ser_json_temporal == "milliseconds") {
+        out = static_cast<double>(whole_seconds) * 1000.0 + static_cast<double>(microseconds) / 1000.0;
+    } else {
+        out = static_cast<double>(whole_seconds) + static_cast<double>(microseconds) / 1000000.0;
+    }
+    return true;
+}
+
 static bool json_leaf_convert(const std::string& type, const py::object& value,
                               const std::string& ser_json_bytes,
                               const std::string& ser_json_timedelta,
+                              const std::string& ser_json_temporal,
                               py::object& out) {
     try {
         if (type == "bytes" && py::isinstance<py::bytes>(value)) {
@@ -329,6 +366,13 @@ static bool json_leaf_convert(const std::string& type, const py::object& value,
             return true;
         }
         if (type == "datetime" || type == "date" || type == "time") {
+            if (ser_json_temporal == "seconds" || ser_json_temporal == "milliseconds") {
+                double ts;
+                if (temporal_to_float(type, value, ser_json_temporal, ts)) {
+                    out = py::float_(ts);
+                    return true;
+                }
+            }
             py::object iso = value.attr("isoformat")();
             std::string s = py::str(iso).cast<std::string>();
             if (s.size() >= 6 && s.substr(s.size() - 6) == "+00:00") {
@@ -767,6 +811,8 @@ struct SerNode {
     std::string ser_json_bytes = "utf8";
     // For timedelta serialization: "iso8601" (default) or "float"
     std::string ser_json_timedelta = "iso8601";
+    // For datetime/date/time serialization: "iso8601" (default), "seconds", or "milliseconds"
+    std::string ser_json_temporal = "iso8601";
 
     // Copy content from another node into this one (preserves shared_ptr identity)
     void copy_from(const SerNode& other) {
@@ -794,6 +840,7 @@ struct SerNode {
         inf_nan_mode = other.inf_nan_mode;
         ser_json_bytes = other.ser_json_bytes;
         ser_json_timedelta = other.ser_json_timedelta;
+        ser_json_temporal = other.ser_json_temporal;
     }
 
     py::object to_python(const py::object& value, bool json_mode, bool exc_none, bool round_trip = false,
@@ -1139,7 +1186,7 @@ struct SerNode {
         // duration or float, etc.), mirroring Rust's mode="json" behavior.
         if (json_mode) {
             py::object converted;
-            if (json_leaf_convert(type, value, ser_json_bytes, ser_json_timedelta, converted)) {
+            if (json_leaf_convert(type, value, ser_json_bytes, ser_json_timedelta, ser_json_temporal, converted)) {
                 return converted;
             }
             // Enum members serialize as their value
@@ -1310,8 +1357,14 @@ struct SerNode {
             type == "ipv4network" || type == "ipv6network") {
             return json_escape(py::str(value).cast<std::string>(), ensure_ascii);
         }
-        // datetime/date/time: call .isoformat()
+        // datetime/date/time: call .isoformat() or convert to a float timestamp
         if (type == "datetime" || type == "date" || type == "time") {
+            if (ser_json_temporal == "seconds" || ser_json_temporal == "milliseconds") {
+                double ts;
+                if (temporal_to_float(type, value, ser_json_temporal, ts)) {
+                    return py::str(py::repr(py::float_(ts))).cast<std::string>();
+                }
+            }
             try {
                 py::object iso = value.attr("isoformat")();
                 std::string s = py::str(iso).cast<std::string>();
@@ -2708,6 +2761,9 @@ static SerRef build_ser_impl(const py::dict& schema,
                 if (config.contains("ser_json_timedelta")) {
                     n->ser_json_timedelta = config["ser_json_timedelta"].cast<std::string>();
                 }
+                if (config.contains("ser_json_temporal")) {
+                    n->ser_json_temporal = config["ser_json_temporal"].cast<std::string>();
+                }
                 if (config.contains("polymorphic_serialization")) {
                     try { n->polymorphic_from_config = config["polymorphic_serialization"].cast<bool>(); } catch (...) {}
                 }
@@ -2756,6 +2812,9 @@ public:
                     if (c.contains("ser_json_timedelta")) {
                         n->ser_json_timedelta = c["ser_json_timedelta"].cast<std::string>();
                     }
+                    if (c.contains("ser_json_temporal")) {
+                        n->ser_json_temporal = c["ser_json_temporal"].cast<std::string>();
+                    }
                     for (auto& child : n->children) set_config(child);
                     for (auto& [k, v] : n->fields) set_config(v);
                     for (auto& [k, v] : n->tagged) set_config(v);
@@ -2792,6 +2851,9 @@ public:
                     }
                     if (c.contains("ser_json_timedelta")) {
                         n->ser_json_timedelta = c["ser_json_timedelta"].cast<std::string>();
+                    }
+                    if (c.contains("ser_json_temporal")) {
+                        n->ser_json_temporal = c["ser_json_temporal"].cast<std::string>();
                     }
                     for (auto& child : n->children) set_config(child);
                     for (auto& [k, v] : n->fields) set_config(v);
@@ -2943,7 +3005,7 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
     if (py_hasattr(v, "days") && py_hasattr(v, "seconds") && py_hasattr(v, "microseconds")
         && !py_hasattr(v, "isoformat")) {
         py::object out;
-        if (json_leaf_convert("timedelta", v, "utf8", timedelta_mode, out)) return out;
+        if (json_leaf_convert("timedelta", v, "utf8", timedelta_mode, "iso8601", out)) return out;
     }
     // Enum members convert as their value
     if (py_hasattr(v, "_value_")) {
