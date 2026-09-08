@@ -35,6 +35,7 @@ struct PySerializationInfo {
 // Runtime polymorphic-serialization flag for the current top-level
 // to_python/to_json call (mirrors Rust SerializationExtra::polymorphic_serialization).
 static thread_local std::optional<bool> g_polymorphic_serialization{};
+static thread_local bool g_exclude_computed_fields = false;
 // Recursion guard for the polymorphism trampoline.
 static thread_local int g_trampoline_depth = 0;
 
@@ -478,6 +479,99 @@ static py::object merge_dicts(const py::object& item_value, const py::object& al
     return item_dict;
 }
 
+// ---------------------------------------------------------------------------
+// Serializer warnings (Rust: serializers/extra.rs CollectWarnings + final_check).
+// Warnings collected per top-level to_python/to_json call are emitted as a
+// UserWarning (mode "warn") or raised as PydanticSerializationError ("error")
+// when that call finishes.
+// ---------------------------------------------------------------------------
+enum class SerWarnMode { None, Warn, Error };
+
+struct SerWarnFrame {
+    bool enabled = false;
+    bool as_error = false;
+    std::vector<std::string> items;
+};
+
+static std::vector<SerWarnFrame>& ser_warn_stack() {
+    static thread_local std::vector<SerWarnFrame> stack;
+    return stack;
+}
+
+static SerWarnMode ser_warnings_mode(const py::object& warnings) {
+    if (warnings.is_none()) return SerWarnMode::None;
+    if (py::isinstance<py::bool_>(warnings)) return warnings.cast<bool>() ? SerWarnMode::Warn : SerWarnMode::None;
+    if (py::isinstance<py::str>(warnings)) {
+        std::string s = warnings.cast<std::string>();
+        if (s == "none") return SerWarnMode::None;
+        if (s == "error") return SerWarnMode::Error;
+        return SerWarnMode::Warn;  // "warn" (default)
+    }
+    return SerWarnMode::Warn;
+}
+
+static void ser_warn_enter(const py::object& warnings) {
+    SerWarnMode m = ser_warnings_mode(warnings);
+    ser_warn_stack().push_back(SerWarnFrame{m != SerWarnMode::None, m == SerWarnMode::Error, {}});
+}
+
+static void ser_warn_leave(bool discard) {
+    auto& stack = ser_warn_stack();
+    if (stack.empty()) return;
+    SerWarnFrame frame = std::move(stack.back());
+    stack.pop_back();
+    if (discard || frame.items.empty()) return;
+    std::string message = "Pydantic serializer warnings:\n  ";
+    for (size_t i = 0; i < frame.items.size(); ++i) {
+        if (i) message += "\n  ";
+        message += frame.items[i];
+    }
+    if (frame.as_error) {
+        throw PydanticSerializationError(message);
+    }
+    // Warn as UserWarning; if a filter turns it into an error, propagate it.
+    if (PyErr_WarnEx(PyExc_UserWarning, message.c_str(), 1) < 0) {
+        throw py::error_already_set();
+    }
+}
+
+static void ser_warn_register(const std::string& text) {
+    auto& stack = ser_warn_stack();
+    if (stack.empty() || !stack.back().enabled) return;
+    stack.back().items.push_back(text);
+}
+
+static std::string ser_warn_input_type(const py::object& value) {
+    try {
+        py::object t = py::reinterpret_borrow<py::object>(value.get_type());
+        return py::str(t.attr("__name__")).cast<std::string>();
+    } catch (...) { return "<unknown>"; }
+}
+
+static std::string ser_warn_input_repr(const py::object& value) {
+    try {
+        std::string r = py::repr(value).cast<std::string>();
+        // Rust truncate_safe_repr caps very long reprs at ~100 chars.
+        if (r.size() > 100) r = r.substr(0, 99) + "\u2026";
+        return r;
+    } catch (...) { return "<unrepresentable>"; }
+}
+
+static void ser_warn_unexpected_value(const std::string& field_name,
+                                      const std::string& field_type,
+                                      const py::object& value) {
+    if (value.is_none()) return;  // Rust special-cases None: no warning
+    std::string type_name = ser_warn_input_type(value);
+    std::string value_str = ser_warn_input_repr(value);
+    std::string msg = "Expected `" + field_type + "` - serialized value may not be as expected";
+    if (field_name.empty()) {
+        msg += " [input_value=" + value_str + ", input_type=" + type_name + "]";
+    } else {
+        msg += " [field_name='" + field_name + "', input_value=" + value_str + ", input_type=" + type_name + "]";
+    }
+    ser_warn_register("PydanticSerializationUnexpectedValue(" + msg + ")");
+}
+
 // Result of applying an include/exclude filter to a key/index
 struct SerFilterResult {
     bool omit = false;                 // true = drop the field/item
@@ -555,9 +649,15 @@ static SerFilterResult apply_ser_filter(const py::object& key, const py::object&
     // Include handling
     if (!include.is_none()) {
         if (py::isinstance<py::dict>(include)) {
-            py::object inc_value = merge_all_value(include.cast<py::dict>(), key);
-            if (!inc_value.is_none()) {
-                if (is_ellipsis_like(inc_value)) {
+            py::dict incd = include.cast<py::dict>();
+            // A key that is present -- even when its value is None (meaning
+            // "include the whole item") -- must include the field; only a key
+            // that is absent should omit it (Rust merge_all_value returns
+            // Some(None) for a stored None value, distinct from absent).
+            bool present = incd.contains(key) || incd.contains(py::str("__all__"));
+            if (present) {
+                py::object inc_value = merge_all_value(incd, key);
+                if (inc_value.is_none() || is_ellipsis_like(inc_value)) {
                     out.include = py::none();
                 } else {
                     out.include = inc_value;
@@ -622,6 +722,10 @@ static py::object missing_sentinel_obj() {
 
 struct SerNode {
     std::string type;
+    // Rust-style serializer display name, e.g. "list[int]" (warnings).
+    static std::string type_name_for_warning(const SerRef& n);
+    // Whether a Python value is compatible with this node's declared type.
+    static bool value_matches_type(const SerRef& n, const py::object& v);
     std::vector<SerRef> children;
     // For tagged-union: map from tag -> serializer
     std::unordered_map<std::string, SerRef> tagged;
@@ -794,7 +898,9 @@ struct SerNode {
                 return ev;
             }
         }
-        if (!fields.empty()) {
+        if (!fields.empty() || type == "model-fields" || type == "typed-dict" || type == "dataclass-args") {
+            // A model/dataclass/typed-dict always serializes to a dict, even
+            // when it declares no fields (empty model -> {}).
             return serialize_fields(value, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context, json_mode);
         }
         // Polymorphism trampoline (Rust PolymorphismTrampoline): a strict
@@ -1302,7 +1408,9 @@ struct SerNode {
             out += "]";
             return out;
         }
-        if (!fields.empty()) {
+        if (!fields.empty() || type == "model-fields" || type == "typed-dict" || type == "dataclass-args") {
+            // A model/dataclass/typed-dict always serializes to a dict, even
+            // when it declares no fields (empty model -> {}).
             return serialize_fields_json(value, ensure_ascii, indent, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults);
         }
         // Polymorphism trampoline (Rust PolymorphismTrampoline), json mode.
@@ -1678,8 +1786,8 @@ private:
             // Skip fields excluded at schema level (Field(exclude=True))
             if (field_excluded.count(k)) continue;
 
-            // Skip computed fields when round_trip=True
-            if (round_trip && computed_fields_.count(k)) continue;
+            // Skip computed fields when round_trip=True or exclude_computed_fields
+            if ((round_trip || g_exclude_computed_fields) && computed_fields_.count(k)) continue;
 
             // Apply include/exclude filters (supports nested dict filters)
             auto next = apply_ser_filter(py::str(k), include, exclude);
@@ -1759,6 +1867,15 @@ private:
                 }
             }
 
+            bool ser_type_mismatch = false;
+            if (computed_fields_.count(k) && ser &&
+                ser->type != "function-plain" && ser->type != "function-wrap" &&
+                ser->type != "function-after" && ser->type != "function-before" &&
+                !fv.is_none() && !SerNode::value_matches_type(ser, fv)) {
+                ser_type_mismatch = true;
+                ser_warn_unexpected_value(k, SerNode::type_name_for_warning(ser), fv);
+            }
+
             py::object serialized;
             // Check if we should use the custom field serializer based on when_used
             bool use_field_serializer = false;
@@ -1776,7 +1893,11 @@ private:
                 }
             }
 
-            if (use_field_serializer) {
+            if (ser_type_mismatch) {
+                // Computed field value does not match its declared return type:
+                // warn and fall back to infer serialization (Rust behavior).
+                serialized = serialize_any_value(fv, exc_none, round_trip);
+            } else if (use_field_serializer) {
                 // Try field serializer call with model instance first
                 PySerializationInfo info(round_trip, "python", k, context);
                 bool tried = false;
@@ -1877,8 +1998,8 @@ private:
             // Skip fields excluded at schema level (Field(exclude=True))
             if (field_excluded.count(k)) continue;
 
-            // Skip computed fields when round_trip=True
-            if (round_trip && computed_fields_.count(k)) continue;
+            // Skip computed fields when round_trip=True or exclude_computed_fields
+            if ((round_trip || g_exclude_computed_fields) && computed_fields_.count(k)) continue;
 
             // Apply include/exclude filters (supports nested dict filters)
             auto next = apply_ser_filter(py::str(k), include, exclude);
@@ -1958,6 +2079,15 @@ private:
                 }
             }
 
+            bool ser_type_mismatch = false;
+            if (computed_fields_.count(k) && ser &&
+                ser->type != "function-plain" && ser->type != "function-wrap" &&
+                ser->type != "function-after" && ser->type != "function-before" &&
+                !fv.is_none() && !SerNode::value_matches_type(ser, fv)) {
+                ser_type_mismatch = true;
+                ser_warn_unexpected_value(k, SerNode::type_name_for_warning(ser), fv);
+            }
+
             std::string field_json;
             // Check if we should use the custom field serializer based on when_used
             bool use_field_serializer = false;
@@ -2027,6 +2157,10 @@ private:
                     // Fallback to field serializer (handles list/dict iteration, etc.)
                     field_json = ser->to_json(fv, ensure_ascii, -1, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
                 }
+            } else if (ser_type_mismatch) {
+                // Computed field value does not match its declared return type:
+                // warn and fall back to infer serialization (Rust behavior).
+                field_json = infer_json(fv, ensure_ascii, -1);
             } else {
                 // Use the field serializer directly (handles list/dict iteration, etc.)
                 field_json = ser->to_json(fv, ensure_ascii, -1, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, exc_none);
@@ -2057,6 +2191,55 @@ private:
         return out;
     }
 };
+
+// Rust-style serializer display name used in "Expected `X`" warnings.
+std::string SerNode::type_name_for_warning(const SerRef& n) {
+    if (!n) return "any";
+    const std::string& t = n->type;
+    auto child0 = [&]() -> std::string {
+        return n->children.empty() ? "any" : type_name_for_warning(n->children[0]);
+    };
+    if (t == "int" || t == "int-constrained") return "int";
+    if (t == "float" || t == "float-constrained") return "float";
+    if (t == "bool") return "bool";
+    if (t == "str" || t == "string" || t == "str-constrained") return "str";
+    if (t == "bytes") return "bytes";
+    if (t == "datetime") return "datetime";
+    if (t == "date") return "date";
+    if (t == "time") return "time";
+    if (t == "list") return "list[" + child0() + "]";
+    if (t == "set") return "set[" + child0() + "]";
+    if (t == "frozenset") return "frozenset[" + child0() + "]";
+    if (t == "tuple") return "tuple[" + child0() + "]";
+    if (t == "dict") {
+        std::string keyn = n->children.size() > 0 ? type_name_for_warning(n->children[0]) : "any";
+        std::string valn = n->children.size() > 1 ? type_name_for_warning(n->children[1]) : "any";
+        return "dict[" + keyn + ", " + valn + "]";
+    }
+    if (t == "none" || t == "is-none") return "None";
+    if (t == "any") return "any";
+    return t;
+}
+
+// Whether a Python value is compatible with the node's declared Python type.
+// Mirrors Rust's ObType::is_type / IsType::False -> warn fallback.  Unknown or
+// permissive node types always return true (no warning).
+bool SerNode::value_matches_type(const SerRef& n, const py::object& v) {
+    if (!n || v.is_none()) return true;
+    const std::string& t = n->type;
+    if (t == "any" || t == "is-instance" || t == "is-subclass") return true;
+    if (t == "int" || t == "int-constrained") return py::isinstance<py::int_>(v);   // bool is an int subclass
+    if (t == "float" || t == "float-constrained") return py::isinstance<py::float_>(v) || py::isinstance<py::int_>(v);
+    if (t == "bool") return py::isinstance<py::bool_>(v);
+    if (t == "str" || t == "string" || t == "str-constrained") return py::isinstance<py::str>(v);
+    if (t == "bytes") return py::isinstance<py::bytes>(v);
+    if (t == "list") return py::isinstance<py::list>(v);
+    if (t == "set") return py::isinstance<py::set>(v);
+    if (t == "frozenset") return py::isinstance<py::frozenset>(v);
+    if (t == "tuple") return py::isinstance<py::tuple>(v);
+    if (t == "dict") return py::isinstance<py::dict>(v);
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // Build serializer from schema
@@ -2402,6 +2585,13 @@ static SerRef build_ser_impl(const py::dict& schema,
                     } else if (cf.contains("alias")) {
                         node->field_aliases[prop] = cf["alias"].cast<std::string>();
                     }
+                    // Computed field serialization_exclude_if (Field(exclude_if=...))
+                    if (cf.contains("serialization_exclude_if")) {
+                        py::object eif = cf["serialization_exclude_if"];
+                        if (py::isinstance<py::function>(eif) || py::hasattr(eif, "__call__")) {
+                            node->field_exclude_if[prop] = eif;
+                        }
+                    }
                     try {
                         node->fields[prop] = build_ser(cf["return_schema"].cast<py::dict>(), defs);
                     } catch (...) {
@@ -2517,8 +2707,10 @@ public:
     py::object to_python(const py::object& value, std::optional<std::string> mode,
                          std::optional<py::object> include, std::optional<py::object> exclude,
                          std::optional<bool> by_alias, bool exclude_unset, bool exclude_defaults, bool exc_none,
-                         bool, bool round_trip, py::object, std::optional<py::object>,
-                         bool, std::optional<bool> polymorphic, py::object context) const {
+                         bool exclude_computed_fields, bool round_trip, py::object warnings, std::optional<py::object> fallback,
+                         bool serialize_as_any, std::optional<bool> polymorphic, py::object context) const {
+        (void)fallback; (void)serialize_as_any;
+        g_exclude_computed_fields = exclude_computed_fields;
         g_polymorphic_serialization = polymorphic;  // reset per call (None -> nullopt)
         if (!ser_) throw std::runtime_error("Serializer not initialized");
 
@@ -2527,14 +2719,24 @@ public:
         py::object exc = (exclude && !exclude->is_none()) ? *exclude : py::none();
         bool use_alias = by_alias.value_or(serialize_by_alias_);
 
-        return ser_->to_python(value, mode && *mode == "json", exc_none, round_trip, inc, exc, use_alias, exclude_unset, exclude_defaults, context);
+        ser_warn_enter(warnings);
+        try {
+            py::object result = ser_->to_python(value, mode && *mode == "json", exc_none, round_trip, inc, exc, use_alias, exclude_unset, exclude_defaults, context);
+            ser_warn_leave(false);  // may emit UserWarning / raise PydanticSerializationError
+            return result;
+        } catch (...) {
+            ser_warn_leave(true);  // discard warnings collected before the error
+            throw;
+        }
     }
 
     py::bytes to_json(const py::object& value, std::optional<size_t>, std::optional<bool> ea,
                       std::optional<py::object> include, std::optional<py::object> exclude,
                       std::optional<bool> by_alias, bool exclude_unset, bool exclude_defaults, bool exc_none,
-                      bool, bool round_trip, py::object, std::optional<py::object>,
-                      bool, std::optional<bool> polymorphic, py::object context) const {
+                      bool exclude_computed_fields, bool round_trip, py::object warnings, std::optional<py::object> fallback,
+                      bool serialize_as_any, std::optional<bool> polymorphic, py::object context) const {
+        (void)fallback; (void)serialize_as_any;
+        g_exclude_computed_fields = exclude_computed_fields;
         g_polymorphic_serialization = polymorphic;  // reset per call (None -> nullopt)
         if (!ser_) throw std::runtime_error("Serializer not initialized");
 
@@ -2544,8 +2746,15 @@ public:
         bool use_alias = by_alias.value_or(serialize_by_alias_);
 
         bool e = ea.value_or(false);
-        std::string json = ser_->to_json(value, e, -1, round_trip, inc, exc, use_alias, exclude_unset, exclude_defaults, exc_none, context);
-        return py::bytes(json);
+        ser_warn_enter(warnings);
+        try {
+            std::string json = ser_->to_json(value, e, -1, round_trip, inc, exc, use_alias, exclude_unset, exclude_defaults, exc_none, context);
+            ser_warn_leave(false);  // may emit UserWarning / raise PydanticSerializationError
+            return py::bytes(json);
+        } catch (...) {
+            ser_warn_leave(true);  // discard warnings collected before the error
+            throw;
+        }
     }
 
     std::string repr() const {
