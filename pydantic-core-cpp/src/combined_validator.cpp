@@ -1402,6 +1402,10 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (!to_lower) to_lower = cfg_bool("str_to_lower");
         std::optional<bool> to_upper = sch_bool("to_upper");
         if (!to_upper) to_upper = cfg_bool("str_to_upper");
+        // Rust: schema_or_config_same — an explicit schema value (even False)
+        // overrides the config value.
+        std::optional<bool> coerce_numbers = sch_bool("coerce_numbers_to_str");
+        if (!coerce_numbers) coerce_numbers = cfg_bool("coerce_numbers_to_str");
         bool has_pattern = schema.contains("pattern") && py::isinstance<py::str>(schema["pattern"]);
         if (min_len || max_len || has_pattern || strip_ws || to_lower || to_upper) {
             auto v = std::make_shared<StrConstrainedValidator>();
@@ -1411,12 +1415,14 @@ static std::shared_ptr<Validator> build_from_py_dict(
             if (strip_ws) v->strip_whitespace = *strip_ws;
             if (to_lower) v->to_lower = *to_lower;
             if (to_upper) v->to_upper = *to_upper;
+            if (coerce_numbers) v->coerce_numbers_to_str = *coerce_numbers;
             return v;
         }
         auto v = std::make_shared<StringValidator>();
         if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
             v->strict = schema["strict"].cast<bool>();
         }
+        if (coerce_numbers) v->coerce_numbers_to_str = *coerce_numbers;
         return v;
     }
 
