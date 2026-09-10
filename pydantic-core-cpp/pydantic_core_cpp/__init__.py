@@ -1085,6 +1085,8 @@ class SchemaValidator:
             return data
 
         if schema.get("type") == "model":
+            if not isinstance(data, dict):
+                return data
             cls = schema.get("cls")
             if cls is None:
                 # Nested inline model schemas have their cls removed during
@@ -1130,6 +1132,8 @@ class SchemaValidator:
         # keep a is b after the dict -> model conversion here).
         if isinstance(data, cls):
             return data
+        if not isinstance(data, dict):
+            return data
         instance = object.__new__(cls)
 
         # Find the definition by ref in the top-level definitions list
@@ -1166,6 +1170,10 @@ class SchemaValidator:
         fields = fields_schema.get("fields", {})
         extras_schema = fields_schema.get("extras_schema")
         if not isinstance(fields, dict):
+            return data
+        # A union may offer a model choice for a value that is plainly not a
+        # mapping (e.g. a list of items); leave it for the next choice.
+        if not isinstance(data, dict):
             return data
 
         result = dict(data)
