@@ -7,6 +7,7 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include "speedate.hpp"
 #include "types.hpp"
 #include "error_types.hpp"
 #include "errors.hpp"
@@ -130,37 +131,6 @@ struct EitherFloat {
     double as_double() const { return value; }
 };
 
-// Date representation (year-month-day without timezone)
-struct Date {
-    int year;
-    int month;
-    int day;
-};
-
-// Time representation (hour-minute-second with optional microsecond and timezone offset)
-struct Time {
-    int hour;
-    int minute;
-    int second;
-    int microsecond = 0;
-    std::optional<int> tz_offset;  // UTC offset in minutes, None = unknown
-};
-
-// DateTime representation (Date + Time + optional timezone)
-struct DateTime {
-    Date date;
-    Time time;
-
-    int year() const { return date.year; }
-    int month() const { return date.month; }
-    int day() const { return date.day; }
-    int hour() const { return time.hour; }
-    int minute() const { return time.minute; }
-    int second() const { return time.second; }
-    int microsecond() const { return time.microsecond; }
-    std::optional<int> tz_offset() const { return time.tz_offset; }
-};
-
 // Either types for date/time validation results
 struct EitherDate {
     Date value;
@@ -194,13 +164,6 @@ struct EitherDateTime {
     explicit EitherDateTime(DateTime dt) : value(dt) {}
 
     DateTime as_raw() const { return value; }
-};
-
-// Timedelta representation (days/seconds/microseconds, like Python's timedelta)
-struct Timedelta {
-    int days = 0;
-    int seconds = 0;
-    int microseconds = 0;
 };
 
 struct EitherTimedelta {
@@ -413,8 +376,12 @@ public:
     virtual bool is_date() const { return false; }
     virtual bool is_datetime() const { return false; }
     virtual bool is_time() const { return false; }
-    virtual ValResult<ValMatch<EitherDate>> validate_date(bool strict) const = 0;
-    virtual ValResult<ValMatch<EitherDateTime>> validate_datetime(bool strict) const = 0;
+    // `unit` is the `val_temporal_unit` config: it decides whether a bare
+    // number is seconds or milliseconds since the epoch.
+    virtual ValResult<ValMatch<EitherDate>> validate_date(
+        bool strict, TimestampUnit unit = TimestampUnit::Infer) const = 0;
+    virtual ValResult<ValMatch<EitherDateTime>> validate_datetime(
+        bool strict, TimestampUnit unit = TimestampUnit::Infer) const = 0;
     virtual ValResult<ValMatch<EitherTime>> validate_time(bool strict) const = 0;
     virtual ValResult<ValMatch<EitherTimedelta>> validate_timedelta(bool strict) const = 0;
 

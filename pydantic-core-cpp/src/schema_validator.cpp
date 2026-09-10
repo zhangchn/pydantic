@@ -67,6 +67,11 @@ SchemaValidator::SchemaValidator(const py::dict& schema,
         else config_.extra_behavior = ExtraBehavior::Ignore;
     }
     config_.cache_strings = StringCacheMode::All;
+    if (config.contains("val_temporal_unit") && !config["val_temporal_unit"].is_none()) {
+        bool ok = false;
+        config_.val_temporal_unit = timestamp_unit_from_string(
+            config["val_temporal_unit"].cast<std::string>(), &ok);
+    }
 
     // Parse hide_input_in_errors from the Python config dict
     if (config.contains("hide_input_in_errors") && !config["hide_input_in_errors"].is_none()) {

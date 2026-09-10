@@ -2,6 +2,7 @@
 
 #include <optional>
 #include <string>
+#include "speedate.hpp"
 #include "types.hpp"
 #include "recursion_guard.hpp"
 
@@ -25,6 +26,7 @@ public:
         StringCacheMode cache_strings = StringCacheMode::All;
         std::optional<bool> by_alias;
         std::optional<bool> by_name;
+        TimestampUnit val_temporal_unit = TimestampUnit::Infer;
     };
     
     ValidationState() = default;
@@ -55,6 +57,7 @@ public:
     void set_by_alias(bool value) { config_.by_alias = value; }
     std::optional<bool> by_name() const { return config_.by_name; }
     void set_by_name(bool value) { config_.by_name = value; }
+    TimestampUnit val_temporal_unit() const { return config_.val_temporal_unit; }
     
     // Determine strict mode - use state setting or validator's default
     bool strict_or(bool default_strict) const {

@@ -113,6 +113,7 @@ endif()
 # ---------------------------------------------------------------------------
 
 set(CORE_SOURCES
+    src/speedate.cpp
     src/errors/errors.cpp
     src/errors/error_types.cpp
     src/recursion_guard.cpp
@@ -195,6 +196,7 @@ if(NOT SKBUILD)
 
     # Test validators
     add_executable(test_validators tests/test_validators.cpp
+        src/speedate.cpp
         src/errors/errors.cpp
         src/errors/error_types.cpp
         src/recursion_guard.cpp
@@ -229,6 +231,7 @@ if(NOT SKBUILD)
 
     # Test integration
     add_executable(test_integration tests/test_integration.cpp
+        src/speedate.cpp
         src/errors/errors.cpp
         src/errors/error_types.cpp
         src/recursion_guard.cpp
@@ -250,6 +253,7 @@ if(NOT SKBUILD)
 
     # Test model/typed-dict/dataclass validators
     add_executable(test_model_fields tests/test_model_fields.cpp
+        src/speedate.cpp
         src/errors/errors.cpp
         src/errors/error_types.cpp
         src/recursion_guard.cpp
@@ -270,6 +274,7 @@ if(NOT SKBUILD)
 
     # Constrained validators test suite
     add_executable(test_constrained_validators tests/test_constrained_validators.cpp
+        src/speedate.cpp
         src/errors/errors.cpp
         src/errors/error_types.cpp
         src/recursion_guard.cpp
@@ -290,6 +295,7 @@ if(NOT SKBUILD)
 
     # Test suite: New validators and features
     add_executable(test_new_validators tests/test_new_validators.cpp
+        src/speedate.cpp
         src/combined_validator.cpp
         src/validator.cpp
         src/errors/errors.cpp
@@ -308,6 +314,7 @@ if(NOT SKBUILD)
 
     # Test suite: PythonInput (native Python object validation)
     add_executable(test_python_input tests/test_python_input.cpp
+        src/speedate.cpp
         src/input/python_input.cpp
         src/errors/errors.cpp
         src/errors/error_types.cpp
@@ -319,4 +326,13 @@ if(NOT SKBUILD)
     target_include_directories(test_python_input PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
     add_test(NAME PythonInput COMMAND test_python_input)
+
+    # Test suite: speedate (pure C++ temporal parsing rules; no pybind11)
+    add_executable(test_speedate tests/test_speedate.cpp
+        src/speedate.cpp
+    )
+    target_link_libraries(test_speedate PRIVATE doctest::doctest)
+    target_include_directories(test_speedate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+    add_test(NAME Speedate COMMAND test_speedate)
 endif()

@@ -203,10 +203,6 @@ std::string ErrorType::message_template() const {
         {Kind::FrozenField, "Field is frozen"},
         {Kind::FrozenInstance, "Instance is frozen"},
         {Kind::UnionType, "Input should match one of the expected types"},
-        {Kind::DateType, "Input should be a valid date in YYYY-MM-DD format"},
-        {Kind::TimeType, "Input should be a valid time in HH:MM:SS format"},
-        {Kind::DateTimeType, "Input should be a valid datetime"},
-
         // Parsing errors
         {Kind::BoolParsing, "Input should be a valid boolean, unable to interpret input"},
         {Kind::IntParsing, "Input should be a valid integer, unable to parse string as an integer"},
@@ -314,16 +310,16 @@ std::string ErrorType::message_template() const {
 
         // Date/Time errors
         {Kind::DateType, "Input should be a valid date"},
-        {Kind::DateParsing, "Input should be a valid date in YYYY-MM-DD format"},
+        {Kind::DateParsing, "Input should be a valid date in the format YYYY-MM-DD, {error}"},
         {Kind::DateFromDatetimeParsing, "Input should be a valid date or datetime, {error}"},
-        {Kind::DateFromDatetimeInexact, "Input should be a date with no time component"},
+        {Kind::DateFromDatetimeInexact, "Datetimes provided to dates should have zero time - e.g. be exact dates"},
         {Kind::DatePast, "Date should be in the past"},
         {Kind::DateFuture, "Date should be in the future"},
         {Kind::TimeType, "Input should be a valid time"},
-        {Kind::TimeParsing, "Input should be a valid time in HH:MM:SS format"},
+        {Kind::TimeParsing, "Input should be in a valid time format, {error}"},
         {Kind::DateTimeType, "Input should be a valid datetime"},
         {Kind::DateTimeParsing, "Input should be a valid datetime, {error}"},
-        {Kind::DatetimeFromDateParsing, "Input should be a valid datetime, unable to parse date as datetime"},
+        {Kind::DatetimeFromDateParsing, "Input should be a valid datetime or date, {error}"},
         {Kind::DatetimeObjectInvalid, "Invalid datetime object"},
         {Kind::DatetimePast, "Input should be in the past"},
         {Kind::DatetimeFuture, "Input should be in the future"},

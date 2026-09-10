@@ -1460,7 +1460,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
 
     // --- Date/time validators ---
     if (type == "date") {
-        auto v = std::make_shared<DateValidator>();
+        auto v = std::make_shared<DateValidator>(py_bool(schema, "strict"));
         for (const char* k : {"gt", "lt", "ge", "le"}) {
             if (schema.contains(k) && !schema[k].is_none()) {
                 if (std::string(k) == "gt") v->gt = schema[k];
@@ -1475,7 +1475,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
         return v;
     }
     if (type == "time") {
-        auto v = std::make_shared<TimeValidator>();
+        auto v = std::make_shared<TimeValidator>(py_bool(schema, "strict"));
         for (const char* k : {"gt", "lt", "ge", "le"}) {
             if (schema.contains(k) && !schema[k].is_none()) {
                 if (std::string(k) == "gt") v->gt = schema[k];
@@ -1487,7 +1487,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
         return v;
     }
     if (type == "datetime") {
-        auto v = std::make_shared<DatetimeValidator>();
+        auto v = std::make_shared<DatetimeValidator>(py_bool(schema, "strict"));
         for (const char* k : {"gt", "lt", "ge", "le"}) {
             if (schema.contains(k) && !schema[k].is_none()) {
                 if (std::string(k) == "gt") v->gt = schema[k];
@@ -1504,7 +1504,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
         }
         return v;
     }
-    if (type == "timedelta") return std::make_shared<TimedeltaValidator>();
+    if (type == "timedelta") return std::make_shared<TimedeltaValidator>(py_bool(schema, "strict"));
 
     // --- URL validators ---
     if (type == "url") {

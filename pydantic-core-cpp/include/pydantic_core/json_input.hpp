@@ -30,8 +30,8 @@ public:
     ValResult<ValMatch<EitherFloat>> validate_float(bool strict) const override;
 
     // Date/time validation
-    ValResult<ValMatch<EitherDate>> validate_date(bool strict) const override;
-    ValResult<ValMatch<EitherDateTime>> validate_datetime(bool strict) const override;
+    ValResult<ValMatch<EitherDate>> validate_date(bool strict, TimestampUnit unit) const override;
+    ValResult<ValMatch<EitherDateTime>> validate_datetime(bool strict, TimestampUnit unit) const override;
     ValResult<ValMatch<EitherTime>> validate_time(bool strict) const override;
     ValResult<ValMatch<EitherTimedelta>> validate_timedelta(bool strict) const override;
     

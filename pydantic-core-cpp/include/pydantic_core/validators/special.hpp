@@ -218,6 +218,84 @@ static std::optional<ValError> apply_temporal_constraints(
     return std::nullopt;
 }
 
+// ---------------------------------------------------------------------------
+// Date/datetime cross-retries
+// ---------------------------------------------------------------------------
+// pydantic-core lets a date and a datetime schema fall back to each other
+// before giving up, and reclassifies the parsing error accordingly. Doing the
+// same here is what makes `date_from_datetime_parsing` and
+// `datetime_from_date_parsing` appear instead of the plain parsing errors.
+
+// Rewrites a parsing line error to `reclassified` in place, keeping its
+// document text. Returns false when no parsing error was present.
+inline bool reclassify_parsing_error(ValError& error, ErrorType::Kind from,
+                                     ErrorType::Kind to) {
+    if (!error.has_line_errors()) return false;
+    bool found = false;
+    for (const auto& line : error.line_errors()) {
+        if (line->error_type.kind() != from) continue;
+        auto it = line->error_type.context().find("error");
+        std::string document = it != line->error_type.context().end() ? it->second : std::string();
+        line->error_type = ErrorType(to, "error", std::move(document));
+        found = true;
+    }
+    return found;
+}
+
+// Outcome of a cross-retry: either the value recovered from the other type, an
+// error that replaces the original one, or neither (keep the original errors).
+template <class T>
+struct CrossRetry {
+    std::optional<T> value;
+    std::optional<ValError> error;
+};
+
+// A datetime at midnight is a valid date; anything else is
+// date_from_datetime_inexact. Mirrors date.rs::date_from_datetime.
+inline CrossRetry<EitherDate> date_from_datetime(const Input& input, TimestampUnit unit) {
+    CrossRetry<EitherDate> out;
+    auto dt_result = input.validate_datetime(false, unit);
+    if (dt_result.is_err()) {
+        ValError& error = dt_result.error();
+        if (reclassify_parsing_error(error, ErrorType::Kind::DateTimeParsing,
+                                     ErrorType::Kind::DateFromDatetimeParsing)) {
+            out.error = std::move(error);
+        }
+        return out;
+    }
+    DateTime dt = dt_result.value().value().value;
+    Time zero{0, 0, 0, 0, dt.time.tz_offset};
+    if (dt.time == zero) {
+        EitherDate either_date(dt.date);
+        either_date.is_lax = true;
+        out.value = either_date;
+    } else {
+        out.error = ValError::line_error(
+            ErrorType(ErrorType::Kind::DateFromDatetimeInexact),
+            input.current_location(), input.as_error_value().repr);
+    }
+    return out;
+}
+
+// A bare date is a valid datetime extended to midnight. Mirrors
+// datetime.rs::datetime_from_date, including its use of the default
+// (infer) unit rather than the configured one.
+inline CrossRetry<EitherDateTime> datetime_from_date(const Input& input) {
+    CrossRetry<EitherDateTime> out;
+    auto date_result = input.validate_date(false, TimestampUnit::Infer);
+    if (date_result.is_err()) {
+        ValError& error = date_result.error();
+        if (reclassify_parsing_error(error, ErrorType::Kind::DateParsing,
+                                     ErrorType::Kind::DatetimeFromDateParsing)) {
+            out.error = std::move(error);
+        }
+        return out;
+    }
+    out.value = EitherDateTime(DateTime{date_result.value().value().value,
+                                        Time{0, 0, 0, 0, std::nullopt}});
+    return out;
+}
+
 // DateValidator - validates date values
 class DateValidator : public Validator {
 public:
@@ -233,13 +311,32 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        auto result = input.validate_date(state.strict_or(strict_));
+        bool strict = state.strict_or(strict_);
+        auto result = input.validate_date(strict, state.val_temporal_unit());
         if (result.is_err()) {
-            // Preserve the specific error kind (date_parsing, date_from_datetime_inexact, etc.)
-            return result.error();
+            if (!strict) {
+                auto retry = date_from_datetime(input, state.val_temporal_unit());
+                if (retry.value) {
+                    result = ValMatch<EitherDate>::lax(std::move(*retry.value));
+                } else if (retry.error) {
+                    return std::move(*retry.error);
+                } else {
+                    return result.error();
+                }
+            } else {
+                return result.error();
+            }
         }
         auto match = std::move(result.value());
         Date d = match.value().value;
+
+        // Python has no year 0, so pydantic-core turns it into a parsing error
+        // instead of letting the datetime constructor raise.
+        if (d.year == 0) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::DateParsing, "error", "year 0 is out of range"),
+                input.current_location(), input.as_error_value().repr);
+        }
 
         // Apply gt/lt/ge/le constraints
         try {
@@ -341,12 +438,30 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        auto result = input.validate_datetime(state.strict_or(strict_));
+        bool strict = state.strict_or(strict_);
+        auto result = input.validate_datetime(strict, state.val_temporal_unit());
         if (result.is_err()) {
-            return result.error();
+            if (!strict) {
+                auto retry = datetime_from_date(input);
+                if (retry.value) {
+                    result = ValMatch<EitherDateTime>::lax(std::move(*retry.value));
+                } else if (retry.error) {
+                    return std::move(*retry.error);
+                } else {
+                    return result.error();
+                }
+            } else {
+                return result.error();
+            }
         }
         auto match = std::move(result.value());
         DateTime dt = match.value().value;
+
+        if (dt.date.year == 0) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::DateTimeParsing, "error", "year 0 is out of range"),
+                input.current_location(), input.as_error_value().repr);
+        }
 
         try {
             py::object py_dt = datetime_to_python_obj(dt);

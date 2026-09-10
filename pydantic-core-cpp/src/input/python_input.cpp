@@ -746,127 +746,72 @@ ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> PythonInput::validate_tuple
 }
 
 // ============================================================================
-// ISO 8601 parsing helpers
-// ============================================================================
-
-// Parse up to `max_digits` decimal digits starting at `pos`.
-// Advances `pos` and sets `out`. Returns false if no digit was consumed.
-static bool parse_int_field(const std::string& s, size_t& pos, int max_digits, int& out) {
-    if (pos >= s.size() || !std::isdigit(static_cast<unsigned char>(s[pos]))) return false;
-    int val = 0;
-    int digits = 0;
-    while (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos])) && digits < max_digits) {
-        val = val * 10 + (s[pos] - '0');
-        pos++;
-        digits++;
-    }
-    out = val;
-    return true;
-}
-
-/// Parse an ISO 8601 datetime string (speedate-compatible subset).
-/// Accepts:
-///   YYYY-MM-DD
-///   YYYY-MM-DD<T|space>HH:MM[:SS[.ffffff]][Z|±HH[:MM[:SS]]]
-/// Seconds and the time component are optional (matching speedate/Rust).
-static std::optional<DateTime> try_parse_iso8601(const std::string& s) {
-    size_t pos = 0;
-    // Optional leading '+' (speedate allows it)
-    if (pos < s.size() && s[pos] == '+') pos++;
-
-    int year, month, day;
-    if (!parse_int_field(s, pos, 4, year)) return std::nullopt;
-    if (pos >= s.size() || s[pos] != '-') return std::nullopt;
-    pos++;
-    if (!parse_int_field(s, pos, 2, month)) return std::nullopt;
-    if (pos >= s.size() || s[pos] != '-') return std::nullopt;
-    pos++;
-    if (!parse_int_field(s, pos, 2, day)) return std::nullopt;
-
-    if (month < 1 || month > 12 || day < 1 || day > 31) return std::nullopt;
-
-    int hour = 0, minute = 0, second = 0, microsecond = 0;
-    std::optional<int> tz_offset;
-
-    if (pos < s.size()) {
-        // Date/time separator: T, t, or space
-        char sep = s[pos];
-        if (sep != 'T' && sep != 't' && sep != ' ') return std::nullopt;
-        pos++;
-        if (!parse_int_field(s, pos, 2, hour)) return std::nullopt;
-        if (pos >= s.size() || s[pos] != ':') return std::nullopt;
-        pos++;
-        if (!parse_int_field(s, pos, 2, minute)) return std::nullopt;
-        if (hour > 23 || minute > 59) return std::nullopt;
-
-        if (pos < s.size() && s[pos] == ':') {
-            pos++;
-            if (!parse_int_field(s, pos, 2, second)) return std::nullopt;
-            if (second > 59) return std::nullopt;
-            // Optional fractional seconds
-            if (pos < s.size() && s[pos] == '.') {
-                pos++;
-                std::string frac;
-                while (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos]))) {
-                    frac += s[pos];
-                    pos++;
-                }
-                if (frac.empty()) return std::nullopt;
-                if (frac.size() > 6) frac = frac.substr(0, 6);
-                while (frac.size() < 6) frac += '0';
-                microsecond = std::stoi(frac);
-            }
-        }
-
-        // Optional timezone
-        if (pos < s.size()) {
-            char c = s[pos];
-            if (c == 'Z' || c == 'z') {
-                tz_offset = 0;
-            } else if (c == '+' || c == '-') {
-                char sign = c;
-                pos++;
-                int tzh, tzm = 0, tzs = 0;
-                if (!parse_int_field(s, pos, 2, tzh)) return std::nullopt;
-                if (pos < s.size() && s[pos] == ':') pos++;
-                if (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos]))) {
-                    if (!parse_int_field(s, pos, 2, tzm)) return std::nullopt;
-                    if (pos < s.size() && s[pos] == ':') {
-                        pos++;
-                        if (!parse_int_field(s, pos, 2, tzs)) return std::nullopt;
-                    }
-                }
-                // C++ convention: tz_offset is in MINUTES (consumers build
-                // timedelta(minutes=...)), matching the rest of this codebase.
-                int offset = tzh * 60 + tzm + tzs / 60;
-                tz_offset = (sign == '-') ? -offset : offset;
-            } else {
-                return std::nullopt;
-            }
-        }
-    }
-
-    if (pos != s.size()) return std::nullopt;
-
-    return DateTime{Date{year, month, day}, Time{hour, minute, second, microsecond, tz_offset}};
-}
-
-// ============================================================================
 // Date/time validation
 // ============================================================================
+//
+// Parsing itself lives in the speedate port (speedate.hpp); these methods only
+// decide which representation an input carries and which error kind to report.
+// The dispatch order and error kinds mirror pydantic-core's input_python.rs.
 
-ValResult<ValMatch<EitherDate>> PythonInput::validate_date(bool strict) const {
+namespace {
+
+// str and bytes share one code path: pydantic-core feeds bytes to the same
+// parser instead of rejecting them.
+std::optional<std::string> python_text_as_bytes(const PythonInput& input) {
+    if (input.is_str()) return input.as_str();
+    if (input.is_bytes()) return py::bytes(input.as_python_object()).cast<std::string>();
+    return std::nullopt;
+}
+
+// Python ints wider than int64 must fall through to the float path, matching
+// pydantic-core's `extract::<i64>()` followed by `extract::<f64>()`.
+bool python_int_as_i64(py::handle obj, int64_t& out) {
+    try {
+        out = obj.cast<int64_t>();
+        return true;
+    } catch (py::error_already_set&) {
+        PyErr_Clear();
+    } catch (py::cast_error&) {
+        // pybind11 reports an out-of-range Python int as cast_error, not as a
+        // raised Python exception.
+    }
+    return false;
+}
+
+}  // namespace
+
+ValResult<ValMatch<EitherDate>> PythonInput::validate_date(bool strict, TimestampUnit unit) const {
+    // datetime subclasses date, so it must be ruled out first: a datetime input
+    // is a date_type error here, not a silently-truncated date.
+    if (is_datetime()) {
+        return type_error(ErrorType::Kind::DateType, *this, this->current_location());
+    }
     if (is_date()) {
-        // Extract year/month/day from a Python datetime.date object
         py::object py_date = obj_;
         int year = py_date.attr("year").cast<int>();
         int month = py_date.attr("month").cast<int>();
         int day = py_date.attr("day").cast<int>();
         return ValMatch<EitherDate>::exact(EitherDate(Date{year, month, day}));
     }
+    if (!strict) {
+        if (auto text = python_text_as_bytes(*this)) {
+            auto parsed = parse_date_bytes(text->data(), text->size(), unit);
+            if (parsed.ok) {
+                return ValMatch<EitherDate>::lax(EitherDate(parsed.value));
+            }
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::DateParsing, "error", parsed.error),
+                this->current_location(),
+                this->as_error_value().repr
+            );
+        }
+    }
+    return type_error(ErrorType::Kind::DateType, *this, this->current_location());
+}
 
-    if (is_datetime() && !strict) {
-        // Lax mode: extract date part from datetime
+ValResult<ValMatch<EitherDateTime>> PythonInput::validate_datetime(
+    bool strict, TimestampUnit unit) const {
+    if (is_datetime()) {
         py::object py_dt = obj_;
         int year = py_dt.attr("year").cast<int>();
         int month = py_dt.attr("month").cast<int>();
@@ -876,105 +821,12 @@ ValResult<ValMatch<EitherDate>> PythonInput::validate_date(bool strict) const {
         int second = py_dt.attr("second").cast<int>();
         int microsecond = py_dt.attr("microsecond").cast<int>();
 
-        // Check if time component is zero (midnight)
-        if (hour == 0 && minute == 0 && second == 0 && microsecond == 0) {
-            return ValMatch<EitherDate>::lax(EitherDate(Date{year, month, day}));
-        }
-        // Non-zero time component
-        return ValError::line_error(
-            ErrorType(ErrorType::Kind::DateFromDatetimeInexact),
-            this->current_location(),
-            this->as_error_value().repr
-        );
-    }
-
-    if (is_str() && !strict) {
-        // Lax mode: try to parse ISO 8601 date string
-        std::string s = as_str();
-        try {
-            // Parse YYYY-MM-DD
-            if (s.size() >= 10 && s[4] == '-' && s[7] == '-') {
-                int year = std::stoi(s.substr(0, 4));
-                int month = std::stoi(s.substr(5, 2));
-                int day = std::stoi(s.substr(8, 2));
-                // Validate month/day ranges
-                if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-                    // Check for trailing time component
-                    if (s.size() > 10) {
-                        // Has time component - validate it's midnight
-                        if (s.size() >= 19) {
-                            int hour = std::stoi(s.substr(11, 2));
-                            int min = std::stoi(s.substr(14, 2));
-                            int sec = std::stoi(s.substr(17, 2));
-                            if (hour == 0 && min == 0 && sec == 0) {
-                                return ValMatch<EitherDate>::lax(EitherDate(Date{year, month, day}));
-                            }
-                        }
-                        // Try full datetime parsing, then check it's exact date
-                        // Try to parse as full ISO datetime
-                        auto dt_result = try_parse_iso8601(s);
-                        if (dt_result) {
-                            auto& dt = *dt_result;
-                            if (dt.time.hour == 0 && dt.time.minute == 0 &&
-                                dt.time.second == 0 && dt.time.microsecond == 0) {
-                                return ValMatch<EitherDate>::lax(EitherDate(dt.date));
-                            }
-                            return ValError::line_error(
-                                ErrorType(ErrorType::Kind::DateFromDatetimeInexact),
-                                this->current_location(),
-                                this->as_error_value().repr
-                            );
-                        }
-                    }
-                    return ValMatch<EitherDate>::lax(EitherDate(Date{year, month, day}));
-                }
-            }
-        } catch (...) {}
-        return ValError::line_error(
-            ErrorType(ErrorType::Kind::DateParsing),
-            this->current_location(),
-            this->as_error_value().repr
-        );
-    }
-
-    // NaN float input -> date_from_datetime_parsing (Rust behavior)
-    if (is_float() && !strict) {
-        double ts = as_float();
-        if (std::isnan(ts)) {
-            return ValError::line_error(
-                ErrorType(ErrorType::Kind::DateFromDatetimeParsing, "error", "NaN values not permitted"),
-                this->current_location(),
-                this->as_error_value().repr
-            );
-        }
-    }
-
-    return type_error(ErrorType::Kind::DateType, *this, this->current_location());
-}
-
-ValResult<ValMatch<EitherDateTime>> PythonInput::validate_datetime(bool strict) const {
-    if (is_datetime()) {
-        // Extract from Python datetime.datetime object
-        py::object py_dt = obj_;
-        int year = py_dt.attr("year").cast<int>();
-        int month = py_dt.attr("month").cast<int>();
-        int day = py_dt.attr("day").cast<int>();
-        int hour = py_dt.attr("hour").cast<int>();
-        int minute = py_dt.attr("minute").cast<int>();
-        int second = py_dt.attr("second").cast<int>();
-        int microsecond = 0;
-        if (py_hasattr(py_dt, "microsecond")) {
-            microsecond = py_dt.attr("microsecond").cast<int>();
-        }
-
-        // Extract timezone offset if available
         std::optional<int> tz_offset;
         if (py_hasattr(py_dt, "tzinfo") && !py_dt.attr("tzinfo").is_none()) {
             py::object tzinfo = py_dt.attr("tzinfo");
             if (py_hasattr(tzinfo, "utcoffset")) {
                 py::object offset = tzinfo.attr("utcoffset")(py_dt);
                 if (!offset.is_none()) {
-                    // Convert timedelta to minutes
                     tz_offset = static_cast<int>(offset.attr("total_seconds")().cast<double>() / 60);
                 }
             }
@@ -988,60 +840,55 @@ ValResult<ValMatch<EitherDateTime>> PythonInput::validate_datetime(bool strict) 
         return ValMatch<EitherDateTime>::exact(std::move(edt));
     }
 
-    if (is_date() && !strict) {
-        // Lax mode: extend date with time 00:00:00
-        py::object py_date = obj_;
-        int year = py_date.attr("year").cast<int>();
-        int month = py_date.attr("month").cast<int>();
-        int day = py_date.attr("day").cast<int>();
-        DateTime dt = {Date{year, month, day}, Time{0, 0, 0, 0, std::nullopt}};
-        return ValMatch<EitherDateTime>::lax(EitherDateTime(dt));
-    }
-
-    if ((is_int() || is_float()) && !strict) {
-        // Lax mode: unix timestamp -> UTC datetime
-        double ts = is_int() ? static_cast<double>(as_int()) : as_float();
-        if (std::isnan(ts)) {
+    if (!strict) {
+        if (auto text = python_text_as_bytes(*this)) {
+            auto parsed = parse_datetime_bytes(text->data(), text->size(), unit);
+            if (parsed.ok) {
+                return ValMatch<EitherDateTime>::lax(EitherDateTime(parsed.value));
+            }
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::DateTimeParsing, "error", "NaN values not permitted"),
+                ErrorType(ErrorType::Kind::DateTimeParsing, "error", parsed.error),
                 this->current_location(),
                 this->as_error_value().repr
             );
         }
-        try {
-            py::object dt_mod = py::module_::import("datetime");
-            py::object utc = dt_mod.attr("timezone").attr("utc");
-            py::object py_dt = dt_mod.attr("datetime").attr("fromtimestamp")(ts, utc);
-            int year = py_dt.attr("year").cast<int>();
-            int month = py_dt.attr("month").cast<int>();
-            int day = py_dt.attr("day").cast<int>();
-            int hour = py_dt.attr("hour").cast<int>();
-            int minute = py_dt.attr("minute").cast<int>();
-            int second = py_dt.attr("second").cast<int>();
-            int microsecond = py_dt.attr("microsecond").cast<int>();
-            DateTime dt = {Date{year, month, day}, Time{hour, minute, second, microsecond, 0}};
+        if (is_int()) {
+            int64_t timestamp = 0;
+            ParseOutcome<DateTime> parsed =
+                python_int_as_i64(obj_, timestamp)
+                    ? datetime_from_timestamp(timestamp, 0, unit)
+                    // Wider than int64: pydantic-core retries as a float, which
+                    // reports the same out-of-range documents.
+                    : datetime_from_float(obj_.cast<double>(), unit);
+            if (parsed.ok) {
+                return ValMatch<EitherDateTime>::lax(EitherDateTime(parsed.value));
+            }
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::DateTimeParsing, "error", parsed.error),
+                this->current_location(),
+                this->as_error_value().repr
+            );
+        }
+        if (is_float()) {
+            auto parsed = datetime_from_float(as_float(), unit);
+            if (parsed.ok) {
+                return ValMatch<EitherDateTime>::lax(EitherDateTime(parsed.value));
+            }
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::DateTimeParsing, "error", parsed.error),
+                this->current_location(),
+                this->as_error_value().repr
+            );
+        }
+        if (is_date()) {
+            // date_as_datetime: the date extended to midnight with no tzinfo.
+            py::object py_date = obj_;
+            int year = py_date.attr("year").cast<int>();
+            int month = py_date.attr("month").cast<int>();
+            int day = py_date.attr("day").cast<int>();
+            DateTime dt = {Date{year, month, day}, Time{0, 0, 0, 0, std::nullopt}};
             return ValMatch<EitherDateTime>::lax(EitherDateTime(dt));
-        } catch (py::error_already_set&) {
-            return ValError::line_error(
-                ErrorType(ErrorType::Kind::DateTimeParsing, "error", "unable to parse"),
-                this->current_location(),
-                this->as_error_value().repr
-            );
         }
-    }
-
-    if (is_str() && !strict) {
-        // Lax mode: try to parse ISO 8601 datetime string
-        std::string s = as_str();
-        auto parsed = try_parse_iso8601(s);
-        if (parsed) {
-            return ValMatch<EitherDateTime>::lax(EitherDateTime(*parsed));
-        }
-        return ValError::line_error(
-            ErrorType(ErrorType::Kind::DateTimeParsing, "error", "unable to parse"),
-            this->current_location(),
-            this->as_error_value().repr
-        );
     }
 
     return type_error(ErrorType::Kind::DateTimeType, *this, this->current_location());
@@ -1049,15 +896,11 @@ ValResult<ValMatch<EitherDateTime>> PythonInput::validate_datetime(bool strict) 
 
 ValResult<ValMatch<EitherTime>> PythonInput::validate_time(bool strict) const {
     if (is_time()) {
-        // Extract from Python datetime.time object
         py::object py_time = obj_;
         int hour = py_time.attr("hour").cast<int>();
         int minute = py_time.attr("minute").cast<int>();
         int second = py_time.attr("second").cast<int>();
-        int microsecond = 0;
-        if (py_hasattr(py_time, "microsecond")) {
-            microsecond = py_time.attr("microsecond").cast<int>();
-        }
+        int microsecond = py_time.attr("microsecond").cast<int>();
         std::optional<int> tz_offset;
         if (py_hasattr(py_time, "tzinfo") && !py_time.attr("tzinfo").is_none()) {
             py::object tzinfo = py_time.attr("tzinfo");
@@ -1068,34 +911,50 @@ ValResult<ValMatch<EitherTime>> PythonInput::validate_time(bool strict) const {
                 }
             }
         }
-        return ValMatch<EitherTime>::exact(EitherTime(Time{hour, minute, second, microsecond, tz_offset}));
+        return ValMatch<EitherTime>::exact(
+            EitherTime(Time{hour, minute, second, microsecond, tz_offset}));
     }
 
-    if (is_str() && !strict) {
-        // Lax mode: try to parse ISO 8601 time string (HH:MM:SS or HH:MM:SS.mmmmmm)
-        std::string s = as_str();
-        try {
-            // Parse HH:MM:SS[.microseconds]
-            if (s.size() >= 8 && s[2] == ':' && s[5] == ':') {
-                int hour = std::stoi(s.substr(0, 2));
-                int minute = std::stoi(s.substr(3, 2));
-                int second = std::stoi(s.substr(6, 2));
-                int microsecond = 0;
-                if (s.size() > 8 && s[8] == '.') {
-                    std::string frac = s.substr(9);
-                    // Pad or truncate to 6 digits
-                    if (frac.size() > 6) frac = frac.substr(0, 6);
-                    while (frac.size() < 6) frac += '0';
-                    microsecond = std::stoi(frac);
-                }
-                return ValMatch<EitherTime>::lax(EitherTime(Time{hour, minute, second, microsecond, std::nullopt}));
+    if (!strict) {
+        if (auto text = python_text_as_bytes(*this)) {
+            auto parsed = parse_time_bytes(text->data(), text->size());
+            if (parsed.ok) {
+                return ValMatch<EitherTime>::lax(EitherTime(parsed.value));
             }
-        } catch (...) {}
-        return ValError::line_error(
-            ErrorType(ErrorType::Kind::TimeParsing),
-            this->current_location(),
-            this->as_error_value().repr
-        );
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::TimeParsing, "error", parsed.error),
+                this->current_location(),
+                this->as_error_value().repr
+            );
+        }
+        if (is_int()) {
+            int64_t seconds = 0;
+            ParseOutcome<Time> parsed =
+                python_int_as_i64(obj_, seconds)
+                    ? time_from_timestamp(seconds, 0)
+                    // Wider than int64: pydantic-core retries as a float, which
+                    // reports the sign document before the magnitude limit.
+                    : time_from_float(obj_.cast<double>());
+            if (parsed.ok) {
+                return ValMatch<EitherTime>::lax(EitherTime(parsed.value));
+            }
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::TimeParsing, "error", parsed.error),
+                this->current_location(),
+                this->as_error_value().repr
+            );
+        }
+        if (is_float()) {
+            auto parsed = time_from_float(as_float());
+            if (parsed.ok) {
+                return ValMatch<EitherTime>::lax(EitherTime(parsed.value));
+            }
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::TimeParsing, "error", parsed.error),
+                this->current_location(),
+                this->as_error_value().repr
+            );
+        }
     }
 
     return type_error(ErrorType::Kind::TimeType, *this, this->current_location());
