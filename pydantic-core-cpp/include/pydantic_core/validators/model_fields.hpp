@@ -1282,6 +1282,14 @@ public:
         return "";
     }
 
+    // Result conversion adds exactly one "maybe_wrapper:" marker; a name that
+    // already carries one would survive substr() and match no handler.
+    static std::string strip_wrapper_marker(const std::string& name) {
+        constexpr std::string_view prefix = "maybe_wrapper:";
+        if (name.rfind(prefix, 0) == 0) return name.substr(prefix.size());
+        return name;
+    }
+
     std::string effective_result_name() const override {
         std::string base_name;
         if (fields_validator_) {
@@ -1297,8 +1305,11 @@ public:
                 base_name = fields_validator_->effective_result_name();
             } else if (root_model_) {
                 // Root model result is the inner validator's value type
-                // (recursively resolved for nested root models)
-                auto inner = fields_validator_->root_model_inner_name();
+                // (recursively resolved for nested root models). Must go through
+                // root_model_inner_name(): the inner validator's name() can
+                // disagree with what it stores (a tagged union stores a
+                // py::object but reports "tagged-union").
+                std::string inner = root_model_inner_name();
                 if (!inner.empty()) {
                     base_name = inner;
                 } else {
@@ -1353,9 +1364,13 @@ public:
             // Resolve recursively through nested root models
             auto inner = fields_validator_->root_model_inner_name();
             if (!inner.empty()) {
-                return inner;
+                return strip_wrapper_marker(inner);
             }
-            return fields_validator_->name();
+            // effective_result_name(), not name(): a tagged union stores a
+            // py::object while name() reports "tagged-union", so using name()
+            // made conversion cast a py::object to the union's nominal type.
+            // The wrapper marker stays out: callers add exactly one.
+            return strip_wrapper_marker(fields_validator_->effective_result_name());
         }
         return "";
     }
