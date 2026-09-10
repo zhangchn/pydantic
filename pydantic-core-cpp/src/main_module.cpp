@@ -685,6 +685,28 @@ static std::string ser_warn_input_repr(const py::object& value) {
     } catch (...) { return "<unrepresentable>"; }
 }
 
+// Tag keys and discriminator values are compared by value: a str-Enum member
+// must match the literal tag it carries, not its repr ("SomeEnum.DOG").
+static std::string ser_tag_string(py::handle value) {
+    if (PyUnicode_Check(value.ptr())) return value.cast<std::string>();
+    try {
+        return py::str(value).cast<std::string>();
+    } catch (const py::error_already_set&) {
+        PyErr_Clear();
+        return std::string();
+    }
+}
+
+// Rust registers a bare PydanticSerializationUnexpectedValue(message) for
+// serializer decisions that are not a field type mismatch.
+static void ser_warn_message(const std::string& message, const py::object& value) {
+    auto& stack = ser_warn_stack();
+    if (stack.empty() || !stack.back().enabled) return;
+    std::string msg = message + " [input_value=" + ser_warn_input_repr(value) +
+                      ", input_type=" + ser_warn_input_type(value) + "]";
+    ser_warn_register("PydanticSerializationUnexpectedValue(" + msg + ")");
+}
+
 static void ser_warn_unexpected_value(const std::string& field_name,
                                       const std::string& field_type,
                                       const py::object& value) {
@@ -934,9 +956,51 @@ struct SerNode {
         }
         return item;
     }
+    // Rust locates a discriminator on a dict key, an object attribute, or
+    // __pydantic_extra__: a validated value is a model instance, not a dict.
+    static bool lookup_discriminator(const py::object& value, const std::vector<std::string>& path, py::object* out) {
+        py::object cur = value;
+        for (const auto& key : path) {
+            py::object next;
+            if (py::isinstance<py::dict>(cur)) {
+                auto d = cur.cast<py::dict>();
+                if (!d.contains(key)) return false;
+                next = d[py::str(key)];
+            } else {
+                bool found = false;
+                try {
+                    if (py_hasattr(cur, key.c_str())) { next = py::getattr(cur, key.c_str()); found = true; }
+                } catch (const py::error_already_set&) {
+                    PyErr_Clear();
+                }
+                if (!found) {
+                    try {
+                        py::object extra = py::getattr(cur, "__pydantic_extra__");
+                        if (!extra.is_none() && py::isinstance<py::dict>(extra) &&
+                            extra.cast<py::dict>().contains(key)) {
+                            next = extra[py::str(key)];
+                            found = true;
+                        }
+                    } catch (const py::error_already_set&) {
+                        PyErr_Clear();
+                    }
+                }
+                if (!found) return false;
+            }
+            cur = std::move(next);
+        }
+        if (cur.is_none()) return false;
+        *out = std::move(cur);
+        return true;
+    }
+
     std::vector<SerRef> children;
     // For tagged-union: map from tag -> serializer
     std::unordered_map<std::string, SerRef> tagged;
+    // For tagged-union: the discriminator lookup paths, and the choices in
+    // declaration order for the left-to-right fallback.
+    std::vector<std::vector<std::string>> tagged_discriminator;
+    std::vector<SerRef> tagged_left_to_right;
     // For model-fields: map from field_name -> serializer
     std::unordered_map<std::string, SerRef> fields;
     // Fields in declaration order (matches Rust — iterate this, not fields directly)
@@ -1132,21 +1196,32 @@ struct SerNode {
                 try { return c->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context); } catch (...) {}
             }
         }
-        if (type == "tagged-union" && !tagged.empty()) {
-            if (py::isinstance<py::dict>(value)) {
-                auto d = value.cast<py::dict>();
-                for (auto item : d) {
-                    auto k = py::str(item.first);
-                    std::string ks = k.cast<std::string>();
-                    if (ks == "type" || ks == "discriminator") {
-                        std::string tag = py::str(item.second).cast<std::string>();
-                        auto it = tagged.find(tag);
-                        if (it != tagged.end()) return it->second->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
-                        break;
-                    }
+        if (type == "tagged-union" && !tagged_left_to_right.empty()) {
+            // Rust TaggedUnionSerializer resolves the discriminator and
+            // serializes with the matching choice. Reading it only from a dict
+            // key (and guessing the key name) meant a validated model instance
+            // never matched, so the fallback below emitted a different
+            // variant's fields.
+            for (const auto& path : tagged_discriminator) {
+                py::object tag_obj;
+                if (!lookup_discriminator(value, path, &tag_obj)) continue;
+                std::string tag = ser_tag_string(tag_obj);
+                if (tag.empty()) continue;
+                auto it = tagged.find(tag);
+                if (it == tagged.end()) continue;
+                try {
+                    return it->second->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
+                } catch (const py::error_already_set&) {
+                    PyErr_Clear();
+                    // Rust warns for the matched variant and falls through to
+                    // inference rather than trying unrelated variants silently.
+                    ser_warn_message("Pydantic serialization failed for tagged union variant '" + tag + "'", value);
                 }
             }
-            for (auto& [t, c] : tagged) {
+            // No discriminator value: Rust registers a warning and tries the
+            // choices left to right, in declaration order.
+            ser_warn_message("Defaulting to left to right union serialization - failed to get discriminator value for tagged union serialization", value);
+            for (auto& c : tagged_left_to_right) {
                 try { return c->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context); } catch (...) {}
             }
         }
@@ -2975,10 +3050,32 @@ static SerRef build_ser_impl(const py::dict& schema,
     }
 
     if (type == "tagged-union") {
+        // The discriminator is a field name, or a list of field paths when the
+        // union was split with a one_of discriminator.
+        try {
+            py::object disc = schema["discriminator"];
+            if (py::isinstance<py::str>(disc)) {
+                node->tagged_discriminator.push_back({disc.cast<std::string>()});
+            } else if (py::isinstance<py::list>(disc)) {
+                for (auto item : disc.cast<py::list>()) {
+                    if (py::isinstance<py::str>(item)) {
+                        node->tagged_discriminator.push_back({item.cast<std::string>()});
+                    } else if (py::isinstance<py::list>(item)) {
+                        std::vector<std::string> path;
+                        for (auto step : item.cast<py::list>()) {
+                            path.push_back(py::str(step).cast<std::string>());
+                        }
+                        if (!path.empty()) node->tagged_discriminator.push_back(std::move(path));
+                    }
+                }
+            }
+        } catch (...) {}
         try {
             for (auto item : schema["choices"].cast<py::dict>()) {
-                std::string tag = py::str(item.first).cast<std::string>();
-                node->tagged[tag] = build_ser(item.second.cast<py::dict>(), defs);
+                std::string tag = ser_tag_string(item.first);
+                auto choice = build_ser(item.second.cast<py::dict>(), defs);
+                node->tagged[tag] = choice;
+                node->tagged_left_to_right.push_back(std::move(choice));
             }
         } catch (...) {}
     }
