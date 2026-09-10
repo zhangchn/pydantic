@@ -25,6 +25,9 @@ std::string get_version() { return "2.47.0"; }
 // Runtime polymorphic-serialization flag for the current top-level
 // to_python/to_json call (mirrors Rust SerializationExtra::polymorphic_serialization).
 static thread_local std::optional<bool> g_polymorphic_serialization{};
+// True while a serialize_as_any dump is driven by inference at the outermost
+// level; nested re-entry must use the declared serializer instead.
+static thread_local bool g_ser_infer_applied = false;
 static thread_local bool g_exclude_computed_fields = false;
 
 // Rust SerializationState::check (SerCheck::None/Strict/Lax). Only a union
@@ -922,6 +925,15 @@ struct SerNode {
     static std::string type_name_for_warning(const SerRef& n);
     // Whether a Python value is compatible with this node's declared type.
     static bool value_matches_type(const SerRef& n, const py::object& v);
+
+    // Rust leaf serializers warn once per container item whose runtime type
+    // disagrees with the declared item serializer, then fall back to inference.
+    static const py::object& check_item_type(const SerRef& child, const py::object& item) {
+        if (child && !value_matches_type(child, item)) {
+            ser_warn_unexpected_value("", type_name_for_warning(child), item);
+        }
+        return item;
+    }
     std::vector<SerRef> children;
     // For tagged-union: map from tag -> serializer
     std::unordered_map<std::string, SerRef> tagged;
@@ -1239,6 +1251,13 @@ struct SerNode {
                         }
                     }
                 }
+                // Rust ModelSerializer::serialize_root_model swaps in
+                // AnySerializer when serialize_as_any is set: the root value is
+                // serialized from its runtime type, so a subclass's extra
+                // fields are visible even though the schema declares the base.
+                if (g_ser_extra.serialize_as_any) {
+                    return SerNode::serialize_any_value(root_val, exc_none, round_trip, json_mode);
+                }
                 return children[0]->to_python(root_val, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
             }
             return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
@@ -1330,7 +1349,7 @@ struct SerNode {
                     for (auto item : seq) {
                         auto next = apply_ser_filter(py::int_(idx), inc, exc);
                         if (!next.omit) {
-                            jresult.append(children[0]->to_python(py::reinterpret_borrow<py::object>(item), json_mode, exc_none, round_trip, next.include, next.exclude));
+                            jresult.append(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, next.include, next.exclude));
                         }
                         idx++;
                     }
@@ -1340,7 +1359,7 @@ struct SerNode {
                 for (auto item : seq) {
                     auto next = apply_ser_filter(py::int_(idx), inc, exc);
                     if (!next.omit) {
-                        result.add(children[0]->to_python(py::reinterpret_borrow<py::object>(item), json_mode, exc_none, round_trip, next.include, next.exclude));
+                        result.add(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, next.include, next.exclude));
                     }
                     idx++;
                 }
@@ -1352,7 +1371,7 @@ struct SerNode {
                     for (auto item : seq) {
                         auto next = apply_ser_filter(py::int_(idx), inc, exc);
                         if (!next.omit) {
-                            jtemp.append(children[0]->to_python(py::reinterpret_borrow<py::object>(item), json_mode, exc_none, round_trip, next.include, next.exclude));
+                            jtemp.append(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, next.include, next.exclude));
                         }
                         idx++;
                     }
@@ -1362,7 +1381,7 @@ struct SerNode {
                 for (auto item : seq) {
                     auto next = apply_ser_filter(py::int_(idx), inc, exc);
                     if (!next.omit) {
-                        temp.add(children[0]->to_python(py::reinterpret_borrow<py::object>(item), json_mode, exc_none, round_trip, next.include, next.exclude));
+                        temp.add(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, next.include, next.exclude));
                     }
                     idx++;
                 }
@@ -1372,7 +1391,7 @@ struct SerNode {
                 for (auto item : seq) {
                     auto next = apply_ser_filter(py::int_(idx), inc, exc);
                     if (!next.omit) {
-                        result.append(children[0]->to_python(py::reinterpret_borrow<py::object>(item), json_mode, exc_none, round_trip, next.include, next.exclude));
+                        result.append(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, next.include, next.exclude));
                     }
                     idx++;
                 }
@@ -1387,8 +1406,8 @@ struct SerNode {
                 auto v = py::reinterpret_borrow<py::object>(item.second);
                 auto next = apply_ser_filter(k, include, exclude);
                 if (next.omit) continue;
-                auto out_k = children[0]->to_python(k, json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context);
-                auto out_v = children.size() > 1 ? children[1]->to_python(v, json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context) : v;
+                auto out_k = children[0]->to_python(check_item_type(children[0], k), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context);
+                auto out_v = children.size() > 1 ? children[1]->to_python(check_item_type(children[1], v), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context) : v;
                 result[out_k] = out_v;
             }
             return std::move(result);
@@ -1414,7 +1433,7 @@ struct SerNode {
                 auto next = apply_ser_filter(py::int_(static_cast<py::ssize_t>(i)), inc, exc);
                 if (!next.omit) {
                     auto v = py::reinterpret_borrow<py::object>(item);
-                    temp.append(i < children.size() ? children[i]->to_python(v, json_mode, exc_none, round_trip, next.include, next.exclude) : children.back()->to_python(v, json_mode, exc_none, round_trip, next.include, next.exclude));
+                    temp.append(i < children.size() ? children[i]->to_python(check_item_type(children[i], v), json_mode, exc_none, round_trip, next.include, next.exclude) : children.back()->to_python(check_item_type(children.back(), v), json_mode, exc_none, round_trip, next.include, next.exclude));
                 }
                 i++;
             }
@@ -1516,7 +1535,7 @@ struct SerNode {
                 if (next.omit) continue;
                 py::object out_k = children[0]->to_python(k, true, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context);
                 std::string val_json = children.size() > 1
-                    ? children[1]->to_json(v, ensure_ascii, -1, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context)
+                    ? children[1]->to_json(check_item_type(children[1], v), ensure_ascii, -1, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context)
                     : infer_json(v, ensure_ascii, -1);
                 if (!first) out += ",";
                 first = false;
@@ -1726,6 +1745,23 @@ struct SerNode {
                 return json_escape(py::str(value).cast<std::string>(), ensure_ascii);
             }
         }
+        // list: serialize items through the declared item serializer. Without
+        // this the node fell through to infer_json, which reads __dict__ and so
+        // emitted a subclass's extra fields (and unserialized leaf values) in
+        // place of the declared item type.
+        if (type == "list" && !children.empty()) {
+            std::string out = "[";
+            bool first = true;
+            for (auto item : py::reinterpret_borrow<py::iterable>(value)) {
+                if (!first) out += ",";
+                first = false;
+                out += children[0]->to_json(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), ensure_ascii, -1,
+                                            round_trip, py::none(), py::none(), false, false, false,
+                                            exc_none, context);
+            }
+            out += "]";
+            return out;
+        }
         // set/frozenset/generator: serialize as JSON array
         if (type == "set" || type == "frozenset" || type == "generator") {
             std::string out = "[";
@@ -1735,7 +1771,7 @@ struct SerNode {
                 first = false;
                 py::object obj = py::reinterpret_borrow<py::object>(item);
                 if (!children.empty()) {
-                    out += children[0]->to_json(obj, ensure_ascii, -1, round_trip, py::none(), py::none(), false, false, false, exc_none, context);
+                    out += children[0]->to_json(check_item_type(children[0], obj), ensure_ascii, -1, round_trip, py::none(), py::none(), false, false, false, exc_none, context);
                 } else {
                     out += infer_json(obj, ensure_ascii, -1);
                 }
@@ -1804,6 +1840,11 @@ struct SerNode {
                         }
                         return infer_json(result, ensure_ascii, indent);
                     }
+                }
+                // Rust ModelSerializer::serialize_root_model swaps in
+                // AnySerializer when serialize_as_any is set (see to_python).
+                if (g_ser_extra.serialize_as_any) {
+                    return infer_json(root_val, ensure_ascii, indent);
                 }
                 return children[0]->to_json(root_val, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
             }
@@ -1942,6 +1983,7 @@ private:
         return out;
     }
 
+  public:
     // Thread-local stack of object addresses currently being serialized,
     // mirroring Rust's RecursionGuard: re-entering an ancestor object means
     // a reference cycle (raise), excessive depth is a safety net (raise).
@@ -2049,6 +2091,21 @@ private:
             }
         } catch (...) {}
 
+        // Rust infer_to_python serializes a pydantic model through its own
+        // __pydantic_serializer__; reading __dict__ directly would emit a
+        // subclass's extra fields and leave leaf values unserialized.
+        if (py_hasattr(value, "__pydantic_serializer__")) {
+            try {
+                auto ser = py::getattr(value, "__pydantic_serializer__");
+                py::object as_py = ser.attr("to_python")(
+                    value, py::arg("mode") = "json",
+                    py::arg("serialize_as_any") = g_ser_extra.serialize_as_any);
+                return infer_json(as_py, ensure_ascii, indent);
+            } catch (const py::error_already_set&) {
+                PyErr_Clear();
+            }
+        }
+
         if (py_hasattr(value, "__dict__")) return infer_json(value.attr("__dict__"), ensure_ascii, indent);
 
         return json_escape(py::repr(value).cast<std::string>(), ensure_ascii);
@@ -2088,8 +2145,11 @@ private:
         if (py_hasattr(v, "__pydantic_serializer__")) {
             auto ser = py::getattr(v, "__pydantic_serializer__");
             try {
+                // Rust call_pydantic_serializer keeps the current state, so a
+                // serialize_as_any dump stays inferred all the way down.
                 return ser.attr("to_python")(v, py::arg("mode") = (json_mode ? "json" : "python"),
-                    py::arg("exclude_none") = exc_none, py::arg("round_trip") = round_trip);
+                    py::arg("exclude_none") = exc_none, py::arg("round_trip") = round_trip,
+                    py::arg("serialize_as_any") = g_ser_extra.serialize_as_any);
             } catch (const py::error_already_set&) {
                 PyErr_Clear();
                 return v;
@@ -2278,8 +2338,14 @@ private:
             // receives them (wrappers forward the value inward).  Applies to
             // regular fields as well as computed fields, mirroring the Rust
             // leaf-serializer checks.
-            SerRef type_leaf = (ser && !fv.is_none())
-                ? ser_leaf_for_value(ser, fv, json_mode) : nullptr;
+            // Rust SerFields::prepare_value: with serialize_as_any every field
+            // serializer is replaced by inference, except a custom
+            // @field_serializer, which must still run.
+            const bool ser_as_any = g_ser_extra.serialize_as_any &&
+                !((ser->type == "function-plain" || ser->type == "function-wrap") && ser->is_field_serializer);
+
+            SerRef type_leaf = (ser_as_any || !ser || fv.is_none())
+                ? nullptr : ser_leaf_for_value(ser, fv, json_mode);
             bool ser_type_mismatch = false;
             if (type_leaf &&
                 type_leaf->type != "function-plain" && type_leaf->type != "function-wrap" &&
@@ -2306,7 +2372,9 @@ private:
                 }
             }
 
-            if (ser_type_mismatch) {
+            if (ser_as_any) {
+                serialized = serialize_any_value(fv, exc_none, round_trip, json_mode);
+            } else if (ser_type_mismatch) {
                 // Field value does not match its declared type: warn and fall
                 // back to infer serialization (Rust behavior).
                 serialized = serialize_any_value(fv, exc_none, round_trip, json_mode);
@@ -2501,8 +2569,12 @@ private:
             // receives them (wrappers forward the value inward).  Applies to
             // regular fields as well as computed fields, mirroring the Rust
             // leaf-serializer checks.
-            SerRef type_leaf = (ser && !fv.is_none())
-                ? ser_leaf_for_value(ser, fv, true) : nullptr;
+            // Rust SerFields::prepare_value, json mode (see the python branch).
+            const bool ser_as_any = g_ser_extra.serialize_as_any &&
+                !((ser->type == "function-plain" || ser->type == "function-wrap") && ser->is_field_serializer);
+
+            SerRef type_leaf = (ser_as_any || !ser || fv.is_none())
+                ? nullptr : ser_leaf_for_value(ser, fv, true);
             bool ser_type_mismatch = false;
             if (type_leaf &&
                 type_leaf->type != "function-plain" && type_leaf->type != "function-wrap" &&
@@ -2526,7 +2598,9 @@ private:
                 // Note: "json" and "json-unless-none" are already in JSON mode, so no additional check needed
             }
 
-            if (use_field_serializer) {
+            if (ser_as_any) {
+                field_json = infer_json(fv, ensure_ascii, -1);
+            } else if (use_field_serializer) {
                 // Try field serializer call with model instance first
                 auto info = make_ser_info(round_trip, k, context, next.include, next.exclude);
                 bool tried = false;
@@ -2798,6 +2872,19 @@ static SerRef build_ser_impl(const py::dict& schema,
             std::string ref = schema["schema_ref"].cast<std::string>();
             auto it = defs.find(ref);
             if (it != defs.end()) {
+                // Rust CombinedSerializer::_build resolves a "serialization"
+                // override with find_serializer(ser_type, ser_schema) before it
+                // ever dispatches on the outer type, so the definition-ref is
+                // dropped entirely. SerializeAsAny[X] arrives as {"type": "any"}.
+                if (has_ser_dict) {
+                    try {
+                        std::string st = ser_dict["type"].cast<std::string>();
+                        if (st != "include-exclude-sequence" && st != "include-exclude-dict" &&
+                            st != "base64" && st != "function-plain" && st != "function-wrap") {
+                            return build_ser_impl(ser_dict, defs);
+                        }
+                    } catch (...) {}
+                }
                 // If this definition-ref has a serialization override, apply it
                 if (has_ser_dict && ser_dict.contains("function")) {
                     auto wrapped = std::make_shared<SerNode>();
@@ -3293,6 +3380,26 @@ public:
         py::object exc = (exclude && !exclude->is_none()) ? *exclude : py::none();
         bool use_alias = by_alias.value_or(serialize_by_alias_);
 
+        // Rust resolves serialize_as_any at the outermost serializer call: the
+        // value is serialized from its runtime type, not its declared type. The
+        // nested model delegation in serialize_any_value_inner re-enters here
+        // with the flag still set and must then use its own declared serializer
+        // (Rust's serialize_no_infer), so the substitution happens once only.
+        if (serialize_as_any && !g_ser_infer_applied) {
+            g_ser_infer_applied = true;
+            struct InferGuard { ~InferGuard() { g_ser_infer_applied = false; } } infer_guard;
+            ser_warn_enter(warnings);
+            try {
+                py::object result = SerNode::serialize_any_value(
+                    value, exc_none, round_trip, mode && *mode == "json");
+                ser_warn_leave(false);
+                return result;
+            } catch (...) {
+                ser_warn_leave(true);
+                throw;
+            }
+        }
+
         ser_warn_enter(warnings);
         try {
             py::object result = ser_->to_python(value, mode && *mode == "json", exc_none, round_trip, inc, exc, use_alias, exclude_unset, exclude_defaults, context);
@@ -3309,7 +3416,7 @@ public:
                       std::optional<bool> by_alias, bool exclude_unset, bool exclude_defaults, bool exc_none,
                       bool exclude_computed_fields, bool round_trip, py::object warnings, std::optional<py::object> fallback,
                       bool serialize_as_any, std::optional<bool> polymorphic, py::object context) const {
-        (void)serialize_as_any;
+        
         g_exclude_computed_fields = exclude_computed_fields;
         g_polymorphic_serialization = polymorphic;  // reset per call (None -> nullopt)
         g_ser_extra = SerCallExtra{};
@@ -3332,6 +3439,22 @@ public:
         bool use_alias = by_alias.value_or(serialize_by_alias_);
 
         bool e = ea.value_or(false);
+
+        // Rust resolves serialize_as_any at the outermost serializer call (see
+        // the to_python branch above for why this happens only once).
+        if (serialize_as_any && !g_ser_infer_applied) {
+            g_ser_infer_applied = true;
+            struct InferGuard { ~InferGuard() { g_ser_infer_applied = false; } } infer_guard;
+            ser_warn_enter(warnings);
+            try {
+                std::string json = SerNode::infer_json(value, e, -1);
+                ser_warn_leave(false);
+                return py::bytes(std::move(json));
+            } catch (...) {
+                ser_warn_leave(true);
+                throw;
+            }
+        }
         ser_warn_enter(warnings);
         try {
             std::string json = ser_->to_json(value, e, -1, round_trip, inc, exc, use_alias, exclude_unset, exclude_defaults, exc_none, context);
