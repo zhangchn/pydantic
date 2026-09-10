@@ -456,12 +456,19 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
                     m.attr("_last_raw_input") = obj;
                     m.attr("_last_assignment_error") = py::bool_(true);
                     py::list err_objs;
+                    py::list err_ctx_objs;
                     if (r.error().has_line_errors()) {
                         for (const auto& le : r.error().line_errors()) {
                             err_objs.append(le->raw_error_obj.ptr() ? py::object(le->raw_error_obj) : py::none());
+                            py::dict ctx_d;
+                            for (const auto& [k, v] : le->error_type.context_objects()) {
+                                ctx_d[py::str(k)] = v;
+                            }
+                            err_ctx_objs.append(std::move(ctx_d));
                         }
                     }
                     m.attr("_last_error_objs") = err_objs;
+                    m.attr("_last_error_ctx_objs") = err_ctx_objs;
                 } catch (...) {}
 #endif
                 reraise_if_internal(r.error());
@@ -769,12 +776,19 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
             // with the error details, so the Python wrapper can attach them to
             // ctx['error'] for value_error/assertion_error entries.
             py::list err_objs;
+            py::list err_ctx_objs;
             if (result.error().has_line_errors()) {
                 for (const auto& le : result.error().line_errors()) {
                     err_objs.append(le->raw_error_obj.ptr() ? py::object(le->raw_error_obj) : py::none());
+                    py::dict ctx_d;
+                    for (const auto& [k, v] : le->error_type.context_objects()) {
+                        ctx_d[py::str(k)] = v;
+                    }
+                    err_ctx_objs.append(std::move(ctx_d));
                 }
             }
             m.attr("_last_error_objs") = err_objs;
+            m.attr("_last_error_ctx_objs") = err_ctx_objs;
         } catch (...) {
             // Silently ignore if module state setting fails
         }

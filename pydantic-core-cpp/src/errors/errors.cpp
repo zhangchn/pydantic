@@ -117,7 +117,18 @@ std::string ValidationError::errors_to_json() const {
             if (emit_error_ref && k == "error") continue;
             if (!cfirst) oss << ",";
             cfirst = false;
-            oss << json_quote(k) << ":" << json_quote(v);
+            oss << json_quote(k) << ":";
+#ifdef HAS_PYBIND11
+            // Object-valued ctx entries carry only their display form above;
+            // the Python wrapper swaps in the real object from the side channel.
+            if (err.ctx_objs.find(k) != err.ctx_objs.end()) {
+                oss << json_quote("__PYDANTIC_CTX_OBJ__");
+            } else {
+                oss << json_quote(v);
+            }
+#else
+            oss << json_quote(v);
+#endif
         }
         if (emit_error_ref) {
             if (!cfirst) oss << ",";
@@ -159,6 +170,9 @@ void ValidationError::build_errors_from_val_error(const ValError& val_error) {
             auto ctx = line_err->error_type.context();
             ctx.erase("s");
             details.ctx = ctx;
+#ifdef HAS_PYBIND11
+            details.ctx_objs = line_err->error_type.context_objects();
+#endif
             errors_.push_back(details);
         }
     }

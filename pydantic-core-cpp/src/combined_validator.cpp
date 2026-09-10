@@ -1597,10 +1597,55 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
             v->strict = schema["strict"].cast<bool>();
         }
-        if (schema.contains("gt") && !schema["gt"].is_none()) v->gt = schema["gt"];
-        if (schema.contains("lt") && !schema["lt"].is_none()) v->lt = schema["lt"];
-        if (schema.contains("ge") && !schema["ge"].is_none()) v->ge = schema["ge"];
-        if (schema.contains("le") && !schema["le"].is_none()) v->le = schema["le"];
+        auto get_u64 = [&](const char* key) -> std::optional<int64_t> {
+            if (!schema.contains(key)) return std::nullopt;
+            py::object val = schema[key];
+            if (val.is_none() || py::isinstance<py::bool_>(val)) return std::nullopt;
+            if (!py::isinstance<py::int_>(val)) {
+                throw SchemaError(std::string("Invalid '") + key + "' value: must be an integer");
+            }
+            return val.cast<int64_t>();
+        };
+        v->decimal_places = get_u64("decimal_places");
+        v->max_digits = get_u64("max_digits");
+
+        bool allow_inf_nan = false;
+        if (schema.contains("allow_inf_nan") && !schema["allow_inf_nan"].is_none()) {
+            allow_inf_nan = schema["allow_inf_nan"].cast<bool>();
+        } else if (config.contains("allow_inf_nan") && !config["allow_inf_nan"].is_none()) {
+            allow_inf_nan = config["allow_inf_nan"].cast<bool>();
+        }
+        if (allow_inf_nan && (v->decimal_places.has_value() || v->max_digits.has_value())) {
+            throw SchemaError("allow_inf_nan=True cannot be used with max_digits or decimal_places");
+        }
+        v->allow_inf_nan = allow_inf_nan;
+
+        // Rust: validate_as_decimal — a constraint that is not coercible to
+        // Decimal makes the schema itself invalid.
+        auto get_decimal = [&](const char* key) -> py::object {
+            if (!schema.contains(key)) return py::none();
+            py::object val = schema[key];
+            if (val.is_none()) return py::none();
+            py::object decimal_cls = py::module_::import("decimal").attr("Decimal");
+            try {
+                if (py::type::of(val).ptr() == decimal_cls.ptr()) return val;
+                if (py::isinstance<py::str>(val) ||
+                    (py::isinstance<py::int_>(val) && !py::isinstance<py::bool_>(val))) {
+                    return decimal_cls(val);
+                }
+                if (py::isinstance<py::float_>(val)) return decimal_cls(py::str(val));
+            } catch (py::error_already_set& e) {
+                e.restore();
+                PyErr_Clear();
+                throw SchemaError(std::string("'") + key + "' must be coercible to a Decimal instance");
+            }
+            throw SchemaError(std::string("'") + key + "' must be coercible to a Decimal instance");
+        };
+        v->gt = get_decimal("gt");
+        v->lt = get_decimal("lt");
+        v->ge = get_decimal("ge");
+        v->le = get_decimal("le");
+        v->multiple_of = get_decimal("multiple_of");
         return v;
     }
 

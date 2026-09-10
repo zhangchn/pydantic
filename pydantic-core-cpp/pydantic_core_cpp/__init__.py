@@ -227,6 +227,9 @@ def _parse_structured_errors(msg: str) -> list[dict] | None:
         # marker in ctx. Resolve the marker back to the real exception object.
         import __main__ as _main
         error_objs = getattr(_main, '_last_error_objs', None)
+        # Object-valued ctx entries (e.g. a Decimal constraint) are likewise
+        # stored index-aligned, keyed by ctx name.
+        ctx_objs = getattr(_main, '_last_error_ctx_objs', None)
         for i, err in enumerate(raw):
             d = {
                 'type': err['type'],
@@ -248,6 +251,9 @@ def _parse_structured_errors(msg: str) -> list[dict] | None:
                 d['ctx'] = {k: _parse_ctx_value(v) for k, v in err['ctx'].items()}
                 if d['ctx'].get('error') == '__PYDANTIC_EXC_REF__' and error_objs is not None and i < len(error_objs):
                     d['ctx']['error'] = error_objs[i]
+                for _k, _v in d['ctx'].items():
+                    if _v == '__PYDANTIC_CTX_OBJ__' and ctx_objs is not None and i < len(ctx_objs):
+                        d['ctx'][_k] = ctx_objs[i].get(_k, _v)
             result.append(d)
         return result
     except Exception:

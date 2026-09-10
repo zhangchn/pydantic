@@ -5,8 +5,10 @@
 
 #include "pydantic_core/validators/basic.hpp"
 #include "pydantic_core/validators/containers.hpp"
+#include "pydantic_core/validators/special.hpp"
 #include "pydantic_core/combined_validator.hpp"
 #include "pydantic_core/json_input.hpp"
+#include "pydantic_core/python_input.hpp"
 #include "pydantic_core/validation_state.hpp"
 
 // Python interpreter for the lifetime of the process (validators under test
@@ -458,3 +460,186 @@ TEST_CASE("SchemaBuilder - handles nullable definition-ref") {
 }
 
 } // TEST_SUITE
+
+TEST_SUITE("Decimal Validator") {
+
+static py::object decimal_type_obj() {
+    return py::module_::import("decimal").attr("Decimal");
+}
+
+static py::object dec(const std::string& value) {
+    return decimal_type_obj()(value);
+}
+
+// Returns the error type name, or an empty string when validation succeeds.
+static std::string decimal_error_type(DecimalValidator& validator, const py::object& value) {
+    ValidationState state;
+    PythonInput input{value};
+    auto result = validator.validate(input, state);
+    if (result.is_ok()) return {};
+    return result.error().line_errors()[0]->error_type.type_name();
+}
+
+static py::object decimal_value(DecimalValidator& validator, const py::object& value) {
+    ValidationState state;
+    PythonInput input{value};
+    auto result = validator.validate(input, state);
+    REQUIRE(result.is_ok());
+    return *std::static_pointer_cast<py::object>(result.value());
+}
+
+TEST_CASE("DecimalValidator - coerces str, int and float inputs") {
+    DecimalValidator validator;
+
+    CHECK(py::repr(decimal_value(validator, py::str("42.24"))).cast<std::string>() == "Decimal('42.24')");
+    CHECK(py::repr(decimal_value(validator, py::int_(42))).cast<std::string>() == "Decimal('42')");
+    // str(float) first, so the binary expansion of 0.1 must not leak through.
+    CHECK(py::repr(decimal_value(validator, py::float_(0.1))).cast<std::string>() == "Decimal('0.1')");
+}
+
+TEST_CASE("DecimalValidator - passes Decimal instances through unchanged") {
+    DecimalValidator validator;
+    CHECK(py::repr(decimal_value(validator, dec("42.0"))).cast<std::string>() == "Decimal('42.0')");
+}
+
+TEST_CASE("DecimalValidator - decimal_type error for unsupported inputs") {
+    DecimalValidator validator;
+    CHECK(decimal_error_type(validator, py::list()) == "decimal_type");
+    CHECK(decimal_error_type(validator, py::none()) == "decimal_type");
+    // bool is an int subclass but is not decimal-coercible (Rust excludes it too)
+    CHECK(decimal_error_type(validator, py::bool_(true)) == "decimal_type");
+}
+
+TEST_CASE("DecimalValidator - decimal_parsing error for unparseable strings") {
+    DecimalValidator validator;
+    CHECK(decimal_error_type(validator, py::str("not-a-number")) == "decimal_parsing");
+}
+
+TEST_CASE("DecimalValidator - strict requires a Decimal instance") {
+    DecimalValidator validator;
+    validator.strict = true;
+    CHECK(decimal_error_type(validator, py::str("42")) == "is_instance_of");
+    CHECK(decimal_error_type(validator, dec("42")) == "");
+}
+
+TEST_CASE("DecimalValidator - gt/lt/ge/le constraints") {
+    ValidationState state;
+
+    DecimalValidator gt;
+    gt.gt = dec("42.24");
+    CHECK(gt.validate(PythonInput{dec("43")}, state).is_ok());
+    CHECK(decimal_error_type(gt, dec("42")) == "greater_than");
+
+    DecimalValidator lt;
+    lt.lt = dec("42.24");
+    CHECK(lt.validate(PythonInput{dec("42")}, state).is_ok());
+    CHECK(decimal_error_type(lt, dec("43")) == "less_than");
+
+    DecimalValidator ge;
+    ge.ge = dec("42.24");
+    CHECK(ge.validate(PythonInput{dec("42.24")}, state).is_ok());
+    CHECK(decimal_error_type(ge, dec("42")) == "greater_than_equal");
+
+    DecimalValidator le;
+    le.le = dec("42.24");
+    CHECK(le.validate(PythonInput{dec("42.24")}, state).is_ok());
+    CHECK(decimal_error_type(le, dec("43")) == "less_than_equal");
+}
+
+TEST_CASE("DecimalValidator - constraint ctx carries the real Decimal") {
+    DecimalValidator validator;
+    validator.gt = dec("42.24");
+
+    ValidationState state;
+    PythonInput input{dec("42")};
+    auto result = validator.validate(input, state);
+    REQUIRE(result.is_err());
+
+    const auto& line_error = result.error().line_errors()[0];
+    // The message renders the display form, errors() reports the object.
+    CHECK(line_error->error_type.message() == "Input should be greater than 42.24");
+    const auto& ctx_objs = line_error->error_type.context_objects();
+    auto it = ctx_objs.find("gt");
+    REQUIRE(it != ctx_objs.end());
+    CHECK(py::isinstance(it->second, decimal_type_obj()));
+    CHECK(py::repr(it->second).cast<std::string>() == "Decimal('42.24')");
+}
+
+TEST_CASE("DecimalValidator - max_digits and decimal_places") {
+    DecimalValidator too_many_places;
+    too_many_places.max_digits = 2;
+    too_many_places.decimal_places = 1;
+    CHECK(decimal_error_type(too_many_places, dec("0.99")) == "decimal_max_places");
+
+    DecimalValidator too_many_whole;
+    too_many_whole.max_digits = 3;
+    too_many_whole.decimal_places = 1;
+    CHECK(decimal_error_type(too_many_whole, dec("999")) == "decimal_whole_digits");
+
+    DecimalValidator too_many_digits;
+    too_many_digits.max_digits = 20;
+    too_many_digits.decimal_places = 2;
+    CHECK(decimal_error_type(too_many_digits, dec("7424742403889818000000")) == "decimal_max_digits");
+
+    // Leading zeros must not count against the limits.
+    DecimalValidator within_limits;
+    within_limits.max_digits = 6;
+    within_limits.decimal_places = 2;
+    CHECK(decimal_error_type(within_limits, dec("000000000001111.700000")) == "");
+}
+
+TEST_CASE("DecimalValidator - digit limits pluralize correctly") {
+    DecimalValidator places;
+    places.decimal_places = 1;
+    ValidationState state;
+    {
+        PythonInput input{dec("0.99")};
+        auto result = places.validate(input, state);
+        REQUIRE(result.is_err());
+        CHECK(result.error().line_errors()[0]->error_type.message() ==
+              "Decimal input should have no more than 1 decimal place");
+    }
+
+    DecimalValidator digits;
+    digits.max_digits = 1;
+    {
+        PythonInput input{dec("99")};
+        auto result = digits.validate(input, state);
+        REQUIRE(result.is_err());
+        CHECK(result.error().line_errors()[0]->error_type.message() ==
+              "Decimal input should have no more than 1 digit in total");
+    }
+}
+
+TEST_CASE("DecimalValidator - allow_inf_nan gates the finite check") {
+    DecimalValidator validator;
+    CHECK(decimal_error_type(validator, dec("NaN")) == "finite_number");
+    CHECK(decimal_error_type(validator, dec("Infinity")) == "finite_number");
+
+    DecimalValidator allow_inf;
+    allow_inf.allow_inf_nan = true;
+    CHECK(decimal_error_type(allow_inf, dec("NaN")) == "");
+    CHECK(decimal_error_type(allow_inf, dec("Infinity")) == "");
+}
+
+TEST_CASE("DecimalValidator - multiple_of") {
+    DecimalValidator validator;
+    validator.multiple_of = dec("5");
+    CHECK(decimal_error_type(validator, dec("45")) == "");
+
+    ValidationState state;
+    PythonInput input{dec("42")};
+    auto result = validator.validate(input, state);
+    REQUIRE(result.is_err());
+
+    const auto& line_error = result.error().line_errors()[0];
+    CHECK(line_error->error_type.type_name() == "multiple_of");
+    CHECK(line_error->error_type.message() == "Input should be a multiple of 5");
+    const auto& ctx_objs = line_error->error_type.context_objects();
+    auto it = ctx_objs.find("multiple_of");
+    REQUIRE(it != ctx_objs.end());
+    CHECK(py::isinstance(it->second, decimal_type_obj()));
+}
+
+} // TEST_SUITE("Decimal Validator")
+

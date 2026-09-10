@@ -4,6 +4,10 @@
 #include <variant>
 #include <optional>
 #include <unordered_map>
+#ifdef HAS_PYBIND11
+#include <pybind11/pybind11.h>
+namespace py = pybind11;
+#endif
 #include "types.hpp"
 
 namespace pydantic_core {
@@ -246,6 +250,21 @@ public:
     // Get rendered message
     std::string message() const;
 
+    // Context values that must reach errors() as real Python objects (a Decimal
+    // constraint, for example). `display` renders the message and the JSON ctx
+    // placeholder; the object itself is carried alongside it because a Decimal
+    // cannot survive the JSON channel without losing its type.
+#ifdef HAS_PYBIND11
+    void set_ctx_object(const std::string& key, const std::string& display, py::object value) {
+        context_[key] = display;
+        context_objects_[key] = std::move(value);
+    }
+
+    const std::unordered_map<std::string, py::object>& context_objects() const {
+        return context_objects_;
+    }
+#endif
+
     // Build a known ErrorType from a custom error type string.
     // Tries to match against all registered known kinds first.
     // Falls back to {Kind::CustomError} if no match is found.
@@ -254,6 +273,9 @@ public:
 private:
     Kind kind_;
     std::unordered_map<std::string, std::string> context_;
+#ifdef HAS_PYBIND11
+    std::unordered_map<std::string, py::object> context_objects_;
+#endif
     // For pre-rendered custom errors (type_name + message stored as-is)
     std::string custom_type_name_;
     std::string custom_message_;

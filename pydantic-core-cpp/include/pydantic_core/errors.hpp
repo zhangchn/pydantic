@@ -122,6 +122,9 @@ public:
         std::unordered_map<std::string, std::string> ctx;
         bool is_custom = false;
 #ifdef HAS_PYBIND11
+        // ctx keys whose real value is a Python object (see ErrorType::set_ctx_object);
+        // the string ctx entry holds only the display form.
+        std::unordered_map<std::string, py::object> ctx_objs;
         bool has_raw_input = false;
         py::object raw_input_obj;
         bool has_raw_error = false;

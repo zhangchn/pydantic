@@ -870,102 +870,228 @@ public:
     std::string name() const override { return "multi-host-url"; }
 };
 
-// DecimalValidator - validates decimal values
+// DecimalValidator - validates decimal values (mirrors Rust validators/decimal.rs)
 class DecimalValidator : public Validator {
 public:
     bool strict = false;
+    bool allow_inf_nan = false;
+    py::object multiple_of = py::none();
     py::object gt = py::none();
     py::object lt = py::none();
     py::object ge = py::none();
     py::object le = py::none();
+    std::optional<int64_t> max_digits;
+    std::optional<int64_t> decimal_places;
+
+    // Rust: check_digits — the digit limits are the only reason to reject inf/nan.
+    bool check_digits() const {
+        return max_digits.has_value() || decimal_places.has_value();
+    }
+
+    // Rust: extract_decimal_digits_info — returns (decimals, digits) read from
+    // Decimal.as_tuple(). A negative exponent widens the digit count because it
+    // contributes the leading zeros after the decimal point.
+    static std::pair<uint64_t, uint64_t> digits_info(const py::object& decimal, bool normalize) {
+        py::object target = normalize ? decimal.attr("normalize")() : decimal;
+        py::tuple as_tuple = target.attr("as_tuple")().cast<py::tuple>();
+        int64_t exponent = as_tuple[2].cast<int64_t>();
+        uint64_t digits = static_cast<uint64_t>(py::len(as_tuple[1]));
+        if (exponent >= 0) {
+            // A positive exponent adds that many trailing zeros.
+            digits += static_cast<uint64_t>(exponent);
+            return {0, digits};
+        }
+        uint64_t decimals = static_cast<uint64_t>(-(exponent + 1)) + 1;  // unsigned_abs, without INT64_MIN UB
+        return {decimals, std::max(digits, decimals)};
+    }
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
     ) override {
+        py::object decimal_cls = py::module_::import("decimal").attr("Decimal");
         py::object input_py = input.as_python_object();
-        py::object decimal_mod = py::module_::import("decimal");
-        py::object decimal_cls = decimal_mod.attr("Decimal");
+        const bool strict_required = state.strict_or(strict);
 
-        py::object result;
-        if (py::isinstance(input_py, decimal_cls)) {
-            result = input_py;
-        } else if (state.strict_or(strict)) {
-            return ValError::line_error(
-                ErrorType(ErrorType::Kind::IsInstanceType, "class", "Decimal"),
-                state.location(),
-                input.as_error_value().repr
-            );
-        } else {
-            try {
-                if (py::isinstance<py::str>(input_py) || py::isinstance<py::int_>(input_py) || py::isinstance<py::float_>(input_py)) {
-                    result = decimal_cls(input_py);
-                } else {
-                    return ValError::line_error(
-                        ErrorType(ErrorType::Kind::DecimalType),
-                        state.location(),
-                        input.as_error_value().repr
-                    );
-                }
-            } catch (py::error_already_set& e) {
-                e.restore();
-                PyErr_Clear();
-                // String/int/float that failed to parse -> DecimalParsing (Rust)
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::DecimalParsing),
-                    state.location(),
-                    input.as_error_value().repr
-                );
-            }
-        }
-
-        // Apply gt/lt/ge/le constraints using Python's rich comparison
-        // (Decimal vs int/float/Decimal all compare correctly in Python).
-        // Use PyObject_RichCompare because pybind11's operator> returns a
-        // C++ bool and may not route through Python's __gt__ for Decimals.
-        auto py_cmp = [](const py::object& a, const py::object& b, int op) -> bool {
-            PyObject* r = PyObject_RichCompare(a.ptr(), b.ptr(), op);
-            if (!r) return false;
-            bool out = (r != Py_False);
-            Py_DECREF(r);
-            return out;
-        };
+        // Rust: input.validate_decimal(strict). Exact Decimals pass through, lax
+        // mode coerces str / int / float / (sign, digits, exponent) tuples, and
+        // Decimal subclasses are upcast to plain Decimal.
+        py::object decimal;
+        bool have_decimal = false;
         try {
-            if (!gt.is_none() && !py_cmp(result, gt, Py_GT)) {
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::GreaterThan, "gt", py::str(gt).cast<std::string>()),
-                    state.location(),
-                    input.as_error_value().repr
-                );
+            if (py::type::of(input_py).ptr() == decimal_cls.ptr()) {
+                decimal = input_py;
+                have_decimal = true;
+            } else if (!strict_required) {
+                if (py::isinstance<py::str>(input_py) ||
+                    (py::isinstance<py::int_>(input_py) && !py::isinstance<py::bool_>(input_py))) {
+                    decimal = decimal_cls(input_py);
+                    have_decimal = true;
+                } else if (py::isinstance<py::float_>(input_py)) {
+                    // str() first: Decimal(0.1) would otherwise keep the exact
+                    // binary expansion instead of Decimal('0.1').
+                    decimal = decimal_cls(py::str(input_py));
+                    have_decimal = true;
+                } else if (py::type::of(input_py).ptr() == reinterpret_cast<PyObject*>(&PyTuple_Type) &&
+                           py::len(input_py) == 3) {
+                    decimal = decimal_cls(input_py);
+                    have_decimal = true;
+                }
             }
-            if (!lt.is_none() && !py_cmp(result, lt, Py_LT)) {
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::LessThan, "lt", py::str(lt).cast<std::string>()),
-                    state.location(),
-                    input.as_error_value().repr
-                );
-            }
-            if (!ge.is_none() && !py_cmp(result, ge, Py_GE)) {
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::GreaterThanEqual, "ge", py::str(ge).cast<std::string>()),
-                    state.location(),
-                    input.as_error_value().repr
-                );
-            }
-            if (!le.is_none() && !py_cmp(result, le, Py_LE)) {
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::LessThanEqual, "le", py::str(le).cast<std::string>()),
-                    state.location(),
-                    input.as_error_value().repr
-                );
+            if (!have_decimal && py::isinstance(input_py, decimal_cls)) {
+                decimal = decimal_cls(input_py);
+                have_decimal = true;
             }
         } catch (py::error_already_set& e) {
             e.restore();
             PyErr_Clear();
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::DecimalParsing),
+                state.location(),
+                input.as_error_value().repr
+            );
+        }
+        if (!have_decimal) {
+            ErrorType err = strict_required
+                ? ErrorType(ErrorType::Kind::IsInstanceType, "class", "Decimal")
+                : ErrorType(ErrorType::Kind::DecimalType);
+            return ValError::line_error(err, state.location(), input.as_error_value().repr);
+        }
+
+        if (!allow_inf_nan || check_digits()) {
+            bool finite = false;
+            try {
+                finite = decimal.attr("is_finite")().cast<bool>();
+            } catch (py::error_already_set& e) {
+                e.restore();
+                PyErr_Clear();
+            }
+            if (!finite) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::FiniteNumber),
+                    state.location(),
+                    input.as_error_value().repr
+                );
+            }
+
+            if (check_digits()) {
+                try {
+                    auto [norm_decimals, norm_digits] = digits_info(decimal, true);
+                    auto [decimals, digits] = digits_info(decimal, false);
+
+                    const uint64_t limit = max_digits.has_value()
+                        ? static_cast<uint64_t>(*max_digits) : 0;
+
+                    // A limit is only violated when the raw *and* normalized
+                    // forms exceed it, so e.g. 1E+2 is not "3 digits".
+                    if (max_digits.has_value()) {
+                        if (digits > limit && norm_digits > limit) {
+                            ErrorType err(ErrorType::Kind::DecimalMaxDigits);
+                            err.context()["max_digits"] = std::to_string(*max_digits);
+                            err.context()["s"] = (*max_digits == 1) ? "" : "s";
+                            return ValError::line_error(err, state.location(), input.as_error_value().repr);
+                        }
+                    }
+
+                    if (decimal_places.has_value()) {
+                        uint64_t places = static_cast<uint64_t>(*decimal_places);
+                        if (decimals > places && norm_decimals > places) {
+                            ErrorType err(ErrorType::Kind::DecimalMaxPlaces);
+                            err.context()["decimal_places"] = std::to_string(*decimal_places);
+                            err.context()["s"] = (*decimal_places == 1) ? "" : "s";
+                            return ValError::line_error(err, state.location(), input.as_error_value().repr);
+                        }
+                        if (max_digits.has_value()) {
+                            uint64_t whole = digits > decimals ? digits - decimals : 0;
+                            uint64_t max_whole = limit > places ? limit - places : 0;
+                            uint64_t norm_whole = norm_digits > norm_decimals ? norm_digits - norm_decimals : 0;
+                            if (whole > max_whole && norm_whole > max_whole) {
+                                ErrorType err(ErrorType::Kind::DecimalWholeDigits);
+                                err.context()["whole_digits"] = std::to_string(max_whole);
+                                err.context()["s"] = (max_whole == 1) ? "" : "s";
+                                return ValError::line_error(err, state.location(), input.as_error_value().repr);
+                            }
+                        }
+                    }
+                } catch (py::error_already_set& e) {
+                    // Rust ignores extraction failures here (the `if let Ok(..)` chain).
+                    e.restore();
+                    PyErr_Clear();
+                }
+            }
+        }
+
+        if (!multiple_of.is_none()) {
+            try {
+                py::object fraction = decimal.attr("__truediv__")(multiple_of).attr("__mod__")(py::int_(1));
+                py::object zero = py::int_(0);
+                int is_zero = PyObject_RichCompareBool(fraction.ptr(), zero.ptr(), Py_EQ);
+                if (is_zero < 0) PyErr_Clear();
+                if (is_zero == 0) {
+                    ErrorType err(ErrorType::Kind::MultipleOf);
+                    err.set_ctx_object("multiple_of", py::str(multiple_of).cast<std::string>(), multiple_of);
+                    return ValError::line_error(err, state.location(), input.as_error_value().repr);
+                }
+            } catch (py::error_already_set& e) {
+                e.restore();
+                PyErr_Clear();
+            }
+        }
+
+        // Comparing a NaN Decimal raises InvalidOperation, so Rust resolves
+        // is_nan() once and short-circuits every comparison on it.
+        bool nan_known = false;
+        bool nan_value = false;
+        auto is_nan = [&]() -> bool {
+            if (!nan_known) {
+                nan_known = true;
+                try {
+                    nan_value = decimal.attr("is_nan")().cast<bool>();
+                } catch (py::error_already_set& e) {
+                    e.restore();
+                    PyErr_Clear();
+                }
+            }
+            return nan_value;
+        };
+
+        // PyObject_RichCompare rather than pybind11's operators, which return a
+        // C++ bool without routing through Decimal.__lt__ etc.
+        auto py_cmp = [](const py::object& a, const py::object& b, int op) -> bool {
+            PyObject* r = PyObject_RichCompare(a.ptr(), b.ptr(), op);
+            if (!r) {
+                PyErr_Clear();
+                return false;
+            }
+            bool out = (r != Py_False);
+            Py_DECREF(r);
+            return out;
+        };
+
+        // Constraint order matches Rust: le, lt, ge, gt.
+        if (!le.is_none() && (is_nan() || !py_cmp(decimal, le, Py_LE))) {
+            ErrorType err(ErrorType::Kind::LessThanEqual);
+            err.set_ctx_object("le", py::str(le).cast<std::string>(), le);
+            return ValError::line_error(err, state.location(), input.as_error_value().repr);
+        }
+        if (!lt.is_none() && (is_nan() || !py_cmp(decimal, lt, Py_LT))) {
+            ErrorType err(ErrorType::Kind::LessThan);
+            err.set_ctx_object("lt", py::str(lt).cast<std::string>(), lt);
+            return ValError::line_error(err, state.location(), input.as_error_value().repr);
+        }
+        if (!ge.is_none() && (is_nan() || !py_cmp(decimal, ge, Py_GE))) {
+            ErrorType err(ErrorType::Kind::GreaterThanEqual);
+            err.set_ctx_object("ge", py::str(ge).cast<std::string>(), ge);
+            return ValError::line_error(err, state.location(), input.as_error_value().repr);
+        }
+        if (!gt.is_none() && (is_nan() || !py_cmp(decimal, gt, Py_GT))) {
+            ErrorType err(ErrorType::Kind::GreaterThan);
+            err.set_ctx_object("gt", py::str(gt).cast<std::string>(), gt);
+            return ValError::line_error(err, state.location(), input.as_error_value().repr);
         }
 
         return ValResult<std::shared_ptr<void>>(
-            std::make_shared<py::object>(std::move(result))
+            std::make_shared<py::object>(std::move(decimal))
         );
     }
 
