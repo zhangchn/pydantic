@@ -1060,6 +1060,11 @@ class SchemaValidator:
         if schema.get("type") == "model" and schema.get("root_model"):
             cls = schema.get("cls") or self._model_classes.get(schema.get("ref"))
             if cls is not None and callable(cls):
+                # The validator reuses an input that is already an instance of
+                # this class; rebuilding it from its own root would nest a model
+                # inside itself.
+                if isinstance(data, cls):
+                    return data
                 inner_schema = schema.get("schema", {})
                 if isinstance(data, dict) and 'root' in data:
                     # self_instance representation: {'root': <value>}

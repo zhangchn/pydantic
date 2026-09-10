@@ -1083,6 +1083,10 @@ public:
                 "ModelValidator: no fields validator set"
             );
         }
+        // Result conversion asks this validator for the stored value's type name
+        // after validate() returns, and the instance-reuse path below stores a
+        // PyObjectWrapper rather than the model's usual output, so record it.
+        last_result_name_.clear();
 
         // Check if input is already an instance of the expected class
         if (!class_.is_none()) {
@@ -1116,6 +1120,7 @@ public:
 
                     if (!should_revalidate) {
                         // Return the instance as-is, wrapped in PyObjectWrapper
+                        last_result_name_ = "py_object_wrapper";
                         return ValResult<std::shared_ptr<void>>(std::make_shared<PyObjectWrapper>(obj));
                     }
                 } else {
@@ -1340,6 +1345,10 @@ public:
     bool root_model() const { return root_model_; }
 
     std::string root_model_inner_name() const override {
+        // A root model reports its root value's type (e.g. "int"), which would
+        // make result conversion cast a PyObjectWrapper to that type; the
+        // instance-reuse path has to override it.
+        if (root_model_ && !last_result_name_.empty()) return last_result_name_;
         if (root_model_ && fields_validator_) {
             // Resolve recursively through nested root models
             auto inner = fields_validator_->root_model_inner_name();
@@ -1357,6 +1366,7 @@ public:
     void set_revalidate(RevalidateInstances r) { revalidate_ = r; }
 
 private:
+    std::string last_result_name_;
     std::shared_ptr<Validator> fields_validator_;
     std::string class_name_ = "Model";
     bool frozen_ = false;

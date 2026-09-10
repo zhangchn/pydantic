@@ -968,6 +968,22 @@ private:
 };
 
 // WithDefaultValidator - provides default value if input is missing
+// The PydanticUndefined singleton, shared with pydantic_core_cpp.PydanticUndefined.
+// Resolved lazily so it is never looked up while pydantic_core_cpp is still
+// importing; retried until it succeeds rather than caching a failed lookup.
+inline py::object pydantic_undefined_obj() {
+    static py::object undefined;
+    if (!undefined.ptr()) {
+        try {
+            undefined = py::module_::import("pydantic_core_cpp").attr("PydanticUndefined");
+        } catch (py::error_already_set&) {
+            PyErr_Clear();
+            return py::none();
+        }
+    }
+    return undefined;
+}
+
 class WithDefaultValidator : public Validator {
 public:
     WithDefaultValidator() : inner_(nullptr), default_value_(nullptr) {}
@@ -978,18 +994,52 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
+        // Result conversion dispatches on the reported type name, and the pointee
+        // type differs per branch below (native default, live py::object, or the
+        // inner validator's own value), so record which one this call produced.
+        last_type_name_.clear();
+
+        // Rust WithDefaultValidator::validate short-circuits when the input *is*
+        // the PydanticUndefined singleton. RootModel.__init__ passes that
+        // sentinel when the caller supplied no value, so the default must be
+        // produced (and validated only when validate_default is set) instead of
+        // being handed to the inner validator.
+        if (input.input_type() == InputType::Python) {
+            py::object undefined = pydantic_undefined_obj();
+            if (undefined.ptr() && input.as_python_object().ptr() == undefined.ptr()) {
+                auto r = default_value(state);
+                if (r.is_ok()) {
+                    // default_value() hands back a live py::object unless
+                    // validate_default re-ran the inner validator.
+                    last_type_name_ = (validate_default_ && inner_)
+                        ? inner_->effective_result_name()
+                        : std::string("py_object");
+                }
+                return r;
+            }
+        }
         if (input.is_none()) {
             if (default_value_) {
+                last_type_name_ = default_type_;
                 return ValResult<std::shared_ptr<void>>(default_value_);
             }
             if (default_py_obj_.ptr()) {
+                last_type_name_ = "py_object";
                 return ValResult<std::shared_ptr<void>>(
                     std::make_shared<py::object>(default_py_obj_));
             }
         }
-        if (inner_) return inner_->validate(input, state);
-        if (default_value_) return ValResult<std::shared_ptr<void>>(default_value_);
+        if (inner_) {
+            auto r = inner_->validate(input, state);
+            if (r.is_ok()) last_type_name_ = inner_->effective_result_name();
+            return r;
+        }
+        if (default_value_) {
+            last_type_name_ = default_type_;
+            return ValResult<std::shared_ptr<void>>(default_value_);
+        }
         if (default_py_obj_.ptr()) {
+            last_type_name_ = "py_object";
             return ValResult<std::shared_ptr<void>>(
                 std::make_shared<py::object>(default_py_obj_));
         }
@@ -1055,9 +1105,14 @@ public:
     // Same delegation for the result-dispatch name: the union/branch inside
     // may report "py_object" etc. via its own effective_result_name().
     std::string effective_result_name() const override {
+        if (!last_type_name_.empty()) return last_type_name_;
         if (inner_) return inner_->effective_result_name();
         return "with-default";
     }
+
+    // A root model whose root schema is a default node resolves the root value's
+    // type through here, so it must report the same name as the value produced.
+    std::string root_model_inner_name() const override { return effective_result_name(); }
 
     void set_default_is_none(bool v) { default_is_none_ = v; }
     bool has_none_default() const { return default_is_none_; }
@@ -1077,6 +1132,8 @@ private:
     bool validate_default_ = false;
     py::object default_factory_ = py::none();
     py::object default_py_obj_;
+    // Type name of the value the most recent validate() call produced.
+    std::string last_type_name_;
 
     static py::object typed_default_to_py(const std::shared_ptr<void>& value, const std::string& type) {
         if (!value) return py::none();

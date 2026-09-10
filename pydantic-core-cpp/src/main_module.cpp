@@ -3886,7 +3886,15 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                             force_setattr(self_instance, py::str("__pydantic_private__"), py::none());
                         }
                         force_setattr(self_instance, py::str("__pydantic_extra__"), py::none());
-                        force_setattr(self_instance, py::str("__pydantic_fields_set__"), py::set(py::make_tuple(py::str("root"))));
+                        // Rust ModelValidator: a PydanticUndefined input means the
+                        // schema default filled the root, so no field is set.
+                        py::object root_undefined = pydantic_undefined_obj();
+                        bool root_from_default =
+                            root_undefined.ptr() && input.ptr() == root_undefined.ptr();
+                        force_setattr(self_instance, py::str("__pydantic_fields_set__"),
+                                      root_from_default
+                                          ? py::set()
+                                          : py::set(py::make_tuple(py::str("root"))));
                     } else if (self.is_dataclass() && !foreign_return) {
                         // Rust DataclassValidator::set_dict_call: the
                         // dataclass-args validator returns
