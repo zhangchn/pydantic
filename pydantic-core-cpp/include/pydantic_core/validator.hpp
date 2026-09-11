@@ -1,7 +1,9 @@
 #pragma once
 
+#include <algorithm>
 #include <memory>
 #include <optional>
+#include <vector>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -53,6 +55,31 @@ class ArgumentsValidator;
 class CallValidator;
 class PyDataclassValidator;
 
+// Rust composes validator names bottom-up while the schema is still under
+// construction, so a recursive reference renders as "...". Names here are
+// computed on demand; the in-progress set reproduces that marker.
+namespace display_name_detail {
+inline std::vector<const void*>& in_progress() {
+    static thread_local std::vector<const void*> stack;
+    return stack;
+}
+struct Guard {
+    const void* id;
+    bool duplicate;
+    explicit Guard(const void* id_) : id(id_), duplicate(false) {
+        std::vector<const void*>& s = in_progress();
+        duplicate = std::find(s.begin(), s.end(), id) != s.end();
+        if (!duplicate) s.push_back(id);
+    }
+    ~Guard() {
+        if (!duplicate) {
+            std::vector<const void*>& s = in_progress();
+            if (!s.empty() && s.back() == id) s.pop_back();
+        }
+    }
+};
+}  // namespace display_name_detail
+
 // Validator base trait - matches Rust's Validator trait
 class Validator {
 public:
@@ -73,6 +100,11 @@ public:
     
     // Get validator name for error messages
     virtual std::string name() const = 0;
+
+    // Rust Validator::get_name(): the schema-shaped label a union attaches to
+    // each choice's line errors, e.g. "list[union[...,int]]". Kept separate
+    // from name(), which drives result-to-Python dispatch in this port.
+    virtual std::string display_name() const { return name(); }
 
     // For root models: return the inner validator's name.
     // Default: not a root model.

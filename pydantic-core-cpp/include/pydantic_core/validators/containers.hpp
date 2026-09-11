@@ -46,7 +46,7 @@ public:
             return ValError::line_error(
                 std::move(err),
                 state.location(),
-                "list(len=" + std::to_string(list_size) + ")"
+                input.as_error_value().repr
             );
         }
         if (max_length.has_value() && list_size > max_length.value()) {
@@ -57,7 +57,7 @@ public:
             return ValError::line_error(
                 std::move(err),
                 state.location(),
-                "list(len=" + std::to_string(list_size) + ")"
+                input.as_error_value().repr
             );
         }
 
@@ -134,6 +134,10 @@ public:
     }
 
     std::string name() const override { return "list"; }
+
+    std::string display_name() const override {
+        return "list[" + (items_schema ? items_schema->display_name() : std::string("any")) + "]";
+    }
 };
 
 // DictValidator - validates dict/object values
@@ -248,7 +252,7 @@ public:
             return ValError::line_error(
                 std::move(err),
                 state.location(),
-                "dict(len=" + std::to_string(dict_size) + ")"
+                input.as_error_value().repr
             );
         }
         if (max_length.has_value() && dict_size > max_length.value()) {
@@ -259,7 +263,7 @@ public:
             return ValError::line_error(
                 std::move(err),
                 state.location(),
-                "dict(len=" + std::to_string(dict_size) + ")"
+                input.as_error_value().repr
             );
         }
 
@@ -365,6 +369,12 @@ public:
     }
 
     std::string name() const override { return "dict"; }
+
+    std::string display_name() const override {
+        std::string k = keys_schema ? keys_schema->display_name() : std::string("any");
+        std::string v = values_schema ? values_schema->display_name() : std::string("any");
+        return "dict[" + k + "," + v + "]";
+    }
 };
 
 // SetValidator - validates set values
@@ -392,7 +402,7 @@ public:
                     err.context()["actual_length"] = std::to_string(set_size);
                     return ValError::line_error(
                         std::move(err), state.location(),
-                        "set(len=" + std::to_string(set_size) + ")"
+                        input.as_error_value().repr
                     );
                 }
                 if (max_length.has_value() && set_size > max_length.value()) {
@@ -402,7 +412,7 @@ public:
                     err.context()["actual_length"] = std::to_string(set_size);
                     return ValError::line_error(
                         std::move(err), state.location(),
-                        "set(len=" + std::to_string(set_size) + ")"
+                        input.as_error_value().repr
                     );
                 }
 
@@ -444,7 +454,7 @@ public:
             return ValError::line_error(
                 std::move(err),
                 state.location(),
-                "set(len=" + std::to_string(list_size) + ")"
+                input.as_error_value().repr
             );
         }
         if (max_length.has_value() && list_size > max_length.value()) {
@@ -455,7 +465,7 @@ public:
             return ValError::line_error(
                 std::move(err),
                 state.location(),
-                "set(len=" + std::to_string(list_size) + ")"
+                input.as_error_value().repr
             );
         }
 
@@ -479,6 +489,10 @@ public:
     }
 
     std::string name() const override { return "set"; }
+
+    std::string display_name() const override {
+        return "set[" + (items_schema ? items_schema->display_name() : std::string("any")) + "]";
+    }
 };
 
 // FrozenSetValidator - validates frozenset values
@@ -551,7 +565,7 @@ public:
             return ValError::line_error(
                 std::move(err),
                 state.location(),
-                "frozenset(len=" + std::to_string(list_size) + ")"
+                input.as_error_value().repr
             );
         }
         if (max_length.has_value() && list_size > max_length.value()) {
@@ -562,7 +576,7 @@ public:
             return ValError::line_error(
                 std::move(err),
                 state.location(),
-                "frozenset(len=" + std::to_string(list_size) + ")"
+                input.as_error_value().repr
             );
         }
 
@@ -586,6 +600,10 @@ public:
     }
 
     std::string name() const override { return "frozenset"; }
+
+    std::string display_name() const override {
+        return "frozenset[" + (items_schema ? items_schema->display_name() : std::string("any")) + "]";
+    }
 };
 
 // TupleValidator - validates tuple values with positional items
@@ -668,6 +686,15 @@ public:
     }
 
     std::string name() const override { return "tuple"; }
+
+    std::string display_name() const override {
+        std::string descr;
+        for (size_t i = 0; i < items.size(); ++i) {
+            if (i) descr += ", ";
+            descr += items[i] ? items[i]->display_name() : std::string("any");
+        }
+        return "tuple[" + descr + "]";
+    }
 };
 
 // GeneratorValidator - validates generator/iterable values, returns list

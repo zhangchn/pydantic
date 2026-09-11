@@ -94,6 +94,22 @@ public:
         return "definition-ref";
     }
 
+    // The referenced validator's own name. A definition reference is the only
+    // way a schema can cycle, so this is also where the recursion marker comes
+    // from: a reference already being named further out renders as "...",
+    // matching Rust's not-yet-built definition.
+    std::string display_name() const override {
+        if (definitions_) {
+            auto def = definitions_->get_definition(schema_ref_);
+            if (def) {
+                display_name_detail::Guard g(def.get());
+                if (g.duplicate) return "...";
+                return def->display_name();
+            }
+        }
+        return "...";
+    }
+
     // Delegate expected-class lookup to the resolved definition (e.g. unions
     // use this to prefer the exact-class branch for model instance inputs).
     const py::object& expected_class() const override {

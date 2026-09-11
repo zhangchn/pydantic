@@ -41,6 +41,11 @@ public:
         if (inner_) return inner_->effective_result_name();
         return "nullable";
     }
+
+    std::string display_name() const override {
+        if (inner_) return "nullable[" + inner_->display_name() + "]";
+        return "nullable";
+    }
     
 private:
     std::shared_ptr<Validator> inner_;
@@ -72,6 +77,13 @@ public:
                 }
             }
         }
+        // Rust MaybeErrors: keep every choice's line errors and locate each
+        // under the choice's schema name, so a failed union reports what went
+        // wrong in every branch instead of one generic error. The choice name
+        // goes at the union's own depth, after any index the enclosing
+        // container already pushed.
+        std::vector<std::shared_ptr<ValLineError>> choice_errors;
+        const size_t own_loc_depth = state.location().items.size();
         for (auto& validator : validators_) {
             auto result = validator->validate(input, state);
             if (result.is_ok()) {
@@ -81,6 +93,19 @@ public:
                 last_type_name_ = validator->effective_result_name();
                 return result;
             }
+            if (custom_error_type_) continue;
+            const ValError& err = result.error();
+            if (!err.has_line_errors()) continue;
+            const std::string label = validator->display_name();
+            for (const auto& le : err.line_errors()) {
+                auto copy = std::make_shared<ValLineError>(*le);
+                size_t at = std::min(own_loc_depth, copy->location.items.size());
+                copy->location.items.insert(copy->location.items.begin() + at, LocItem(label));
+                choice_errors.push_back(std::move(copy));
+            }
+        }
+        if (!choice_errors.empty()) {
+            return ValError::line_errors(std::move(choice_errors));
         }
         if (custom_error_type_) {
             ErrorType et(*custom_error_type_, custom_error_message_.value_or(""));
@@ -102,6 +127,15 @@ public:
 
     std::string effective_result_name() const override {
         return last_type_name_.empty() ? "union" : last_type_name_;
+    }
+
+    std::string display_name() const override {
+        std::string descr;
+        for (size_t i = 0; i < validators_.size(); ++i) {
+            if (i) descr += ",";
+            descr += validators_[i] ? validators_[i]->display_name() : std::string("any");
+        }
+        return "union[" + descr + "]";
     }
 
     void set_custom_error(std::string type, std::string message) {
