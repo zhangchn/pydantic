@@ -1546,6 +1546,11 @@ struct SerNode {
         if (type == "any") {
             return serialize_any_value(value, exc_none, round_trip, json_mode);
         }
+        // Rust ToStringSerializer is a leaf: str(value), gated by when_used.
+        if (type == "to-string") {
+            if (!ser_when_used_skips(when_used, json_mode, value)) return py::str(value);
+            return value;
+        }
         // Rust FormatSerializer: builtin format(value, formatting_string),
         // gated by when_used; falls back to the inner schema when skipped.
         if (type == "format" && !format_str.empty()) {
@@ -2908,6 +2913,21 @@ static SerRef build_ser_impl(const py::dict& schema,
 
     auto node = std::make_shared<SerNode>();
     node->type = type;
+
+    // Rust FormatSerializer/ToStringSerializer default `when_used` to `json-unless-none`.
+    if (type == "format" || type == "to-string") {
+        node->when_used = "json-unless-none";
+        auto read_when_used = [&](const py::dict& d) -> bool {
+            try {
+                if (d.contains("when_used")) {
+                    node->when_used = d["when_used"].cast<std::string>();
+                    return true;
+                }
+            } catch (...) {}
+            return false;
+        };
+        if (!read_when_used(ser_dict)) read_when_used(schema);
+    }
 
     // Handle model-field wrapper: unwrap to inner schema
     if (type == "model-field") {
