@@ -1083,7 +1083,7 @@ static std::shared_ptr<Validator> build_from_element(
                 auto ref_val = def_elem["ref"];
                 if (!ref_val.error() && ref_val.value().is_string()) {
                     std::string ref = std::string(ref_val.value().get_string().value());
-                    registry->add_definition(ref, std::make_shared<AnyValidator>());
+                    registry->add_placeholder(ref, std::make_shared<AnyValidator>());
                 }
             }
         }
@@ -1099,6 +1099,11 @@ static std::shared_ptr<Validator> build_from_element(
                 if (ref.empty()) continue;
                 
                 auto def_validator = build_from_element(def_elem, config, registry);
+                // Rust composes validator names while the definition is still
+                // being built, so a reference to a definition that is not built
+                // yet keeps its "..." marker. Prime the names before publishing
+                // this definition to the registry.
+                def_validator->display_name();
                 registry->add_definition(ref, def_validator);
             }
         }

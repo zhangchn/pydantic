@@ -43,12 +43,15 @@ public:
     }
 
     std::string display_name() const override {
-        if (inner_) return "nullable[" + inner_->display_name() + "]";
-        return "nullable";
+        if (display_name_cache_) return *display_name_cache_;
+        std::string out = inner_ ? "nullable[" + inner_->display_name() + "]" : std::string("nullable");
+        display_name_cache_ = out;
+        return out;
     }
     
 private:
     std::shared_ptr<Validator> inner_;
+    mutable std::optional<std::string> display_name_cache_;
 };
 
 // UnionValidator - tries multiple validators in order
@@ -130,12 +133,14 @@ public:
     }
 
     std::string display_name() const override {
+        if (display_name_cache_) return *display_name_cache_;
         std::string descr;
         for (size_t i = 0; i < validators_.size(); ++i) {
             if (i) descr += ",";
             descr += validators_[i] ? validators_[i]->display_name() : std::string("any");
         }
-        return "union[" + descr + "]";
+        display_name_cache_ = "union[" + descr + "]";
+        return *display_name_cache_;
     }
 
     void set_custom_error(std::string type, std::string message) {
@@ -146,6 +151,7 @@ public:
 private:
     std::vector<std::shared_ptr<Validator>> validators_;
     mutable std::string last_type_name_;
+    mutable std::optional<std::string> display_name_cache_;
     std::optional<std::string> custom_error_type_;
     std::optional<std::string> custom_error_message_;
 };

@@ -25,8 +25,18 @@ public:
     using ValidatorPtr = std::shared_ptr<Validator>;
 
     void add_definition(const std::string& ref, ValidatorPtr validator) {
+        pending_.erase(ref);
         definitions_[ref] = std::move(validator);
     }
+
+    // Rust's DefinitionsBuilder hands out a reference to a definition that is
+    // still being built; its name is not known yet, so it renders as "...".
+    void add_placeholder(const std::string& ref, ValidatorPtr stub) {
+        pending_.insert(ref);
+        definitions_[ref] = std::move(stub);
+    }
+
+    bool is_pending(const std::string& ref) const { return pending_.count(ref) != 0; }
 
     ValidatorPtr get_definition(const std::string& ref) const {
         auto it = definitions_.find(ref);
@@ -42,6 +52,7 @@ public:
 
 private:
     std::unordered_map<std::string, ValidatorPtr> definitions_;
+    std::unordered_set<std::string> pending_;
 };
 
 // DefinitionRefValidator - resolves recursive schema references
@@ -100,6 +111,7 @@ public:
     // matching Rust's not-yet-built definition.
     std::string display_name() const override {
         if (definitions_) {
+            if (definitions_->is_pending(schema_ref_)) return "...";
             auto def = definitions_->get_definition(schema_ref_);
             if (def) {
                 display_name_detail::Guard g(def.get());

@@ -160,9 +160,14 @@ def _lookup_value_by_loc(obj, loc):
     """Recursively look up a value in a dict/tuple/ArgsKwargs by location path.
     
     E.g. obj={'t': ArbitraryType()}, loc=('t',) → ArbitraryType()
-    Returns _LOC_NOT_FOUND when the path does not resolve.
+    Returns _LOC_NOT_FOUND when no part of the path resolves.
+
+    A failed union puts the choice's schema name ("dict[str,...]", "str",
+    "union[a,b]") into the location. Those are not keys of the input, so a step
+    that does not resolve is skipped instead of failing the whole lookup.
     """
     current = obj
+    resolved = False
     for key in loc:
         if isinstance(current, ArgsKwargs):
             if isinstance(key, int) and key < len(current.args):
@@ -170,14 +175,15 @@ def _lookup_value_by_loc(obj, loc):
             elif key in current.kwargs:
                 current = current.kwargs[key]
             else:
-                return _LOC_NOT_FOUND
+                continue
         elif isinstance(current, dict) and key in current:
             current = current[key]
         elif isinstance(current, (list, tuple)) and isinstance(key, int):
             current = current[key]
         else:
-            return _LOC_NOT_FOUND
-    return current
+            continue
+        resolved = True
+    return current if resolved else _LOC_NOT_FOUND
 
 
 def _parse_input(raw: str):

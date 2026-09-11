@@ -22,6 +22,7 @@ public:
     std::optional<size_t> min_length;
     std::optional<size_t> max_length;
     std::shared_ptr<Validator> items_schema;  // Inner validator for list items
+    mutable std::optional<std::string> display_name_cache_;
 
     ListValidator() = default;
 
@@ -136,7 +137,14 @@ public:
     std::string name() const override { return "list"; }
 
     std::string display_name() const override {
-        return "list[" + (items_schema ? items_schema->display_name() : std::string("any")) + "]";
+        if (display_name_cache_) return *display_name_cache_;
+        std::string inner = items_schema ? items_schema->display_name() : std::string("any");
+        // Rust caches the list name only once its item name resolves; while the
+        // item is a definition still being built it stays "list[...]" and is
+        // recomputed on the next call.
+        if (inner == "...") return "list[...]";
+        display_name_cache_ = "list[" + inner + "]";
+        return *display_name_cache_;
     }
 };
 
@@ -149,6 +157,7 @@ public:
     std::optional<size_t> max_length;
     std::shared_ptr<Validator> keys_schema;   // Inner validator for dict keys
     std::shared_ptr<Validator> values_schema; // Inner validator for dict values
+    mutable std::optional<std::string> display_name_cache_;
 
     DictValidator() = default;
 
@@ -371,9 +380,11 @@ public:
     std::string name() const override { return "dict"; }
 
     std::string display_name() const override {
+        if (display_name_cache_) return *display_name_cache_;
         std::string k = keys_schema ? keys_schema->display_name() : std::string("any");
         std::string v = values_schema ? values_schema->display_name() : std::string("any");
-        return "dict[" + k + "," + v + "]";
+        display_name_cache_ = "dict[" + k + "," + v + "]";
+        return *display_name_cache_;
     }
 };
 
@@ -381,6 +392,7 @@ public:
 class SetValidator : public Validator {
 public:
     std::shared_ptr<Validator> items_schema;
+    mutable std::optional<std::string> display_name_cache_;
     std::optional<size_t> min_length;
     std::optional<size_t> max_length;
 
@@ -491,7 +503,10 @@ public:
     std::string name() const override { return "set"; }
 
     std::string display_name() const override {
-        return "set[" + (items_schema ? items_schema->display_name() : std::string("any")) + "]";
+        if (display_name_cache_) return *display_name_cache_;
+        std::string inner = items_schema ? items_schema->display_name() : std::string("any");
+        display_name_cache_ = "set[" + inner + "]";
+        return *display_name_cache_;
     }
 };
 
@@ -499,6 +514,7 @@ public:
 class FrozenSetValidator : public Validator {
 public:
     std::shared_ptr<Validator> items_schema;
+    mutable std::optional<std::string> display_name_cache_;
     std::optional<size_t> min_length;
     std::optional<size_t> max_length;
 
@@ -602,7 +618,10 @@ public:
     std::string name() const override { return "frozenset"; }
 
     std::string display_name() const override {
-        return "frozenset[" + (items_schema ? items_schema->display_name() : std::string("any")) + "]";
+        if (display_name_cache_) return *display_name_cache_;
+        std::string inner = items_schema ? items_schema->display_name() : std::string("any");
+        display_name_cache_ = "frozenset[" + inner + "]";
+        return *display_name_cache_;
     }
 };
 
@@ -612,6 +631,7 @@ public:
     bool strict = false;
     bool variadic = false;  // If true, last item_schema is repeated for remaining items
     std::vector<std::shared_ptr<Validator>> items; // Positional item validators
+    mutable std::optional<std::string> display_name_cache_;
 
     TupleValidator() = default;
 
@@ -688,12 +708,14 @@ public:
     std::string name() const override { return "tuple"; }
 
     std::string display_name() const override {
+        if (display_name_cache_) return *display_name_cache_;
         std::string descr;
         for (size_t i = 0; i < items.size(); ++i) {
             if (i) descr += ", ";
             descr += items[i] ? items[i]->display_name() : std::string("any");
         }
-        return "tuple[" + descr + "]";
+        display_name_cache_ = "tuple[" + descr + "]";
+        return *display_name_cache_;
     }
 };
 
