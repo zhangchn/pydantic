@@ -43,6 +43,14 @@ from ._pydantic_core_cpp import (
 from typing import TypedDict as _TypedDict
 
 
+# Root-model inner schemas that reject a dict input; used by _dict_to_model to
+# avoid building a scalar root model from another union member's dict.
+_SCALAR_ROOT_TYPES = {
+    "int", "int-constrained", "str", "string", "str-constrained", "float",
+    "float-constrained", "bool", "bytes", "date", "time", "datetime",
+    "timedelta", "decimal", "enum", "literal",
+}
+
 class _ValidationInfo:
     """Helper class that wraps a dict with attribute access.
 
@@ -1066,6 +1074,14 @@ class SchemaValidator:
                 if isinstance(data, cls):
                     return data
                 inner_schema = schema.get("schema", {})
+                # A dict can never be the root value of a scalar root model.
+                # Inside a union the loop hands the same dict to every choice,
+                # and this branch always produces a new object, so without the
+                # guard e.g. Union[RModel, BModel] would swallow a BModel's
+                # dict as RModel(root={...}).
+                if isinstance(data, dict) and isinstance(inner_schema, dict) and \
+                        inner_schema.get("type") in _SCALAR_ROOT_TYPES:
+                    return data
                 if isinstance(data, dict) and 'root' in data:
                     # self_instance representation: {'root': <value>}
                     root_val = self._dict_to_model(data['root'], inner_schema)

@@ -1220,9 +1220,15 @@ struct SerNode {
             }
             // No discriminator value: Rust registers a warning and tries the
             // choices left to right, in declaration order.
+            // Rust UnionChoices::serialize: a strict pass first, then a lax
+            // pass, so a choice whose class does not match the value cannot
+            // "succeed" by emitting the wrong variant's fields.
             ser_warn_message("Defaulting to left to right union serialization - failed to get discriminator value for tagged union serialization", value);
-            for (auto& c : tagged_left_to_right) {
-                try { return c->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context); } catch (...) {}
+            for (int level = 1; level <= 2; level++) {
+                SerCheckScope scope(level);
+                for (auto& c : tagged_left_to_right) {
+                    try { return c->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context); } catch (...) {}
+                }
             }
         }
         if (type == "default" || type == "with-default") {
@@ -1286,11 +1292,34 @@ struct SerNode {
             // Union discrimination (Rust ModelSerializer::allow_value): while a
             // union is trying its choices, reject a value that is not of (or not
             // even an instance of) the expected class so the next choice is tried.
-            if (g_ser_check != 0 && !class_.is_none()) {
-                bool ok = g_ser_check == 1
-                    ? (static_cast<void*>(value.ptr()->ob_type) == static_cast<void*>(class_.ptr()))
-                    : py::isinstance(value, class_);
-                if (!ok) throw std::runtime_error("Value is not an instance of the expected model class");
+            if (class_.ptr() && !class_.is_none()) {
+                bool ok;
+                if (g_ser_check == 1) {
+                    ok = (static_cast<void*>(value.ptr()->ob_type) == static_cast<void*>(class_.ptr()));
+                } else if (g_ser_check == 2) {
+                    ok = py::isinstance(value, class_);
+                } else {
+                    // Rust allow_value_root_model checks isinstance even with no
+                    // union active; a non-root model only needs an instance dict.
+                    // An unmatched value falls back to inference with a warning
+                    // instead of silently emitting an empty dict.
+                    // A model reached through this pipeline may still be the
+                    // dict representation that _dict_to_model turns into an
+                    // instance later, so a dict is accepted too.
+                    ok = root_model
+                        ? py::isinstance(value, class_)
+                        : (py_hasattr(value, "__dict__") || py::isinstance<py::dict>(value));
+                }
+                if (!ok) {
+                    if (g_ser_check != 0) {
+                        throw std::runtime_error("Value is not an instance of the expected model class");
+                    }
+                    std::string model_name = "model";
+                    try { model_name = py::getattr(class_, "__name__").cast<std::string>(); }
+                    catch (const py::error_already_set&) { PyErr_Clear(); }
+                    ser_warn_unexpected_value("", model_name, value);
+                    return serialize_any_value(value, exc_none, round_trip, json_mode);
+                }
             }
             // For root models, extract the 'root' attribute before delegating
             if (root_model && py_hasattr(value, "root")) {
@@ -1877,11 +1906,30 @@ struct SerNode {
             // Union discrimination (Rust ModelSerializer::allow_value): while a
             // union is trying its choices, reject a value that is not of (or not
             // even an instance of) the expected class so the next choice is tried.
-            if (g_ser_check != 0 && !class_.is_none()) {
-                bool ok = g_ser_check == 1
-                    ? (static_cast<void*>(value.ptr()->ob_type) == static_cast<void*>(class_.ptr()))
-                    : py::isinstance(value, class_);
-                if (!ok) throw std::runtime_error("Value is not an instance of the expected model class");
+            if (class_.ptr() && !class_.is_none()) {
+                bool ok;
+                if (g_ser_check == 1) {
+                    ok = (static_cast<void*>(value.ptr()->ob_type) == static_cast<void*>(class_.ptr()));
+                } else if (g_ser_check == 2) {
+                    ok = py::isinstance(value, class_);
+                } else {
+                    // A model reached through this pipeline may still be the
+                    // dict representation that _dict_to_model turns into an
+                    // instance later, so a dict is accepted too.
+                    ok = root_model
+                        ? py::isinstance(value, class_)
+                        : (py_hasattr(value, "__dict__") || py::isinstance<py::dict>(value));
+                }
+                if (!ok) {
+                    if (g_ser_check != 0) {
+                        throw std::runtime_error("Value is not an instance of the expected model class");
+                    }
+                    std::string model_name = "model";
+                    try { model_name = py::getattr(class_, "__name__").cast<std::string>(); }
+                    catch (const py::error_already_set&) { PyErr_Clear(); }
+                    ser_warn_unexpected_value("", model_name, value);
+                    return infer_json(value, ensure_ascii, indent);
+                }
             }
             // For root models, extract the 'root' attribute before delegating
             if (root_model && py_hasattr(value, "root")) {
