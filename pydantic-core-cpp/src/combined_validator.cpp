@@ -1941,45 +1941,81 @@ static std::shared_ptr<Validator> build_from_py_dict(
     // --- TaggedUnion ---
     if (type == "tagged-union") {
         auto disc_obj = schema["discriminator"];
-        // Callable discriminator: build a tag->validator map
-        if (py::isinstance<py::function>(disc_obj) || py_hasattr(disc_obj, "__call__")) {
-            std::unordered_map<std::string, std::shared_ptr<Validator>> choice_map;
-            if (schema.contains("choices")) {
-                auto choices_obj = schema["choices"];
-                if (py::isinstance<py::dict>(choices_obj)) {
-                    auto choices_dict = choices_obj.cast<py::dict>();
-                    for (auto item : choices_dict) {
-                        std::string tag = py::str(item.first).cast<std::string>();
-                        auto choice = build_from_py_dict(item.second.cast<py::dict>(), config, definitions);
-                        choice_map[tag] = std::move(choice);
+        std::vector<TaggedUnionValidator::Choice> choices;
+        if (schema.contains("choices")) {
+            auto choices_obj = schema["choices"];
+            if (py::isinstance<py::dict>(choices_obj)) {
+                for (auto item : choices_obj.cast<py::dict>()) {
+                    TaggedUnionValidator::Choice choice;
+                    choice.tag = py::reinterpret_borrow<py::object>(item.first);
+                    choice.validator = build_from_py_dict(item.second.cast<py::dict>(), config, definitions);
+                    choices.push_back(std::move(choice));
+                }
+            } else if (py::isinstance<py::list>(choices_obj)) {
+                for (auto item : choices_obj.cast<py::list>()) {
+                    TaggedUnionValidator::Choice choice;
+                    choice.validator = build_from_py_dict(item.cast<py::dict>(), config, definitions);
+                    choices.push_back(std::move(choice));
+                }
+            }
+        }
+        bool callable_disc = py::isinstance<py::function>(disc_obj) ||
+                             (disc_obj.ptr() && !disc_obj.is_none() && py_hasattr(disc_obj, "__call__"));
+        auto uv = std::make_shared<TaggedUnionValidator>();
+        if (callable_disc) {
+            std::string repr;
+            try { repr = py::str(disc_obj.attr("__name__")).cast<std::string>() + "()"; }
+            catch (const py::error_already_set&) { PyErr_Clear(); repr = "discriminator()"; }
+            uv = std::make_shared<TaggedUnionValidator>(
+                disc_obj.cast<py::object>(), std::move(repr), std::move(choices));
+        } else {
+            std::vector<std::vector<std::string>> paths;
+            std::vector<std::string> repr_parts;
+            auto quote = [](const std::string& key) { return "'" + key + "'"; };
+            if (py::isinstance<py::str>(disc_obj)) {
+                paths.push_back({disc_obj.cast<std::string>()});
+            } else if (py::isinstance<py::list>(disc_obj)) {
+                for (auto entry : disc_obj.cast<py::list>()) {
+                    if (py::isinstance<py::str>(entry)) {
+                        paths.push_back({entry.cast<std::string>()});
+                    } else if (py::isinstance<py::list>(entry)) {
+                        std::vector<std::string> path;
+                        for (auto part : entry.cast<py::list>()) {
+                            if (!py::isinstance<py::str>(part)) {
+                                throw SchemaError("The first item in an alias path should be a string");
+                            }
+                            path.push_back(part.cast<std::string>());
+                        }
+                        if (path.empty()) {
+                            throw SchemaError("Each alias path should have at least one element");
+                        }
+                        paths.push_back(std::move(path));
                     }
                 }
             }
-            return std::make_shared<TaggedUnionValidator>(disc_obj.cast<py::object>(), std::move(choice_map));
-        }
-        // String discriminator: try all validators in order
-        std::string discriminator = py_str(schema, "discriminator");
-        std::vector<std::shared_ptr<Validator>> choices;
-        if (schema.contains("choices")) {
-            auto choices_obj = schema["choices"];
-            if (py::isinstance<py::list>(choices_obj)) {
-                auto choices_list = choices_obj.cast<py::list>();
-                for (auto item : choices_list) {
-                    auto choice = build_from_py_dict(item.cast<py::dict>(), config, definitions);
-                    choices.push_back(choice);
-                }
-            } else if (py::isinstance<py::dict>(choices_obj)) {
-                // Tagged union: choices is a dict mapping tag -> schema
-                auto choices_dict = choices_obj.cast<py::dict>();
-                for (auto item : choices_dict) {
-                    auto choice = build_from_py_dict(item.second.cast<py::dict>(), config, definitions);
-                    choices.push_back(choice);
-                }
+            for (const auto& path : paths) {
+                std::string part = quote(path.front());
+                for (size_t i = 1; i < path.size(); i++) part += "." + path[i];
+                repr_parts.push_back(std::move(part));
             }
+            std::string repr;
+            for (size_t i = 0; i < repr_parts.size(); i++) {
+                repr += repr_parts[i];
+                if (i + 1 < repr_parts.size()) repr += " | ";
+            }
+            uv = std::make_shared<TaggedUnionValidator>(std::move(paths), std::move(repr), std::move(choices));
         }
-        return std::make_shared<TaggedUnionValidator>(discriminator, std::move(choices));
+        if (schema.contains("from_attributes")) {
+            uv->set_from_attributes(schema["from_attributes"].cast<bool>());
+        }
+        if (schema.contains("custom_error_type") && !schema["custom_error_type"].is_none()) {
+            std::string cmsg = (schema.contains("custom_error_message") &&
+                                !schema["custom_error_message"].is_none())
+                ? py::str(schema["custom_error_message"]).cast<std::string>() : std::string();
+            uv->set_custom_error(schema["custom_error_type"].cast<std::string>(), cmsg);
+        }
+        return uv;
     }
-
     // --- List ---
     if (type == "list" || type == "list-constrained" || type == "constr-list") {
         auto v = std::make_shared<ListValidator>();

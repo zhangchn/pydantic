@@ -153,6 +153,32 @@ def _errors_with_include_url(self, *args, include_url: bool = True, **kwargs):
 
 
 # Sentinel for "location not found" (distinct from a stored value of None).
+def _discriminator_tags(data, discriminator):
+    """Every tag a tagged-union discriminator finds in ``data``, in schema order.
+
+    pydantic spells an aliased discriminator as ``[['field', 'alias']]``, so a
+    validated dict (keyed by field name) and a raw input (keyed by alias) are
+    both resolvable without guessing which spelling survived validation.
+    """
+    if isinstance(discriminator, str):
+        return [data.get(discriminator)] if isinstance(data, dict) else []
+    if isinstance(discriminator, list):
+        tags = []
+        for path in discriminator:
+            keys = [path] if isinstance(path, str) else list(path)
+            current = data
+            for key in keys:
+                if not isinstance(current, dict):
+                    current = None
+                    break
+                current = current.get(key)
+            tags.append(current)
+        return tags
+    if callable(discriminator):
+        return [discriminator(data)]
+    return []
+
+
 _LOC_NOT_FOUND = object()
 
 
@@ -231,6 +257,15 @@ _ERR_MSG_MAP = {
 }
 
 
+# Context keys that Rust declares as ``String``; they must never be literal-parsed
+# back into ints/tuples (see ``pydantic-core/src/errors/types.rs``).
+_CTX_STR_KEYS = frozenset({
+    "attribute", "class", "class_name", "discriminator", "encoding",
+    "encoding_error", "error", "error_type", "expected", "expected_schemes",
+    "expected_tags", "field_type", "message_template", "pattern", "tag",
+})
+
+
 def _parse_structured_errors(msg: str) -> list[dict] | None:
     """Parse the structured ``__PYDANTIC_ERRORS__:<json>`` section appended to
     the C++ message, which carries full error details (typed loc items, ctx).
@@ -262,14 +297,18 @@ def _parse_structured_errors(msg: str) -> list[dict] | None:
             if not err.get('is_custom'):
                 d['url'] = f'https://errors.pydantic.dev/2.14/v/{err["type"]}'
             if err.get('ctx'):
-                def _parse_ctx_value(v):
+                def _parse_ctx_value(k, v):
+                    # Rust types every one of these as a str, so "3" must stay
+                    # "3" and "1, 2" must not become a tuple.
+                    if k in _CTX_STR_KEYS:
+                        return v
                     # Quoted-string ctx values (e.g. literal_error's expected
                     # "'foo'") are already Python reprs — keep them verbatim;
                     # literal_eval would strip the meaningful quotes.
                     if isinstance(v, str) and v[:1] in ('"', "'"):
                         return v
                     return _parse_input(v)
-                d['ctx'] = {k: _parse_ctx_value(v) for k, v in err['ctx'].items()}
+                d['ctx'] = {k: _parse_ctx_value(k, v) for k, v in err['ctx'].items()}
                 if d['ctx'].get('error') == '__PYDANTIC_EXC_REF__' and error_objs is not None and i < len(error_objs):
                     d['ctx']['error'] = error_objs[i]
                 for _k, _v in d['ctx'].items():
@@ -1034,18 +1073,26 @@ class SchemaValidator:
 
         if schema.get("type") == "tagged-union":
             if isinstance(data, dict):
-                discriminator = schema.get("discriminator")
                 choices = schema.get("choices", {})
-                if isinstance(discriminator, str) and isinstance(choices, dict):
-                    # Extract tag from data
-                    tag = data.get(discriminator)
-                    if tag is not None:
-                        # Try direct match
-                        choice_schema = choices.get(str(tag))
-                        if choice_schema and isinstance(choice_schema, dict):
-                            result = self._dict_to_model(data, choice_schema)
-                            if result is not data:
-                                return result
+                # A choice key is a real Python object (int, str, Enum member) and
+                # the C++ validator matched the tag with Python equality, so the
+                # schema walk has to match it the same way. The discriminator is
+                # either a key, a list of alternative key paths (an aliased field
+                # appears as both spellings) or a callable.
+                for tag in _discriminator_tags(data, schema.get("discriminator")):
+                    if tag is None:
+                        continue
+                    for key, choice_schema in (choices.items() if isinstance(choices, dict) else ()):
+                        if not isinstance(choice_schema, dict):
+                            continue
+                        try:
+                            if not (tag == key):
+                                continue
+                        except Exception:
+                            continue
+                        result = self._dict_to_model(data, choice_schema)
+                        if result is not data:
+                            return result
             return data
 
         if schema.get("type") == "union":

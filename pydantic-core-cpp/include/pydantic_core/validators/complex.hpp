@@ -159,94 +159,226 @@ private:
 // TaggedUnionValidator - union with discriminator tag
 class TaggedUnionValidator : public Validator {
 public:
+    // A choice keeps its schema key so the tag can be matched by value: pydantic
+    // emits int, str and Enum-member keys, and Rust compares them with Python
+    // equality (True matches 1, "1" does not).
+    struct Choice {
+        py::object tag;
+        std::shared_ptr<Validator> validator;
+    };
+
     TaggedUnionValidator() = default;
-    TaggedUnionValidator(std::string tag, std::vector<std::shared_ptr<Validator>> validators)
-        : tag_(std::move(tag)), validators_(std::move(validators)) {}
-    // Callable discriminator constructor: maps tag string -> validator
-    TaggedUnionValidator(py::object discriminator,
-                         std::unordered_map<std::string, std::shared_ptr<Validator>> choice_map)
-        : discriminator_(std::move(discriminator)), choice_map_(std::move(choice_map)) {}
+
+    TaggedUnionValidator(std::vector<std::vector<std::string>> paths,
+                         std::string discriminator_repr,
+                         std::vector<Choice> choices)
+        : paths_(std::move(paths)), discriminator_repr_(std::move(discriminator_repr)),
+          choices_(std::move(choices)) {
+        build_tags_repr();
+    }
+
+    TaggedUnionValidator(py::object callable, std::string discriminator_repr,
+                         std::vector<Choice> choices)
+        : callable_(std::move(callable)), discriminator_repr_(std::move(discriminator_repr)),
+          choices_(std::move(choices)) {
+        build_tags_repr();
+    }
+
+    void set_custom_error(const std::string& type, const std::string& message) {
+        custom_error_type_ = type;
+        custom_error_message_ = message;
+    }
+
+    void set_from_attributes(bool value) { from_attributes_ = value; }
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
     ) override {
-        // If we have a callable discriminator and choice map, use them
-        if (!discriminator_.is_none() && !choice_map_.empty()) {
-            py::object tag_value;
+        py::object tag;
+        if (!callable_.is_none()) {
             try {
-                // Get the raw Python input for the discriminator call
-                auto* py_input = dynamic_cast<const PythonInput*>(&input);
-                if (!py_input) {
-                    return ValError::line_error(
-                        ErrorType(ErrorType::Kind::CustomError),
-                        state.location(),
-                        "tagged-union: callable discriminator requires Python input"
-                    );
+                tag = py::object(callable_(input.as_python_object()));
+            } catch (const py::error_already_set&) {
+                throw;  // a raising discriminator belongs to its caller
+            }
+            if (tag.is_none()) return tag_not_found(input, state);
+        } else {
+            py::object source;
+            if (!fields_source(input, state, &source)) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::ModelAttributesType),
+                    state.location(), input.as_error_value().repr);
+            }
+            bool found = false;
+            for (const auto& path : paths_) {
+                py::object value;
+                if (read_key_path(source, path, &value)) {
+                    tag = std::move(value);
+                    found = true;
+                    break;
                 }
-                tag_value = discriminator_(py_input->py_object());
-            } catch (py::error_already_set& e) {
-                e.restore();
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::CustomError),
-                    state.location(),
-                    "tagged-union: discriminator call failed"
-                );
-            } catch (...) {
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::CustomError),
-                    state.location(),
-                    "tagged-union: discriminator call failed"
-                );
             }
-            std::string tag_str;
-            try { tag_str = tag_value.cast<std::string>(); } catch (...) {
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::CustomError),
-                    state.location(),
-                    "tagged-union: discriminator did not return a string"
-                );
-            }
-            auto it = choice_map_.find(tag_str);
-            if (it == choice_map_.end()) {
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::InvalidJsonValue),
-                    state.location(),
-                    input.as_error_value().repr
-                );
-            }
-            auto result = it->second->validate(input, state);
+            if (!found) return tag_not_found(input, state);
+        }
+
+        const size_t own_loc_depth = state.location().items.size();
+        for (const auto& choice : choices_) {
+            if (!choice.tag.ptr()) continue;
+            // pybind11's operator== on object/handle is a pointer compare; the tag
+            // must match its schema key by Python value.
+            int equal = PyObject_RichCompareBool(tag.ptr(), choice.tag.ptr(), Py_EQ);
+            if (equal < 0) { PyErr_Clear(); continue; }
+            if (!equal) continue;
+            auto result = choice.validator->validate(input, state);
             if (result.is_ok()) {
-                auto py_obj = value_to_python_with_type(result.value(), it->second->effective_result_name());
-                return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(std::move(py_obj)));
+                last_type_name_ = choice.validator->effective_result_name();
+                return result;
+            }
+            // Rust: err.with_outer_location(tag) — the matched tag sits in the
+            // location right after the union's own path segment.
+            if (result.error().has_line_errors()) {
+                auto errors = result.error().line_errors();
+                const LocItem loc_item = tag_loc_item(tag);
+                for (auto& le : errors) {
+                    size_t at = std::min(own_loc_depth, le->location.items.size());
+                    le->location.items.insert(le->location.items.begin() + at, loc_item);
+                }
+                return ValError::line_errors(std::move(errors));
             }
             return result;
         }
-        // Fallback: try all validators
-        for (auto& validator : validators_) {
-            auto result = validator->validate(input, state);
-            if (result.is_ok()) {
-                auto py_obj = value_to_python_with_type(result.value(), validator->effective_result_name());
-                return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(std::move(py_obj)));
-            }
-        }
-        return ValError::line_error(
-            ErrorType(ErrorType::Kind::CustomError),
-            state.location(),
-            "No tagged union variant matched"
-        );
+        return tag_invalid(input, state, tag);
     }
 
     std::string name() const override { return "tagged-union"; }
 
-    // The stored value is always a py::object (converted at validate time).
-    std::string effective_result_name() const override { return "py_object"; }
+    // The inner value is returned unconverted, so the matched choice decides
+    // how it is turned back into a Python object.
+    std::string effective_result_name() const override {
+        return last_type_name_.empty() ? std::string("py_object") : last_type_name_;
+    }
 
 private:
-    std::string tag_;
-    std::vector<std::shared_ptr<Validator>> validators_;
-    py::object discriminator_ = py::none();
-    std::unordered_map<std::string, std::shared_ptr<Validator>> choice_map_;
+    std::vector<std::vector<std::string>> paths_;
+    std::vector<Choice> choices_;
+    py::object callable_ = py::none();
+    std::string tags_repr_;
+    std::string discriminator_repr_;
+    bool from_attributes_ = true;
+    std::string custom_error_type_;
+    std::string custom_error_message_;
+    mutable std::string last_type_name_;
+
+    void build_tags_repr() {
+        bool first = true;
+        for (const auto& choice : choices_) {
+            if (!first) tags_repr_ += ", ";
+            first = false;
+            try { tags_repr_ += py::repr(choice.tag).cast<std::string>(); }
+            catch (const py::error_already_set&) { PyErr_Clear(); }
+        }
+    }
+
+    static LocItem tag_loc_item(const py::object& tag) {
+        if (PyLong_Check(tag.ptr()) && !PyBool_Check(tag.ptr())) {
+            int64_t value = PyLong_AsLongLong(tag.ptr());
+            if (value != -1 || !PyErr_Occurred()) return LocItem(value);
+            PyErr_Clear();
+        }
+        try { return LocItem(py::str(tag).cast<std::string>()); }
+        catch (const py::error_already_set&) { PyErr_Clear(); return LocItem(std::string()); }
+    }
+
+    static bool read_one(py::handle cur, const std::string& key, py::object* out) {
+        if (py::isinstance<py::dict>(cur)) {
+            py::dict d = cur.cast<py::dict>();
+            if (!d.contains(key)) return false;
+            *out = d[py::str(key)];
+            return true;
+        }
+        if (py_hasattr(cur, key.c_str())) {
+            *out = py::getattr(cur, key.c_str());
+            return true;
+        }
+        return false;
+    }
+
+    // Rust reads the tag through validate_model_fields, so an input that cannot
+    // be read as a field container at all (a str, an int, ...) reports
+    // model_attributes_type rather than union_tag_not_found.
+    bool fields_source(const Input& input, ValidationState& state, py::object* out) const {
+        if (auto* py_input = dynamic_cast<const PythonInput*>(&input)) {
+            const py::object& obj = py_input->py_object();
+            if (py::isinstance<py::dict>(obj)) { *out = obj; return true; }
+            if (!state.strict_or(false) && PyMapping_Check(obj.ptr()) &&
+                !PyUnicode_Check(obj.ptr()) && !PyBytes_Check(obj.ptr()) &&
+                !PyByteArray_Check(obj.ptr()) && !PySequence_Check(obj.ptr())) { *out = obj; return true; }
+            if (from_attributes_ && from_attributes_applicable(obj)) { *out = obj; return true; }
+            return false;
+        }
+        auto dict_result = input.validate_dict(state.strict_or(false));
+        if (dict_result.is_err()) return false;
+        auto& dict = dict_result.value();
+        py::dict py_dict;
+        for (const auto& key : dict->keys()) {
+            auto value = dict->get_value(key);
+            if (value) py_dict[py::str(key)] = *value;
+        }
+        *out = std::move(py_dict);
+        return true;
+    }
+
+    static bool from_attributes_applicable(py::handle obj) {
+        try {
+            std::string module = obj.get_type().attr("__module__").cast<std::string>();
+            return module != "builtins" && module != "datetime" && module != "collections";
+        } catch (const py::error_already_set&) {
+            PyErr_Clear();
+            return false;
+        }
+    }
+
+    static bool read_key_path(const py::object& source, const std::vector<std::string>& path,
+                              py::object* out) {
+        if (path.empty()) return false;
+        py::object cur = source;
+        for (const auto& key : path) {
+            py::object next;
+            if (!read_one(cur, key, &next)) return false;
+            cur = std::move(next);
+        }
+        *out = cur;
+        return true;
+    }
+
+    bool has_custom_error() const { return !custom_error_type_.empty(); }
+
+    ValError custom_error(const Input& input, ValidationState& state) const {
+        ErrorType err(ErrorType::Kind::CustomError);
+        err.context()["custom_error_type"] = custom_error_type_;
+        if (!custom_error_message_.empty()) err.context()["msg"] = custom_error_message_;
+        return ValError::line_error(std::move(err), state.location(), input.as_error_value().repr);
+    }
+
+    ValError tag_not_found(const Input& input, ValidationState& state) const {
+        if (has_custom_error()) return custom_error(input, state);
+        ErrorType err(ErrorType::Kind::UnionTagNotFound);
+        err.context()["discriminator"] = discriminator_repr_;
+        return ValError::line_error(std::move(err), state.location(), input.as_error_value().repr);
+    }
+
+    ValError tag_invalid(const Input& input, ValidationState& state, const py::object& tag) const {
+        if (has_custom_error()) return custom_error(input, state);
+        ErrorType err(ErrorType::Kind::UnionTagInvalid);
+        err.context()["discriminator"] = discriminator_repr_;
+        err.context()["expected_tags"] = tags_repr_;
+        std::string tag_str;
+        try { tag_str = py::str(tag).cast<std::string>(); }
+        catch (const py::error_already_set&) { PyErr_Clear(); }
+        err.context()["tag"] = tag_str;
+        return ValError::line_error(std::move(err), state.location(), input.as_error_value().repr);
+    }
 };
 
 } // namespace pydantic_core
