@@ -232,14 +232,14 @@ std::string ErrorType::message_template() const {
         {Kind::BytesTooLong, "Data should have at most {max_length} bytes"},
         
         // List/Set constraint errors - use generic too_short/too_long messages
-        {Kind::ListTooShort, "{field_type} should have at least {min_length} items after validation, not {actual_length}"},
-        {Kind::ListTooLong, "{field_type} should have at most {max_length} items after validation, not {actual_length}"},
-        {Kind::SetTooShort, "{field_type} should have at least {min_length} items after validation, not {actual_length}"},
-        {Kind::SetTooLong, "{field_type} should have at most {max_length} items after validation, not {actual_length}"},
+        {Kind::ListTooShort, "{field_type} should have at least {min_length} item{s} after validation, not {actual_length}"},
+        {Kind::ListTooLong, "{field_type} should have at most {max_length} item{s} after validation, not {actual_length}"},
+        {Kind::SetTooShort, "{field_type} should have at least {min_length} item{s} after validation, not {actual_length}"},
+        {Kind::SetTooLong, "{field_type} should have at most {max_length} item{s} after validation, not {actual_length}"},
 
         // Dict constraint errors - use generic too_short/too_long messages
-        {Kind::DictTooShort, "{field_type} should have at least {min_length} items after validation, not {actual_length}"},
-        {Kind::DictTooLong, "{field_type} should have at most {max_length} items after validation, not {actual_length}"},
+        {Kind::DictTooShort, "{field_type} should have at least {min_length} item{s} after validation, not {actual_length}"},
+        {Kind::DictTooLong, "{field_type} should have at most {max_length} item{s} after validation, not {actual_length}"},
         
         // Tuple errors
         {Kind::TupleLengthMismatch, "Tuple should have {expected} items, got {actual}"},
@@ -304,8 +304,8 @@ std::string ErrorType::message_template() const {
         {Kind::LessThanEqual, "Input should be less than or equal to {le}"},
         {Kind::MultipleOf, "Input should be a multiple of {multiple_of}"},
         {Kind::FiniteNumber, "Input should be a finite number"},
-        {Kind::TooShort, "{field_type} should have at least {min_length} items after validation, not {actual_length}"},
-        {Kind::TooLong, "{field_type} should have at most {max_length} items after validation, not {actual_length}"},
+        {Kind::TooShort, "{field_type} should have at least {min_length} item{s} after validation, not {actual_length}"},
+        {Kind::TooLong, "{field_type} should have at most {max_length} item{s} after validation, not {actual_length}"},
         {Kind::StringNotAscii, "Input should be ASCII"},
 
         // Date/Time errors
@@ -363,13 +363,36 @@ std::string ErrorType::message_template() const {
 std::string ErrorType::message() const {
     if (!custom_message_.empty()) return custom_message_;
     std::string result = message_template();
-    for (const auto& [key, value] : context_) {
+    // Rust renders "{s}" from plural_s(expected_count). Validators that do not
+    // pass it explicitly still get the right singular/plural form by reading it
+    // back from the constraint the template names.
+    std::unordered_map<std::string, std::string> plural_ctx;
+    const std::unordered_map<std::string, std::string>* ctx = &context_;
+    if (result.find("{s}") != std::string::npos && context_.find("s") == context_.end()) {
+        static constexpr const char* kCountKeys[] = {
+            "max_length", "min_length", "max_digits", "decimal_places", "whole_digits"};
+        for (const char* k : kCountKeys) {
+            auto it = context_.find(k);
+            if (it != context_.end()) {
+                plural_ctx = context_;
+                plural_ctx["s"] = (it->second == "1") ? "" : "s";
+                ctx = &plural_ctx;
+                break;
+            }
+        }
+    }
+    for (const auto& [key, value] : *ctx) {
         std::string placeholder = "{" + key + "}";
         size_t pos = result.find(placeholder);
         while (pos != std::string::npos) {
             result.replace(pos, placeholder.length(), value);
             pos = result.find(placeholder);
         }
+    }
+    // Nothing to pluralise against: keep the plural form the templates had
+    // before "{s}" was introduced rather than emitting a literal "{s}".
+    for (size_t pos = result.find("{s}"); pos != std::string::npos; pos = result.find("{s}")) {
+        result.replace(pos, 3, "s");
     }
     return result;
 }
