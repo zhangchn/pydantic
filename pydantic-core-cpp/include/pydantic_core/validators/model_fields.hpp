@@ -1347,6 +1347,12 @@ public:
 
     std::string name() const override { return "model"; }
 
+    // Rust names a model validator after the model itself, so a union that
+    // reports each choice's name shows the class, not the validator type.
+    std::string display_name() const override {
+        return class_name_.empty() ? std::string("model") : class_name_;
+    }
+
     // The wrapped fields validator (for reaches_fields_result traversal).
     std::shared_ptr<Validator> inner_validator() const override { return fields_validator_; }
 
