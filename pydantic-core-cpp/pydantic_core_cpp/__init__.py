@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast as _ast
 import copy as _copy
+import decimal as _decimal
 import re as _re
 import sys as _sys
 from typing import Any as _Any
@@ -293,9 +294,6 @@ def _parse_structured_errors(msg: str) -> list[dict] | None:
                 'msg': _ERR_MSG_MAP.get(err['msg'], err['msg']),
                 'input': _parse_input(err['input']),
             }
-            # Rust omits the url key for custom error types.
-            if not err.get('is_custom'):
-                d['url'] = f'https://errors.pydantic.dev/2.14/v/{err["type"]}'
             if err.get('ctx'):
                 def _parse_ctx_value(k, v):
                     # Rust types every one of these as a str, so "3" must stay
@@ -314,6 +312,9 @@ def _parse_structured_errors(msg: str) -> list[dict] | None:
                 for _k, _v in d['ctx'].items():
                     if _v == '__PYDANTIC_CTX_OBJ__' and ctx_objs is not None and i < len(ctx_objs):
                         d['ctx'][_k] = ctx_objs[i].get(_k, _v)
+            # Rust emits ctx before url; dict order is observable in errors().
+            if not err.get('is_custom'):
+                d['url'] = f'https://errors.pydantic.dev/2.14/v/{err["type"]}'
             result.append(d)
         return result
     except Exception:
@@ -427,6 +428,43 @@ def _validation_error_count(self) -> int:
 
 
 ValidationError.error_count = _validation_error_count
+
+
+def _error_json_default(o):
+    # Mirrors the Rust error serializer, which renders bytes as their decoded
+    # text and any iterable as a JSON array rather than failing.
+    if isinstance(o, (bytes, bytearray)):
+        try:
+            return o.decode()
+        except UnicodeDecodeError:
+            return o.decode('utf-8', 'replace')
+    if isinstance(o, (set, frozenset)):
+        return sorted(o, key=repr)
+    if isinstance(o, _decimal.Decimal):
+        return str(o)
+    if isinstance(o, (list, tuple)):
+        return list(o)
+    raise TypeError(f'Object of type {type(o).__name__} is not JSON serializable')
+
+
+def _validation_error_json(self, *, indent=None, include_url=True,
+                           include_context=True, include_input=True) -> str:
+    """Serialize ``errors()`` to a JSON string, matching the Rust format."""
+    import json as _json
+    errors = self.errors(include_url=include_url)
+    if not include_input:
+        for e in errors:
+            e.pop('input', None)
+    if not include_context:
+        for e in errors:
+            e.pop('ctx', None)
+    # Rust's serde_json emits no padding between items when unindented.
+    separators = None if indent else (',', ':')
+    return _json.dumps(errors, indent=indent, separators=separators,
+                       ensure_ascii=False, default=_error_json_default)
+
+
+ValidationError.json = _validation_error_json
 
 
 def _validation_error_title(self) -> str:
