@@ -285,8 +285,17 @@ double PythonInput::as_float() const {
 }
 
 std::vector<uint8_t> PythonInput::as_bytes() const {
-    py::bytes b = obj_.cast<py::bytes>();
-    std::string s = b;
+    // bytearray and other buffer types must be copied out; py::bytes' caster
+    // rejects them outright.
+    if (!PyBytes_Check(obj_.ptr())) {
+        PyObject* owned = PyBytes_FromObject(obj_.ptr());
+        if (owned) {
+            std::string s = py::reinterpret_steal<py::bytes>(owned);
+            return std::vector<uint8_t>(s.begin(), s.end());
+        }
+        PyErr_Clear();
+    }
+    std::string s = obj_.cast<py::bytes>();
     return std::vector<uint8_t>(s.begin(), s.end());
 }
 
@@ -958,8 +967,13 @@ ValResult<ValMatch<EitherDateTime>> PythonInput::validate_datetime(
                 this->as_error_value().repr
             );
         }
-        if (is_float()) {
-            auto parsed = datetime_from_float(as_float(), unit);
+        // Rust retries Decimal and Fraction through extract::<f64>().
+        double numeric = 0;
+        if (is_float() || is_decimal()) {
+            if (!as_float_via_number(&numeric)) {
+                return type_error(ErrorType::Kind::DateTimeType, *this, this->current_location());
+            }
+            auto parsed = datetime_from_float(numeric, unit);
             if (parsed.ok) {
                 return ValMatch<EitherDateTime>::lax(EitherDateTime(parsed.value));
             }
@@ -1033,8 +1047,13 @@ ValResult<ValMatch<EitherTime>> PythonInput::validate_time(bool strict) const {
                 this->as_error_value().repr
             );
         }
-        if (is_float()) {
-            auto parsed = time_from_float(as_float());
+        // Rust retries Decimal and Fraction through extract::<f64>().
+        double numeric = 0;
+        if (is_float() || is_decimal()) {
+            if (!as_float_via_number(&numeric)) {
+                return type_error(ErrorType::Kind::TimeType, *this, this->current_location());
+            }
+            auto parsed = time_from_float(numeric);
             if (parsed.ok) {
                 return ValMatch<EitherTime>::lax(EitherTime(parsed.value));
             }
@@ -1068,9 +1087,11 @@ ValResult<ValMatch<EitherTimedelta>> PythonInput::validate_timedelta(bool strict
             EitherTimedelta(Timedelta{static_cast<int>(days), static_cast<int>(rem), 0}));
     }
 
-    if (is_float() && !strict) {
-        // Lax mode: treat float as number of seconds
-        double seconds = py::float_(obj_).cast<double>();
+    // Lax mode: treat the number of seconds as a float; Rust reaches Decimal and
+    // Fraction through extract::<f64>().
+    double numeric = 0;
+    if (!strict && (is_float() || is_decimal()) && as_float_via_number(&numeric)) {
+        double seconds = numeric;
         double days_f = seconds / 86400.0;
         long long days = static_cast<long long>(days_f);
         double rem = seconds - days * 86400.0;

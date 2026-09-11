@@ -5,6 +5,7 @@
 #include <optional>
 #include <vector>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include "speedate.hpp"
@@ -176,6 +177,61 @@ struct EitherTimedelta {
     Timedelta as_raw() const { return value; }
 };
 
+namespace timedelta_detail {
+
+inline bool all_digits(const std::string& s, size_t b, size_t e) {
+    if (b >= e) return false;
+    for (size_t i = b; i < e; ++i) {
+        if (s[i] < '0' || s[i] > '9') return false;
+    }
+    return true;
+}
+
+// speedate's time tail: "HH:MM" or "HH:MM:SS[.ffffff]". The two-field form
+// needs a two-digit hour, a fraction only belongs to the third field, extra
+// fraction digits are truncated rather than rejected, and hours are capped at
+// 23 once a days prefix has already carried the date part.
+inline bool parse_time_tail(const std::string& t, bool hours_capped,
+                            long long* seconds, long long* micros) {
+    size_t c1 = t.find(':');
+    if (c1 == std::string::npos) return false;
+    size_t c2 = t.find(':', c1 + 1);
+    if (c2 == std::string::npos) {
+        if (c1 < 2 || !all_digits(t, 0, c1)) return false;
+        if (t.size() - (c1 + 1) != 2 || !all_digits(t, c1 + 1, t.size())) return false;
+        long long h = std::stoll(t.substr(0, c1));
+        long long m = std::stoll(t.substr(c1 + 1, 2));
+        if (m > 59 || h > 999999999LL || (hours_capped && h > 23)) return false;
+        *seconds = h * 3600 + m * 60;
+        *micros = 0;
+        return true;
+    }
+    if (t.find(':', c2 + 1) != std::string::npos) return false;
+    if (!all_digits(t, 0, c1)) return false;
+    if (c2 - (c1 + 1) != 2 || !all_digits(t, c1 + 1, c2)) return false;
+    std::string sec_field = t.substr(c2 + 1);
+    size_t dot = sec_field.find('.');
+    std::string whole = dot == std::string::npos ? sec_field : sec_field.substr(0, dot);
+    if (whole.size() != 2 || !all_digits(whole, 0, whole.size())) return false;
+    long long h = std::stoll(t.substr(0, c1));
+    long long m = std::stoll(t.substr(c1 + 1, 2));
+    long long sec = std::stoll(whole);
+    if (m > 59 || sec > 59 || h > 999999999LL || (hours_capped && h > 23)) return false;
+    long long micro = 0;
+    if (dot != std::string::npos) {
+        std::string frac = sec_field.substr(dot + 1);
+        if (!all_digits(frac, 0, frac.size())) return false;
+        if (frac.size() > 6) frac = frac.substr(0, 6);
+        while (frac.size() < 6) frac += '0';
+        micro = std::stoll(frac);
+    }
+    *seconds = h * 3600 + m * 60 + sec;
+    *micros = micro;
+    return true;
+}
+
+} // namespace timedelta_detail
+
 // Parse a timedelta string: ISO 8601 duration (P4Y/P4M/P4W/P4D/P0.5D/PT5H...),
 // HH:MM:SS[.frac] with optional "[Nd,]HH:MM:SS" days prefix, or either form
 // with a leading '-'. Returns nullopt when the string is not a valid duration.
@@ -243,33 +299,61 @@ inline std::optional<Timedelta> try_parse_timedelta_str(const std::string& input
             }
             if (!parsed_any) return std::nullopt;
         } else {
-            // [Nd,]HH:MM:SS[.frac]
+            // speedate's human form: "[<int> [ws] d|day|days [,] [ws]] <time tail>".
+            // At most one space is tolerated either side of the comma, and the
+            // days unit may be omitted entirely ("10:10").
+            size_t digits_end = 0;
+            while (digits_end < s.size() && s[digits_end] >= '0' && s[digits_end] <= '9') digits_end++;
+            bool have_days = false;
             long long day_part = 0;
-            std::string hms = s;
-            size_t comma = s.find(',');
-            if (comma != std::string::npos) {
-                std::string daystr = s.substr(0, comma);
-                if (daystr.size() >= 2 && daystr.back() == 'd') {
-                    day_part = std::stoll(daystr.substr(0, daystr.size() - 1));
-                    hms = s.substr(comma + 1);
-                } else {
-                    return std::nullopt;
+            size_t tail = 0;
+            if (digits_end > 0) {
+                size_t j = digits_end;
+                if (j < s.size() && s[j] == ' ') j++;
+                static const char* const units[] = {"days", "day", "d"};
+                for (const char* u : units) {
+                    size_t n = std::strlen(u);
+                    if (j + n > s.size()) continue;
+                    bool match = true;
+                    for (size_t k = 0; k < n; ++k) {
+                        char a = s[j + k];
+                        if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+                        if (a != u[k]) { match = false; break; }
+                    }
+                    if (!match) continue;
+                    size_t after = j + n;
+                    bool letter_follows = after < s.size() &&
+                        ((s[after] >= 'a' && s[after] <= 'z') || (s[after] >= 'A' && s[after] <= 'Z'));
+                    if (letter_follows) continue;
+                    day_part = std::stoll(s.substr(0, digits_end));
+                    if (day_part > 999999999LL) return std::nullopt;
+                    have_days = true;
+                    tail = after;
+                    break;
                 }
             }
-            size_t c1 = hms.find(':');
-            if (c1 == std::string::npos) return std::nullopt;
-            size_t c2 = hms.find(':', c1 + 1);
-            if (c2 == std::string::npos) return std::nullopt;
-            // Third colon means seconds contain a ':' — not valid here
-            if (hms.find(':', c2 + 1) != std::string::npos) return std::nullopt;
-            long long h = std::stoll(hms.substr(0, c1));
-            long long m = std::stoll(hms.substr(c1 + 1, c2 - c1 - 1));
-            double sv = std::stod(hms.substr(c2 + 1));
-            double sw = 0.0;
-            double sf = std::modf(sv, &sw);
-            total_seconds = day_part * 86400LL + h * 3600LL + m * 60LL + static_cast<long long>(sw);
-            micros = std::llround(sf * 1e6);
-            parsed_any = true;
+            if (have_days) {
+                if (tail < s.size() && s[tail] == ',') tail++;
+                if (tail < s.size() && s[tail] == ' ') tail++;
+                if (tail >= s.size()) {
+                    total_seconds = day_part * 86400LL;
+                    parsed_any = true;
+                } else {
+                    long long tsec = 0, tmicro = 0;
+                    if (!timedelta_detail::parse_time_tail(s.substr(tail), true, &tsec, &tmicro)) {
+                        return std::nullopt;
+                    }
+                    total_seconds = day_part * 86400LL + tsec;
+                    micros = tmicro;
+                    parsed_any = true;
+                }
+            } else {
+                long long tsec = 0, tmicro = 0;
+                if (!timedelta_detail::parse_time_tail(s, false, &tsec, &tmicro)) return std::nullopt;
+                total_seconds = tsec;
+                micros = tmicro;
+                parsed_any = true;
+            }
         }
 
         if (!parsed_any) return std::nullopt;

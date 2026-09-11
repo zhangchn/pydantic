@@ -1197,6 +1197,19 @@ public:
                         std::string msg = e2.what();
                         e2.restore();
                         PyErr_Clear();
+                        // Rust falls back to Uuid::from_slice when the utf-8 text
+                        // form fails, which accepts a raw 16-byte value.
+                        if (b.size() == 16) {
+                            try {
+                                uuid_obj = uuid_mod.attr("UUID")(py::arg("bytes") = input_py);
+                                return ValResult<std::shared_ptr<void>>(
+                                    std::make_shared<std::string>(py::str(uuid_obj).cast<std::string>())
+                                );
+                            } catch (py::error_already_set& e3) {
+                                e3.restore();
+                                PyErr_Clear();
+                            }
+                        }
                         ErrorType err(ErrorType::Kind::UuidParsing);
                         err.context()["error"] = msg;
                         return ValError::line_error(err, state.location(),
