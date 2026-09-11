@@ -144,6 +144,16 @@ public:
     bool is_complex() const;
     bool is_callable() const;
 
+    // Rust input_python.rs::maybe_as_string: PyBytes is a string input as well,
+    // and bytes that are not valid utf-8 must report the caller's own parsing
+    // error instead of falling through to a type error.
+    enum class StringSource { NotString, Ok, BadUtf8 };
+    StringSource maybe_as_string(std::string* out) const;
+
+    // Rust falls back to PyFloat_AsDouble, which accepts Decimal, Fraction and
+    // any other object implementing __float__.
+    bool as_float_via_number(double* out) const;
+
     // Value extraction helpers (Python-specific)
     std::string as_str() const;
     int64_t as_int() const;

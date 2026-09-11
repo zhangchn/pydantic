@@ -160,6 +160,46 @@ bool PythonInput::is_dict() const {
     return py::isinstance<py::dict>(obj_);
 }
 
+bool PythonInput::as_float_via_number(double* out) const {
+    if (!PyNumber_Check(obj_.ptr())) return false;
+    double v = PyFloat_AsDouble(obj_.ptr());
+    if (v == -1.0 && PyErr_Occurred()) {
+        PyErr_Clear();
+        return false;
+    }
+    *out = v;
+    return true;
+}
+
+PythonInput::StringSource PythonInput::maybe_as_string(std::string* out) const {
+    if (is_str()) {
+        *out = as_str();
+        return StringSource::Ok;
+    }
+    if (!py::isinstance<py::bytes>(obj_)) return StringSource::NotString;
+    char* buf = nullptr;
+    Py_ssize_t len = 0;
+    if (PyBytes_AsStringAndSize(obj_.ptr(), &buf, &len) < 0) {
+        PyErr_Clear();
+        return StringSource::BadUtf8;
+    }
+    PyObject* decoded = PyUnicode_DecodeUTF8(buf, len, nullptr);
+    if (!decoded) {
+        PyErr_Clear();
+        return StringSource::BadUtf8;
+    }
+    Py_ssize_t out_len = 0;
+    const char* utf8 = PyUnicode_AsUTF8AndSize(decoded, &out_len);
+    if (!utf8) {
+        PyErr_Clear();
+        Py_DECREF(decoded);
+        return StringSource::BadUtf8;
+    }
+    out->assign(utf8, static_cast<size_t>(out_len));
+    Py_DECREF(decoded);
+    return StringSource::Ok;
+}
+
 bool PythonInput::is_list() const {
     return py::isinstance<py::list>(obj_);
 }
@@ -351,9 +391,14 @@ ValResult<ValMatch<bool>> PythonInput::validate_bool(bool strict) const {
     }
 
     if (!strict) {
-        if (is_str()) {
+        std::string s;
+        StringSource str_src = maybe_as_string(&s);
+        if (str_src == StringSource::BadUtf8) {
+            return ValError::line_error(ErrorType(ErrorType::Kind::BoolParsing),
+                                       this->current_location(), as_error_value().repr);
+        }
+        if (str_src == StringSource::Ok) {
             // Rust shared.rs::str_as_bool token set (case-insensitive, except 0/1)
-            std::string s = as_str();
             std::string lower = s;
             std::transform(lower.begin(), lower.end(), lower.begin(),
                            [](unsigned char c) { return std::tolower(c); });
@@ -376,9 +421,9 @@ ValResult<ValMatch<bool>> PythonInput::validate_bool(bool strict) const {
             return ValError::line_error(ErrorType(ErrorType::Kind::BoolParsing),
                                        this->current_location(), as_error_value().repr);
         }
-        if (is_float()) {
+        double d = 0;
+        if (as_float_via_number(&d)) {
             // Rust: float -> integer value -> int_as_bool
-            double d = as_float();
             if (std::isfinite(d) && std::floor(d) == d) {
                 int64_t v = static_cast<int64_t>(d);
                 if (v == 0) return ValMatch<bool>::lax(false);
@@ -420,9 +465,13 @@ ValResult<ValMatch<EitherInt>> PythonInput::validate_int(bool strict) const {
             return type_error(ErrorType::Kind::IntFromFloat, *this, this->current_location());
         }
 
-        if (is_str()) {
+        std::string s;
+        StringSource str_src = maybe_as_string(&s);
+        if (str_src == StringSource::BadUtf8) {
+            return type_error(ErrorType::Kind::IntParsing, *this, this->current_location());
+        }
+        if (str_src == StringSource::Ok) {
             try {
-                std::string s = as_str();
                 std::string cleaned = s;
                 // strip leading/trailing whitespace and underscores (Rust clean_int_str)
                 size_t start = cleaned.find_first_not_of(" \t\n");
@@ -473,6 +522,19 @@ ValResult<ValMatch<EitherInt>> PythonInput::validate_int(bool strict) const {
             int64_t v = obj_.cast<bool>() ? 1 : 0;
             return ValMatch<EitherInt>::lax(EitherInt(v));
         }
+        // Rust: validate_decimal -> decimal_as_int, fraction_as_int, then
+        // extract::<f64>; all three reduce to a truncating float conversion.
+        double n = 0;
+        if (as_float_via_number(&n)) {
+            if (std::isnan(n) || std::isinf(n)) {
+                return type_error(ErrorType::Kind::IntParsing, *this, this->current_location());
+            }
+            double truncated = std::trunc(n);
+            if (truncated != n) {
+                return type_error(ErrorType::Kind::IntFromFloat, *this, this->current_location());
+            }
+            return ValMatch<EitherInt>::lax(EitherInt(static_cast<int64_t>(truncated)));
+        }
     }
 
     return type_error(ErrorType::Kind::IntType, *this, this->current_location());
@@ -488,9 +550,13 @@ ValResult<ValMatch<EitherFloat>> PythonInput::validate_float(bool strict) const 
             return ValMatch<EitherFloat>::lax(EitherFloat(static_cast<double>(as_int())));
         }
 
-        if (is_str()) {
+        std::string s;
+        StringSource str_src = maybe_as_string(&s);
+        if (str_src == StringSource::BadUtf8) {
+            return type_error(ErrorType::Kind::FloatParsing, *this, this->current_location());
+        }
+        if (str_src == StringSource::Ok) {
             try {
-                std::string s = as_str();
                 double v = std::stod(s);
                 return ValMatch<EitherFloat>::lax(EitherFloat(v));
             } catch (...) {
@@ -500,6 +566,10 @@ ValResult<ValMatch<EitherFloat>> PythonInput::validate_float(bool strict) const 
 
         if (is_bool()) {
             return ValMatch<EitherFloat>::lax(EitherFloat(obj_.cast<bool>() ? 1.0 : 0.0));
+        }
+        double n = 0;
+        if (as_float_via_number(&n)) {
+            return ValMatch<EitherFloat>::lax(EitherFloat(n));
         }
     }
 
@@ -735,11 +805,30 @@ ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> PythonInput::validate_tuple
         );
     }
 
-    if (!strict && is_list()) {
-        py::tuple tup = py::tuple(obj_);
-        return ValMatch<std::unique_ptr<ValidatedTuple>>::lax(
-            std::make_unique<PythonValidatedTuple>(tup)
-        );
+    // Lax mode mirrors Rust's extract_sequence_iterable: list/tuple/set/frozenset
+    // plus any other iterable that is not a text or mapping type. PyMapping_Check
+    // is true for lists, so concrete sequence types must be accepted first.
+    if (!strict && (is_list() || is_set() || is_frozenset())) {
+        try {
+            py::tuple tup = py::tuple(obj_);
+            return ValMatch<std::unique_ptr<ValidatedTuple>>::lax(
+                std::make_unique<PythonValidatedTuple>(tup)
+            );
+        } catch (const py::error_already_set&) {
+            PyErr_Clear();
+        }
+    }
+    if (!strict && !py::isinstance<py::str>(obj_) && !py::isinstance<py::bytes>(obj_) &&
+        !py::isinstance<py::bytearray>(obj_) && !py::isinstance<py::dict>(obj_) &&
+        !PyMapping_Check(obj_.ptr()) && py_hasattr(obj_, "__iter__")) {
+        try {
+            py::tuple tup = py::tuple(obj_);
+            return ValMatch<std::unique_ptr<ValidatedTuple>>::lax(
+                std::make_unique<PythonValidatedTuple>(tup)
+            );
+        } catch (const py::error_already_set&) {
+            PyErr_Clear();
+        }
     }
 
     return type_error(ErrorType::Kind::TupleType, *this, this->current_location());
