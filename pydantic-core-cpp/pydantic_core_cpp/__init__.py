@@ -163,8 +163,10 @@ def _lookup_value_by_loc(obj, loc):
     Returns _LOC_NOT_FOUND when no part of the path resolves.
 
     A failed union puts the choice's schema name ("dict[str,...]", "str",
-    "union[a,b]") into the location. Those are not keys of the input, so a step
-    that does not resolve is skipped instead of failing the whole lookup.
+    "union[a,b]") into the location. Those are not keys of the input, so a
+    string step that does not resolve is skipped; an index step that does not
+    resolve (an item of an unordered set, for instance) means the path is not
+    the input's path and the lookup fails outright.
     """
     current = obj
     resolved = False
@@ -174,14 +176,19 @@ def _lookup_value_by_loc(obj, loc):
                 current = current.args[key]
             elif key in current.kwargs:
                 current = current.kwargs[key]
-            else:
+            elif isinstance(key, str):
                 continue
+            else:
+                return _LOC_NOT_FOUND
         elif isinstance(current, dict) and key in current:
             current = current[key]
-        elif isinstance(current, (list, tuple)) and isinstance(key, int):
+        elif isinstance(current, (list, tuple)) and isinstance(key, int) \
+                and -len(current) <= key < len(current):
             current = current[key]
-        else:
+        elif isinstance(key, str):
             continue
+        else:
+            return _LOC_NOT_FOUND
         resolved = True
     return current if resolved else _LOC_NOT_FOUND
 

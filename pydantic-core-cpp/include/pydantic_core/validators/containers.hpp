@@ -395,6 +395,7 @@ public:
     mutable std::optional<std::string> display_name_cache_;
     std::optional<size_t> min_length;
     std::optional<size_t> max_length;
+    bool fail_fast = false;
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -429,20 +430,32 @@ public:
                 }
 
                 py::set result_set;
+                std::vector<std::shared_ptr<ValLineError>> errors;
+                size_t index = 0;
                 for (auto item : py_set) {
                     py::object element = py::reinterpret_borrow<py::object>(item);
                     if (items_schema) {
+                        state.location().push(static_cast<int64_t>(index));
                         PythonInput elem_input(element);
+                        elem_input.set_current_location(state.location());
                         auto item_result = items_schema->validate(elem_input, state);
+                        state.location().pop();
                         if (item_result.is_ok()) {
                             py::object py_val = value_to_python_with_type(item_result.value(), items_schema->effective_result_name());
                             result_set.add(py_val);
+                        } else if (item_result.error().has_line_errors()) {
+                            for (auto& le : item_result.error().line_errors()) errors.push_back(le);
+                            if (fail_fast) return ValError::line_errors(std::move(errors));
                         } else {
                             return item_result.error();
                         }
                     } else {
                         result_set.add(element);
                     }
+                    index++;
+                }
+                if (!errors.empty()) {
+                    return ValError::line_errors(std::move(errors));
                 }
                 return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(std::move(result_set)));
             }
@@ -482,20 +495,30 @@ public:
         }
 
         py::set result_set;
+        std::vector<std::shared_ptr<ValLineError>> errors;
         for (const auto& entry : entries) {
             py::object element = list->get_item(entry.index);
             if (items_schema) {
+                state.location().push(static_cast<int64_t>(entry.index));
                 PythonInput elem_input(element);
+                elem_input.set_current_location(state.location());
                 auto item_result = items_schema->validate(elem_input, state);
+                state.location().pop();
                 if (item_result.is_ok()) {
                     py::object py_val = value_to_python_with_type(item_result.value(), items_schema->effective_result_name());
                     result_set.add(py_val);
+                } else if (item_result.error().has_line_errors()) {
+                    for (auto& le : item_result.error().line_errors()) errors.push_back(le);
+                    if (fail_fast) return ValError::line_errors(std::move(errors));
                 } else {
                     return item_result.error();
                 }
             } else {
                 result_set.add(element);
             }
+        }
+        if (!errors.empty()) {
+            return ValError::line_errors(std::move(errors));
         }
         return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(std::move(result_set)));
     }
@@ -517,6 +540,7 @@ public:
     mutable std::optional<std::string> display_name_cache_;
     std::optional<size_t> min_length;
     std::optional<size_t> max_length;
+    bool fail_fast = false;
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -597,19 +621,31 @@ public:
         }
 
         py::set result_set;
+        std::vector<std::shared_ptr<ValLineError>> errors;
+        size_t index = 0;
         for (auto& element : items) {
             if (items_schema) {
+                state.location().push(static_cast<int64_t>(index));
                 PythonInput elem_input(element);
+                elem_input.set_current_location(state.location());
                 auto item_result = items_schema->validate(elem_input, state);
+                state.location().pop();
                 if (item_result.is_ok()) {
                     py::object py_val = value_to_python_with_type(item_result.value(), items_schema->effective_result_name());
                     result_set.add(py_val);
+                } else if (item_result.error().has_line_errors()) {
+                    for (auto& le : item_result.error().line_errors()) errors.push_back(le);
+                    if (fail_fast) return ValError::line_errors(std::move(errors));
                 } else {
                     return item_result.error();
                 }
             } else {
                 result_set.add(element);
             }
+            index++;
+        }
+        if (!errors.empty()) {
+            return ValError::line_errors(std::move(errors));
         }
         py::frozenset fs = py::frozenset(result_set);
         return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(std::move(fs)));
@@ -632,6 +668,7 @@ public:
     bool variadic = false;  // If true, last item_schema is repeated for remaining items
     std::vector<std::shared_ptr<Validator>> items; // Positional item validators
     mutable std::optional<std::string> display_name_cache_;
+    bool fail_fast = false;
 
     TupleValidator() = default;
 
@@ -658,8 +695,9 @@ public:
             if (!items.empty()) {
                 size_t schema_idx = (variadic && i >= items.size()) ? items.size() - 1 : i;
                 if (schema_idx < items.size() && items[schema_idx]) {
-                    state.location().push(i);
+                    state.location().push(static_cast<int64_t>(i));
                     PythonInput elem_input(element);
+                    elem_input.set_current_location(state.location());
                     auto item_result = items[schema_idx]->validate(elem_input, state);
                     state.location().pop();
                     if (item_result.is_ok()) {
@@ -669,6 +707,7 @@ public:
                             for (auto& le : item_result.error().line_errors()) {
                                 errors.push_back(le);
                             }
+                            if (fail_fast) return ValError::line_errors(std::move(errors));
                         } else {
                             return item_result.error();
                         }
@@ -751,6 +790,7 @@ public:
                 ValidationState sub_state = state.sub_copy(state.coerce_strings());
                 if (items_schema) {
                     PythonInput py_item(py::reinterpret_borrow<py::object>(item));
+                    py_item.set_current_location(state.location());
                     auto item_result = items_schema->validate(py_item, sub_state);
                     if (item_result.is_err()) {
                         return item_result.error();

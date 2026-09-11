@@ -1993,6 +1993,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("max_length")) {
             v->max_length = schema["max_length"].cast<size_t>();
         }
+        v->fail_fast = py_bool(schema, "fail_fast");
         return v;
     }
 
@@ -2034,6 +2035,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("variadic_item_index")) {
             tv->variadic = true;
         }
+        tv->fail_fast = py_bool(schema, "fail_fast");
         return tv;
     }
 
@@ -2052,6 +2054,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("max_length")) {
             v->max_length = schema["max_length"].cast<size_t>();
         }
+        v->fail_fast = py_bool(schema, "fail_fast");
         return v;
     }
 
@@ -2067,6 +2070,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("max_length")) {
             v->max_length = schema["max_length"].cast<size_t>();
         }
+        v->fail_fast = py_bool(schema, "fail_fast");
         return v;
     }
     if (type == "frozenset" || type == "frozenset-constrained") {
@@ -2080,6 +2084,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("max_length")) {
             v->max_length = schema["max_length"].cast<size_t>();
         }
+        v->fail_fast = py_bool(schema, "fail_fast");
         return v;
     }
 
