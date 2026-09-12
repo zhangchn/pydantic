@@ -185,7 +185,7 @@ public:
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::FiniteNumber),
                 state.location(),
-                std::to_string(f)
+                input.as_error_value().repr
             );
         }
         return ValResult<std::shared_ptr<void>>(std::make_shared<double>(f));
@@ -222,35 +222,35 @@ public:
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::FiniteNumber),
                 state.location(),
-                std::to_string(f)
+                input.as_error_value().repr
             );
         }
         if (gt.has_value() && f <= gt.value()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::GreaterThan, "gt", std::to_string(gt.value())),
+                ErrorType(ErrorType::Kind::GreaterThan, "gt", format_double(gt.value())),
                 state.location(),
-                std::to_string(f)
+                input.as_error_value().repr
             );
         }
         if (ge.has_value() && f < ge.value()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::GreaterThanEqual, "ge", std::to_string(ge.value())),
+                ErrorType(ErrorType::Kind::GreaterThanEqual, "ge", format_double(ge.value())),
                 state.location(),
-                std::to_string(f)
+                input.as_error_value().repr
             );
         }
         if (lt.has_value() && f >= lt.value()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::LessThan, "lt", std::to_string(lt.value())),
+                ErrorType(ErrorType::Kind::LessThan, "lt", format_double(lt.value())),
                 state.location(),
-                std::to_string(f)
+                input.as_error_value().repr
             );
         }
         if (le.has_value() && f > le.value()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::LessThanEqual, "le", std::to_string(le.value())),
+                ErrorType(ErrorType::Kind::LessThanEqual, "le", format_double(le.value())),
                 state.location(),
-                std::to_string(f)
+                input.as_error_value().repr
             );
         }
         if (multiple_of.has_value() && multiple_of.value() != 0.0) {
@@ -259,9 +259,9 @@ public:
             double diff = std::abs(f - (rounded_div * multiple_of.value()));
             if (diff > tolerance) {
                 return ValError::line_error(
-                    ErrorType(ErrorType::Kind::MultipleOf, "multiple_of", std::to_string(multiple_of.value())),
+                    ErrorType(ErrorType::Kind::MultipleOf, "multiple_of", format_double(multiple_of.value())),
                     state.location(),
-                    std::to_string(f)
+                    input.as_error_value().repr
                 );
             }
         }

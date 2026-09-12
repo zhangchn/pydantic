@@ -1667,10 +1667,12 @@ struct SerNode {
         if (type == "float" || type == "float-constrained") {
             double d = value.cast<double>();
             if (std::isnan(d)) {
+                if (inf_nan_mode == "null") return "null";
                 if (inf_nan_mode == "strings") return "\"NaN\"";
                 return "NaN";
             }
             if (std::isinf(d)) {
+                if (inf_nan_mode == "null") return "null";
                 if (inf_nan_mode == "strings") return d > 0 ? "\"Infinity\"" : "\"-Infinity\"";
                 return d > 0 ? "Infinity" : "-Infinity";
             }

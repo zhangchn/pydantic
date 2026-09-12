@@ -1337,9 +1337,21 @@ static std::shared_ptr<Validator> build_from_py_dict(
     }
 
     if (type == "float" || type == "float-constrained" || type == "constr-float") {
+        // Rust reads allow_inf_nan with schema_or_config_same, so a model with
+        // ConfigDict(allow_inf_nan=False) constrains plain float fields too.
+        auto allow_inf_nan = [&schema, &config]() -> bool {
+            if (schema.contains("allow_inf_nan") && !schema["allow_inf_nan"].is_none()) {
+                return schema["allow_inf_nan"].cast<bool>();
+            }
+            if (config.contains("allow_inf_nan") && !config["allow_inf_nan"].is_none()) {
+                return config["allow_inf_nan"].cast<bool>();
+            }
+            return true;
+        }();
         if (schema.contains("multiple_of") || schema.contains("le") || schema.contains("ge") ||
             schema.contains("lt") || schema.contains("gt")) {
             auto v = std::make_shared<ConstrainedFloatValidator>();
+            v->allow_inf_nan = allow_inf_nan;
             if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
                 v->strict = schema["strict"].cast<bool>();
             }
@@ -1358,6 +1370,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
             return v;
         }
         auto v = std::make_shared<FloatValidator>();
+        v->allow_inf_nan = allow_inf_nan;
         if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
             v->strict = schema["strict"].cast<bool>();
         }

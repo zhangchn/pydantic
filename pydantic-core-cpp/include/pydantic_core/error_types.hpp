@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <variant>
 #include <optional>
@@ -11,6 +13,24 @@ namespace py = pybind11;
 #include "types.hpp"
 
 namespace pydantic_core {
+
+// Constraint values appear verbatim in error messages, so they need the same
+// shortest round-trip rendering Rust's formatter gives ("0.1", "1"), not the
+// fixed six-decimal text std::to_string produces.
+inline std::string format_double(double value) {
+    char buf[64];
+    for (int precision = 1; precision <= 17; ++precision) {
+        int written = std::snprintf(buf, sizeof(buf), "%.*g", precision, value);
+        if (written < 0 || written >= static_cast<int>(sizeof(buf))) {
+            continue;
+        }
+        if (std::strtod(buf, nullptr) == value) {
+            return std::string(buf, static_cast<size_t>(written));
+        }
+    }
+    return std::to_string(value);
+}
+
 
 // ErrorType is standalone - no circular dependencies
 
