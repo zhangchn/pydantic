@@ -134,7 +134,7 @@ def _errors_with_include_url(self, *args, include_url: bool = True, **kwargs):
                     # unparseable string repr. If _parse_input already
                     # reconstructed a real object (ArgsKwargs, dict, None,
                     # int, ...), keep it — it is the authoritative input.
-                    if not isinstance(cur, str):
+                    if not isinstance(cur, _UnparsedInput):
                         continue
                     loc = err.get('loc', ())
                     if isinstance(loc, tuple) and len(loc) > 0:
@@ -233,6 +233,17 @@ def _lookup_value_by_loc(obj, loc):
     return current if resolved else _LOC_NOT_FOUND
 
 
+class _UnparsedInput(str):
+    """Placeholder for an input the C++ side could only render as text.
+
+    ``ast.literal_eval`` cannot reproduce every object from its repr, so the
+    caller replaces this placeholder with the real object from the raw input.
+    A value that parsed cleanly is already the input the validator saw, which
+    is not always the raw one: a ``Json`` field validates the decoded value,
+    so overwriting it with the undecoded text would report the wrong input.
+    """
+
+
 def _parse_input(raw: str):
     """Try to parse an input_value string as a Python literal (dict, list, etc.)."""
     import ast as _ast
@@ -257,7 +268,7 @@ def _parse_input(raw: str):
     try:
         return _ast.literal_eval(raw)
     except Exception:
-        return raw
+        return _UnparsedInput(raw)
 
 
 # C++ message -> Rust-compatible message mapping

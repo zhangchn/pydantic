@@ -53,6 +53,7 @@ enum class WarningsMode {
 // Exactness indicator for validation
 enum class Exactness {
     Exact,    // Exact type match
+    Strict,   // Compatible type used as-is (a subclass, an int for a float)
     Lax,      // Coercion allowed
     Unknown   // Not yet determined
 };

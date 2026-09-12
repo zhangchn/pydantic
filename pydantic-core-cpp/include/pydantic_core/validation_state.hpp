@@ -143,7 +143,12 @@ public:
     // Rust lowers exactness monotonically: a choice that already needed a
     // coercion stays lax, and a state outside a union (Unknown) is left alone.
     void floor_exactness(Exactness e) {
-        if (exactness_ == Exactness::Exact) exactness_ = e;
+        if (exactness_ == Exactness::Exact) {
+            exactness_ = e;
+            return;
+        }
+        // Rust only ever lowers a Strict floor, and only down to Lax.
+        if (exactness_ == Exactness::Strict && e == Exactness::Lax) exactness_ = e;
     }
     
     // Context (for validation functions)

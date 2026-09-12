@@ -92,7 +92,13 @@ public:
         // int | str, "123" stays a str because the int branch only matched laxly.
         const Exactness old_exactness = state.exactness();
         auto exactness_rank = [](Exactness e) {
-            return e == Exactness::Exact ? 2 : (e == Exactness::Lax ? 0 : 1);
+            switch (e) {
+                case Exactness::Exact: return 3;
+                case Exactness::Strict: return 2;
+                case Exactness::Lax: return 0;
+                case Exactness::Unknown: break;
+            }
+            return 1;
         };
         const bool smart = !left_to_right_;
         std::optional<std::shared_ptr<void>> best_value;

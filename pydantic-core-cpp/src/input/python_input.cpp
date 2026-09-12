@@ -337,7 +337,12 @@ bool PythonInput::is_instance_of(const char* module, const char* type_name) cons
 
 ValResult<ValMatch<EitherString>> PythonInput::validate_str(bool strict, bool coerce_numbers) const {
     if (is_str()) {
-        return ValMatch<EitherString>::exact(EitherString(as_str()));
+        // Rust keeps a str subclass as the value but records it as a strict
+        // match, so it cannot outrank an exact str inside a union.
+        if (PyUnicode_CheckExact(obj_.ptr())) {
+            return ValMatch<EitherString>::exact(EitherString(as_str()));
+        }
+        return ValMatch<EitherString>::strict(EitherString(as_str()));
     }
 
     if (is_none()) {
@@ -385,7 +390,12 @@ ValResult<ValMatch<EitherBytes>> PythonInput::validate_bytes(bool strict) const 
     // Rust casts PyBytes exactly and reaches for bytearray/memoryview only in
     // lax mode, so strict bytes must reject a bytearray.
     if (PyBytes_Check(obj_.ptr())) {
-        return ValMatch<EitherBytes>::exact(EitherBytes(as_bytes()));
+        // A bytes subclass is read as-is and marked strict, as Rust does;
+        // only bytearray goes through a coercion and stays lax.
+        if (PyBytes_CheckExact(obj_.ptr())) {
+            return ValMatch<EitherBytes>::exact(EitherBytes(as_bytes()));
+        }
+        return ValMatch<EitherBytes>::strict(EitherBytes(as_bytes()));
     }
 
     if (!strict && is_bytes()) {
@@ -456,13 +466,19 @@ ValResult<ValMatch<bool>> PythonInput::validate_bool(bool strict) const {
 
 ValResult<ValMatch<EitherInt>> PythonInput::validate_int(bool strict) const {
     if (is_int()) {
+        // Rust upcasts a non-bool int subclass to a plain int and marks the
+        // match strict; only an exact int is Exact.
+        const bool exact = PyLong_CheckExact(obj_.ptr());
+        auto wrap = [exact](EitherInt v) {
+            return exact ? ValMatch<EitherInt>::exact(v) : ValMatch<EitherInt>::strict(v);
+        };
         try {
             int64_t v = as_int();
-            return ValMatch<EitherInt>::exact(EitherInt(v));
+            return wrap(EitherInt(v));
         } catch (...) {
             try {
                 uint64_t v = obj_.cast<uint64_t>();
-                return ValMatch<EitherInt>::exact(EitherInt(v));
+                return wrap(EitherInt(v));
             } catch (...) {
                 return type_error(ErrorType::Kind::IntType, *this, this->current_location());
             }
@@ -559,14 +575,13 @@ ValResult<ValMatch<EitherInt>> PythonInput::validate_int(bool strict) const {
 
 ValResult<ValMatch<EitherFloat>> PythonInput::validate_float(bool strict) const {
     if (is_float()) {
-        return ValMatch<EitherFloat>::exact(EitherFloat(as_float()));
+        if (PyFloat_CheckExact(obj_.ptr())) {
+            return ValMatch<EitherFloat>::exact(EitherFloat(as_float()));
+        }
+        return ValMatch<EitherFloat>::strict(EitherFloat(as_float()));
     }
 
     if (!strict) {
-        if (is_int()) {
-            return ValMatch<EitherFloat>::lax(EitherFloat(static_cast<double>(as_int())));
-        }
-
         std::string s;
         StringSource str_src = maybe_as_string(&s);
         if (str_src == StringSource::BadUtf8) {
@@ -581,13 +596,31 @@ ValResult<ValMatch<EitherFloat>> PythonInput::validate_float(bool strict) const 
             }
         }
 
-        if (is_bool()) {
-            return ValMatch<EitherFloat>::lax(EitherFloat(obj_.cast<bool>() ? 1.0 : 0.0));
-        }
         double n = 0;
         if (as_float_via_number(&n)) {
             return ValMatch<EitherFloat>::lax(EitherFloat(n));
         }
+    }
+
+    // Rust reads any real number through extract::<f64>: an int is a strict
+    // match, which strict mode keeps, while a bool is a lax match that strict
+    // mode rejects.
+    if (is_int()) {
+        try {
+            return ValMatch<EitherFloat>::strict(EitherFloat(static_cast<double>(as_int())));
+        } catch (...) {
+            try {
+                return ValMatch<EitherFloat>::strict(EitherFloat(obj_.cast<double>()));
+            } catch (...) {
+                return type_error(ErrorType::Kind::FloatType, *this, this->current_location());
+            }
+        }
+    }
+    if (is_bool()) {
+        if (strict) {
+            return type_error(ErrorType::Kind::FloatType, *this, this->current_location());
+        }
+        return ValMatch<EitherFloat>::lax(EitherFloat(obj_.cast<bool>() ? 1.0 : 0.0));
     }
 
     return type_error(ErrorType::Kind::FloatType, *this, this->current_location());

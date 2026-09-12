@@ -110,6 +110,11 @@ public:
     static ValMatch lax(T value) {
         return ValMatch(std::move(value), Exactness::Lax);
     }
+
+    // Strict match - no coercion, but not the exact type (e.g. a subclass)
+    static ValMatch strict(T value) {
+        return ValMatch(std::move(value), Exactness::Strict);
+    }
     
     T& value() { return value_; }
     const T& value() const { return value_; }
