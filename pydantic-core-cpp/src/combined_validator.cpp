@@ -1993,6 +1993,10 @@ static std::shared_ptr<Validator> build_from_py_dict(
             }
         }
         auto uv = std::make_shared<UnionValidator>(std::move(choices));
+        // Rust reads the mode off the schema: "smart" (default) or "left_to_right".
+        if (py_str(schema, "mode") == "left_to_right") {
+            uv->set_left_to_right(true);
+        }
         if (schema.contains("custom_error_type") && !schema["custom_error_type"].is_none()) {
             std::string cmsg = schema.contains("custom_error_message") && !schema["custom_error_message"].is_none()
                 ? schema["custom_error_message"].cast<std::string>() : std::string();

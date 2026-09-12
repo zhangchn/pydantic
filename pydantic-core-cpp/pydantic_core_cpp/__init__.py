@@ -197,7 +197,20 @@ def _lookup_value_by_loc(obj, loc):
     """
     current = obj
     resolved = False
+    parent = None
+    prev_key = None
     for key in loc:
+        if key == '[key]':
+            # Rust locates a failing dict key as (..., key, '[key]'), and the
+            # input of that error is the key object, not the entry's value.
+            if isinstance(parent, dict):
+                for k in parent:
+                    if k == prev_key or str(k) == str(prev_key):
+                        current = k
+                        break
+            break
+        parent = current
+        prev_key = key
         if isinstance(current, ArgsKwargs):
             if isinstance(key, int) and key < len(current.args):
                 current = current.args[key]

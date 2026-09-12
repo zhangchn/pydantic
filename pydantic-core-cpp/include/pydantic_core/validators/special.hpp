@@ -355,6 +355,7 @@ public:
             }
         }
         auto match = std::move(result.value());
+        state.floor_exactness(match.exactness());
         Date d = match.value().value;
 
         // Python has no year 0, so pydantic-core turns it into a parsing error
@@ -426,6 +427,7 @@ public:
         if (result.is_err()) {
             return result.error();
         }
+        state.floor_exactness(result.value().exactness());
         auto match = std::move(result.value());
         Time t = match.value().value;
 
@@ -483,6 +485,7 @@ public:
             }
         }
         auto match = std::move(result.value());
+        state.floor_exactness(match.exactness());
         DateTime dt = match.value().value;
 
         if (dt.date.year == 0) {
@@ -564,6 +567,7 @@ public:
         if (result.is_err()) {
             return result.error();
         }
+        state.floor_exactness(result.value().exactness());
         auto match = std::move(result.value());
         return ValResult<std::shared_ptr<void>>(
             std::make_shared<EitherTimedelta>(std::move(match.value()))
@@ -1555,10 +1559,11 @@ private:
             }
         } catch (...) {}
 
-        auto str_result = input.validate_str(state.strict_or(false), false);
+auto str_result = input.validate_str(state.strict_or(false), false);
         if (str_result.is_err()) {
             return str_result.error();
         }
+        state.floor_exactness(str_result.value().exactness());
         auto es = str_result.value().value();
         std::string str_val;
         if (auto* s = std::get_if<std::string>(&es.value)) {

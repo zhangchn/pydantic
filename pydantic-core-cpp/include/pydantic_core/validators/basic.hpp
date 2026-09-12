@@ -59,10 +59,11 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        auto result = input.validate_bool(state.strict_or(strict));
+auto result = input.validate_bool(state.strict_or(strict));
         if (result.is_err()) {
             return result.error();
         }
+        state.floor_exactness(result.value().exactness());
         return ValResult<std::shared_ptr<void>>(
             std::make_shared<bool>(result.value().value())
         );
@@ -80,10 +81,11 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        auto result = input.validate_int(state.strict_or(strict));
+auto result = input.validate_int(state.strict_or(strict));
         if (result.is_err()) {
             return result.error();
         }
+        state.floor_exactness(result.value().exactness());
         auto& either_int = result.value().value();
         // Return the actual validated integer (preserves both int64 and
         // uint64 range so values larger than 2^63-1 are not truncated).
@@ -111,10 +113,11 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        auto result = input.validate_int(state.strict_or(strict));
+auto result = input.validate_int(state.strict_or(strict));
         if (result.is_err()) {
             return result.error();
         }
+        state.floor_exactness(result.value().exactness());
         auto& either_int = result.value().value();
         int64_t int_value = either_int.as_i64().value_or(0);
 
@@ -175,10 +178,11 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        auto result = input.validate_float(state.strict_or(strict));
+auto result = input.validate_float(state.strict_or(strict));
         if (result.is_err()) {
             return result.error();
         }
+        state.floor_exactness(result.value().exactness());
         auto& either_float = result.value().value();
         double f = either_float.as_double();
         if (!allow_inf_nan && !std::isfinite(f)) {
@@ -211,10 +215,11 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        auto result = input.validate_float(state.strict_or(strict));
+auto result = input.validate_float(state.strict_or(strict));
         if (result.is_err()) {
             return result.error();
         }
+        state.floor_exactness(result.value().exactness());
         auto& either_float = result.value().value();
         double f = either_float.as_double();
 
@@ -361,10 +366,11 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str);
+auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str);
         if (result.is_err()) {
             return result.error();
         }
+        state.floor_exactness(result.value().exactness());
         return ValResult<std::shared_ptr<void>>(
             std::make_shared<std::string>(result.value().value().to_string())
         );
@@ -413,10 +419,11 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str);
+auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str);
         if (result.is_err()) {
             return result.error();
         }
+        state.floor_exactness(result.value().exactness());
         std::string str = result.value().value().to_string();
 
         if (strip_whitespace) {
@@ -546,10 +553,11 @@ public:
                 }
             }
         }
-        auto result = input.validate_bytes(state.strict_or_declared(strict));
+auto result = input.validate_bytes(state.strict_or_declared(strict));
         if (result.is_err()) {
             return result.error();
         }
+        state.floor_exactness(result.value().exactness());
         return ValResult<std::shared_ptr<void>>(
             std::make_shared<EitherBytes>(result.value().value())
         );
@@ -571,10 +579,11 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        auto result = input.validate_bytes(state.strict_or_declared(strict));
+auto result = input.validate_bytes(state.strict_or_declared(strict));
         if (result.is_err()) {
             return result.error();
         }
+        state.floor_exactness(result.value().exactness());
         auto& bytes = result.value().value();
         size_t len = bytes.size();
 

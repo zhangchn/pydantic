@@ -31,10 +31,11 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        auto result = input.validate_list(state.strict_or_declared(strict));
+auto result = input.validate_list(state.strict_or_declared(strict));
         if (result.is_err()) {
             return result.error();
         }
+        state.floor_exactness(result.value().exactness());
         auto& list_match = result.value();
         auto& list = list_match.value();
         size_t list_size = list->size();
@@ -309,7 +310,14 @@ public:
                             return key_result.error();
                         }
                         if (!is_last_partial && key_result.error().has_line_errors()) {
+                            const size_t key_depth =
+                                state.location().items.size() - 1;
                             for (auto& le : key_result.error().line_errors()) {
+                                // Rust marks a failing dict key with "[key]" right
+                                // after the key itself.
+                                size_t at = std::min(key_depth + 1, le->location.items.size());
+                                le->location.items.insert(le->location.items.begin() + at,
+                                                          LocItem("[key]"));
                                 errors.push_back(le);
                             }
                         }
@@ -388,10 +396,11 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        auto seq_result = input.validate_set(state.strict_or_declared(strict));
+auto seq_result = input.validate_set(state.strict_or_declared(strict));
         if (seq_result.is_err()) {
             return seq_result.error();
         }
+        state.floor_exactness(seq_result.value().exactness());
         auto& seq = seq_result.value().value();
         std::vector<py::object> elements;
         for (const auto& entry : seq->entries()) {
@@ -497,6 +506,8 @@ public:
                        && !py::isinstance<py::bytes>(obj)
                        && !py::isinstance<py::bytearray>(obj)
                        && !py::isinstance<py::dict>(obj)) {
+                // Anything but a frozenset reaches the value through iteration.
+                state.floor_exactness(Exactness::Lax);
                 try {
                     for (auto handle : obj) {
                         items.push_back(py::reinterpret_borrow<py::object>(handle));
@@ -609,10 +620,11 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        auto result = input.validate_tuple(state.strict_or_declared(strict));
+auto result = input.validate_tuple(state.strict_or_declared(strict));
         if (result.is_err()) {
             return result.error();
         }
+        state.floor_exactness(result.value().exactness());
         auto& tuple_match = result.value();
         auto& tuple = tuple_match.value();
         size_t tuple_size = tuple->size();

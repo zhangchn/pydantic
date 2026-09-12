@@ -87,14 +87,39 @@ public:
         // container already pushed.
         std::vector<std::shared_ptr<ValLineError>> choice_errors;
         const size_t own_loc_depth = state.location().items.size();
+        // Rust ranks the successful choices by how exactly they matched, so a
+        // choice that needed a coercion cannot beat one that did not: for
+        // int | str, "123" stays a str because the int branch only matched laxly.
+        const Exactness old_exactness = state.exactness();
+        auto exactness_rank = [](Exactness e) {
+            return e == Exactness::Exact ? 2 : (e == Exactness::Lax ? 0 : 1);
+        };
+        const bool smart = !left_to_right_;
+        std::optional<std::shared_ptr<void>> best_value;
+        std::optional<Exactness> best_exactness;
+        std::string best_type_name;
         for (auto& validator : validators_) {
+            if (smart) state.set_exactness(Exactness::Exact);
             auto result = validator->validate(input, state);
             if (result.is_ok()) {
-                // Record which inner validator matched so result conversion
-                // can dispatch on the real value type (avoiding unsafe
-                // blind casts of the type-erased shared_ptr<void>).
-                last_type_name_ = validator->effective_result_name();
-                return result;
+                if (!smart) {
+                    last_type_name_ = validator->effective_result_name();
+                    return result;
+                }
+                const Exactness exactness = state.exactness();
+                if (exactness == Exactness::Exact) {
+                    // An exact choice wins outright, as Rust does.
+                    state.set_exactness(old_exactness);
+                    last_type_name_ = validator->effective_result_name();
+                    return result;
+                }
+                if (!best_exactness.has_value() ||
+                    exactness_rank(exactness) > exactness_rank(*best_exactness)) {
+                    best_value = result.value();
+                    best_exactness = exactness;
+                    best_type_name = validator->effective_result_name();
+                }
+                continue;
             }
             if (custom_error_type_) continue;
             const ValError& err = result.error();
@@ -106,6 +131,12 @@ public:
                 copy->location.items.insert(copy->location.items.begin() + at, LocItem(label));
                 choice_errors.push_back(std::move(copy));
             }
+        }
+        state.set_exactness(old_exactness);
+        if (best_value.has_value()) {
+            state.floor_exactness(*best_exactness);
+            last_type_name_ = best_type_name;
+            return ValResult<std::shared_ptr<void>>(*best_value);
         }
         if (!choice_errors.empty()) {
             return ValError::line_errors(std::move(choice_errors));
@@ -156,11 +187,16 @@ public:
         custom_error_message_ = std::move(message);
     }
 
+    // union_mode='left_to_right' opts out of Rust's smart ranking: the first
+    // choice that succeeds wins even if it needed a coercion.
+    void set_left_to_right(bool value) { left_to_right_ = value; }
+
 private:
     std::vector<std::shared_ptr<Validator>> validators_;
     mutable std::string last_type_name_;
     mutable std::optional<std::string> display_name_cache_;
     std::optional<std::string> custom_error_type_;
+    bool left_to_right_ = false;
     std::optional<std::string> custom_error_message_;
 };
 

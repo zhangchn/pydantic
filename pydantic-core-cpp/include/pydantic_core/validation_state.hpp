@@ -139,6 +139,12 @@ public:
     // Exactness tracking
     Exactness exactness() const { return exactness_; }
     void set_exactness(Exactness e) { exactness_ = e; }
+
+    // Rust lowers exactness monotonically: a choice that already needed a
+    // coercion stays lax, and a state outside a union (Unknown) is left alone.
+    void floor_exactness(Exactness e) {
+        if (exactness_ == Exactness::Exact) exactness_ = e;
+    }
     
     // Context (for validation functions)
     void* context() const { return context_; }
