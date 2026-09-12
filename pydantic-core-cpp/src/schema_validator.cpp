@@ -810,6 +810,12 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
         }
 #endif
         reraise_if_internal(result.error());
+        // Rust turns an Omit that escapes the whole schema into a SchemaError
+        // (ValidationError::omit_error) at the binding boundary.
+        if (result.error().is_omit()) {
+            throw SchemaError(
+                "Uncaught Omit error, please check your usage of `default` validators.");
+        }
         auto err = prepare_error(result.error(), InputType::Python);
         throw err;
     }

@@ -1877,6 +1877,9 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (validate_default) {
             wd->set_validate_default(true);
         }
+        if (schema.contains("on_error") && py::isinstance<py::str>(schema["on_error"])) {
+            wd->set_on_error(schema["on_error"].cast<std::string>());
+        }
         return wd;
     }
 
@@ -2345,6 +2348,15 @@ static std::shared_ptr<Validator> build_from_py_dict(
                     // Extract default from inner "default" type schema
                     if (field_schema_dict.contains("type") &&
                         py::str(field_schema_dict["type"]).cast<std::string>() == "default") {
+                        // Rust keeps the WithDefault wrapper when on_error is not
+                        // "raise": only the wrapper knows how to fall back to the
+                        // default or omit the field entirely.
+                        std::string field_on_error = "raise";
+                        if (field_schema_dict.contains("on_error") &&
+                            py::isinstance<py::str>(field_schema_dict["on_error"])) {
+                            field_on_error = field_schema_dict["on_error"].cast<std::string>();
+                        }
+                        const bool keep_default_wrapper = field_on_error != "raise";
                         // Unwrap default schema: use inner validator and extract default value string
                         if (field_schema_dict.contains("default")) {
                             auto py_default = field_schema_dict["default"];
@@ -2374,7 +2386,9 @@ static std::shared_ptr<Validator> build_from_py_dict(
                             }
                             required = false;
                         }
-                        if (field_schema_dict.contains("schema")) {
+                        if (keep_default_wrapper) {
+                            field_validator = build_from_py_dict(field_schema_dict, config, definitions);
+                        } else if (field_schema_dict.contains("schema")) {
                             // Use the inner validator directly (skip the WithDefault wrapper)
                             field_validator = build_from_py_dict(
                                 field_schema_dict["schema"].cast<py::dict>(), config, definitions);

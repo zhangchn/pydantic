@@ -1090,7 +1090,24 @@ public:
         }
         if (inner_) {
             auto r = inner_->validate(input, state);
-            if (r.is_ok()) last_type_name_ = inner_->effective_result_name();
+            if (r.is_ok()) {
+                last_type_name_ = inner_->effective_result_name();
+                return r;
+            }
+            // Rust WithDefaultValidator::validate: an inner UseDefault always
+            // falls back to the default, while any other error follows
+            // on_error - raise, fall back to the default, or omit.
+            if (r.error().is_use_default()) return default_value(state);
+            if (on_error_ == "omit") return ValError::omit();
+            if (on_error_ == "default") {
+                auto d = default_value(state);
+                if (d.is_ok()) {
+                    last_type_name_ = (validate_default_ && inner_)
+                        ? inner_->effective_result_name()
+                        : std::string("py_object");
+                }
+                return d;
+            }
             return r;
         }
         if (default_value_) {
@@ -1181,6 +1198,8 @@ public:
     void set_validate_default(bool v) { validate_default_ = v; }
     bool validate_default() const { return validate_default_; }
     void set_default_py_obj(py::object o) { default_py_obj_ = std::move(o); }
+    // Rust's OnError: "raise" (default), "omit" or "default".
+    void set_on_error(const std::string& v) { on_error_ = v; }
 
 private:
     std::shared_ptr<Validator> inner_;
@@ -1189,6 +1208,7 @@ private:
     std::string default_type_;
     bool default_is_none_ = false;
     bool validate_default_ = false;
+    std::string on_error_;
     py::object default_factory_ = py::none();
     py::object default_py_obj_;
     // Type name of the value the most recent validate() call produced.

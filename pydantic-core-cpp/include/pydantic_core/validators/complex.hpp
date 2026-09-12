@@ -87,6 +87,7 @@ public:
         // container already pushed.
         std::vector<std::shared_ptr<ValLineError>> choice_errors;
         const size_t own_loc_depth = state.location().items.size();
+        bool should_omit = false;
         // Rust ranks the successful choices by how exactly they matched, so a
         // choice that needed a coercion cannot beat one that did not: for
         // int | str, "123" stays a str because the int branch only matched laxly.
@@ -127,8 +128,20 @@ public:
                 }
                 continue;
             }
-            if (custom_error_type_) continue;
             const ValError& err = result.error();
+            if (err.is_omit()) {
+                // Rust notes the omission and only lets it win when no choice
+                // succeeded at all.
+                if (!best_value.has_value()) should_omit = true;
+                continue;
+            }
+            if (!smart && !err.has_line_errors()) {
+                // Rust's left-to-right union collects line errors and tries the
+                // next choice, but passes a non-line error (UseDefault,
+                // InternalErr) straight through.
+                return err;
+            }
+            if (custom_error_type_) continue;
             if (!err.has_line_errors()) continue;
             const std::string label = validator->display_name();
             for (const auto& le : err.line_errors()) {
@@ -144,6 +157,7 @@ public:
             last_type_name_ = best_type_name;
             return ValResult<std::shared_ptr<void>>(*best_value);
         }
+        if (should_omit) return ValError::omit();
         if (!choice_errors.empty()) {
             return ValError::line_errors(std::move(choice_errors));
         }

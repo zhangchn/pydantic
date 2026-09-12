@@ -85,6 +85,12 @@ auto result = input.validate_list(state.strict_or_declared(strict));
                 element_input->set_current_location(state.location());
                 auto item_result = items_schema->validate(*element_input, item_state);
                 if (item_result.is_err()) {
+                    // Rust drops an item whose validator omitted it; the list
+                    // simply gets shorter.
+                    if (item_result.error().is_omit()) {
+                        state.location().pop();
+                        continue;
+                    }
                     // Partial mode: drop line errors for the last item (Rust:
                     // enumerate_last_partial — the last element is omitted from
                     // the output when its validation fails).
@@ -305,6 +311,11 @@ public:
                     key_input->set_current_location(state.location());
                     auto key_result = keys_schema->validate(*key_input, sub_state);
                     if (key_result.is_err()) {
+                        // Rust skips the whole entry when the key omits.
+                        if (key_result.error().is_omit()) {
+                            state.location().pop();
+                            continue;
+                        }
                         if (fail_fast && !is_last_partial) {
                             state.location().pop();
                             return key_result.error();
@@ -333,6 +344,11 @@ public:
                     val_input->set_current_location(state.location());
                     auto val_result = values_schema->validate(*val_input, sub_state);
                     if (val_result.is_err()) {
+                        // A value that omits drops the entry, as in Rust.
+                        if (val_result.error().is_omit()) {
+                            state.location().pop();
+                            continue;
+                        }
                         if (fail_fast && !is_last_partial) {
                             state.location().pop();
                             return val_result.error();
@@ -423,6 +439,7 @@ auto seq_result = input.validate_set(state.strict_or_declared(strict));
                 auto item_result = items_schema->validate(elem_input, state);
                 state.location().pop();
                 if (item_result.is_err()) {
+                    if (item_result.error().is_omit()) continue;
                     if (item_result.error().has_line_errors()) {
                         for (auto& le : item_result.error().line_errors()) {
                             errors.push_back(le);
@@ -553,6 +570,9 @@ public:
                 state.location().pop();
                 if (item_result.is_ok()) {
                     validated = value_to_python_with_type(item_result.value(), items_schema->effective_result_name());
+                } else if (item_result.error().is_omit()) {
+                    index++;
+                    continue;
                 } else if (item_result.error().has_line_errors()) {
                     for (auto& le : item_result.error().line_errors()) errors.push_back(le);
                     if (fail_fast) return ValError::line_errors(std::move(errors));
