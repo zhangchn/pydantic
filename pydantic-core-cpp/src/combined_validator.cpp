@@ -2314,6 +2314,20 @@ static std::shared_ptr<Validator> build_from_py_dict(
     // (dataclass-args is handled separately below — its fields are a list,
     // not a dict, so the model-fields path must not intercept it)
     if (type == "model-fields" || type == "typed-dict") {
+        // A typed-dict carries its own config on the schema, and pydantic also
+        // spells extra_behavior as a typed-dict key. Both have to reach the field
+        // and extras validators built below, or e.g. str_to_lower is lost.
+        py::dict inner_config = config;
+        if (schema.contains("config") && py::isinstance<py::dict>(schema["config"])) {
+            for (auto item : schema["config"].cast<py::dict>()) {
+                inner_config[item.first] = item.second;
+            }
+        }
+        if (schema.contains("extra_behavior") &&
+            py::isinstance<py::str>(schema["extra_behavior"])) {
+            // Rust reads extra_behavior from the schema before the config.
+            inner_config["extra_fields_behavior"] = schema["extra_behavior"];
+        }
         // TypedDict must use TypedDictValidator (name "typed-dict") so result
         // conversion produces a plain dict (no __pydantic_fields_set__, extras
         // merged in) matching Rust. ModelFieldsValidator names itself
@@ -2387,14 +2401,14 @@ static std::shared_ptr<Validator> build_from_py_dict(
                             required = false;
                         }
                         if (keep_default_wrapper) {
-                            field_validator = build_from_py_dict(field_schema_dict, config, definitions);
+                            field_validator = build_from_py_dict(field_schema_dict, inner_config, definitions);
                         } else if (field_schema_dict.contains("schema")) {
                             // Use the inner validator directly (skip the WithDefault wrapper)
                             field_validator = build_from_py_dict(
-                                field_schema_dict["schema"].cast<py::dict>(), config, definitions);
+                                field_schema_dict["schema"].cast<py::dict>(), inner_config, definitions);
                         }
                     } else {
-                        field_validator = build_from_py_dict(field_schema_dict, config, definitions);
+                        field_validator = build_from_py_dict(field_schema_dict, inner_config, definitions);
                     }
                 }
 
@@ -2412,9 +2426,9 @@ static std::shared_ptr<Validator> build_from_py_dict(
                         info.validate_default = fsd_vd["validate_default"].cast<bool>();
                     }
                 }
-                if (!info.validate_default && config.contains("validate_default") &&
-                    py::isinstance<py::bool_>(config["validate_default"])) {
-                    info.validate_default = config["validate_default"].cast<bool>();
+                if (!info.validate_default && inner_config.contains("validate_default") &&
+                    py::isinstance<py::bool_>(inner_config["validate_default"])) {
+                    info.validate_default = inner_config["validate_default"].cast<bool>();
                 }
                 // Extract default_factory and callable defaults from the field schema
                 if (field_def.contains("schema")) {
@@ -2502,8 +2516,8 @@ static std::shared_ptr<Validator> build_from_py_dict(
         // Extract extras behavior from the schema (typed-dicts embed their own
         // extra_behavior) or the top-level config
         std::string extra_str = py_str(schema, "extra_behavior",
-            py_str(config, "extra_fields_behavior",
-                py_str(config, "extra_behavior", py_str(config, "extra", "ignore"))));
+            py_str(inner_config, "extra_fields_behavior",
+                py_str(inner_config, "extra_behavior", py_str(inner_config, "extra", "ignore"))));
         auto extra = extra_behavior_from_string(extra_str);
         v->set_extra_behavior(extra);
 
@@ -2511,22 +2525,22 @@ static std::shared_ptr<Validator> build_from_py_dict(
         bool from_attributes = false;
         if (schema.contains("from_attributes")) {
             from_attributes = schema["from_attributes"].cast<bool>();
-        } else if (config.contains("from_attributes")) {
-            from_attributes = config["from_attributes"].cast<bool>();
+        } else if (inner_config.contains("from_attributes")) {
+            from_attributes = inner_config["from_attributes"].cast<bool>();
         }
         v->set_from_attributes(from_attributes);
 
         // Extract extras_schema (value validator applied to extra fields)
         if (schema.contains("extras_schema")) {
             auto extras_schema = schema["extras_schema"].cast<py::dict>();
-            auto extras_validator = build_from_py_dict(extras_schema, config, definitions);
+            auto extras_validator = build_from_py_dict(extras_schema, inner_config, definitions);
             v->set_extras_validator(extras_validator);
         }
 
         // Extract extras_keys_schema (validator applied to extra field keys)
         if (schema.contains("extras_keys_schema")) {
             auto extras_keys_schema = schema["extras_keys_schema"].cast<py::dict>();
-            auto extras_keys_validator = build_from_py_dict(extras_keys_schema, config, definitions);
+            auto extras_keys_validator = build_from_py_dict(extras_keys_schema, inner_config, definitions);
             v->set_extras_keys_validator(extras_keys_validator);
         }
 
