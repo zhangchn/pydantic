@@ -1247,6 +1247,14 @@ static int64_t py_int(const py::dict& d, const char* key, int64_t fallback = 0) 
     return d[key].cast<int64_t>();
 }
 
+// Helper: extract an optional bool from py::dict; absent means "not declared"
+static std::optional<bool> py_bool_opt(const py::dict& d, const char* key) {
+    if (!d.contains(key)) return std::nullopt;
+    auto val = d[key];
+    if (py::isinstance<py::bool_>(val)) return val.cast<bool>();
+    return std::nullopt;
+}
+
 // Helper: extract bool from py::dict
 static bool py_bool(const py::dict& d, const char* key, bool fallback = false) {
     if (!d.contains(key)) return fallback;
@@ -1456,6 +1464,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
     if (type == "bytes" || type == "bytes-constrained" || type == "constr-bytes") {
         if (schema.contains("max_length") || schema.contains("min_length")) {
             auto v = std::make_shared<BytesConstrainedValidator>();
+            v->strict = py_bool_opt(schema, "strict");
             auto ps = [&](const char* k) -> std::optional<size_t> {
                 if (!schema.contains(k)) return std::nullopt;
                 py::object val = schema[k];
@@ -1470,6 +1479,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
             return v;
         }
         auto bv = std::make_shared<BytesValidator>();
+        bv->strict = py_bool_opt(schema, "strict");
         if (config.contains("val_json_bytes")) {
             bv->val_json_bytes = config["val_json_bytes"].cast<std::string>();
         }
@@ -2082,6 +2092,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("max_length")) {
             v->max_length = schema["max_length"].cast<size_t>();
         }
+        v->strict = py_bool_opt(schema, "strict");
         v->fail_fast = py_bool(schema, "fail_fast");
         return v;
     }
@@ -2124,6 +2135,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("variadic_item_index")) {
             tv->variadic = true;
         }
+        tv->strict = py_bool_opt(schema, "strict");
         tv->fail_fast = py_bool(schema, "fail_fast");
         return tv;
     }
@@ -2145,7 +2157,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
         }
         // Rust builds the dict with is_strict(schema, config); without the
         // schema flag a strict dict would still accept Mapping inputs.
-        v->strict = py_bool(schema, "strict");
+        v->strict = py_bool_opt(schema, "strict");
         v->fail_fast = py_bool(schema, "fail_fast");
         return v;
     }
@@ -2153,6 +2165,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
     // --- Set ---
     if (type == "set" || type == "set-constrained" || type == "constr-set") {
         auto v = std::make_shared<SetValidator>();
+        v->strict = py_bool_opt(schema, "strict");
         if (schema.contains("items_schema")) {
             v->items_schema = build_from_py_dict(schema["items_schema"].cast<py::dict>(), config, definitions);
         }
@@ -2167,6 +2180,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
     }
     if (type == "frozenset" || type == "frozenset-constrained") {
         auto v = std::make_shared<FrozenSetValidator>();
+        v->strict = py_bool_opt(schema, "strict");
         if (schema.contains("items_schema")) {
             v->items_schema = build_from_py_dict(schema["items_schema"].cast<py::dict>(), config, definitions);
         }

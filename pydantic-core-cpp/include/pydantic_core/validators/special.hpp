@@ -1622,9 +1622,13 @@ public:
         // Inner failed (or no inner) — raise custom error.
         // Build an ErrorType whose type_name matches error_type_, and whose
         // message is the rendered msg_ (no template processing needed).
+        // Rust resolves custom_error_type against the known-error table first and only
+        // uses custom_error_message for an unknown type.
         std::string type_key = error_type_.empty() ? "custom_error" : error_type_;
-        std::string rendered_msg = msg_.empty() ? "Validation error" : msg_;
-        auto error_type = ErrorType(type_key, rendered_msg);
+        auto error_type = ErrorType::build_known_type(type_key);
+        if (error_type.is_custom()) {
+            error_type = ErrorType(type_key, msg_.empty() ? "Validation error" : msg_);
+        }
         ValError val_err = ValError::line_error(
             std::move(error_type),
             state.location(),

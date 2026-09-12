@@ -18,7 +18,7 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
 // ListValidator - validates list/array values
 class ListValidator : public Validator {
 public:
-    bool strict = false;
+    std::optional<bool> strict;
     bool fail_fast = false;
     std::optional<size_t> min_length;
     std::optional<size_t> max_length;
@@ -31,7 +31,7 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        auto result = input.validate_list(strict);
+        auto result = input.validate_list(state.strict_or_declared(strict));
         if (result.is_err()) {
             return result.error();
         }
@@ -152,7 +152,7 @@ public:
 // DictValidator - validates dict/object values
 class DictValidator : public Validator {
 public:
-    bool strict = false;
+    std::optional<bool> strict;
     bool fail_fast = false;
     std::optional<size_t> min_length;
     std::optional<size_t> max_length;
@@ -231,7 +231,7 @@ public:
         ValidationState& state
     ) override {
         // Rust combines the schema-level flag with the state override.
-        auto result = input.validate_dict(state.strict_or(strict));
+        auto result = input.validate_dict(state.strict_or_declared(strict));
         if (result.is_err()) {
             return result.error();
         }
@@ -382,131 +382,74 @@ public:
     std::optional<size_t> min_length;
     std::optional<size_t> max_length;
     bool fail_fast = false;
+    std::optional<bool> strict;
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
     ) override {
-        // Accept set inputs directly (Rust accepts both list and set)
-        if (auto* py_input = dynamic_cast<const PythonInput*>(&input)) {
-            const py::object& obj = py_input->py_object();
-            if (py::isinstance<py::set>(obj)) {
-                auto py_set = obj.cast<py::set>();
-                size_t set_size = py::len(py_set);
-
-                if (min_length.has_value() && set_size < min_length.value()) {
-                    ErrorType err(ErrorType::Kind::SetTooShort);
-                    err.context()["field_type"] = "Set";
-                    err.context()["min_length"] = std::to_string(min_length.value());
-                    err.context()["actual_length"] = std::to_string(set_size);
-                    return ValError::line_error(
-                        std::move(err), state.location(),
-                        input.as_error_value().repr
-                    );
-                }
-                if (max_length.has_value() && set_size > max_length.value()) {
-                    ErrorType err(ErrorType::Kind::SetTooLong);
-                    err.context()["field_type"] = "Set";
-                    err.context()["max_length"] = std::to_string(max_length.value());
-                    err.context()["actual_length"] = std::to_string(set_size);
-                    return ValError::line_error(
-                        std::move(err), state.location(),
-                        input.as_error_value().repr
-                    );
-                }
-
-                py::set result_set;
-                std::vector<std::shared_ptr<ValLineError>> errors;
-                size_t index = 0;
-                for (auto item : py_set) {
-                    py::object element = py::reinterpret_borrow<py::object>(item);
-                    if (items_schema) {
-                        state.location().push(static_cast<int64_t>(index));
-                        PythonInput elem_input(element);
-                        elem_input.set_current_location(state.location());
-                        auto item_result = items_schema->validate(elem_input, state);
-                        state.location().pop();
-                        if (item_result.is_ok()) {
-                            py::object py_val = value_to_python_with_type(item_result.value(), items_schema->effective_result_name());
-                            result_set.add(py_val);
-                        } else if (item_result.error().has_line_errors()) {
-                            for (auto& le : item_result.error().line_errors()) errors.push_back(le);
-                            if (fail_fast) return ValError::line_errors(std::move(errors));
-                        } else {
-                            return item_result.error();
-                        }
-                    } else {
-                        result_set.add(element);
-                    }
-                    index++;
-                }
-                if (!errors.empty()) {
-                    return ValError::line_errors(std::move(errors));
-                }
-                return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(std::move(result_set)));
-            }
+        auto seq_result = input.validate_set(state.strict_or_declared(strict));
+        if (seq_result.is_err()) {
+            return seq_result.error();
+        }
+        auto& seq = seq_result.value().value();
+        std::vector<py::object> elements;
+        for (const auto& entry : seq->entries()) {
+            elements.push_back(seq->get_item(entry.index));
         }
 
-        // Not a set: Rust reads it through validate_set, so a value that is not
-        // a sequence iterable reports set_type rather than list_type.
-        auto result = input.validate_set(state.strict_or(false));
-        if (result.is_err()) {
-            return result.error();
-        }
-        auto& list_match = result.value();
-        auto& list = list_match.value();
-        auto entries = list->entries();
-        size_t list_size = entries.size();
-
-        // Length checks
-        if (min_length.has_value() && list_size < min_length.value()) {
-            ErrorType err(ErrorType::Kind::SetTooShort);
-            err.context()["field_type"] = "Set";
-            err.context()["min_length"] = std::to_string(min_length.value());
-            err.context()["actual_length"] = std::to_string(list_size);
-            return ValError::line_error(
-                std::move(err),
-                state.location(),
-                input.as_error_value().repr
-            );
-        }
-        if (max_length.has_value() && list_size > max_length.value()) {
-            ErrorType err(ErrorType::Kind::SetTooLong);
-            err.context()["field_type"] = "Set";
-            err.context()["max_length"] = std::to_string(max_length.value());
-            err.context()["actual_length"] = std::to_string(list_size);
-            return ValError::line_error(
-                std::move(err),
-                state.location(),
-                input.as_error_value().repr
-            );
-        }
-
+        // Rust fills the set item by item: max_length applies to the
+        // deduplicated output as soon as an item lands in it (and reports no
+        // actual length, because the input may have held far more items), while
+        // min_length is only checked once the set is complete.
         py::set result_set;
         std::vector<std::shared_ptr<ValLineError>> errors;
-        for (const auto& entry : entries) {
-            py::object element = list->get_item(entry.index);
+        for (size_t index = 0; index < elements.size(); ++index) {
+            const py::object& element = elements[index];
+            py::object validated = element;
             if (items_schema) {
-                state.location().push(static_cast<int64_t>(entry.index));
+                state.location().push(static_cast<int64_t>(index));
                 PythonInput elem_input(element);
                 elem_input.set_current_location(state.location());
                 auto item_result = items_schema->validate(elem_input, state);
                 state.location().pop();
-                if (item_result.is_ok()) {
-                    py::object py_val = value_to_python_with_type(item_result.value(), items_schema->effective_result_name());
-                    result_set.add(py_val);
-                } else if (item_result.error().has_line_errors()) {
-                    for (auto& le : item_result.error().line_errors()) errors.push_back(le);
-                    if (fail_fast) return ValError::line_errors(std::move(errors));
-                } else {
-                    return item_result.error();
+                if (item_result.is_err()) {
+                    if (item_result.error().has_line_errors()) {
+                        for (auto& le : item_result.error().line_errors()) {
+                            errors.push_back(le);
+                        }
+                        if (fail_fast) {
+                            return ValError::line_errors(std::move(errors));
+                        }
+                    } else {
+                        return item_result.error();
+                    }
+                    continue;
                 }
-            } else {
-                result_set.add(element);
+                validated = value_to_python_with_type(item_result.value(),
+                                                      items_schema->effective_result_name());
+            }
+            result_set.add(validated);
+            if (max_length.has_value() && py::len(result_set) > max_length.value()) {
+                ErrorType err(ErrorType::Kind::SetTooLong);
+                err.context()["field_type"] = "Set";
+                err.context()["max_length"] = std::to_string(max_length.value());
+                err.set_ctx_object("actual_length", "more", py::none());
+                return ValError::line_error(
+                    std::move(err), state.location(), input.as_error_value().repr);
             }
         }
         if (!errors.empty()) {
             return ValError::line_errors(std::move(errors));
+        }
+        size_t set_size = py::len(result_set);
+        if (min_length.has_value() && set_size < min_length.value()) {
+            ErrorType err(ErrorType::Kind::SetTooShort);
+            err.context()["field_type"] = "Set";
+            err.context()["min_length"] = std::to_string(min_length.value());
+            err.context()["actual_length"] = std::to_string(set_size);
+            return ValError::line_error(
+                std::move(err), state.location(), input.as_error_value().repr);
         }
         return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(std::move(result_set)));
     }
@@ -529,6 +472,7 @@ public:
     std::optional<size_t> min_length;
     std::optional<size_t> max_length;
     bool fail_fast = false;
+    std::optional<bool> strict;
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -542,14 +486,14 @@ public:
 
         if (auto* py_input = dynamic_cast<const PythonInput*>(&input)) {
             const py::object& obj = py_input->py_object();
-            bool strict = state.strict_or(false);
+            const bool strict_mode = state.strict_or_declared(strict);
 
             if (py::isinstance<py::frozenset>(obj)) {
                 matched = true;
                 for (auto handle : obj) {
                     items.push_back(py::reinterpret_borrow<py::object>(handle));
                 }
-            } else if (!strict && !py::isinstance<py::str>(obj)
+            } else if (!strict_mode && !py::isinstance<py::str>(obj)
                        && !py::isinstance<py::bytes>(obj)
                        && !py::isinstance<py::bytearray>(obj)
                        && !py::isinstance<py::dict>(obj)) {
@@ -582,36 +526,14 @@ public:
             );
         }
 
-        size_t list_size = items.size();
-
-        // Length checks
-        if (min_length.has_value() && list_size < min_length.value()) {
-            ErrorType err(ErrorType::Kind::SetTooShort);
-            err.context()["field_type"] = "Frozenset";
-            err.context()["min_length"] = std::to_string(min_length.value());
-            err.context()["actual_length"] = std::to_string(list_size);
-            return ValError::line_error(
-                std::move(err),
-                state.location(),
-                input.as_error_value().repr
-            );
-        }
-        if (max_length.has_value() && list_size > max_length.value()) {
-            ErrorType err(ErrorType::Kind::SetTooLong);
-            err.context()["field_type"] = "Frozenset";
-            err.context()["max_length"] = std::to_string(max_length.value());
-            err.context()["actual_length"] = std::to_string(list_size);
-            return ValError::line_error(
-                std::move(err),
-                state.location(),
-                input.as_error_value().repr
-            );
-        }
-
+        // Same order as Rust: max_length watches the deduplicated output while
+        // items are added (without reporting an actual length), and min_length
+        // runs once the whole collection is built.
         py::set result_set;
         std::vector<std::shared_ptr<ValLineError>> errors;
         size_t index = 0;
         for (auto& element : items) {
+            py::object validated = element;
             if (items_schema) {
                 state.location().push(static_cast<int64_t>(index));
                 PythonInput elem_input(element);
@@ -619,21 +541,44 @@ public:
                 auto item_result = items_schema->validate(elem_input, state);
                 state.location().pop();
                 if (item_result.is_ok()) {
-                    py::object py_val = value_to_python_with_type(item_result.value(), items_schema->effective_result_name());
-                    result_set.add(py_val);
+                    validated = value_to_python_with_type(item_result.value(), items_schema->effective_result_name());
                 } else if (item_result.error().has_line_errors()) {
                     for (auto& le : item_result.error().line_errors()) errors.push_back(le);
                     if (fail_fast) return ValError::line_errors(std::move(errors));
+                    index++;
+                    continue;
                 } else {
                     return item_result.error();
                 }
-            } else {
-                result_set.add(element);
+            }
+            result_set.add(validated);
+            if (max_length.has_value() && py::len(result_set) > max_length.value()) {
+                ErrorType err(ErrorType::Kind::SetTooLong);
+                err.context()["field_type"] = "Frozenset";
+                err.context()["max_length"] = std::to_string(max_length.value());
+                err.set_ctx_object("actual_length", "more", py::none());
+                return ValError::line_error(
+                    std::move(err),
+                    state.location(),
+                    input.as_error_value().repr
+                );
             }
             index++;
         }
         if (!errors.empty()) {
             return ValError::line_errors(std::move(errors));
+        }
+        size_t set_size = py::len(result_set);
+        if (min_length.has_value() && set_size < min_length.value()) {
+            ErrorType err(ErrorType::Kind::SetTooShort);
+            err.context()["field_type"] = "Frozenset";
+            err.context()["min_length"] = std::to_string(min_length.value());
+            err.context()["actual_length"] = std::to_string(set_size);
+            return ValError::line_error(
+                std::move(err),
+                state.location(),
+                input.as_error_value().repr
+            );
         }
         py::frozenset fs = py::frozenset(result_set);
         return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(std::move(fs)));
@@ -652,7 +597,7 @@ public:
 // TupleValidator - validates tuple values with positional items
 class TupleValidator : public Validator {
 public:
-    bool strict = false;
+    std::optional<bool> strict;
     bool variadic = false;  // If true, last item_schema is repeated for remaining items
     std::vector<std::shared_ptr<Validator>> items; // Positional item validators
     mutable std::optional<std::string> display_name_cache_;
@@ -664,7 +609,7 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        auto result = input.validate_tuple(strict);
+        auto result = input.validate_tuple(state.strict_or_declared(strict));
         if (result.is_err()) {
             return result.error();
         }

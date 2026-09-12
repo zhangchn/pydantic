@@ -64,6 +64,14 @@ public:
     bool strict_or(bool default_strict) const {
         return config_.strict.value_or(default_strict);
     }
+
+    // Rust resolves is_strict(schema, config) once per validator, and an explicit
+    // schema flag outranks the config value.  The port keeps the model-wide config
+    // in the state, so a schema-declared flag has to outrank it here as well.
+    bool strict_or_declared(std::optional<bool> declared, bool default_strict = false) const {
+        if (declared.has_value()) return *declared;
+        return config_.strict.value_or(default_strict);
+    }
     
     // Extra behavior - use state setting or default
     ExtraBehavior extra_behavior_or(ExtraBehavior default_behavior) const {

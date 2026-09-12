@@ -382,8 +382,14 @@ ValResult<ValMatch<EitherString>> PythonInput::validate_str(bool strict, bool co
 }
 
 ValResult<ValMatch<EitherBytes>> PythonInput::validate_bytes(bool strict) const {
-    if (is_bytes()) {
+    // Rust casts PyBytes exactly and reaches for bytearray/memoryview only in
+    // lax mode, so strict bytes must reject a bytearray.
+    if (PyBytes_Check(obj_.ptr())) {
         return ValMatch<EitherBytes>::exact(EitherBytes(as_bytes()));
+    }
+
+    if (!strict && is_bytes()) {
+        return ValMatch<EitherBytes>::lax(EitherBytes(as_bytes()));
     }
 
     if (!strict && is_str()) {
@@ -859,6 +865,18 @@ ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_sequence_like(
         return ValMatch<std::unique_ptr<ValidatedList>>::lax(
             std::make_unique<PythonValidatedList>(input.as_list())
         );
+    }
+
+    // Rust casts to the concrete set type before the lax branch, so a set input
+    // stays valid for a set field even in strict mode.
+    if ((kind == ErrorType::Kind::SetType && input.is_set()) ||
+        (kind == ErrorType::Kind::FrozenSetType && input.is_frozenset())) {
+        SequenceItems collected = collect_sequence_items(input.py_object());
+        if (collected.iterable && collected.error.empty()) {
+            return ValMatch<std::unique_ptr<ValidatedList>>::lax(
+                std::make_unique<PythonValidatedList>(collected.items)
+            );
+        }
     }
 
     // Lax mode: any iterable other than str/bytes/dict-like coerces to a

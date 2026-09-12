@@ -485,7 +485,7 @@ public:
 // BytesValidator - validates bytes values
 class BytesValidator : public Validator {
 public:
-    bool strict = false;
+    std::optional<bool> strict;
     std::string val_json_bytes = "utf8";  // "utf8", "base64", or "hex"
 
     BytesValidator() = default;
@@ -538,7 +538,7 @@ public:
                 }
             }
         }
-        auto result = input.validate_bytes(state.strict_or(strict));
+        auto result = input.validate_bytes(state.strict_or_declared(strict));
         if (result.is_err()) {
             return result.error();
         }
@@ -553,7 +553,7 @@ public:
 // BytesConstrainedValidator - validates bytes with min_length/max_length
 class BytesConstrainedValidator : public Validator {
 public:
-    bool strict = false;
+    std::optional<bool> strict;
     std::optional<size_t> min_length;
     std::optional<size_t> max_length;
 
@@ -563,7 +563,7 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        auto result = input.validate_bytes(state.strict_or(strict));
+        auto result = input.validate_bytes(state.strict_or_declared(strict));
         if (result.is_err()) {
             return result.error();
         }

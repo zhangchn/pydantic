@@ -111,7 +111,15 @@ public:
             return ValError::line_errors(std::move(choice_errors));
         }
         if (custom_error_type_) {
-            ErrorType et(*custom_error_type_, custom_error_message_.value_or(""));
+            // Rust builds a PydanticKnownError when custom_error_type names a known
+            // error, so the standard message template applies; only an unknown type
+            // falls back to the caller-supplied custom_error_message.
+            const std::string& type = *custom_error_type_;
+            ErrorType et = ErrorType::build_known_type(type);
+            if (et.is_custom()) {
+                std::string message = custom_error_message_.value_or("");
+                et = ErrorType(type, message.empty() ? "Validation error" : message);
+            }
             return ValError::line_error(et, state.location(), input.as_error_value().repr);
         }
         return ValError::line_error(
