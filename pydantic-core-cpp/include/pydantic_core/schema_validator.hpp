@@ -45,7 +45,8 @@ public:
                                       py::object self_instance = py::none(),
                                       std::optional<bool> by_alias = std::nullopt,
                                       std::optional<bool> by_name = std::nullopt,
-                                      PartialMode allow_partial = PartialMode::Off);
+                                      PartialMode allow_partial = PartialMode::Off,
+                                      InputType input_type = InputType::Python);
 
     // Populate self_instance from the fields snapshot taken by the outermost
     // fields-position function-after (BaseModel.__init__ path).  Returns

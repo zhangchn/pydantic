@@ -718,7 +718,8 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
                                                    py::object self_instance,
                                                    std::optional<bool> by_alias,
                                                    std::optional<bool> by_name,
-                                                   PartialMode allow_partial) {
+                                                   PartialMode allow_partial,
+                                                   InputType input_type) {
     if (!validator_) {
         throw std::runtime_error("Validator not initialized");
     }
@@ -728,6 +729,7 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
 
     // Create validation state
     ValidationState state(config_);
+    state.set_input_type(input_type);
     if (strict.has_value()) {
         state.set_strict(*strict);
     }

@@ -328,12 +328,45 @@ private:
     py::object py_func_;
 };
 
+// The Python wrapper owns the dict->model-instance conversion, so the nested
+// instances are built by calling back into it. Cached; None when unavailable.
+inline py::object materialize_into_fn() {
+    // Leaked on purpose: destroying a cached py::object during interpreter
+    // shutdown aborts the process.
+    static py::object* fn = new py::object([]() -> py::object {
+        try {
+            return py::module_::import("pydantic_core_cpp").attr("_materialize_into");
+        } catch (const py::error_already_set&) {
+            PyErr_Clear();
+            return py::none();
+        }
+    }());
+    return *fn;
+}
+
 // FunctionAfterValidator - runs Python function after validation
+// Rust decides from the schema's function "type" whether the callable takes an
+// info argument, so a TypeError raised by the callable itself is genuine and
+// must propagate rather than be mistaken for a signature mismatch.
+inline ValError propagate_function_error(py::error_already_set& e, const Input& input,
+                                         ValidationState& state) {
+    if (e.matches(PyExc_ValueError) || e.matches(PyExc_AssertionError)) {
+        return function_error_from_exception(e, input, state);
+    }
+    py::object exc = e.value();
+    e.restore();
+    PyErr_Clear();
+    return ValError::internal_err(std::move(exc));
+}
+
 class FunctionAfterValidator : public Validator {
 public:
     FunctionAfterValidator() : inner_(nullptr), py_func_(py::none()) {}
     FunctionAfterValidator(std::shared_ptr<Validator> inner, py::object py_func)
         : inner_(std::move(inner)), py_func_(std::move(py_func)) {}
+
+    // -1 = unknown, fall back to the call/retry heuristic; 0 = no-info; 1 = with-info.
+    void set_info_arg(int value) { info_arg_ = value; }
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -558,6 +591,17 @@ public:
                             instance = validated_obj;
                         }
                     }
+                    // The C++ pipeline leaves nested models as plain dicts until
+                    // the Python boundary, so an after-callable that walks
+                    // self.<field> would see dicts; build them now (Rust parity).
+                    py::object materialize = materialize_into_fn();
+                    if (!materialize.is_none()) {
+                        try {
+                            materialize(instance);
+                        } catch (const py::error_already_set&) {
+                            PyErr_Clear();
+                        }
+                    }
                     validated_obj = instance;
                 } catch (...) {
                     // If construction fails, continue with the validated_obj as-is
@@ -632,6 +676,19 @@ public:
         try {
             py::object info_obj = make_validation_info(state);
             py::object output;
+            // The schema declares whether the callable takes an info argument;
+            // when it does not, a TypeError from the callable is genuine.
+            bool called = false;
+            if (info_arg_ >= 0) {
+                try {
+                    output = info_arg_ == 1 ? py_func_(validated_obj, info_obj)
+                                            : py_func_(validated_obj);
+                    called = true;
+                } catch (py::error_already_set& e) {
+                    return propagate_function_error(e, input, state);
+                }
+            }
+            if (!called) {
             try {
                 // Try with info object (general/no-info-wrapped functions)
                 output = py_func_(validated_obj, info_obj);
@@ -667,6 +724,7 @@ public:
                     PyErr_Clear();
                     return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(validated_obj));
                 }
+            }
             }
             // If the inner validator is a model-fields/typed-dict validator
             // (i.e. this is a V1 post root validator position), the shim
@@ -799,6 +857,7 @@ public:
 private:
     std::shared_ptr<Validator> inner_;
     py::object py_func_;
+    int info_arg_ = -1;
 
 public:
     std::shared_ptr<Validator> inner_validator() const override { return inner_; }

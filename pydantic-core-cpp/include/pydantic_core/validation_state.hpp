@@ -5,6 +5,7 @@
 #include "speedate.hpp"
 #include "types.hpp"
 #include "recursion_guard.hpp"
+#include "errors.hpp"
 
 #ifdef HAS_PYBIND11
 #include <pybind11/pybind11.h>
@@ -253,6 +254,23 @@ private:
 #endif
 
     Location location_;
+
+    // Rust returns ValError::InternalErr through `?`, so an internal error that
+    // carries a Python exception aborts validation instead of joining the
+    // aggregated line errors. Containers stash it here for their caller to
+    // return once the stack has unwound far enough.
+public:
+    void set_hard_error(ValError err) { hard_error_ = std::move(err); }
+    bool has_hard_error() const { return hard_error_.has_value(); }
+    void clear_hard_error() { hard_error_.reset(); }
+    ValError take_hard_error() {
+        ValError out = std::move(*hard_error_);
+        hard_error_.reset();
+        return out;
+    }
+
+private:
+    std::optional<ValError> hard_error_;
 };
 
 #ifdef HAS_PYBIND11

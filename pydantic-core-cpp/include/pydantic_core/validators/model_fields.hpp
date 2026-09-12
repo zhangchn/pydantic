@@ -256,6 +256,7 @@ public:
         ValidatedModelFieldsOutput output;
         ValError combined_errors(ValError::Kind::LineErrors);
         std::set<std::string> used_keys;
+        state.clear_hard_error();
 
         // Partial mode: compute the last key of the input dict (Rust:
         // typed_dict.rs partial_last_key).  Only the field whose first lookup
@@ -341,6 +342,10 @@ public:
                     }
                 }
                 auto validate_result = validate_field_value_from_object(*resolved_value, field, state, combined_errors, is_last_partial);
+                if (state.has_hard_error()) {
+                    state.pop_loc();
+                    return state.take_hard_error();
+                }
 
                 if (validate_result.has_value()) {
                     // Validation succeeded (value may be nullptr for nullable)
@@ -722,6 +727,10 @@ protected:
                     combined_errors.merge(std::move(*mutable_err));
                 }
             } else if (err.is_internal()) {
+                if (err.has_internal_py_err()) {
+                    state.set_hard_error(err);
+                    return std::nullopt;
+                }
                 auto new_err = ValError::line_error(
                     ErrorType(ErrorType::Kind::CustomError),
                     state.location(),
@@ -743,6 +752,10 @@ protected:
                 combined_errors.merge(std::move(*mutable_err));
             }
         } else if (err.is_internal()) {
+            if (err.has_internal_py_err()) {
+                state.set_hard_error(err);
+                return std::nullopt;
+            }
             auto new_err = ValError::line_error(
                 ErrorType(ErrorType::Kind::CustomError),
                 state.location(),

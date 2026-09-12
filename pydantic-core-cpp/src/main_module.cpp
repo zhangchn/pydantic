@@ -2120,6 +2120,11 @@ private:
         return stack;
     }
 
+    static bool is_enum_instance(const py::object& v) {
+        static py::object enum_cls = py::module_::import("enum").attr("Enum");
+        return py::isinstance(v, enum_cls);
+    }
+
     static std::string infer_json(const py::object& value, bool ensure_ascii, int indent) {
         std::vector<const void*>& st = json_rec_stack();
         const void* p = value.ptr();
@@ -2141,6 +2146,13 @@ private:
 
     static std::string infer_json_body(const py::object& value, bool ensure_ascii, int indent) {
         if (value.is_none()) return "null";
+        // Rust infer_serialize ObType::Enum: serialize the member's value. This
+        // must precede the bool/int/str leaves, because a mixin member (IntEnum,
+        // str Enum) also satisfies those checks, and the __dict__ fallback at the
+        // bottom, because a member's __dict__ holds _value_/_name_.
+        if (is_enum_instance(value)) {
+            return infer_json(py::getattr(value, "value"), ensure_ascii, indent);
+        }
         if (py::isinstance<py::bool_>(value)) return value.cast<bool>() ? "true" : "false";
         if (py::isinstance<py::int_>(value)) return py::str(py::repr(value)).cast<std::string>();
         if (py::isinstance<py::float_>(value)) {
@@ -2318,7 +2330,7 @@ private:
         }
         if (json_mode) {
             // Rust infer_to_python ObType::Enum serializes the member's value.
-            if (py::isinstance(py::module_::import("enum").attr("Enum"), py::type::of(v)) && py_hasattr(v, "value")) {
+            if (is_enum_instance(v) && py_hasattr(v, "value")) {
                 return serialize_any_value(py::getattr(v, "value"), exc_none, round_trip, json_mode);
             }
             py::object converted;
@@ -4241,7 +4253,7 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                     else partial_mode = PartialMode::Off;
                 }
             }
-            return self.validate_python_object(py_input, pyobj_to_bool(strict), extra_opt, std::nullopt, context, /*coerce_strings=*/false, py::none(), std::nullopt, std::nullopt, partial_mode);
+            return self.validate_python_object(py_input, pyobj_to_bool(strict), extra_opt, std::nullopt, context, /*coerce_strings=*/false, py::none(), std::nullopt, std::nullopt, partial_mode, InputType::Json);
         }, py::arg("json_data"), py::arg("strict") = py::none(), py::arg("context") = py::none(), py::arg("extra") = py::none(),
              py::arg("allow_partial") = py::none(), py::arg("by_alias") = py::none(), py::arg("by_name") = py::none())
         .def("validate_strings", [](SchemaValidator& self, const py::object& sd, py::object strict, py::object extra,

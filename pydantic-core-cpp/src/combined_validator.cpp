@@ -1697,7 +1697,40 @@ static std::shared_ptr<Validator> build_from_py_dict(
             }
         }
         std::unordered_set<std::string> member_set(members.begin(), members.end());
-        return std::make_shared<EnumValidator>(std::move(member_set));
+        auto v = std::make_shared<EnumValidator>(std::move(member_set));
+        if (schema.contains("cls")) {
+            py::object cls = schema["cls"];
+            std::vector<EnumValidator::Member> cls_members;
+            std::vector<std::string> value_reprs;
+            if (schema.contains("members")) {
+                for (auto item : schema["members"].cast<py::list>()) {
+                    EnumValidator::Member m;
+                    m.member = py::reinterpret_borrow<py::object>(item);
+                    PyObject* val = PyObject_GetAttrString(m.member.ptr(), "value");
+                    m.value = val ? py::reinterpret_steal<py::object>(val) : m.member;
+                    value_reprs.push_back(EnumValidator::value_repr(m.value));
+                    cls_members.push_back(std::move(m));
+                }
+            }
+            std::string sub_type;
+            try {
+                if (schema.contains("sub_type")) sub_type = schema["sub_type"].cast<std::string>();
+            } catch (const py::error_already_set&) {
+                PyErr_Clear();
+            }
+            std::optional<bool> declared_strict;
+            if (schema.contains("strict")) {
+                try {
+                    declared_strict = schema["strict"].cast<bool>();
+                } catch (const py::error_already_set&) {
+                    PyErr_Clear();
+                }
+            }
+            v->configure_class(std::move(cls), std::move(cls_members), std::move(sub_type),
+                               EnumValidator::join_expected(value_reprs),
+                               EnumValidator::type_qualname(schema["cls"].ptr()), declared_strict);
+        }
+        return v;
     }
 
     // --- IsInstance / IsSubclass / Callable ---
@@ -1850,6 +1883,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
             inner = build_from_py_dict(schema["schema"].cast<py::dict>(), config, definitions);
         }
         py::object func = py::none();
+        int info_arg = -1;
         if (schema.contains("function")) {
             func = schema["function"];
             // function may be a dict like {'function': actual_callable, 'type': 'no-info'}
@@ -1858,9 +1892,15 @@ static std::shared_ptr<Validator> build_from_py_dict(
                 if (func_dict.contains("function")) {
                     func = func_dict["function"];
                 }
+                try {
+                    std::string ftype = func_dict["type"].cast<std::string>();
+                    info_arg = (ftype == "no-info") ? 0 : 1;
+                } catch (...) {}
             }
         }
-        return std::make_shared<FunctionAfterValidator>(inner, func);
+        auto after = std::make_shared<FunctionAfterValidator>(inner, func);
+        after->set_info_arg(info_arg);
+        return after;
     }
 
     if (type == "function-plain") {

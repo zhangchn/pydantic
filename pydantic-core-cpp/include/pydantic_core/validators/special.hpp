@@ -1365,16 +1365,158 @@ private:
 };
 
 // EnumValidator - validates enum values
+//
+// Rust (validators/enum_.rs) keeps the Enum members themselves as the accepted
+// values and returns the matched member, so a use_enum_values post-processor
+// (operator.attrgetter('value')) sees an Enum instance instead of a bare value.
 class EnumValidator : public Validator {
 public:
     EnumValidator() = default;
     explicit EnumValidator(std::unordered_set<std::string> valid_values)
         : valid_values_(std::move(valid_values)) {}
-    
+
+    struct Member {
+        py::object member;
+        py::object value;
+    };
+
+    // cls/members/sub_type/expected_repr come straight from the core schema,
+    // mirroring EnumValidator::from_config.
+    void configure_class(py::object cls, std::vector<Member> members,
+                         std::string sub_type, std::string expected_repr,
+                         std::string class_repr,
+                         std::optional<bool> declared_strict) {
+        cls_ = std::move(cls);
+        members_ = std::move(members);
+        sub_type_ = std::move(sub_type);
+        expected_repr_ = std::move(expected_repr);
+        class_repr_ = std::move(class_repr);
+        declared_strict_ = declared_strict;
+    }
+
+    std::string name() const override { return "enum"; }
+
+    // The validated value is the Enum member itself, so the result-to-Python
+    // dispatch has to pass the object through untouched.
+    std::string effective_result_name() const override {
+        return cls_.ptr() ? "py_object" : "enum";
+    }
+
+    // Rust's validators::literal::expected_repr: all but the last joined with
+    // ", ", and " or " immediately before the last one.
+    static std::string join_expected(const std::vector<std::string>& reprs) {
+        std::string out;
+        for (size_t i = 0; i + 1 < reprs.size(); ++i) {
+            if (i) out += ", ";
+            out += reprs[i];
+        }
+        if (reprs.size() > 1) out += " or ";
+        if (!reprs.empty()) out += reprs.back();
+        return out;
+    }
+
+    static std::string value_repr(const py::object& o) {
+        PyObject* r = PyObject_Repr(o.ptr());
+        if (!r) {
+            PyErr_Clear();
+            return std::string();
+        }
+        return py::reinterpret_steal<py::str>(r).cast<std::string>();
+    }
+
+    // PyType::name() in Rust reads __qualname__, which is what the is-instance
+    // message shows (e.g. "test_strict_enum.<locals>.Demo").
+    static std::string type_qualname(PyObject* t) {
+        PyObject* q = PyObject_GetAttrString(t, "__qualname__");
+        if (!q) {
+            PyErr_Clear();
+            q = PyObject_GetAttrString(t, "__name__");
+        }
+        if (!q) {
+            PyErr_Clear();
+            return std::string();
+        }
+        return py::reinterpret_steal<py::str>(q).cast<std::string>();
+    }
+
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
     ) override {
+        if (cls_.ptr()) return validate_class(input, state);
+        return validate_legacy(input, state);
+    }
+
+private:
+    static ValResult<std::shared_ptr<void>> member_result(const py::object& member) {
+        return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(member));
+    }
+
+    ValError enum_error_for(const Input& input, ValidationState& state) {
+        ErrorType err(ErrorType::Kind::EnumError);
+        err.context()["expected"] = expected_repr_;
+        return ValError::line_error(std::move(err), state.location(),
+                                    input.as_error_value().repr);
+    }
+
+    ValResult<std::shared_ptr<void>> validate_class(const Input& input, ValidationState& state) {
+        py::object input_py = input.as_python_object();
+
+        // Rust accepts an exact instance of the Enum class before anything else.
+        if (input_py && Py_TYPE(input_py.ptr()) == reinterpret_cast<PyTypeObject*>(cls_.ptr())) {
+            return member_result(input_py);
+        }
+
+        // The strict short-circuit is Python-input only; JSON inputs keep their
+        // usual coercions.
+        if (strict_active(state) && state.input_type() == InputType::Python) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::IsInstanceType, "class", class_repr_),
+                state.location(), input.as_error_value().repr);
+        }
+
+        // Match on the member value, with the coercion Rust applies per sub_type.
+        std::vector<PyObject*> candidates;
+        if (input_py) candidates.push_back(input_py.ptr());
+        py::object coerced;
+        if (sub_type_ == "int") {
+            auto r = input.validate_int(false);
+            if (r.is_ok()) coerced = r.value().value().to_python();
+        } else if (sub_type_ == "float") {
+            auto r = input.validate_float(false);
+            if (r.is_ok()) coerced = py::float_(r.value().value().as_double());
+        } else if (sub_type_ == "str") {
+            auto r = input.validate_str(false, false);
+            if (r.is_ok()) coerced = py::str(r.value().value().to_string());
+        }
+        if (coerced) candidates.push_back(coerced.ptr());
+
+        for (PyObject* cand : candidates) {
+            for (const auto& m : members_) {
+                if (!m.value) continue;
+                int eq = PyObject_RichCompareBool(cand, m.value.ptr(), Py_EQ);
+                if (eq == 1) return member_result(m.member);
+                if (eq < 0) PyErr_Clear();
+            }
+        }
+
+        // Then call the class itself, which resolves value lookups and runs any
+        // user-defined _missing_ hook.
+        if (input_py) {
+            PyObject* out = PyObject_CallOneArg(cls_.ptr(), input_py.ptr());
+            if (!out) {
+                PyErr_Clear();
+            } else {
+                py::object out_obj = py::reinterpret_steal<py::object>(out);
+                if (PyObject_IsInstance(out_obj.ptr(), cls_.ptr()) == 1) {
+                    return member_result(out_obj);
+                }
+            }
+        }
+        return enum_error_for(input, state);
+    }
+
+    ValResult<std::shared_ptr<void>> validate_legacy(const Input& input, ValidationState& state) {
         if (valid_values_.empty()) {
             return ValError::line_error(
                 PydanticKnownError::enum_error(),
@@ -1444,11 +1586,22 @@ public:
             input.as_error_value().repr
         );
     }
-    
-    std::string name() const override { return "enum"; }
 
-private:
     std::unordered_set<std::string> valid_values_;
+    py::object cls_;
+    std::vector<Member> members_;
+    std::string sub_type_;
+    std::string expected_repr_;
+    std::string class_repr_;
+    // Rust keeps is_strict(schema, config) per validator, so a field-level
+    // Field(strict=False) overrides the model-wide config. The C++ state cannot
+    // tell that config apart from a call-time override, so a schema-declared
+    // value simply wins here.
+    std::optional<bool> declared_strict_;
+
+    bool strict_active(const ValidationState& state) const {
+        return declared_strict_.value_or(state.strict_or(false));
+    }
 };
 
 // CustomErrorValidator - wraps an inner validator, replacing its error with a custom one
