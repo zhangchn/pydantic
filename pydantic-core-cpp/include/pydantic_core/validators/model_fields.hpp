@@ -189,6 +189,40 @@ public:
             auto* py_input = dynamic_cast<const PythonInput*>(&input);
             if (py_input && !py::isinstance<py::dict>(py_input->py_object())) {
                 const py::object& obj = py_input->py_object();
+                // Rust reads a Mapping instance through the mapping protocol;
+                // any other object must come from a module that may be read by
+                // attribute, otherwise the input is reported as
+                // model_attributes_type rather than a set of missing fields.
+                if (!state.strict_or(false) && py_is_mapping_instance(obj)) {
+                    try {
+                        py::dict from_mapping;
+                        for (py::handle item : obj.attr("items")()) {
+                            PyObject* key = nullptr;
+                            PyObject* value = nullptr;
+                            if (PyArg_UnpackTuple(item.ptr(), "items", 2, 2, &key, &value) == 0) {
+                                PyErr_Clear();
+                                return ValError::line_error(
+                                    ErrorType(ErrorType::Kind::MappingType, "error",
+                                              "Mapping items must be tuples of (key, value) pairs"),
+                                    state.location(), input.as_error_value().repr);
+                            }
+                            from_mapping[py::reinterpret_borrow<py::object>(key)] =
+                                py::reinterpret_borrow<py::object>(value);
+                        }
+                        return validate_dict(std::make_unique<PythonValidatedDict>(from_mapping),
+                                             input, state);
+                    } catch (const py::error_already_set& err) {
+                        return ValError::line_error(
+                            ErrorType(ErrorType::Kind::MappingType, "error",
+                                      py_caught_exception_string(err)),
+                            state.location(), input.as_error_value().repr);
+                    }
+                }
+                if (!py_from_attributes_applicable(obj)) {
+                    return ValError::line_error(
+                        ErrorType(ErrorType::Kind::ModelAttributesType),
+                        state.location(), input.as_error_value().repr);
+                }
                 py::dict filtered;
                 for (const auto& name : field_order_) {
                     const auto& field = fields_.at(name);

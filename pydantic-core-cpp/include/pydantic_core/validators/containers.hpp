@@ -230,7 +230,8 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        auto result = input.validate_dict(strict);
+        // Rust combines the schema-level flag with the state override.
+        auto result = input.validate_dict(state.strict_or(strict));
         if (result.is_err()) {
             return result.error();
         }
@@ -446,7 +447,9 @@ public:
             }
         }
 
-        auto result = input.validate_list(state.strict_or(false));
+        // Not a set: Rust reads it through validate_set, so a value that is not
+        // a sequence iterable reports set_type rather than list_type.
+        auto result = input.validate_set(state.strict_or(false));
         if (result.is_err()) {
             return result.error();
         }
@@ -754,10 +757,11 @@ public:
     ) override {
         py::object py_in = input.as_python_object();
 
-        // Accept any iterable (generators, lists, tuples, etc.)
+        // Accept any iterable (generators, lists, tuples, etc.); Rust reports a
+        // value that cannot be iterated as iterable_type, not list_type.
         if (!py_hasattr(py_in, "__iter__") && !py_hasattr(py_in, "__next__")) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::ListType),
+                ErrorType(ErrorType::Kind::IterableType),
                 state.location(),
                 input.as_error_value().repr
             );

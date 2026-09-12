@@ -1345,7 +1345,15 @@ public:
             );
         }
         used_python_ = true;
-        return python_->validate(input, state);
+        // A JSON document is validated through this branch because the port
+        // parses it into Python objects first, so the subtree really does hold
+        // Python values: checks such as isinstance must stay available instead
+        // of reporting needs_python_object.
+        InputType previous_input_type = state.input_type();
+        state.set_input_type(InputType::Python);
+        auto result = python_->validate(input, state);
+        state.set_input_type(previous_input_type);
+        return result;
     }
 
     std::string name() const override { return "json-or-python"; }

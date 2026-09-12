@@ -306,6 +306,22 @@ inline CrossRetry<EitherDateTime> datetime_from_date(const Input& input) {
     return out;
 }
 
+// Rust's JsonInput parses a temporal string regardless of strict (only the
+// int/float coercion is gated), so a JSON string keeps its *_parsing error
+// where a strict Python input would report the *_type error.
+static bool json_temporal_text(const Input& input, ValidationState& state) {
+    if (state.input_type() != InputType::Json) {
+        return false;
+    }
+    try {
+        py::object obj = input.as_python_object();
+        return obj.ptr() != nullptr && PyUnicode_Check(obj.ptr());
+    } catch (...) {
+        PyErr_Clear();
+        return false;
+    }
+}
+
 // DateValidator - validates date values
 class DateValidator : public Validator {
 public:
@@ -322,7 +338,8 @@ public:
         ValidationState& state
     ) override {
         bool strict = state.strict_or(strict_);
-        auto result = input.validate_date(strict, state.val_temporal_unit());
+        auto result = input.validate_date(strict && !json_temporal_text(input, state),
+                                           state.val_temporal_unit());
         if (result.is_err()) {
             if (!strict) {
                 auto retry = date_from_datetime(input, state.val_temporal_unit());
@@ -405,7 +422,7 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        auto result = input.validate_time(state.strict_or(strict_));
+        auto result = input.validate_time(state.strict_or(strict_) && !json_temporal_text(input, state));
         if (result.is_err()) {
             return result.error();
         }
@@ -449,7 +466,8 @@ public:
         ValidationState& state
     ) override {
         bool strict = state.strict_or(strict_);
-        auto result = input.validate_datetime(strict, state.val_temporal_unit());
+        auto result = input.validate_datetime(strict && !json_temporal_text(input, state),
+                                              state.val_temporal_unit());
         if (result.is_err()) {
             if (!strict) {
                 auto retry = datetime_from_date(input);
@@ -542,7 +560,7 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        auto result = input.validate_timedelta(state.strict_or(strict_));
+        auto result = input.validate_timedelta(state.strict_or(strict_) && !json_temporal_text(input, state));
         if (result.is_err()) {
             return result.error();
         }

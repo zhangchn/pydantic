@@ -2143,6 +2143,9 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("max_length")) {
             v->max_length = schema["max_length"].cast<size_t>();
         }
+        // Rust builds the dict with is_strict(schema, config); without the
+        // schema flag a strict dict would still accept Mapping inputs.
+        v->strict = py_bool(schema, "strict");
         v->fail_fast = py_bool(schema, "fail_fast");
         return v;
     }

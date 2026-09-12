@@ -12,6 +12,88 @@ namespace py = pybind11;
 
 namespace pydantic_core {
 
+// Rust's py_err_string: "QualName: str(exc)", or the bare qualname when str()
+// returns an empty string.  Used for iteration_error/mapping_type contexts.
+// Rust's py_err_string: "QualName: str(exc)", or the bare qualname when str()
+// returns an empty string.  Used for iteration_error/mapping_type contexts.
+inline std::string py_exception_type_and_message(PyObject* type, PyObject* value) {
+    if (!type) {
+        return "Unknown Error";
+    }
+    std::string out;
+    try {
+        PyObject* qualname = PyObject_GetAttrString(type, "__qualname__");
+        if (!qualname) {
+            PyErr_Clear();
+            return "Unknown Error";
+        }
+        out = py::str(py::reinterpret_steal<py::object>(qualname)).cast<std::string>();
+        PyObject* message_obj = value ? PyObject_Str(value) : nullptr;
+        std::string message;
+        if (message_obj) {
+            message = py::str(py::reinterpret_steal<py::object>(message_obj)).cast<std::string>();
+        } else if (value) {
+            PyErr_Clear();
+            message = "<exception str() failed>";
+        }
+        if (!message.empty()) out += ": " + message;
+    } catch (...) {
+        PyErr_Clear();
+        return "Unknown Error";
+    }
+    return out;
+}
+
+inline std::string py_fetched_exception_string() {
+    PyObject *type = nullptr, *value = nullptr, *traceback = nullptr;
+    PyErr_Fetch(&type, &value, &traceback);
+    PyErr_NormalizeException(&type, &value, &traceback);
+    std::string out = py_exception_type_and_message(type, value);
+    Py_XDECREF(type);
+    Py_XDECREF(value);
+    Py_XDECREF(traceback);
+    return out;
+}
+
+// Same formatting for an exception already captured by pybind11.
+inline std::string py_caught_exception_string(const py::error_already_set& err) {
+    return py_exception_type_and_message(err.type().ptr(), err.value().ptr());
+}
+
+// Rust reads a field container through the abstract Mapping protocol; text and
+// sequence types satisfy PyMapping_Check too, so only Mapping instances pass.
+inline bool py_is_mapping_instance(py::handle obj) {
+    static py::object mapping_abc = py::module_::import("collections.abc").attr("Mapping");
+    int result = PyObject_IsInstance(obj.ptr(), mapping_abc.ptr());
+    if (result < 0) {
+        PyErr_Clear();
+        return false;
+    }
+    return result == 1;
+}
+
+// Rust's from_attributes_applicable: instances of classes defined in these
+// modules are never read by attribute, so they report model_attributes_type.
+inline bool py_from_attributes_applicable(py::handle obj) {
+    // The module lives on the type: an instance only exposes it if its class
+    // happens to keep __module__ in its own __dict__.
+    PyObject* type = reinterpret_cast<PyObject*>(Py_TYPE(obj.ptr()));
+    PyObject* module = PyObject_GetAttrString(type, "__module__");
+    if (!module) {
+        PyErr_Clear();
+        return false;
+    }
+    bool applicable = true;
+    try {
+        std::string name = py::str(py::reinterpret_steal<py::object>(module)).cast<std::string>();
+        applicable = name != "builtins" && name != "datetime" && name != "collections";
+    } catch (...) {
+        PyErr_Clear();
+        applicable = false;
+    }
+    return applicable;
+}
+
 // Python validated dict implementation
 class PythonValidatedDict : public ValidatedDict {
 public:
@@ -104,6 +186,8 @@ public:
     ValResult<std::unique_ptr<ValidatedDict>> validate_dict_from_attributes(bool strict) const;
     ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_list(bool strict) const override;
     ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> validate_tuple(bool strict) const override;
+    ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_set(bool strict) const override;
+    ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_frozenset(bool strict) const override;
 
     // Arguments validation: accepts ArgsKwargs instances and plain dicts (kwargs-only)
     ValResult<ArgumentsInput> validate_args() const override;

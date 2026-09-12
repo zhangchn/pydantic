@@ -474,6 +474,16 @@ public:
     virtual ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_list(bool strict) const = 0;
     virtual ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> validate_tuple(bool strict) const = 0;
 
+    // Rust's validate_set/validate_frozenset share the sequence path but report
+    // set_type/frozenset_type.  Inputs without a dedicated set accessor keep the
+    // list wording.
+    virtual ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_set(bool strict) const {
+        return validate_list(strict);
+    }
+    virtual ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_frozenset(bool strict) const {
+        return validate_list(strict);
+    }
+
     // Arguments validation (ArgsKwargs or dict input).  Only implemented for
     // PythonInput; other input kinds report an arguments_type error.
     virtual ValResult<ArgumentsInput> validate_args() const {

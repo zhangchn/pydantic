@@ -361,7 +361,9 @@ ValResult<ValMatch<EitherString>> PythonInput::validate_str(bool strict, bool co
                 std::string decoded = decoded_str.cast<std::string>();
                 return ValMatch<EitherString>::lax(EitherString(decoded));
             } catch (...) {
-                return type_error(ErrorType::Kind::StringType, *this, this->current_location());
+                PyErr_Clear();
+                // Rust reports undecodable bytes as string_unicode, not string_type.
+                return type_error(ErrorType::Kind::StringUnicode, *this, this->current_location());
             }
         }
 
@@ -599,6 +601,34 @@ ValResult<std::unique_ptr<ValidatedDict>> PythonInput::validate_dict(bool strict
         return result;
     }
 
+    // Lax mode reads the abstract Mapping protocol through .items(); an
+    // exception raised by the mapping methods is a mapping_type error carrying
+    // that exception as its context (Rust: iterate_mapping_items).
+    if (!strict && py_is_mapping_instance(obj_)) {
+        try {
+            py::dict collected;
+            for (py::handle item : obj_.attr("items")()) {
+                PyObject* key = nullptr;
+                PyObject* value = nullptr;
+                if (PyArg_UnpackTuple(item.ptr(), "items", 2, 2, &key, &value) == 0) {
+                    PyErr_Clear();
+                    return ValError::line_error(
+                        ErrorType(ErrorType::Kind::MappingType, "error",
+                                  "Mapping items must be tuples of (key, value) pairs"),
+                        this->current_location(), this->as_error_value().repr);
+                }
+                collected[py::reinterpret_borrow<py::object>(key)] =
+                    py::reinterpret_borrow<py::object>(value);
+            }
+            std::unique_ptr<ValidatedDict> result = std::make_unique<PythonValidatedDict>(collected);
+            return result;
+        } catch (const py::error_already_set& err) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::MappingType, "error", py_caught_exception_string(err)),
+                this->current_location(), this->as_error_value().repr);
+        }
+    }
+
     return type_error(ErrorType::Kind::DictType, *this, this->current_location());
 }
 
@@ -782,29 +812,92 @@ py::dict PythonInput::get_attributes_as_dict() const {
     return result;
 }
 
-ValResult<ValMatch<std::unique_ptr<ValidatedList>>> PythonInput::validate_list(bool strict) const {
-    if (is_list()) {
+namespace {
+
+// Rust materialises a lax sequence input through the iterator protocol.  A
+// value with no working __iter__ is left to the caller, which reports its own
+// type error, while an exception raised part-way through iteration becomes
+// iteration_error at the failing index (Rust's any_next_error).
+struct SequenceItems {
+    bool iterable = false;
+    py::list items;
+    std::string error;
+    size_t error_index = 0;
+};
+
+SequenceItems collect_sequence_items(py::handle obj) {
+    SequenceItems collected;
+    PyObject* iter = PyObject_GetIter(obj.ptr());
+    if (!iter) {
+        // Consumes the TypeError so the caller can report a type error instead.
+        py_fetched_exception_string();
+        return collected;
+    }
+    collected.iterable = true;
+    size_t index = 0;
+    while (true) {
+        PyObject* item = PyIter_Next(iter);
+        if (!item) {
+            if (PyErr_Occurred()) {
+                collected.error = py_fetched_exception_string();
+                collected.error_index = index;
+            }
+            break;
+        }
+        collected.items.append(py::reinterpret_steal<py::object>(item));
+        ++index;
+    }
+    Py_DECREF(iter);
+    return collected;
+}
+
+// list/set/frozenset share the sequence path (Rust: extract_sequence_iterable)
+// and differ only in the type error they report.
+ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_sequence_like(
+    const PythonInput& input, bool strict, ErrorType::Kind kind) {
+    if (kind == ErrorType::Kind::ListType && input.is_list()) {
         return ValMatch<std::unique_ptr<ValidatedList>>::lax(
-            std::make_unique<PythonValidatedList>(as_list())
+            std::make_unique<PythonValidatedList>(input.as_list())
         );
     }
 
     // Lax mode: any iterable other than str/bytes/dict-like coerces to a
     // list (Rust accepts arbitrary iterables, rejecting only text types).
-    if (!strict && !py::isinstance<py::str>(obj_) && !py::isinstance<py::bytes>(obj_) &&
-        !py::isinstance<py::bytearray>(obj_) && !py::isinstance<py::dict>(obj_) &&
-        py_hasattr(obj_, "__iter__")) {
-        try {
-            py::list items = py::list(obj_);
-            return ValMatch<std::unique_ptr<ValidatedList>>::lax(
-                std::make_unique<PythonValidatedList>(items)
-            );
-        } catch (const py::error_already_set&) {
-            PyErr_Clear();
+    const py::object& obj = input.py_object();
+    if (!strict && !py::isinstance<py::str>(obj) && !py::isinstance<py::bytes>(obj) &&
+        !py::isinstance<py::bytearray>(obj) && !py::isinstance<py::dict>(obj) &&
+        py_hasattr(obj, "__iter__")) {
+        SequenceItems collected = collect_sequence_items(obj);
+        if (!collected.iterable) {
+            return type_error(kind, input, input.current_location());
         }
+        if (!collected.error.empty()) {
+            Location loc = input.current_location();
+            loc.items.push_back(static_cast<int64_t>(collected.error_index));
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::IterationError, "error", collected.error),
+                loc, input.as_error_value().repr);
+        }
+        return ValMatch<std::unique_ptr<ValidatedList>>::lax(
+            std::make_unique<PythonValidatedList>(collected.items)
+        );
     }
 
-    return type_error(ErrorType::Kind::ListType, *this, this->current_location());
+    return type_error(kind, input, input.current_location());
+}
+
+}  // namespace
+
+ValResult<ValMatch<std::unique_ptr<ValidatedList>>> PythonInput::validate_list(bool strict) const {
+    return validate_sequence_like(*this, strict, ErrorType::Kind::ListType);
+}
+
+ValResult<ValMatch<std::unique_ptr<ValidatedList>>> PythonInput::validate_set(bool strict) const {
+    return validate_sequence_like(*this, strict, ErrorType::Kind::SetType);
+}
+
+ValResult<ValMatch<std::unique_ptr<ValidatedList>>> PythonInput::validate_frozenset(bool strict) const {
+    return validate_sequence_like(*this, strict, ErrorType::Kind::FrozenSetType);
 }
 
 ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> PythonInput::validate_tuple(bool strict) const {
@@ -830,14 +923,24 @@ ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> PythonInput::validate_tuple
     if (!strict && !py::isinstance<py::str>(obj_) && !py::isinstance<py::bytes>(obj_) &&
         !py::isinstance<py::bytearray>(obj_) && !py::isinstance<py::dict>(obj_) &&
         !PyMapping_Check(obj_.ptr()) && py_hasattr(obj_, "__iter__")) {
-        try {
-            py::tuple tup = py::tuple(obj_);
-            return ValMatch<std::unique_ptr<ValidatedTuple>>::lax(
-                std::make_unique<PythonValidatedTuple>(tup)
-            );
-        } catch (const py::error_already_set&) {
-            PyErr_Clear();
+        SequenceItems collected = collect_sequence_items(obj_);
+        if (!collected.iterable) {
+            return type_error(ErrorType::Kind::TupleType, *this, this->current_location());
         }
+        if (!collected.error.empty()) {
+            Location loc = current_location();
+            loc.items.push_back(static_cast<int64_t>(collected.error_index));
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::IterationError, "error", collected.error),
+                loc, as_error_value().repr);
+        }
+        py::tuple tup(collected.items.size());
+        for (size_t i = 0; i < collected.items.size(); ++i) {
+            tup[i] = collected.items[i];
+        }
+        return ValMatch<std::unique_ptr<ValidatedTuple>>::lax(
+            std::make_unique<PythonValidatedTuple>(tup)
+        );
     }
 
     return type_error(ErrorType::Kind::TupleType, *this, this->current_location());

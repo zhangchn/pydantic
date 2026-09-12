@@ -611,6 +611,14 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
+        // Rust cannot apply isinstance to a value that only exists in JSON, so
+        // the check asks for a Python object instead of silently comparing
+        // against the parsed representation.
+        if (state.input_type() != InputType::Python) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::NeedsPythonObject, "method_name", "isinstance"),
+                state.location(), input.as_error_value().repr);
+        }
         // Check if input is an instance of the specified Python class
         if (!py_class_.is_none()) {
             try {
@@ -685,6 +693,12 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
+        // issubclass cannot be evaluated against a JSON value either.
+        if (state.input_type() != InputType::Python) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::NeedsPythonObject, "method_name", "issubclass"),
+                state.location(), input.as_error_value().repr);
+        }
         // Check if input is a subclass of the specified Python class
         // Input must be a type/class itself
         if (!py_class_.is_none()) {
