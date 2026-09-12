@@ -727,7 +727,85 @@ def _format_rust_error(msg: str, model_name: str = '') -> str:
     # Build the Rust-style header
     result = [f'{count} {label} for {name}']
 
-    # Parse error entries: alternating loc and message lines
+    # Parse error entries: an optional loc line followed by the message line.
+    def _truncate_input(repr_text: str) -> str:
+        # Rust tools::truncate_safe_repr(input, Some(50)): keep the first
+        # ceil(50/2) and the last (mid - 1) characters with "..." between.
+        if len(repr_text) <= 50:
+            return repr_text
+        mid = (50 + 1) // 2
+        return repr_text[:mid] + '...' + repr_text[len(repr_text) - (mid - 1):]
+
+    def _render_message(msg_line: str, loc_text: str) -> None:
+        # Hidden-input line (config hide_input_in_errors): ends with [type=x]
+        # and carries no input_value segment.  Keep that shape instead of
+        # appending an empty input segment.
+        hidden_seg = _re.search(r'\s*\[type=([^,\]]+)\]$', msg_line)
+        hidden = bool(hidden_seg)
+        seg = _re.search(r'\s*\[type=([^,\]]+),\s*input_value=(.*)\]$', msg_line)
+        if hidden_seg:
+            msg_line_base = msg_line[:hidden_seg.start()].rstrip()
+        else:
+            msg_line_base = msg_line
+        # Look up Rust-compatible error info
+        err_type = 'value_error'
+        rust_msg = msg_line_base
+        input_val = ''
+        input_type = ''
+        for pattern, (etype, emsg, ival, itype) in _ERR_MSG_TO_RUST.items():
+            if msg_line_base.startswith(pattern) or pattern in msg_line_base:
+                err_type = etype
+                rust_msg = emsg
+                input_val = ival
+                input_type = itype
+                # The type carried by the C++ message is authoritative; the
+                # message table only repairs C++ errors that omit it.  When the
+                # table disagrees, the emitted text is the Rust message with
+                # extra detail (e.g. ", unable to interpret input") and must
+                # not be shortened to the table entry.
+                emitted_seg = seg or hidden_seg
+                if emitted_seg:
+                    err_type = emitted_seg.group(1)
+                    detail = msg_line[:seg.start()].strip() if seg else msg_line_base
+                    if err_type != etype and detail.startswith(emsg):
+                        rust_msg = detail
+                # Use the real input value from the message's
+                # [type=..., input_value=...] segment when present
+                if seg:
+                    raw_input = seg.group(2).strip()
+                    input_val = _truncate_input(raw_input)
+                    try:
+                        input_type = type(_ast.literal_eval(raw_input)).__name__
+                    except Exception:
+                        pass
+                # Keep the full message text for errors that carry a
+                # detail after the prefix (e.g. "Value error, foo"
+                # must not be truncated to "Value error").
+                if err_type in ('value_error', 'assertion_error'):
+                    rust_msg = msg_line[:seg.start()].strip() if seg else msg_line_base
+                break
+        else:
+            # Unmapped message: strip the trailing [type=..., input_value=...]
+            # segment so it is not duplicated when we append a new one.
+            if seg:
+                err_type = seg.group(1)
+                raw_input = seg.group(2).strip()
+                input_val = _truncate_input(raw_input)
+                try:
+                    input_type = type(_ast.literal_eval(raw_input)).__name__
+                except Exception:
+                    input_type = 'str'
+                rust_msg = msg_line[:seg.start()].strip()
+
+        if loc_text:
+            result.append(f'{loc_text}')
+        if hidden:
+            result.append(f'  {rust_msg} [type={err_type}]')
+        else:
+            result.append(
+                f'  {rust_msg} [type={err_type}, input_value={input_val}, input_type={input_type}]'
+            )
+
     i = 1
     while i < len(lines):
         loc_line = lines[i].strip()
@@ -738,70 +816,18 @@ def _format_rust_error(msg: str, model_name: str = '') -> str:
         if loc_line.startswith('__PYDANTIC_ERRORS__:'):
             i += 1
             continue
-        # Message line follows (indented)
+        # A top-level error carries no loc line, so this line is itself the
+        # message: pairing it with the following line would misparse the rest.
+        # The [type=<ident>,|]] shape is checked instead of a whole-suffix match
+        # because the input_value repr may contain "]" characters.
+        if loc_line.endswith(']') and _re.search(r'\[type=[A-Za-z_][A-Za-z0-9_]*(,|\])', loc_line):
+            _render_message(loc_line, '')
+            i += 1
+            continue
         if i + 1 < len(lines):
-            msg_line = lines[i + 1].strip()
-            if msg_line.startswith('  ') or msg_line:
-                msg_line = msg_line.lstrip()
-                # Hidden-input line (config hide_input_in_errors): ends with
-                # [type=x] and carries no input_value segment.  Keep that
-                # shape instead of appending an empty input segment.
-                hidden_seg = _re.search(r'\s*\[type=([^,\]]+)\]$', msg_line)
-                hidden = bool(hidden_seg)
-                if hidden_seg:
-                    msg_line_base = msg_line[:hidden_seg.start()].rstrip()
-                else:
-                    msg_line_base = msg_line
-                # Look up Rust-compatible error info
-                err_type = 'value_error'
-                rust_msg = msg_line_base
-                input_val = ''
-                input_type = ''
-                for pattern, (etype, emsg, ival, itype) in _ERR_MSG_TO_RUST.items():
-                    if msg_line_base.startswith(pattern) or pattern in msg_line_base:
-                        err_type = etype
-                        rust_msg = emsg
-                        input_val = ival
-                        input_type = itype
-                        # Use the real input value from the message's
-                        # [type=..., input_value=...] segment when present
-                        seg = _re.search(r'\s*\[type=([^,\]]+),\s*input_value=(.*)\]$', msg_line)
-                        if seg:
-                            raw_input = seg.group(2).strip()
-                            input_val = raw_input
-                            try:
-                                input_type = type(_ast.literal_eval(raw_input)).__name__
-                            except Exception:
-                                pass
-                        # Keep the full message text for errors that carry a
-                        # detail after the prefix (e.g. "Value error, foo"
-                        # must not be truncated to "Value error").
-                        if err_type in ('value_error', 'assertion_error'):
-                            rust_msg = msg_line[:seg.start()].strip() if seg else msg_line_base
-                        break
-                else:
-                    # Unmapped message: strip the trailing [type=..., input_value=...]
-                    # segment so it is not duplicated when we append a new one.
-                    seg = _re.search(r'\s*\[type=([^,\]]+),\s*input_value=(.*)\]$', msg_line)
-                    if seg:
-                        err_type = seg.group(1)
-                        raw_input = seg.group(2).strip()
-                        input_val = raw_input
-                        try:
-                            input_type = type(_ast.literal_eval(raw_input)).__name__
-                        except Exception:
-                            input_type = 'str'
-                        rust_msg = msg_line[:seg.start()].strip()
-
-                result.append(f'{loc_line}')
-                if hidden:
-                    result.append(f'  {rust_msg} [type={err_type}]')
-                else:
-                    result.append(
-                        f'  {rust_msg} [type={err_type}, input_value={input_val}, input_type={input_type}]'
-                    )
-                i += 2
-                continue
+            _render_message(lines[i + 1].strip(), loc_line)
+            i += 2
+            continue
         result.append(loc_line)
         i += 1
 
@@ -1625,18 +1651,121 @@ def _schema_copy_clean(schema):
     — they are singletons or live references that C++ needs to keep.
     """
     if isinstance(schema, dict):
-        keep_cls = schema.get("type") in ("is-instance", "is-subclass", "model", "dataclass")
+        # An enum node needs ``cls`` so the C++ validator can call the Enum class
+        # and emit is-instance errors the way Rust does.
+        keep_cls = schema.get("type") in ("is-instance", "is-subclass", "model", "dataclass", "enum")
         result = {}
         for k, v in schema.items():
             if k == "cls" and not keep_cls:
                 continue
             result[k] = _schema_copy_clean(v)
         return result
+    if _is_enum_member(schema):
+        # A list/tuple-valued Enum member is itself an instance of that container,
+        # so it must bypass the container copies below to stay an Enum member.
+        return schema
     if isinstance(schema, list):
         return [_schema_copy_clean(item) for item in schema]
     if isinstance(schema, tuple):
         return tuple(_schema_copy_clean(item) for item in schema)
     return schema
+
+
+def _new_model_instance(cls, data):
+    """Build a model instance from already-validated field values.
+
+    Mirrors what the C++ does for the outermost model: bypass ``__init__`` so
+    no validator re-runs, and attach the dunder state BaseModel expects.
+    """
+    import builtins as _builtins
+    instance = _builtins.object.__new__(cls)
+    fields_set = set(data)
+    extra = data.pop('__pydantic_extra__', None)
+    instance.__dict__.update(data)
+    instance.__pydantic_private__ = None
+    instance.__pydantic_extra__ = extra
+    instance.__pydantic_fields_set__ = fields_set
+    return instance
+
+
+def _model_class_of(annotation):
+    """The pydantic model class behind ``annotation``, or None.
+
+    Unwraps Optional/Union (only when a single member is a model) so a nested
+    ``User | None`` still resolves.
+    """
+    import typing as _typing
+    if isinstance(annotation, type) and hasattr(annotation, '__pydantic_fields__'):
+        return annotation
+    origin = _typing.get_origin(annotation)
+    # Only a Union may hide a model; a list/dict/tuple of models must stay a
+    # container here so its items are materialized individually.
+    if origin is _typing.Union or type(annotation).__name__ == 'UnionType':
+        models = [a for a in _typing.get_args(annotation)
+                  if isinstance(a, type) and hasattr(a, '__pydantic_fields__')]
+        if len({id(m) for m in models}) == 1:
+            return models[0]
+    return None
+
+
+def _materialize_value(value, annotation):
+    """Rebuild nested model instances inside an already-validated value.
+
+    The C++ pipeline keeps nested models as plain dicts until the Python
+    boundary, but a model_validator(mode='after') receives ``self`` before that
+    conversion, so its nested fields have to be instances by then (as in Rust).
+    """
+    import typing as _typing
+    if annotation is None or annotation is Ellipsis:
+        return value
+    model_cls = _model_class_of(annotation)
+    if model_cls is not None:
+        if isinstance(model_cls, type) and isinstance(value, model_cls):
+            _materialize_into(value)
+            return value
+        if isinstance(value, dict):
+            return _materialize_into(_new_model_instance(model_cls, dict(value)))
+        return value
+    origin = _typing.get_origin(annotation)
+    args = _typing.get_args(annotation)
+    if origin in (list, set, frozenset) and isinstance(value, (list, set, frozenset)) and args:
+        items = [_materialize_value(v, args[0]) for v in value]
+        return type(value)(items) if isinstance(value, (set, frozenset)) else items
+    if origin is tuple and isinstance(value, tuple):
+        if not args:
+            return value
+        if len(args) == 2 and args[1] is Ellipsis:
+            return tuple(_materialize_value(v, args[0]) for v in value)
+        return tuple(
+            _materialize_value(v, args[i] if i < len(args) else args[-1])
+            for i, v in enumerate(value)
+        )
+    if origin is dict and isinstance(value, dict) and len(args) == 2:
+        return {k: _materialize_value(v, args[1]) for k, v in value.items()}
+    return value
+
+
+def _materialize_into(instance):
+    """Recursively materialize ``instance.__dict__`` from its field annotations."""
+    cls = type(instance)
+    fields = getattr(cls, '__pydantic_fields__', None)
+    values = getattr(instance, '__dict__', None)
+    if not isinstance(fields, dict) or not isinstance(values, dict):
+        return instance
+    for name, field in fields.items():
+        if name not in values:
+            continue
+        annotation = getattr(field, 'annotation', None)
+        try:
+            values[name] = _materialize_value(values[name], annotation)
+        except Exception:
+            pass
+    return instance
+
+
+def _is_enum_member(obj) -> bool:
+    from enum import Enum as _Enum
+    return isinstance(obj, _Enum)
 
 
 def _schema_clean_cls_keys(d):
