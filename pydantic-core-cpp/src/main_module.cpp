@@ -4295,6 +4295,7 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             return self.validate_assignment_object(obj, fn, fv);
         }, py::arg("object"), py::arg("field_name"), py::arg("field_value"))
         .def_property_readonly("title", &SchemaValidator::title)
+        .def_property_readonly("validator_display_name", &SchemaValidator::validator_display_name)
         .def("__repr__", &SchemaValidator::repr)
         // Pickle support: __reduce__ returns (cls, (schema_json, config_json))
         .def("__reduce__", [](const SchemaValidator& self) -> py::tuple {

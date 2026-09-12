@@ -92,6 +92,10 @@ public:
     // Properties
     const std::string& title() const { return title_; }
 
+    // Rust titles an error after the root validator's name, so a TypeAdapter
+    // over a list reports "list[User]" rather than the schema title.
+    std::string validator_display_name() const;
+
     // Whether the top-level schema is a root model (RootModel[T])
     bool is_root_model() const;
 

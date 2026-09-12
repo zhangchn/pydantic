@@ -108,6 +108,17 @@ public:
         }, variant_);
     }
 
+    // Validator::display_name(): the schema-shaped label, e.g. "list[int]",
+    // which is what Rust titles a validation error with.
+    std::string display_name() const {
+        return std::visit([](const auto& v) -> std::string {
+            if (v) {
+                return v->display_name();
+            }
+            return "unknown";
+        }, variant_);
+    }
+
     // Get default value
     ValResult<std::shared_ptr<void>> default_value(ValidationState& state) const {
         return std::visit([&](const auto& v) -> ValResult<std::shared_ptr<void>> {

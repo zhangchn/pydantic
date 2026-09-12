@@ -661,6 +661,19 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
     return validated_value;
 }
 
+std::string SchemaValidator::validator_display_name() const {
+    if (!validator_) {
+        return title_;
+    }
+    try {
+        std::string name = validator_->display_name();
+        return name.empty() ? title_ : name;
+    } catch (...) {
+        PyErr_Clear();
+        return title_;
+    }
+}
+
 std::string SchemaValidator::repr() const {
     return "SchemaValidator(title='" + title_ + "')";
 }

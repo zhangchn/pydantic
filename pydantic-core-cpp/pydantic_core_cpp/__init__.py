@@ -1423,6 +1423,20 @@ class SchemaValidator:
                     result[field_name] = default_info[1]
         return result
 
+    def _attach_error_context(self, e) -> None:
+        # The C++ error renders the generic "Schema" title; the Python formatter
+        # needs the untranslated message plus the model name taken from the
+        # schema, whatever entry point raised the error.
+        if not hasattr(e, '_cpp_msg'):
+            e._cpp_msg = _orig_str(e)
+        model_name = _get_model_name(self._schema) if hasattr(self, '_schema') else ''
+        if not model_name:
+            # Non-model roots (list[int], a bare int, ...) are titled after the
+            # root validator by Rust.
+            model_name = getattr(self._base, 'validator_display_name', '') or ''
+        if model_name and model_name != 'Schema':
+            e._model_name = model_name
+
     def validate_python(self, obj, *, strict=None, context=None, self_instance=None,
                         extra=None, from_attributes=None, by_alias=None, by_name=None,
                         allow_partial=None):
@@ -1442,10 +1456,7 @@ class SchemaValidator:
                 allow_partial=allow_partial)
         except ValidationError as e:
             # Store original C++ message and model name for formatting
-            e._cpp_msg = _orig_str(e)
-            model_name = _get_model_name(self._schema)
-            if model_name:
-                e._model_name = model_name
+            self._attach_error_context(e)
             raise
 
         if isinstance(result, dict):
@@ -1567,8 +1578,12 @@ class SchemaValidator:
     def validate_json(self, json_data, *, strict=None, context=None, extra=None,
                       from_attributes=None, by_alias=None, by_name=None,
                       allow_partial=None):
-        result = self._base.validate_json(json_data, strict=strict, context=context, extra=extra,
-                                          allow_partial=allow_partial, by_alias=by_alias, by_name=by_name)
+        try:
+            result = self._base.validate_json(json_data, strict=strict, context=context, extra=extra,
+                                              allow_partial=allow_partial, by_alias=by_alias, by_name=by_name)
+        except ValidationError as e:
+            self._attach_error_context(e)
+            raise
         if isinstance(result, dict):
             result = self._dict_to_model(result)
         else:
@@ -1581,7 +1596,11 @@ class SchemaValidator:
         return result
 
     def validate_strings(self, string_data, *, strict=None, extra=None, context=None, by_alias=None, by_name=None, allow_partial=None):
-        result = self._base.validate_strings(string_data, strict=strict, extra=extra, allow_partial=allow_partial)
+        try:
+            result = self._base.validate_strings(string_data, strict=strict, extra=extra, allow_partial=allow_partial)
+        except ValidationError as e:
+            self._attach_error_context(e)
+            raise
         if isinstance(result, dict):
             result = self._dict_to_model(result)
             if not isinstance(result, dict):
@@ -1629,7 +1648,11 @@ class SchemaValidator:
         return Some(value)
 
     def validate_assignment(self, obj, field_name, field_value):
-        return self._base.validate_assignment(obj, field_name, field_value)
+        try:
+            return self._base.validate_assignment(obj, field_name, field_value)
+        except ValidationError as e:
+            self._attach_error_context(e)
+            raise
 
     def __repr__(self):
         return self._base.__repr__()
