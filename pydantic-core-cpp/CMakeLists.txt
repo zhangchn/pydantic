@@ -335,4 +335,16 @@ if(NOT SKBUILD)
     target_include_directories(test_speedate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
     add_test(NAME Speedate COMMAND test_speedate)
+
+    # Test suite: JSON grammar diagnostics (jiter-compatible wording)
+    add_executable(test_json_diagnose tests/test_json_diagnose.cpp
+        src/input/json_input.cpp
+        src/errors/errors.cpp
+        src/errors/error_types.cpp
+    )
+    target_compile_definitions(test_json_diagnose PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN HAS_PYBIND11)
+    target_link_libraries(test_json_diagnose PRIVATE doctest::doctest simdjson::simdjson pybind11::module Python3::Python)
+    target_include_directories(test_json_diagnose PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+    add_test(NAME JsonDiagnose COMMAND test_json_diagnose)
 endif()

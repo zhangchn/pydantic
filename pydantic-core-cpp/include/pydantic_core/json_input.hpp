@@ -103,4 +103,20 @@ private:
 // Parse JSON to JsonInput
 ValResult<std::unique_ptr<JsonInput>> parse_json(std::string_view json_str);
 
+// Describe the first deviation from the JSON grammar in jiter's wording, which
+// is what pydantic exposes as the json_invalid message.  Returns nullopt when
+// the text is well-formed, so callers keep their own parser as the authority
+// and use this only to word the failure.
+std::optional<std::string> json_diagnose_parse_error(const std::string& json_text);
+
+struct JsonParseOutcome {
+    bool ok = false;
+    py::object value;               // meaningful when ok
+    std::string error_description;  // jiter-style wording when not ok
+};
+
+// Decode JSON text into Python objects (json.loads is permissive in exactly the
+// way jiter's allow_inf_nan mode is).
+JsonParseOutcome json_parse_python(const std::string& json_text);
+
 } // namespace pydantic_core

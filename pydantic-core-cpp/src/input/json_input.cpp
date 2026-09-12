@@ -2,6 +2,7 @@
 #include "pydantic_core/result.hpp"
 #include "pydantic_core/error_types.hpp"
 #include <simdjson.h>
+#include <cstring>
 #include <memory>
 #include <sstream>
 #include <pybind11/pybind11.h>
@@ -569,6 +570,397 @@ ValResult<std::unique_ptr<JsonInput>> parse_json(std::string_view json_str) {
     auto input = std::make_unique<JsonInput>(result.value());
     input->parser_ = std::move(parser);
     return input;
+}
+
+
+namespace {
+
+class JsonGrammarScan {
+public:
+    explicit JsonGrammarScan(const std::string& text) : s_(text) {
+        line_starts_.push_back(0);
+        for (size_t i = 0; i < s_.size(); ++i) {
+            if (s_[i] == '\n') {
+                line_starts_.push_back(i + 1);
+            }
+        }
+    }
+
+    std::optional<std::string> run() {
+        skip_ws();
+        if (parse_value() != Step::Ok) {
+            return msg_;
+        }
+        skip_ws();
+        if (i_ < s_.size()) {
+            return error_at("trailing characters", i_);
+        }
+        return std::nullopt;
+    }
+
+private:
+    enum class Step { Ok, Err };
+
+    static bool is_digit(char c) { return c >= '0' && c <= '9'; }
+
+    static bool is_hex(char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+    }
+
+    void skip_ws() {
+        while (i_ < s_.size() && (s_[i_] == ' ' || s_[i_] == '\t' || s_[i_] == '\n' || s_[i_] == '\r')) {
+            ++i_;
+        }
+    }
+
+    size_t line_index_at(size_t idx) const {
+        size_t lo = 0;
+        size_t hi = line_starts_.size();
+        while (lo + 1 < hi) {
+            size_t mid = (lo + hi) / 2;
+            if (line_starts_[mid] <= idx) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        return lo;
+    }
+
+    std::string error_at(const std::string& phrase, size_t idx) const {
+        size_t line = line_index_at(idx) + 1;
+        size_t col = idx - line_starts_[line_index_at(idx)] + 1;
+        return phrase + " at line " + std::to_string(line) + " column " + std::to_string(col);
+    }
+
+    // End of input is reported at the position after the last character, one to
+    // the left of where error_at() would place it.
+    std::string error_at_eof(const char* context) {
+        size_t idx = s_.size();
+        size_t line = line_index_at(idx) + 1;
+        size_t col = idx - line_starts_[line_index_at(idx)];
+        return std::string("EOF while parsing ") + context + " at line " + std::to_string(line) +
+               " column " + std::to_string(col);
+    }
+
+    Step fail(std::string message) {
+        msg_ = std::move(message);
+        return Step::Err;
+    }
+
+    Step parse_value() {
+        skip_ws();
+        if (i_ >= s_.size()) {
+            return fail(error_at_eof("a value"));
+        }
+        char c = s_[i_];
+        if (c == '{') {
+            return parse_object();
+        }
+        if (c == '[') {
+            return parse_list();
+        }
+        if (c == '"') {
+            return parse_string();
+        }
+        if (c == 't') {
+            return parse_ident("true");
+        }
+        if (c == 'f') {
+            return parse_ident("false");
+        }
+        if (c == 'n') {
+            return parse_ident("null");
+        }
+        if (c == 'N') {
+            return parse_ident("NaN");
+        }
+        if (c == 'I') {
+            return parse_ident("Infinity");
+        }
+        if (c == '-' || is_digit(c)) {
+            return parse_number();
+        }
+        return fail(error_at("expected value", i_));
+    }
+
+    Step parse_ident(const char* word) {
+        size_t word_len = std::strlen(word);
+        size_t matched = 0;
+        while (matched < word_len && i_ + matched < s_.size() && s_[i_ + matched] == word[matched]) {
+            ++matched;
+        }
+        if (i_ + matched >= s_.size() && matched < word_len) {
+            return fail(error_at_eof("a value"));
+        }
+        if (matched < word_len) {
+            return fail(error_at("expected ident", i_ + matched));
+        }
+        i_ += word_len;
+        return Step::Ok;
+    }
+
+    Step parse_number() {
+        size_t start = i_;
+        if (s_[i_] == '-') {
+            ++i_;
+            if (i_ >= s_.size()) {
+                return fail(error_at_eof("a value"));
+            }
+            // allow_inf_nan also covers the negated constants
+            if (s_[i_] == 'I') {
+                return parse_ident("Infinity");
+            }
+            if (s_[i_] == 'N') {
+                return parse_ident("NaN");
+            }
+            if (!is_digit(s_[i_])) {
+                return fail(error_at("invalid number", i_));
+            }
+        }
+        if (s_[i_] == '0') {
+            ++i_;
+            if (i_ < s_.size() && is_digit(s_[i_])) {
+                return fail(error_at("invalid number", i_));
+            }
+        } else {
+            size_t digits_begin = i_;
+            while (i_ < s_.size() && is_digit(s_[i_])) {
+                ++i_;
+            }
+            if (i_ == digits_begin) {
+                return fail(error_at("expected value", start));
+            }
+        }
+        if (i_ < s_.size() && s_[i_] == '.') {
+            ++i_;
+            if (i_ >= s_.size()) {
+                return fail(error_at_eof("a value"));
+            }
+            if (!is_digit(s_[i_])) {
+                return fail(error_at("invalid number", i_));
+            }
+            while (i_ < s_.size() && is_digit(s_[i_])) {
+                ++i_;
+            }
+        }
+        if (i_ < s_.size() && (s_[i_] == 'e' || s_[i_] == 'E')) {
+            ++i_;
+            if (i_ < s_.size() && (s_[i_] == '+' || s_[i_] == '-')) {
+                ++i_;
+            }
+            if (i_ >= s_.size()) {
+                return fail(error_at_eof("a value"));
+            }
+            if (!is_digit(s_[i_])) {
+                return fail(error_at("invalid number", i_));
+            }
+            while (i_ < s_.size() && is_digit(s_[i_])) {
+                ++i_;
+            }
+        }
+        return Step::Ok;
+    }
+
+    Step parse_unicode_escape() {
+        // s_[i_] is just past the 'u' of \uXXXX
+        unsigned int first = 0;
+        for (int k = 0; k < 4; ++k) {
+            if (i_ >= s_.size()) {
+                return fail(error_at_eof("a string"));
+            }
+            if (!is_hex(s_[i_])) {
+                return fail(error_at("invalid escape", i_));
+            }
+            char c = s_[i_];
+            unsigned int digit = is_digit(c) ? static_cast<unsigned int>(c - '0')
+                                            : static_cast<unsigned int>((c | 0x20) - 'a' + 10);
+            first = (first << 4) | digit;
+            ++i_;
+        }
+        if (first < 0xD800 || first > 0xDBFF) {
+            return Step::Ok;
+        }
+        // A high surrogate must be followed by its low half
+        if (i_ + 5 < s_.size() && s_[i_] == '\\' && s_[i_ + 1] == 'u') {
+            unsigned int low = 0;
+            size_t cur = i_ + 2;
+            bool ok = true;
+            for (int k = 0; k < 4 && ok; ++k) {
+                if (!is_hex(s_[cur])) {
+                    ok = false;
+                } else {
+                    char c = s_[cur];
+                    unsigned int digit = is_digit(c) ? static_cast<unsigned int>(c - '0')
+                                                    : static_cast<unsigned int>((c | 0x20) - 'a' + 10);
+                    low = (low << 4) | digit;
+                    ++cur;
+                }
+            }
+            if (ok && low >= 0xDC00 && low <= 0xDFFF) {
+                i_ = cur;
+                return Step::Ok;
+            }
+        }
+        return fail(error_at("unexpected end of hex escape", i_));
+    }
+
+    Step parse_string() {
+        ++i_;  // opening quote
+        for (;;) {
+            if (i_ >= s_.size()) {
+                return fail(error_at_eof("a string"));
+            }
+            char c = s_[i_];
+            if (c == '"') {
+                ++i_;
+                return Step::Ok;
+            }
+            if (c == '\\') {
+                ++i_;
+                if (i_ >= s_.size()) {
+                    return fail(error_at_eof("a string"));
+                }
+                char escape = s_[i_];
+                if (escape == 'u') {
+                    ++i_;
+                    Step step = parse_unicode_escape();
+                    if (step != Step::Ok) {
+                        return step;
+                    }
+                    continue;
+                }
+                if (escape == '"' || escape == '\\' || escape == '/' || escape == 'b' || escape == 'f' ||
+                    escape == 'n' || escape == 'r' || escape == 't') {
+                    ++i_;
+                    continue;
+                }
+                return fail(error_at("invalid escape", i_));
+            }
+            if (static_cast<unsigned char>(c) < 0x20) {
+                return fail(error_at("control character (\\u0000-\\u001F) found while parsing a string", i_));
+            }
+            ++i_;
+        }
+    }
+
+    Step parse_list() {
+        ++i_;  // '['
+        skip_ws();
+        if (i_ >= s_.size()) {
+            return fail(error_at_eof("a list"));
+        }
+        if (s_[i_] == ']') {
+            ++i_;
+            return Step::Ok;
+        }
+        for (;;) {
+            Step step = parse_value();
+            if (step != Step::Ok) {
+                return step;
+            }
+            skip_ws();
+            if (i_ >= s_.size()) {
+                return fail(error_at_eof("a list"));
+            }
+            if (s_[i_] == ']') {
+                ++i_;
+                return Step::Ok;
+            }
+            if (s_[i_] != ',') {
+                return fail(error_at("expected `,` or `]`", i_));
+            }
+            ++i_;
+            skip_ws();
+            if (i_ >= s_.size()) {
+                return fail(error_at_eof("a value"));
+            }
+            if (s_[i_] == ']') {
+                return fail(error_at("trailing comma", i_));
+            }
+        }
+    }
+
+    Step parse_object() {
+        ++i_;  // '{'
+        skip_ws();
+        if (i_ >= s_.size()) {
+            return fail(error_at_eof("an object"));
+        }
+        if (s_[i_] == '}') {
+            ++i_;
+            return Step::Ok;
+        }
+        for (;;) {
+            skip_ws();
+            if (i_ >= s_.size()) {
+                return fail(error_at_eof("an object"));
+            }
+            if (s_[i_] != '"') {
+                return fail(error_at("key must be a string", i_));
+            }
+            Step step = parse_string();
+            if (step != Step::Ok) {
+                return step;
+            }
+            skip_ws();
+            if (i_ >= s_.size()) {
+                return fail(error_at_eof("an object"));
+            }
+            if (s_[i_] != ':') {
+                return fail(error_at("expected `:`", i_));
+            }
+            ++i_;
+            step = parse_value();
+            if (step != Step::Ok) {
+                return step;
+            }
+            skip_ws();
+            if (i_ >= s_.size()) {
+                return fail(error_at_eof("an object"));
+            }
+            if (s_[i_] == '}') {
+                ++i_;
+                return Step::Ok;
+            }
+            if (s_[i_] != ',') {
+                return fail(error_at("expected `,` or `}`", i_));
+            }
+            ++i_;
+            skip_ws();
+            if (i_ >= s_.size()) {
+                return fail(error_at_eof("a value"));
+            }
+            if (s_[i_] == '}') {
+                return fail(error_at("trailing comma", i_));
+            }
+        }
+    }
+
+    const std::string& s_;
+    size_t i_ = 0;
+    std::vector<size_t> line_starts_;
+    std::string msg_;
+};
+
+}  // namespace
+
+std::optional<std::string> json_diagnose_parse_error(const std::string& json_text) {
+    JsonGrammarScan scan(json_text);
+    return scan.run();
+}
+
+JsonParseOutcome json_parse_python(const std::string& json_text) {
+    JsonParseOutcome outcome;
+    try {
+        py::object json_mod = py::module_::import("json");
+        outcome.value = json_mod.attr("loads")(json_text);
+        outcome.ok = true;
+    } catch (const py::error_already_set& e) {
+        auto diagnosis = json_diagnose_parse_error(json_text);
+        outcome.error_description = diagnosis.has_value() ? *diagnosis : py::str(e.value()).cast<std::string>();
+    }
+    return outcome;
 }
 
 } // namespace pydantic_core

@@ -1363,7 +1363,9 @@ private:
     mutable bool used_python_;
 };
 
-// JsonValidator - validates JSON input by converting to Python object
+// JsonValidator - matches Rust's JsonValidator (validators/json.rs): only
+// string/bytes/bytearray carry JSON text, a bytes failure is reported as
+// json_type, and the inner schema then sees the decoded value as JSON input.
 class JsonValidator : public Validator {
 public:
     JsonValidator() = default;
@@ -1373,17 +1375,48 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        // Convert JSON to Python object (handled by as_python_object)
-        py::object parsed = input.as_python_object();
-
-        if (inner_) {
-            auto py_input = std::make_unique<PythonInput>(parsed);
-            return inner_->validate(*py_input, state);
+        auto bytes_result = input.validate_bytes(false);
+        if (bytes_result.is_err()) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::JsonType),
+                state.location(),
+                input.as_error_value().repr);
         }
-        return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(parsed));
+        EitherBytes& bytes = bytes_result.value().value();
+        std::string text;
+        if (auto* vec = std::get_if<std::vector<uint8_t>>(&bytes.data)) {
+            text.assign(vec->begin(), vec->end());
+        } else {
+            std::string_view sv = std::get<std::string_view>(bytes.data);
+            text.assign(sv.begin(), sv.end());
+        }
+
+        JsonParseOutcome parsed = json_parse_python(text);
+        if (!parsed.ok) {
+            ErrorType error_type(ErrorType::Kind::JsonInvalid, "error", parsed.error_description);
+            return ValError::line_error(error_type, state.location(), input.as_error_value().repr);
+        }
+        if (!inner_) {
+            return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(parsed.value));
+        }
+        InputType previous_input_type = state.input_type();
+        state.set_input_type(InputType::Json);
+        PythonInput decoded(parsed.value);
+        ValResult<std::shared_ptr<void>> result = inner_->validate(decoded, state);
+        state.set_input_type(previous_input_type);
+        return result;
     }
 
     std::string name() const override { return "json"; }
+
+    // Without an inner schema the result is a plain Python object from the
+    // parser; with one it is whatever that schema produced.
+    std::string effective_result_name() const override {
+        if (inner_) {
+            return inner_->effective_result_name();
+        }
+        return "py_object";
+    }
 
 private:
     std::shared_ptr<Validator> inner_;

@@ -4227,8 +4227,10 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             } catch (const py::error_already_set& e) {
                 // Malformed JSON: convert JSONDecodeError to a ValidationError
                 // with json_invalid type (Rust: validate_json throws ValidationError
-                // for malformed JSON, not a raw JSONDecodeError).
-                std::string err_msg = py::str(e.value()).cast<std::string>();
+                // for malformed JSON, not a raw JSONDecodeError).  The wording has
+                // to be jiter's, not the json module's.
+                auto diagnosis = json_diagnose_parse_error(js);
+                std::string err_msg = diagnosis.value_or(py::str(e.value()).cast<std::string>());
                 ErrorType error_type(ErrorType::Kind::JsonInvalid, "error", err_msg);
                 Location location;
                 ValError val_error = ValError::line_error(error_type, location, js);
