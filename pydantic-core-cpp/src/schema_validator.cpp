@@ -7,6 +7,7 @@
 #include "pydantic_core/url_types.hpp"
 #include "pydantic_core/validators/model_fields.hpp"
 #include "pydantic_core/validators/complex.hpp"
+#include "pydantic_core/py_time.hpp"
 #include <memory>
 #include <pybind11/stl.h>
 #include <stdexcept>
@@ -882,8 +883,7 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
             auto* ed = static_cast<EitherDate*>(value.get());
             if (ed) {
                 auto& d = ed->value;
-                py::object datetime_mod = py::module_::import("datetime");
-                return datetime_mod.attr("date")(d.year, d.month, d.day);
+                return py_date_object(d);
             }
         } catch (...) {}
         return py::none();
@@ -893,15 +893,7 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
             auto* et = static_cast<EitherTime*>(value.get());
             if (et) {
                 auto& t = et->value;
-                if (t.tz_offset.has_value()) {
-                    py::object datetime_mod = py::module_::import("datetime");
-                    py::object timezone = py::module_::import("datetime").attr("timezone");
-                    py::object tz_delta = py::module_::import("datetime").attr("timedelta")(py::arg("minutes") = *t.tz_offset);
-                    py::object tz = timezone(tz_delta);
-                    return datetime_mod.attr("time")(t.hour, t.minute, t.second, t.microsecond, tz);
-                }
-                py::object datetime_mod = py::module_::import("datetime");
-                return datetime_mod.attr("time")(t.hour, t.minute, t.second, t.microsecond);
+                return py_time_object(t);
             }
         } catch (...) {}
         return py::none();
@@ -916,19 +908,7 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
                     return edt->original_obj;
                 }
                 auto& dt = edt->value;
-                if (dt.time.tz_offset.has_value()) {
-                    py::object datetime_mod = py::module_::import("datetime");
-                    py::object timezone = py::module_::import("datetime").attr("timezone");
-                    py::object tz_delta = py::module_::import("datetime").attr("timedelta")(py::arg("minutes") = *dt.time.tz_offset);
-                    py::object tz = timezone(tz_delta);
-                    return datetime_mod.attr("datetime")(
-                        dt.date.year, dt.date.month, dt.date.day,
-                        dt.time.hour, dt.time.minute, dt.time.second, dt.time.microsecond, tz);
-                }
-                py::object datetime_mod = py::module_::import("datetime");
-                return datetime_mod.attr("datetime")(
-                    dt.date.year, dt.date.month, dt.date.day,
-                    dt.time.hour, dt.time.minute, dt.time.second, dt.time.microsecond);
+                return py_datetime_object(dt);
             }
         } catch (...) {}
         return py::none();

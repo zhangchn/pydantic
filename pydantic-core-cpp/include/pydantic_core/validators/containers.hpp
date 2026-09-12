@@ -4,6 +4,7 @@
 #include "pydantic_core/py_compat.hpp"
 #include "pydantic_core/python_input.hpp"
 #include "pydantic_core/string_input.hpp"
+#include "pydantic_core/py_time.hpp"
 #include <memory>
 #include <optional>
 #include <string>
@@ -188,35 +189,19 @@ public:
         if (name == "date") {
             if (auto* ed = static_cast<EitherDate*>(value.get())) {
                 auto& d = ed->value;
-                return py::module_::import("datetime").attr("date")(d.year, d.month, d.day);
+                return py_date_object(d);
             }
         }
         if (name == "time") {
             if (auto* et = static_cast<EitherTime*>(value.get())) {
                 auto& t = et->value;
-                py::object datetime_mod = py::module_::import("datetime");
-                if (t.tz_offset.has_value()) {
-                    py::object tz_delta = datetime_mod.attr("timedelta")(py::arg("minutes") = *t.tz_offset);
-                    py::object tz = datetime_mod.attr("timezone")(tz_delta);
-                    return datetime_mod.attr("time")(t.hour, t.minute, t.second, t.microsecond, tz);
-                }
-                return datetime_mod.attr("time")(t.hour, t.minute, t.second, t.microsecond);
+                return py_time_object(t);
             }
         }
         if (name == "datetime") {
             if (auto* edt = static_cast<EitherDateTime*>(value.get())) {
                 auto& dt = edt->value;
-                py::object datetime_mod = py::module_::import("datetime");
-                if (dt.time.tz_offset.has_value()) {
-                    py::object tz_delta = datetime_mod.attr("timedelta")(py::arg("minutes") = *dt.time.tz_offset);
-                    py::object tz = datetime_mod.attr("timezone")(tz_delta);
-                    return datetime_mod.attr("datetime")(
-                        dt.date.year, dt.date.month, dt.date.day,
-                        dt.time.hour, dt.time.minute, dt.time.second, dt.time.microsecond, tz);
-                }
-                return datetime_mod.attr("datetime")(
-                    dt.date.year, dt.date.month, dt.date.day,
-                    dt.time.hour, dt.time.minute, dt.time.second, dt.time.microsecond);
+                return py_datetime_object(dt);
             }
         }
         if (name == "timedelta") {
