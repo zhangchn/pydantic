@@ -225,30 +225,37 @@ public:
                 input.as_error_value().repr
             );
         }
+        // Rust puts the constraint in ctx as a float, so an integral bound has
+        // to survive as 1.0 rather than the int a numeric string would decode to.
+        auto float_ctx = [](ErrorType::Kind kind, const char* key, double value) {
+            ErrorType err(kind);
+            err.set_ctx_object(key, format_double(value), py::float_(value));
+            return err;
+        };
         if (gt.has_value() && f <= gt.value()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::GreaterThan, "gt", format_double(gt.value())),
+                float_ctx(ErrorType::Kind::GreaterThan, "gt", gt.value()),
                 state.location(),
                 input.as_error_value().repr
             );
         }
         if (ge.has_value() && f < ge.value()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::GreaterThanEqual, "ge", format_double(ge.value())),
+                float_ctx(ErrorType::Kind::GreaterThanEqual, "ge", ge.value()),
                 state.location(),
                 input.as_error_value().repr
             );
         }
         if (lt.has_value() && f >= lt.value()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::LessThan, "lt", format_double(lt.value())),
+                float_ctx(ErrorType::Kind::LessThan, "lt", lt.value()),
                 state.location(),
                 input.as_error_value().repr
             );
         }
         if (le.has_value() && f > le.value()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::LessThanEqual, "le", format_double(le.value())),
+                float_ctx(ErrorType::Kind::LessThanEqual, "le", le.value()),
                 state.location(),
                 input.as_error_value().repr
             );
@@ -258,10 +265,11 @@ public:
             double rounded_div = std::round(f / multiple_of.value());
             double diff = std::abs(f - (rounded_div * multiple_of.value()));
             if (diff > tolerance) {
+                ErrorType err(ErrorType::Kind::MultipleOf);
+                err.set_ctx_object("multiple_of", format_double(multiple_of.value()),
+                                   py::float_(multiple_of.value()));
                 return ValError::line_error(
-                    ErrorType(ErrorType::Kind::MultipleOf, "multiple_of", format_double(multiple_of.value())),
-                    state.location(),
-                    input.as_error_value().repr
+                    std::move(err), state.location(), input.as_error_value().repr
                 );
             }
         }
@@ -572,16 +580,16 @@ public:
 
         if (min_length.has_value() && len < min_length.value()) {
             return ValError::line_error(
-                ErrorType(ErrorType::Kind::BytesTooShort, static_cast<int64_t>(min_length.value())),
+                ErrorType(ErrorType::Kind::BytesTooShort, "min_length", std::to_string(min_length.value())),
                 state.location(),
-                bytes_repr(bytes)
+                input.as_error_value().repr
             );
         }
         if (max_length.has_value() && len > max_length.value()) {
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::BytesTooLong, "max_length", std::to_string(max_length.value())),
                 state.location(),
-                bytes_repr(bytes)
+                input.as_error_value().repr
             );
         }
 
@@ -590,11 +598,6 @@ public:
     
     std::string name() const override { return "constrained-bytes"; }
 
-private:
-    static std::string bytes_repr(const EitherBytes& b) {
-        auto v = b.to_vector();
-        return "<bytes len=" + std::to_string(v.size()) + ">";
-    }
 };
 
 // IsInstanceValidator - validates that input is an instance of a given Python class
