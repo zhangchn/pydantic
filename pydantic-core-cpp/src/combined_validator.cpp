@@ -2739,6 +2739,117 @@ static std::shared_ptr<Validator> build_from_py_dict(
         return v;
     }
 
+    // --- Arguments v3 (each parameter declares its own mode) ---
+    if (type == "arguments-v3") {
+        using Mode = ArgumentsV3Validator::Mode;
+        auto v = std::make_shared<ArgumentsV3Validator>();
+        std::unordered_set<std::string> names;
+        bool had_positional_or_keyword = false, had_var_args = false;
+        bool had_keyword_only = false, had_var_kwargs = false;
+        bool had_default_arg = false;
+        if (schema.contains("arguments_schema")) {
+            for (auto item : schema["arguments_schema"].cast<py::list>()) {
+                auto arg = item.cast<py::dict>();
+                ArgumentsV3Validator::Parameter p;
+                p.name = py_str(arg, "name");
+                if (!names.insert(p.name).second) {
+                    throw SchemaError("Duplicate parameter '" + p.name + "'");
+                }
+                std::string mode = py_str(arg, "mode", "positional_or_keyword");
+                if (mode == "positional_only") {
+                    if (had_positional_or_keyword || had_var_args || had_keyword_only || had_var_kwargs) {
+                        throw SchemaError("Positional only parameter '" + p.name +
+                                          "' cannot follow other parameter kinds");
+                    }
+                    p.mode = Mode::PositionalOnly;
+                } else if (mode == "positional_or_keyword") {
+                    if (had_var_args || had_keyword_only || had_var_kwargs) {
+                        throw SchemaError("Positional or keyword parameter '" + p.name +
+                                          "' cannot follow variadic or keyword only parameters");
+                    }
+                    had_positional_or_keyword = true;
+                    p.mode = Mode::PositionalOrKeyword;
+                } else if (mode == "var_args") {
+                    if (had_var_args) {
+                        throw SchemaError("Duplicate variadic positional parameter '" + p.name + "'");
+                    }
+                    if (had_keyword_only || had_var_kwargs) {
+                        throw SchemaError("Variadic positional parameter '" + p.name +
+                                          "' cannot follow variadic or keyword only parameters");
+                    }
+                    had_var_args = true;
+                    p.mode = Mode::VarArgs;
+                } else if (mode == "keyword_only") {
+                    if (had_var_kwargs) {
+                        throw SchemaError("Keyword only parameter '" + p.name +
+                                          "' cannot follow variadic keyword only parameter");
+                    }
+                    had_keyword_only = true;
+                    p.mode = Mode::KeywordOnly;
+                } else if (mode == "var_kwargs_uniform" || mode == "var_kwargs_unpacked_typed_dict") {
+                    if (had_var_kwargs) {
+                        throw SchemaError("Duplicate variadic keyword parameter '" + p.name + "'");
+                    }
+                    had_var_kwargs = true;
+                    p.mode = (mode == "var_kwargs_uniform") ? Mode::VarKwargsUniform
+                                                            : Mode::VarKwargsUnpackedTypedDict;
+                } else {
+                    throw SchemaError("Invalid var_kwargs mode: `" + mode + "`");
+                }
+
+                if (arg.contains("alias") && !arg["alias"].is_none()) {
+                    py::object alias = arg["alias"];
+                    if (py::isinstance<py::str>(alias)) {
+                        p.aliases.push_back(alias.cast<std::string>());
+                    } else if (py::isinstance<py::list>(alias)) {
+                        for (auto choice : alias.cast<py::list>()) {
+                            if (py::isinstance<py::str>(choice)) {
+                                p.aliases.push_back(choice.cast<std::string>());
+                            } else if (py::isinstance<py::list>(choice)) {
+                                for (auto inner : choice.cast<py::list>()) {
+                                    p.aliases.push_back(py::str(inner).cast<std::string>());
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Rust asks the built validator whether it carries a default so a
+                // required parameter after an optional one is a schema error.
+                bool has_default = false;
+                if (arg.contains("schema") && py::isinstance<py::dict>(arg["schema"])) {
+                    py::dict inner = arg["schema"].cast<py::dict>();
+                    has_default = py_str(inner, "type") == "default";
+                    if (has_default && py_str(inner, "on_error") == "omit") {
+                        throw SchemaError("Parameter '" + p.name + "': omit_on_error cannot be used with arguments");
+                    }
+                }
+                if (had_default_arg && !has_default && !had_keyword_only) {
+                    throw SchemaError("Required parameter '" + p.name + "' follows parameter with default");
+                } else if (has_default) {
+                    had_default_arg = true;
+                }
+
+                if (arg.contains("schema")) {
+                    p.validator = build_from_py_dict(arg["schema"].cast<py::dict>(), config, definitions);
+                }
+                v->parameters.push_back(std::move(p));
+            }
+        }
+        for (const auto& p : v->parameters) {
+            if (ArgumentsV3Validator::is_positional(p.mode)) v->positional_params_count++;
+        }
+        if (config.contains("loc_by_alias") && py::isinstance<py::bool_>(config["loc_by_alias"])) {
+            v->loc_by_alias = config["loc_by_alias"].cast<bool>();
+        }
+        v->extra = extra_behavior_from_string(py_str(schema, "extra",
+            py_str(config, "extra_fields_behavior",
+                py_str(config, "extra_behavior", py_str(config, "extra", "forbid")))));
+        v->validate_by_alias = py_bool_opt(schema, "validate_by_alias");
+        v->validate_by_name = py_bool_opt(schema, "validate_by_name");
+        return v;
+    }
+
     // --- Call (validate function call: arguments + return value) ---
     if (type == "call") {
         std::shared_ptr<Validator> arguments_validator;

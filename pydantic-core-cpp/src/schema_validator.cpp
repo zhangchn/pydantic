@@ -1191,7 +1191,9 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
     // For function-after/before/wrap/plain validators, check py::object*
     bool is_function_type = (effective_type == "function-after" || effective_type == "function-before" ||
                              effective_type == "function-wrap" || effective_type == "function-plain" ||
-                             effective_type == "call" || effective_type == "arguments" || effective_type == "dataclass" ||
+                             effective_type == "call" || effective_type == "arguments" ||
+                             effective_type == "arguments-v3" ||
+                             effective_type == "dataclass" ||
                              effective_type == "callable" || effective_type == "set" || effective_type == "frozenset" ||
                              effective_type == "tuple");
     if (is_function_type) {

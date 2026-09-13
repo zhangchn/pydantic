@@ -1531,6 +1531,56 @@ private:
     std::shared_ptr<Validator> inner_;
 };
 
+// Convert a validated value to a Python object.  "any"-typed values pass
+// through the original input object (matching Rust's AnyValidator) because
+// the C++ AnyValidator round-trips through a string repr, which loses
+// arbitrary objects (classes, instances, ...).  Defaults for "any" params
+// have no raw input, so fall back to generic typed casts.
+inline py::object value_to_python(const std::shared_ptr<void>& value, const std::string& type_name,
+                                  const py::object* raw) {
+    if (type_name == "any") {
+        if (raw != nullptr) {
+            return *raw;
+        }
+        if (value) {
+            // AnyValidator round-trips through a string repr ("null", "true",
+            // numbers, ...) — map the JSON-ish literals back to Python values.
+            try {
+                auto* s = static_cast<std::string*>(value.get());
+                if (s) {
+                    if (*s == "null") return py::none();
+                    if (*s == "true") return py::bool_(true);
+                    if (*s == "false") return py::bool_(false);
+                    return py::str(*s);
+                }
+            } catch (...) {}
+            try { return py::int_(*static_cast<int64_t*>(value.get())); } catch (...) {}
+            try { return py::float_(*static_cast<double*>(value.get())); } catch (...) {}
+            try { return py::bool_(*static_cast<bool*>(value.get())); } catch (...) {}
+            try { return *static_cast<py::object*>(value.get()); } catch (...) {}
+        }
+        return py::none();
+    }
+    return value_to_python_with_type(value, type_name);
+}
+
+// Convert a default value to a Python object.  WithDefaultValidator
+// returns the raw default as a py::object (unless validate_default is set,
+// in which case the result is the inner validator's validated type).
+inline py::object default_to_python(const std::shared_ptr<Validator>& validator,
+                                    const std::shared_ptr<void>& value) {
+    if (auto* wd = dynamic_cast<WithDefaultValidator*>(validator.get())) {
+        if (!wd->validate_default()) {
+            try {
+                auto* obj = static_cast<py::object*>(value.get());
+                if (obj) return *obj;
+            } catch (...) {}
+            return py::none();
+        }
+    }
+    return value_to_python(value, validator->effective_result_name(), nullptr);
+}
+
 // ArgumentsValidator - validates function arguments (positional + keyword).
 // Matches Rust's ArgumentsValidator (arguments.rs).  Produces a Python tuple
 // of (validated_args, validated_kwargs) ready for a function call.
@@ -1914,54 +1964,443 @@ private:
         }
     }
 
-    // Convert a default value to a Python object.  WithDefaultValidator
-    // returns the raw default as a py::object (unless validate_default is set,
-    // in which case the result is the inner validator's validated type).
-    static py::object default_to_python(const std::shared_ptr<Validator>& validator,
-                                        const std::shared_ptr<void>& value) {
-        if (auto* wd = dynamic_cast<WithDefaultValidator*>(validator.get())) {
-            if (!wd->validate_default()) {
-                try {
-                    auto* obj = static_cast<py::object*>(value.get());
-                    if (obj) return *obj;
-                } catch (...) {}
-                return py::none();
-            }
-        }
-        return value_to_python(value, validator->effective_result_name(), nullptr);
+};
+
+// ArgumentsV3Validator - the 'arguments-v3' schema: every parameter declares its
+// own mode, so a single list covers positional, keyword-only and variadic
+// parameters, and the input may be either a name->value mapping or an
+// ArgsKwargs container (Rust validators/arguments_v3.rs).
+class ArgumentsV3Validator : public Validator {
+public:
+    enum class Mode {
+        PositionalOnly,
+        PositionalOrKeyword,
+        VarArgs,
+        KeywordOnly,
+        VarKwargsUniform,
+        VarKwargsUnpackedTypedDict,
+    };
+
+    struct Parameter {
+        std::string name;
+        Mode mode = Mode::PositionalOrKeyword;
+        std::shared_ptr<Validator> validator;
+        std::vector<std::string> aliases;
+    };
+
+    std::vector<Parameter> parameters;
+    size_t positional_params_count = 0;
+    bool loc_by_alias = true;
+    ExtraBehavior extra = ExtraBehavior::Forbid;
+    std::optional<bool> validate_by_alias;
+    std::optional<bool> validate_by_name;
+
+    std::string name() const override { return "arguments-v3"; }
+
+    static bool is_positional(Mode mode) {
+        return mode == Mode::PositionalOnly || mode == Mode::PositionalOrKeyword;
+    }
+    static bool is_variadic(Mode mode) {
+        return mode == Mode::VarArgs || mode == Mode::VarKwargsUniform ||
+               mode == Mode::VarKwargsUnpackedTypedDict;
     }
 
-    // Convert a validated value to a Python object.  "any"-typed values pass
-    // through the original input object (matching Rust's AnyValidator) because
-    // the C++ AnyValidator round-trips through a string repr, which loses
-    // arbitrary objects (classes, instances, ...).  Defaults for "any" params
-    // have no raw input, so fall back to generic typed casts.
-    static py::object value_to_python(const std::shared_ptr<void>& value, const std::string& type_name,
-                                      const py::object* raw) {
-        if (type_name == "any") {
-            if (raw != nullptr) {
-                return *raw;
-            }
-            if (value) {
-                // AnyValidator round-trips through a string repr ("null", "true",
-                // numbers, ...) — map the JSON-ish literals back to Python values.
-                try {
-                    auto* s = static_cast<std::string*>(value.get());
-                    if (s) {
-                        if (*s == "null") return py::none();
-                        if (*s == "true") return py::bool_(true);
-                        if (*s == "false") return py::bool_(false);
-                        return py::str(*s);
-                    }
-                } catch (...) {}
-                try { return py::int_(*static_cast<int64_t*>(value.get())); } catch (...) {}
-                try { return py::float_(*static_cast<double*>(value.get())); } catch (...) {}
-                try { return py::bool_(*static_cast<bool*>(value.get())); } catch (...) {}
-                try { return *static_cast<py::object*>(value.get()); } catch (...) {}
-            }
-            return py::none();
+    ValResult<std::shared_ptr<void>> validate(const Input& input, ValidationState& state) override {
+        const bool by_alias = state.by_alias().value_or(validate_by_alias.value_or(true));
+        const bool by_name = state.by_name().value_or(validate_by_name.value_or(false));
+        const ExtraBehavior extra_behavior = state.extra_behavior_or(extra);
+
+        // Rust tries the mapping path first and only falls back to ArgsKwargs.
+        auto dict_result = input.validate_dict(false);
+        if (dict_result.is_ok()) {
+            return validate_from_mapping(*dict_result.value(), input, state, by_alias, by_name, extra_behavior);
         }
-        return value_to_python_with_type(value, type_name);
+        auto args_result = input.validate_args();
+        if (args_result.is_err()) {
+            return ValResult<std::shared_ptr<void>>(args_result.error());
+        }
+        ArgumentsInput args_in = std::move(args_result.value());
+        return validate_from_argskwargs(args_in.args, args_in.kwargs, input, state, by_alias, by_name,
+                                       extra_behavior);
+    }
+
+private:
+    // Rust LookupPathCollection::lookup_paths: the alias paths first while
+    // looking up by alias, then the parameter name when no alias is declared or
+    // looking up by name is allowed too.
+    static std::vector<std::string> lookup_keys(const Parameter& p, bool by_alias, bool by_name) {
+        std::vector<std::string> keys;
+        if (by_alias) keys.insert(keys.end(), p.aliases.begin(), p.aliases.end());
+        if (p.aliases.empty() || by_name) keys.push_back(p.name);
+        return keys;
+    }
+
+    // Rust LookupPathCollection::error_loc for a parameter no value was found for.
+    std::string missing_loc_key(const Parameter& p, bool by_alias) const {
+        if (loc_by_alias && by_alias && !p.aliases.empty()) return p.aliases.front();
+        return p.name;
+    }
+
+    const Parameter* find_mode(Mode mode) const {
+        for (const auto& p : parameters) {
+            if (p.mode == mode) return &p;
+        }
+        return nullptr;
+    }
+
+    static std::shared_ptr<ValLineError> line_error(ErrorType::Kind kind, const Location& loc,
+                                                    const py::object& obj) {
+        auto le = std::make_shared<ValLineError>(
+            ValLineError{ErrorType(kind), loc, py::repr(obj).cast<std::string>()});
+        le->raw_input_obj = obj;
+        return le;
+    }
+
+    static std::shared_ptr<ValLineError> missing_line_error(Mode mode, const Location& loc,
+                                                            const std::string& input_repr) {
+        ErrorType::Kind kind = ErrorType::Kind::MissingArgument;
+        if (mode == Mode::PositionalOnly) kind = ErrorType::Kind::MissingPositionalOnlyArgument;
+        else if (mode == Mode::KeywordOnly) kind = ErrorType::Kind::MissingKeywordOnlyArgument;
+        return std::make_shared<ValLineError>(ValLineError{ErrorType(kind), loc, input_repr});
+    }
+
+    static void collect(const ValError& err, std::vector<std::shared_ptr<ValLineError>>& out) {
+        for (const auto& le : err.line_errors()) out.push_back(le);
+    }
+
+    // A parameter value is validated with the parameter location already on the
+    // state, which is where the port's inputs report their own type errors.
+    ValResult<std::shared_ptr<void>> validate_child(const Parameter& p, const py::object& value,
+                                                    ValidationState& state) const {
+        PythonInput in(value);
+        in.set_current_location(state.location());
+        return p.validator->validate(in, state);
+    }
+
+    // Rust spreads an unpacked-typed-dict result into the keyword arguments; the
+    // port's typed-dict output keeps its extras under __pydantic_extra__.
+    static void merge_kwargs(py::dict& output_kwargs, const std::shared_ptr<void>& value,
+                             const std::shared_ptr<Validator>& validator) {
+        py::object validated = value_to_python_with_type(value, validator->effective_result_name());
+        if (!py::isinstance<py::dict>(validated)) return;
+        for (auto kv : validated.cast<py::dict>()) {
+            std::string key = py::str(kv.first).cast<std::string>();
+            py::object item = py::reinterpret_borrow<py::object>(kv.second);
+            if (key == "__pydantic_extra__" && py::isinstance<py::dict>(item)) {
+                for (auto ekv : item.cast<py::dict>()) output_kwargs[ekv.first] = ekv.second;
+                continue;
+            }
+            if (key.rfind("__pydantic_", 0) == 0) continue;
+            output_kwargs[py::str(key)] = item;
+        }
+    }
+
+    static ValResult<std::shared_ptr<void>> finish(
+        py::list& output_args, py::dict& output_kwargs,
+        std::vector<std::shared_ptr<ValLineError>>& errors) {
+        if (!errors.empty()) return ValError::line_errors(std::move(errors));
+        return ValResult<std::shared_ptr<void>>(
+            std::make_shared<py::object>(py::make_tuple(py::tuple(output_args), output_kwargs)));
+    }
+
+    ValResult<std::shared_ptr<void>> validate_from_mapping(
+        ValidatedDict& mapping, const Input& input, ValidationState& state,
+        bool by_alias, bool by_name, ExtraBehavior extra_behavior) const {
+        py::list output_args;
+        py::dict output_kwargs;
+        std::vector<std::shared_ptr<ValLineError>> errors;
+        std::unordered_set<std::string> used_keys;
+
+        for (const Parameter& p : parameters) {
+            std::string found_key;
+            py::object value = py::none();
+            for (const auto& key : lookup_keys(p, by_alias, by_name)) {
+                auto found = mapping.get_value(key);
+                if (found.has_value()) {
+                    found_key = key;
+                    value = *found;
+                    break;
+                }
+            }
+
+            if (found_key.empty()) {
+                if (is_positional(p.mode) || p.mode == Mode::KeywordOnly) {
+                    // The name goes on the state first so a rejected default is
+                    // located on the parameter (Rust default_value(name)).
+                    state.location().push(p.name);
+                    ValResult<std::shared_ptr<void>> def = p.validator->default_value(state);
+                    state.location().pop();
+                    if (def.is_ok()) {
+                        py::object val = default_to_python(p.validator, def.value());
+                        if (is_positional(p.mode)) output_args.append(val);
+                        else output_kwargs[py::str(p.name)] = val;
+                    } else if (!def.error().is_omit()) {
+                        collect(def.error(), errors);
+                    } else {
+                        Location loc = state.location();
+                        loc.push(missing_loc_key(p, by_alias));
+                        errors.push_back(missing_line_error(p.mode, loc, input.as_error_value().repr));
+                    }
+                } else if (p.mode == Mode::VarKwargsUnpackedTypedDict) {
+                    // Rust validates an empty dict so required typed-dict keys
+                    // are reported even though no keyword was supplied.
+                    py::dict empty;
+                    state.location().push(p.name);
+                    auto r = validate_child(p, empty, state);
+                    state.location().pop();
+                    if (r.is_ok()) merge_kwargs(output_kwargs, r.value(), p.validator);
+                    else if (r.error().is_internal()) return ValResult<std::shared_ptr<void>>(r.error());
+                    else collect(r.error(), errors);
+                }
+                continue;
+            }
+
+            // The key counts as used whether or not its value validates (Rust).
+            used_keys.insert(found_key);
+            const bool positional = is_positional(p.mode);
+            state.location().push(loc_by_alias ? found_key : p.name);
+
+            if (positional || p.mode == Mode::KeywordOnly) {
+                auto r = validate_child(p, value, state);
+                if (r.is_ok()) {
+                    py::object conv = value_to_python(r.value(), p.validator->effective_result_name(), &value);
+                    if (positional) output_args.append(conv);
+                    else output_kwargs[py::str(p.name)] = conv;
+                } else if (r.error().is_internal()) {
+                    state.location().pop();
+                    return ValResult<std::shared_ptr<void>>(r.error());
+                } else {
+                    collect(r.error(), errors);
+                }
+            } else if (p.mode == Mode::VarArgs) {
+                PythonInput tuple_in(value);
+                tuple_in.set_current_location(state.location());
+                auto items = tuple_in.validate_tuple(false);
+                if (items.is_err()) {
+                    errors.push_back(line_error(ErrorType::Kind::TupleType, state.location(), value));
+                } else {
+                    auto& tuple = items.value().value();
+                    for (size_t i = 0; i < tuple->size(); ++i) {
+                        py::object item = tuple->get_item(i);
+                        state.location().push(static_cast<int64_t>(i));
+                        auto r = validate_child(p, item, state);
+                        state.location().pop();
+                        if (r.is_ok()) {
+                            output_args.append(
+                                value_to_python(r.value(), p.validator->effective_result_name(), &item));
+                        } else if (r.error().is_internal()) {
+                            state.location().pop();
+                            return ValResult<std::shared_ptr<void>>(r.error());
+                        } else {
+                            collect(r.error(), errors);
+                        }
+                    }
+                }
+            } else if (p.mode == Mode::VarKwargsUniform) {
+                // Rust reads the value through as_kwargs: only a real dict qualifies.
+                if (!py::isinstance<py::dict>(value)) {
+                    errors.push_back(line_error(ErrorType::Kind::DictType, state.location(), value));
+                } else {
+                    for (auto kv : value.cast<py::dict>()) {
+                        py::object key = py::reinterpret_borrow<py::object>(kv.first);
+                        py::object item = py::reinterpret_borrow<py::object>(kv.second);
+                        if (!py::isinstance<py::str>(key)) {
+                            Location loc = state.location();
+                            loc.push(py::str(key).cast<std::string>());
+                            errors.push_back(line_error(ErrorType::Kind::InvalidKey, loc, key));
+                            continue;
+                        }
+                        std::string key_str = key.cast<std::string>();
+                        state.location().push(key_str);
+                        auto r = validate_child(p, item, state);
+                        state.location().pop();
+                        if (r.is_ok()) {
+                            output_kwargs[key] =
+                                value_to_python(r.value(), p.validator->effective_result_name(), &item);
+                        } else if (r.error().is_internal()) {
+                            state.location().pop();
+                            return ValResult<std::shared_ptr<void>>(r.error());
+                        } else {
+                            collect(r.error(), errors);
+                        }
+                    }
+                }
+            } else {  // Mode::VarKwargsUnpackedTypedDict
+                auto r = validate_child(p, value, state);
+                if (r.is_ok()) merge_kwargs(output_kwargs, r.value(), p.validator);
+                else if (r.error().is_internal()) {
+                    state.location().pop();
+                    return ValResult<std::shared_ptr<void>>(r.error());
+                } else {
+                    collect(r.error(), errors);
+                }
+            }
+            state.location().pop();
+        }
+
+        if (extra_behavior == ExtraBehavior::Forbid) {
+            for (const auto& key : mapping.keys()) {
+                if (used_keys.count(key)) continue;
+                auto found = mapping.get_value(key);
+                py::object item = found.has_value() ? *found : py::none();
+                Location loc = state.location();
+                loc.push(key);
+                errors.push_back(line_error(ErrorType::Kind::ExtraForbidden, loc, item));
+            }
+        }
+        return finish(output_args, output_kwargs, errors);
+    }
+
+    ValResult<std::shared_ptr<void>> validate_from_argskwargs(
+        py::tuple pos_args, py::dict kw_args, const Input& input, ValidationState& state,
+        bool by_alias, bool by_name, ExtraBehavior extra_behavior) const {
+        py::list output_args;
+        py::dict output_kwargs;
+        std::vector<std::shared_ptr<ValLineError>> errors;
+        std::unordered_set<std::string> used_keys;
+        const py::ssize_t n_pos = pos_args.ptr() ? py::len(pos_args) : 0;
+        const std::string input_repr = input.as_error_value().repr;
+
+        // Rust enumerates only the non-variadic parameters, so positional values
+        // are consumed in declaration order.
+        size_t pos_index = 0;
+        for (const Parameter& p : parameters) {
+            if (is_variadic(p.mode)) continue;
+            std::optional<py::object> pos_value;
+            if (is_positional(p.mode) && pos_args.ptr() && (py::ssize_t)pos_index < n_pos) {
+                pos_value = py::reinterpret_borrow<py::object>(pos_args[pos_index]);
+            }
+            std::optional<py::object> kw_value;
+            std::string kw_key;
+            if (p.mode == Mode::PositionalOrKeyword || p.mode == Mode::KeywordOnly) {
+                for (const auto& key : lookup_keys(p, by_alias, by_name)) {
+                    if (kw_args.contains(py::str(key))) {
+                        kw_value = py::reinterpret_borrow<py::object>(kw_args[py::str(key)]);
+                        kw_key = key;
+                        used_keys.insert(key);
+                        break;
+                    }
+                }
+            }
+            const size_t index = pos_index++;
+
+            if (pos_value && kw_value) {
+                Location loc = state.location();
+                loc.push(p.name);
+                errors.push_back(line_error(ErrorType::Kind::MultipleArgumentValues, loc, *kw_value));
+            } else if (pos_value) {
+                state.location().push(static_cast<int64_t>(index));
+                auto r = validate_child(p, *pos_value, state);
+                state.location().pop();
+                if (r.is_ok()) {
+                    output_args.append(
+                        value_to_python(r.value(), p.validator->effective_result_name(), &*pos_value));
+                } else if (r.error().is_internal()) {
+                    return ValResult<std::shared_ptr<void>>(r.error());
+                } else {
+                    collect(r.error(), errors);
+                }
+            } else if (kw_value) {
+                state.location().push(loc_by_alias ? kw_key : p.name);
+                auto r = validate_child(p, *kw_value, state);
+                state.location().pop();
+                if (r.is_ok()) {
+                    output_kwargs[py::str(p.name)] =
+                        value_to_python(r.value(), p.validator->effective_result_name(), &*kw_value);
+                } else if (r.error().is_internal()) {
+                    return ValResult<std::shared_ptr<void>>(r.error());
+                } else {
+                    collect(r.error(), errors);
+                }
+            } else {
+                state.location().push(p.name);
+                ValResult<std::shared_ptr<void>> def = p.validator->default_value(state);
+                state.location().pop();
+                if (def.is_ok()) {
+                    py::object val = default_to_python(p.validator, def.value());
+                    if (p.mode == Mode::PositionalOnly) output_args.append(val);
+                    else output_kwargs[py::str(p.name)] = val;
+                } else if (!def.error().is_omit()) {
+                    collect(def.error(), errors);
+                } else {
+                    Location loc = state.location();
+                    if (p.mode == Mode::PositionalOnly) loc.push(static_cast<int64_t>(index));
+                    else loc.push(missing_loc_key(p, by_alias));
+                    errors.push_back(missing_line_error(p.mode, loc, input_repr));
+                }
+            }
+        }
+
+        // Positional values beyond the declared positional parameters go to *args
+        // or become unexpected_positional_argument errors.
+        if (n_pos > static_cast<py::ssize_t>(positional_params_count)) {
+            const Parameter* var_args = find_mode(Mode::VarArgs);
+            for (py::ssize_t i = static_cast<py::ssize_t>(positional_params_count); i < n_pos; ++i) {
+                py::object item = py::reinterpret_borrow<py::object>(pos_args[i]);
+                if (var_args == nullptr) {
+                    Location loc = state.location();
+                    loc.push(i);
+                    errors.push_back(line_error(ErrorType::Kind::UnexpectedPositionalArgument, loc, item));
+                    continue;
+                }
+                state.location().push(i);
+                auto r = validate_child(*var_args, item, state);
+                state.location().pop();
+                if (r.is_ok()) {
+                    output_args.append(
+                        value_to_python(r.value(), var_args->validator->effective_result_name(), &item));
+                } else if (r.error().is_internal()) {
+                    return ValResult<std::shared_ptr<void>>(r.error());
+                } else {
+                    collect(r.error(), errors);
+                }
+            }
+        }
+
+        const Parameter* var_kwargs = nullptr;
+        for (const auto& p : parameters) {
+            if (p.mode == Mode::VarKwargsUniform || p.mode == Mode::VarKwargsUnpackedTypedDict) {
+                var_kwargs = &p;
+                break;
+            }
+        }
+        py::dict remaining_kwargs;
+        for (auto kv : kw_args) {
+            py::object key = py::reinterpret_borrow<py::object>(kv.first);
+            py::object item = py::reinterpret_borrow<py::object>(kv.second);
+            std::string key_str = py::str(key).cast<std::string>();
+            if (used_keys.count(key_str)) continue;
+            if (var_kwargs == nullptr) {
+                if (extra_behavior == ExtraBehavior::Forbid) {
+                    Location loc = state.location();
+                    loc.push(key_str);
+                    errors.push_back(line_error(ErrorType::Kind::UnexpectedKeywordArgument, loc, item));
+                }
+            } else if (var_kwargs->mode == Mode::VarKwargsUniform) {
+                state.location().push(key_str);
+                auto r = validate_child(*var_kwargs, item, state);
+                state.location().pop();
+                if (r.is_ok()) {
+                    output_kwargs[key] =
+                        value_to_python(r.value(), var_kwargs->validator->effective_result_name(), &item);
+                } else if (r.error().is_internal()) {
+                    return ValResult<std::shared_ptr<void>>(r.error());
+                } else {
+                    collect(r.error(), errors);
+                }
+            } else {
+                // Rust validates the leftover keyword arguments as one dict.
+                remaining_kwargs[key] = item;
+            }
+        }
+        if (var_kwargs != nullptr && var_kwargs->mode == Mode::VarKwargsUnpackedTypedDict) {
+            auto r = validate_child(*var_kwargs, remaining_kwargs, state);
+            if (r.is_ok()) merge_kwargs(output_kwargs, r.value(), var_kwargs->validator);
+            else if (r.error().is_internal()) return ValResult<std::shared_ptr<void>>(r.error());
+            else collect(r.error(), errors);
+        }
+
+        return finish(output_args, output_kwargs, errors);
     }
 };
 
