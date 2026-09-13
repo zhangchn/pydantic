@@ -567,7 +567,8 @@ def _format_err_msg(type_str: str, ctx: dict | None) -> str:
 
 
 @classmethod
-def _from_exception_data(cls, title: str, line_errors: list[dict], *, input_type: str = 'python') -> 'ValidationError':
+def _from_exception_data(cls, title: str, line_errors: list[dict], input_type: str = 'python',
+                         hide_input: bool = False) -> 'ValidationError':
     """Create a ValidationError from error data dicts (matches Rust API)."""
     # Build error details for the exception message
     error_parts = []
@@ -587,7 +588,13 @@ def _from_exception_data(cls, title: str, line_errors: list[dict], *, input_type
         except Exception:
             input_repr = str(input_val)
 
-        error_parts.append(f'  {loc_str}\n    {msg} [type={err_type}, input_value={input_repr}, input_type={type(input_val).__name__}]')
+        # Rust's pretty() appends the input only while inputs are shown; the
+        # errors() dicts keep it either way.
+        if hide_input:
+            details = f'type={err_type}'
+        else:
+            details = f'type={err_type}, input_value={input_repr}, input_type={type(input_val).__name__}'
+        error_parts.append(f'  {loc_str}\n    {msg} [{details}]')
 
         # Build error dict
         err_dict = {
