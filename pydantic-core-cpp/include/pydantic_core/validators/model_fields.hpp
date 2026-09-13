@@ -477,7 +477,10 @@ public:
             return;
         }
         try {
+            // The input layer reports its own type errors at the location the input
+            // carries, so a default has to name the field just like a field value does.
             PythonInput py_in(raw);
+            py_in.set_current_location(state.location());
             auto r = field.schema->validate(py_in, state);
             if (r.is_ok()) {
                 fv.value = r.value();

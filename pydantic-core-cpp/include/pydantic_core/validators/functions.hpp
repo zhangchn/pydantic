@@ -1234,7 +1234,10 @@ public:
         }
 
         if (validate_default_ && inner_) {
+            // Rust reports a rejected default at the enclosing location, which the
+            // input layer only does when the input carries it.
             PythonInput in(raw);
+            in.set_current_location(state.location());
             return inner_->validate(in, state);
         }
         return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(std::move(raw)));
