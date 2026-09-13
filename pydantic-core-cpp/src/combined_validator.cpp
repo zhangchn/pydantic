@@ -2374,7 +2374,15 @@ static std::shared_ptr<Validator> build_from_py_dict(
         // "model-fields" and would leak __pydantic_fields_set__ into the output.
         std::shared_ptr<ModelFieldsValidator> v;
         if (type == "typed-dict") {
-            v = std::make_shared<TypedDictValidator>();
+            auto tdv = std::make_shared<TypedDictValidator>();
+            // Rust reads cls_name from the typed-dict schema for the validator name.
+            if (schema.contains("cls_name") && py::isinstance<py::str>(schema["cls_name"])) {
+                tdv->set_cls_name(schema["cls_name"].cast<std::string>());
+            } else if (schema.contains("cls") && !schema["cls"].is_none()) {
+                try { tdv->set_cls_name(py::str(schema["cls"].attr("__name__")).cast<std::string>()); }
+                catch (...) { PyErr_Clear(); }
+            }
+            v = tdv;
         } else {
             v = std::make_shared<ModelFieldsValidator>();
         }

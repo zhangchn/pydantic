@@ -336,6 +336,10 @@ static std::optional<bool> pyobj_to_bool(const py::object& obj) {
 // Serializer tree node — built from schema
 // ---------------------------------------------------------------------------
 struct SerNode;
+
+// Re-indents an already-built JSON document the way serde_json's pretty printer
+// does; defined next to the top-level to_json entry points that use it.
+static std::string json_pretty_print(const std::string& compact, int indent);
 using SerRef = std::shared_ptr<SerNode>;
 
 // ---------------------------------------------------------------------------
@@ -3736,7 +3740,7 @@ public:
         }
     }
 
-    py::bytes to_json(const py::object& value, std::optional<size_t>, std::optional<bool> ea,
+    py::bytes to_json(const py::object& value, std::optional<size_t> indent, std::optional<bool> ea,
                       std::optional<py::object> include, std::optional<py::object> exclude,
                       std::optional<bool> by_alias, bool exclude_unset, bool exclude_defaults, bool exc_none,
                       bool exclude_computed_fields, bool round_trip, py::object warnings, std::optional<py::object> fallback,
@@ -3774,6 +3778,7 @@ public:
             try {
                 std::string json = SerNode::infer_json(value, e, -1);
                 ser_warn_leave(false);
+                if (indent.has_value()) json = json_pretty_print(json, static_cast<int>(*indent));
                 return py::bytes(std::move(json));
             } catch (...) {
                 ser_warn_leave(true);
@@ -3784,7 +3789,8 @@ public:
         try {
             std::string json = ser_->to_json(value, e, -1, round_trip, inc, exc, use_alias, exclude_unset, exclude_defaults, exc_none, context);
             ser_warn_leave(false);  // may emit UserWarning / raise PydanticSerializationError
-            return py::bytes(json);
+            if (indent.has_value()) json = json_pretty_print(json, static_cast<int>(*indent));
+            return py::bytes(std::move(json));
         } catch (...) {
             ser_warn_leave(true);  // discard warnings collected before the error
             throw;
@@ -3814,13 +3820,65 @@ private:
 // ---------------------------------------------------------------------------
 // Standalone to_json
 // ---------------------------------------------------------------------------
-static py::bytes to_json_fn(const py::object& value, std::optional<size_t>, std::optional<bool> ea,
+// Rust serializes with serde_json's pretty printer when an indent is given:
+// newline plus indentation after every opening bracket, before the separator
+// and before every closing bracket, ": " between a key and its value, and
+// empty containers left on one line.
+static std::string json_pretty_print(const std::string& compact, int indent) {
+    std::string out;
+    int depth = 0;
+    bool in_string = false;
+    bool escape = false;
+    auto newline = [&](int d) {
+        out += '\n';
+        if (d > 0) out.append(static_cast<size_t>(indent) * static_cast<size_t>(d), ' ');
+    };
+    for (size_t i = 0; i < compact.size(); ++i) {
+        char c = compact[i];
+        if (in_string) {
+            out += c;
+            if (escape) escape = false;
+            else if (c == '\\') escape = true;
+            else if (c == '"') in_string = false;
+            continue;
+        }
+        if (c == '"') {
+            in_string = true;
+            out += c;
+        } else if (c == '{' || c == '[') {
+            char closing = (c == '{') ? '}' : ']';
+            out += c;
+            if (i + 1 < compact.size() && compact[i + 1] == closing) {
+                out += compact[i + 1];
+                ++i;
+                continue;
+            }
+            newline(++depth);
+        } else if (c == '}' || c == ']') {
+            if (depth > 0) --depth;
+            newline(depth);
+            out += c;
+        } else if (c == ',') {
+            out += c;
+            newline(depth);
+        } else if (c == ':') {
+            out += ": ";
+        } else {
+            out += c;
+        }
+    }
+    return out;
+}
+
+static py::bytes to_json_fn(const py::object& value, std::optional<size_t> indent, std::optional<bool> ea,
     std::optional<py::object>, std::optional<py::object>, bool, bool, bool round_trip,
     std::string, std::string, std::string, std::string, bool,
     std::optional<py::object>, bool, std::optional<bool>, std::optional<py::object>) {
     SerRef any = std::make_shared<SerNode>();
     any->type = "any";
-    return py::bytes(any->to_json(value, ea.value_or(false), -1, round_trip, py::none(), py::none(), false, false, false, false));
+    std::string json = any->to_json(value, ea.value_or(false), -1, round_trip, py::none(), py::none(), false, false, false, false);
+    if (indent.has_value()) json = json_pretty_print(json, static_cast<int>(*indent));
+    return py::bytes(std::move(json));
 }
 
 // Convert an arbitrary Python value to its JSON-compatible Python form

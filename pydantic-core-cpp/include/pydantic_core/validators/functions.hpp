@@ -40,6 +40,24 @@ inline void error_type_context_from_py(ErrorType& et, const py::object& ctx) {
 // AssertionError -> assertion_error, anything else -> InternalErr so the
 // original exception propagates unchanged. The exception object is attached
 // to the line error so the Python wrapper can surface it as ctx['error'].
+// PydanticUseDefault is a signal rather than an error (Rust turns it into
+// ValError::UseDefault). User code imports it from whichever core it was
+// written against, so the class registered here and pydantic_core's Rust one
+// are distinct types; match the name along the exception's MRO.
+inline bool exception_is_use_default(PyObject* exc) {
+    if (!exc) return false;
+    try {
+        py::object type = py::reinterpret_borrow<py::object>(
+            reinterpret_cast<PyObject*>(Py_TYPE(exc)));
+        for (py::handle klass : type.attr("__mro__")) {
+            if (py::str(klass.attr("__name__")).cast<std::string>() == "PydanticUseDefault") return true;
+        }
+    } catch (...) {
+        PyErr_Clear();
+    }
+    return false;
+}
+
 inline ValError function_error_from_exception(py::error_already_set& e, const Input& input, ValidationState& state) {
     // Keep a reference to the exception object for ctx['error'] — value()
     // returns a new reference, so it stays valid after e.restore().
@@ -49,6 +67,14 @@ inline ValError function_error_from_exception(py::error_already_set& e, const In
         exc_str = py::str(exc_value).cast<std::string>();
     } catch (...) {
         exc_str = "";
+    }
+    // Rust convert_err: a PydanticUseDefault raised by the function is not an
+    // error at all but the ValError::UseDefault signal, which the enclosing
+    // default schema turns into the field's default value.
+    if (exception_is_use_default(exc_value.ptr())) {
+        e.restore();
+        PyErr_Clear();
+        return ValError::use_default();
     }
     if (e.matches(PyExc_ValueError)) {
         // Rust convert_err: PydanticCustomError / PydanticKnownError carry
@@ -350,6 +376,9 @@ inline py::object materialize_into_fn() {
 // must propagate rather than be mistaken for a signature mismatch.
 inline ValError propagate_function_error(py::error_already_set& e, const Input& input,
                                          ValidationState& state) {
+    if (exception_is_use_default(e.value().ptr())) {
+        return function_error_from_exception(e, input, state);
+    }
     if (e.matches(PyExc_ValueError) || e.matches(PyExc_AssertionError)) {
         return function_error_from_exception(e, input, state);
     }

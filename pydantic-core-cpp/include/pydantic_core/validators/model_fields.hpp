@@ -375,7 +375,9 @@ public:
                         is_last_partial = (lookup_paths[0][0] == *partial_last_key);
                     }
                 }
-                auto validate_result = validate_field_value_from_object(*resolved_value, field, state, combined_errors, is_last_partial);
+                bool field_use_default = false;
+                auto validate_result = validate_field_value_from_object(*resolved_value, field, state, combined_errors,
+                                                                       is_last_partial, &field_use_default);
                 if (state.has_hard_error()) {
                     state.pop_loc();
                     return state.take_hard_error();
@@ -395,6 +397,18 @@ public:
                     output.fields_set.insert(name);
                     output.field_order.push_back(name);
                     add_to_data(name, output.fields.at(name));
+                } else if (field_use_default) {
+                    // Rust keeps a field with a default inside a default node, so a
+                    // UseDefault raised by the field validator is answered with the
+                    // field's default rather than dropping the field.
+                    ValidatedModelFieldsOutput::FieldValue fv;
+                    compute_field_default(field, output, state, fv, combined_errors);
+                    if (fv.value) {
+                        output.fields[name] = std::move(fv);
+                        output.fields_set.insert(name);
+                        output.field_order.push_back(name);
+                        add_to_data(name, output.fields.at(name));
+                    }
                 }
             } else {
                 // Field not found
@@ -405,62 +419,14 @@ public:
                         original_input.as_error_value().repr
                     );
                     combined_errors.merge(std::move(err));
-                } else if (!field.default_factory.is_none()) {
-                    // Call default_factory to get the default value
+                } else {
                     ValidatedModelFieldsOutput::FieldValue fv;
-                    try {
-                        py::object raw;
-                        if (field.default_factory_takes_data) {
-                            // Build dict of already-validated fields for the factory
-                            py::dict data_dict;
-                            for (const auto& fname : output.field_order) {
-                                auto& fval = output.fields.at(fname);
-                                data_dict[py::str(fname)] = value_to_python_with_type(fval.value, fval.type_name);
-                            }
-                            raw = field.default_factory(data_dict);
-                        } else {
-                            raw = field.default_factory();
-                        }
-                        apply_field_default(raw, field, state, fv, combined_errors);
-                    } catch (py::error_already_set& e) {
-                        if (field.default_factory_takes_data) {
-                            // Let exceptions from data-aware factories propagate (e.g. KeyError)
-                            throw;
-                        }
-                        auto err = ValError::line_error(
-                            ErrorType(ErrorType::Kind::CustomError),
-                            state.location(),
-                            std::string("default_factory failed: ") + e.what()
-                        );
-                        combined_errors.merge(std::move(err));
+                    compute_field_default(field, output, state, fv, combined_errors);
+                    if (fv.value) {
+                        output.fields[name] = std::move(fv);
+                        output.field_order.push_back(name);
+                        add_to_data(name, output.fields.at(name));
                     }
-                    output.fields[name] = std::move(fv);
-                    output.field_order.push_back(name);
-                    add_to_data(name, output.fields.at(name));
-                } else if (!field.default_py_obj.is_none()) {
-                    // Complex Python object default (callable result, date,
-                    // timedelta, etc.) — used raw unless validate_default.
-                    ValidatedModelFieldsOutput::FieldValue fv;
-                    apply_field_default(field.default_py_obj, field, state, fv, combined_errors);
-                    output.fields[name] = std::move(fv);
-                    output.field_order.push_back(name);
-                    add_to_data(name, output.fields.at(name));
-                } else if (!field.default_value_str.empty()) {
-                    ValidatedModelFieldsOutput::FieldValue fv;
-                    // Reconstruct the Python default object from the stored
-                    // JSON text (primitives round-trip; complex types use the
-                    // default_py_obj path instead).
-                    py::object raw = py::none();
-                    auto parse_result = parse_json(field.default_value_str);
-                    if (parse_result.is_ok()) {
-                        try {
-                            raw = parse_result.value()->as_python_object();
-                        } catch (...) {}
-                    }
-                    apply_field_default(raw, field, state, fv, combined_errors);
-                    output.fields[name] = std::move(fv);
-                    output.field_order.push_back(name);
-                    add_to_data(name, output.fields.at(name));
                 }
             }
 
@@ -523,6 +489,65 @@ public:
         }
         fv.value = std::make_shared<py::object>(raw);
         fv.type_name = "py_object";
+    }
+
+    // Resolve a field's default into fv: a default_factory (optionally fed the
+    // already-validated fields), a live Python object default, or the stored
+    // JSON text of a primitive. Shared by the missing-field path and by a
+    // UseDefault raised from the field validator, which Rust answers with the
+    // same WithDefaultValidator::default_value.
+    void compute_field_default(const FieldInfo& field,
+                               const ValidatedModelFieldsOutput& output,
+                               ValidationState& state,
+                               ValidatedModelFieldsOutput::FieldValue& fv,
+                               ValError& combined_errors) {
+        if (!field.default_factory.is_none()) {
+            try {
+                py::object raw;
+                if (field.default_factory_takes_data) {
+                    // Build dict of already-validated fields for the factory
+                    py::dict data_dict;
+                    for (const auto& fname : output.field_order) {
+                        const auto& fval = output.fields.at(fname);
+                        data_dict[py::str(fname)] = value_to_python_with_type(fval.value, fval.type_name);
+                    }
+                    raw = field.default_factory(data_dict);
+                } else {
+                    raw = field.default_factory();
+                }
+                apply_field_default(raw, field, state, fv, combined_errors);
+            } catch (py::error_already_set& e) {
+                if (field.default_factory_takes_data) {
+                    // Let exceptions from data-aware factories propagate (e.g. KeyError)
+                    throw;
+                }
+                auto err = ValError::line_error(
+                    ErrorType(ErrorType::Kind::CustomError),
+                    state.location(),
+                    std::string("default_factory failed: ") + e.what()
+                );
+                combined_errors.merge(std::move(err));
+            }
+            return;
+        }
+        if (!field.default_py_obj.is_none()) {
+            // Complex Python object default (callable result, date,
+            // timedelta, etc.) — used raw unless validate_default.
+            apply_field_default(field.default_py_obj, field, state, fv, combined_errors);
+            return;
+        }
+        if (!field.default_value_str.empty()) {
+            // Reconstruct the Python default object from the stored JSON text
+            // (primitives round-trip; complex types use default_py_obj instead).
+            py::object raw = py::none();
+            auto parse_result = parse_json(field.default_value_str);
+            if (parse_result.is_ok()) {
+                try {
+                    raw = parse_result.value()->as_python_object();
+                } catch (...) {}
+            }
+            apply_field_default(raw, field, state, fv, combined_errors);
+        }
     }
 
     // Rust ModelFieldsValidator::validate_assignment: validate ONLY the
@@ -743,7 +768,8 @@ protected:
         const FieldInfo& field,
         ValidationState& state,
         ValError& combined_errors,
-        bool is_last_partial = false
+        bool is_last_partial = false,
+        bool* use_default = nullptr
     ) {
         // Partial mode: suppress line errors for the last partial key on
         // optional fields (Rust: typed_dict.rs error suppression).
@@ -754,6 +780,10 @@ protected:
             auto result = field.schema->validate(str_input, state);
             if (result.is_ok()) return result.value();
             auto& err = result.error();
+            if (err.is_use_default()) {
+                if (use_default) *use_default = true;
+                return std::nullopt;
+            }
             if (err.is_omit()) return std::nullopt;
             else if (err.has_line_errors()) {
                 if (!suppress_errors) {
@@ -779,6 +809,10 @@ protected:
         auto result = field.schema->validate(field_input, state);
         if (result.is_ok()) return result.value();
         auto& err = result.error();
+        if (err.is_use_default()) {
+            if (use_default) *use_default = true;
+            return std::nullopt;
+        }
         if (err.is_omit()) return std::nullopt;
         else if (err.has_line_errors()) {
             if (!suppress_errors) {
@@ -1080,11 +1114,21 @@ public:
 
     std::string name() const override { return name_; }
 
+    // Rust's TypedDictValidator is named after the TypedDict class (its
+    // cls_name), so a composed label reads list[User] rather than
+    // list[typed-dict].
+    std::string display_name() const override {
+        return cls_name_.empty() ? name_ : cls_name_;
+    }
+
+    void set_cls_name(std::string n) { cls_name_ = std::move(n); }
+
     bool total() const { return total_; }
     void set_total(bool t) { total_ = t; }
 
 private:
     std::string name_ = "typed-dict";
+    std::string cls_name_;
     bool total_ = true;
 };
 

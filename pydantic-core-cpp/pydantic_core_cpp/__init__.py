@@ -1707,6 +1707,13 @@ def _schema_copy_clean(schema):
             if k == "cls" and not keep_cls:
                 continue
             result[k] = _schema_copy_clean(v)
+        if schema.get("type") == "typed-dict" and "cls_name" not in result:
+            # Rust names a TypedDict validator after the TypedDict class itself, so a
+            # composed error label reads list[User] instead of list[typed-dict]; the
+            # class is stripped above, so carry its name across for the C++ builder.
+            name = getattr(schema.get("cls"), "__name__", None)
+            if isinstance(name, str):
+                result["cls_name"] = name
         return result
     if _is_enum_member(schema):
         # A list/tuple-valued Enum member is itself an instance of that container,
