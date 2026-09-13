@@ -697,6 +697,25 @@ _ERR_TYPE_TO_MSG: dict[str, str] = {
 }
 
 
+def _apply_model_post_init(instance, original_input) -> None:
+    """Call ``model_post_init`` the way pydantic-core does.
+
+    Rust invokes the post-init hook from inside validation: a ValueError raised
+    there becomes a ``value_error`` line error, while any other exception
+    (KeyError, RuntimeError, ...) propagates unchanged.
+    """
+    try:
+        instance.model_post_init(None)
+    except ValidationError:
+        raise
+    except ValueError as exc:
+        raise ValidationError.from_exception_data(
+            getattr(type(instance), '__name__', 'BaseModel'),
+            [{'type': 'value_error', 'loc': (), 'input': original_input,
+              'ctx': {'error': str(exc)}}],
+        ) from None
+
+
 def _get_model_name(schema: dict | None) -> str:
     """Extract the model name from a pydantic schema dict."""
     if not isinstance(schema, dict):
@@ -819,7 +838,10 @@ def _format_rust_error(msg: str, model_name: str = '') -> str:
         else:
             # Unmapped message: strip the trailing [type=..., input_value=...]
             # segment so it is not duplicated when we append a new one.
-            if seg:
+            if hidden_seg:
+                err_type = hidden_seg.group(1)
+                rust_msg = msg_line_base
+            elif seg:
                 err_type = seg.group(1)
                 raw_input = seg.group(2).strip()
                 input_val = _truncate_input(raw_input)
@@ -1290,10 +1312,7 @@ class SchemaValidator:
                 object.__setattr__(instance, "__pydantic_fields_set__", {"root"})
                 # Call model_post_init if defined
                 if call_post_init and hasattr(instance, 'model_post_init'):
-                    try:
-                        instance.model_post_init(None)
-                    except Exception:
-                        pass
+                    _apply_model_post_init(instance, data)
                 return instance
             return data
 
@@ -1324,10 +1343,7 @@ class SchemaValidator:
                 object.__setattr__(instance, '__pydantic_fields_set__', fields_set)
                 # Call model_post_init if defined
                 if call_post_init and hasattr(instance, 'model_post_init'):
-                    try:
-                        instance.model_post_init(None)
-                    except Exception:
-                        pass
+                    _apply_model_post_init(instance, data)
                 return instance
             return data
 
@@ -1406,10 +1422,7 @@ class SchemaValidator:
         object.__setattr__(instance, '__pydantic_fields_set__', fields_set)
         # Call model_post_init if defined
         if hasattr(instance, 'model_post_init'):
-            try:
-                instance.model_post_init(None)
-            except Exception:
-                pass
+            _apply_model_post_init(instance, data)
         return instance
 
     def _process_model_fields(self, data, fields_schema):
@@ -1656,10 +1669,7 @@ class SchemaValidator:
             # Call model_post_init AFTER nested models are processed (correct order)
             # Only call if the model actually overrides model_post_init
             if getattr(type(self_instance), '__pydantic_post_init__', None):
-                try:
-                    self_instance.model_post_init(None)
-                except Exception:
-                    pass
+                _apply_model_post_init(self_instance, obj)
 
         else:
             # No self_instance and non-dict result: wrap scalar results for
