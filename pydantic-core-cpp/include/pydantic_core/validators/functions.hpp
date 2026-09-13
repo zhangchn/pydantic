@@ -1294,11 +1294,15 @@ public:
     LaxOrStrictValidator(std::shared_ptr<Validator> lax, std::shared_ptr<Validator> strict)
         : lax_(std::move(lax)), strict_(std::move(strict)), used_strict_(false) {}
 
+    // Rust resolves is_strict(schema, config) when it builds this validator, so an
+    // explicit strict on the schema node outranks a strict model config.
+    std::optional<bool> declared;
+
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
     ) override {
-        if (state.strict_or(false)) {
+        if (declared.value_or(state.strict_or(false))) {
             if (!strict_) {
                 return ValError::line_error(
                     ErrorType(ErrorType::Kind::CustomError),
@@ -1346,7 +1350,12 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        if (input.input_type() == InputType::Json) {
+        // The port parses a JSON document into Python objects, so the input itself
+        // reports Python; the state still knows where the document came from, and
+        // Rust takes the json branch for a JSON document even under strict.
+        const bool json_document = input.input_type() == InputType::Json ||
+                                   state.input_type() == InputType::Json;
+        if (json_document) {
             if (!json_) {
                 return ValError::line_error(
                     ErrorType(ErrorType::Kind::CustomError),

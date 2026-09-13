@@ -944,6 +944,11 @@ public:
         py::object decimal_cls = py::module_::import("decimal").attr("Decimal");
         py::object input_py = input.as_python_object();
         const bool strict_required = state.strict_or(strict);
+        // Rust's JsonInput::validate_decimal ignores strict for the scalar forms
+        // because JSON has no Decimal type; only the (sign, digits, exponent)
+        // array requires lax mode.
+        const bool json_document = state.input_type() == InputType::Json;
+        const bool coerce_scalar = !strict_required || json_document;
 
         // Rust: input.validate_decimal(strict). Exact Decimals pass through, lax
         // mode coerces str / int / float / (sign, digits, exponent) tuples, and
@@ -954,7 +959,7 @@ public:
             if (py::type::of(input_py).ptr() == decimal_cls.ptr()) {
                 decimal = input_py;
                 have_decimal = true;
-            } else if (!strict_required) {
+            } else if (coerce_scalar) {
                 if (py::isinstance<py::str>(input_py) ||
                     (py::isinstance<py::int_>(input_py) && !py::isinstance<py::bool_>(input_py))) {
                     decimal = decimal_cls(input_py);
@@ -964,7 +969,8 @@ public:
                     // binary expansion instead of Decimal('0.1').
                     decimal = decimal_cls(py::str(input_py));
                     have_decimal = true;
-                } else if (py::type::of(input_py).ptr() == reinterpret_cast<PyObject*>(&PyTuple_Type) &&
+                } else if (!strict_required &&
+                           py::type::of(input_py).ptr() == reinterpret_cast<PyObject*>(&PyTuple_Type) &&
                            py::len(input_py) == 3) {
                     decimal = decimal_cls(input_py);
                     have_decimal = true;
@@ -984,7 +990,7 @@ public:
             );
         }
         if (!have_decimal) {
-            ErrorType err = strict_required
+            ErrorType err = (strict_required && !json_document)
                 ? ErrorType(ErrorType::Kind::IsInstanceType, "class", "Decimal")
                 : ErrorType(ErrorType::Kind::DecimalType);
             return ValError::line_error(err, state.location(), input.as_error_value().repr);
@@ -1132,6 +1138,39 @@ public:
 };
 
 // UuidValidator - validates UUID values
+// Rust's uuid crate names the group that fails to parse, so a malformed
+// hyphenated UUID reports the group index (0-based), what was expected and what
+// was found instead of Python's single "badly formed" message.
+static std::optional<std::string> uuid_crate_parse_error(const std::string& text) {
+    static const size_t expected[5] = {8, 4, 4, 4, 12};
+    size_t pos = 0;
+    for (int group = 0; group < 5; ++group) {
+        size_t start = pos;
+        while (pos < text.size() &&
+               std::isxdigit(static_cast<unsigned char>(text[pos]))) {
+            ++pos;
+        }
+        size_t len = pos - start;
+        if (len != expected[group]) {
+            return "invalid group length in group " + std::to_string(group) +
+                   ": expected " + std::to_string(expected[group]) +
+                   ", found " + std::to_string(len);
+        }
+        if (group < 4) {
+            if (pos >= text.size() || text[pos] != '-') {
+                return "invalid group length in group " + std::to_string(group) +
+                       ": expected " + std::to_string(expected[group]) +
+                       ", found " + std::to_string(len);
+            }
+            ++pos;
+        }
+    }
+    if (pos != text.size()) {
+        return std::string("invalid character: ") + text[pos];
+    }
+    return std::nullopt;
+}
+
 class UuidValidator : public Validator {
 public:
     bool strict = false;
@@ -1176,7 +1215,7 @@ public:
         } catch (...) {}
 
         // In strict mode (python input), only accept UUID objects (Rust: IsInstanceOf)
-        if (state.strict_or(strict)) {
+        if (state.strict_or(strict) && state.input_type() == InputType::Python) {
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::IsInstanceType, "class", "UUID"),
                 state.location(),
@@ -1192,13 +1231,14 @@ public:
                 py::object uuid_obj = uuid_mod.attr("UUID")(uuid_str);
                 return finish_uuid(uuid_obj);
             } catch (py::error_already_set& e) {
-                std::string msg = e.what();
+                std::string msg = py::str(e.value()).cast<std::string>();
                 // Swallow the error: restore() releases the fetched refs so
                 // the destructor is a no-op and the error indicator stays clear
                 e.restore();
                 PyErr_Clear();
+                auto crate_error = uuid_crate_parse_error(uuid_str);
                 ErrorType err(ErrorType::Kind::UuidParsing);
-                err.context()["error"] = msg;
+                err.context()["error"] = crate_error.value_or(msg);
                 return ValError::line_error(err, state.location(), uuid_str);
             }
         }

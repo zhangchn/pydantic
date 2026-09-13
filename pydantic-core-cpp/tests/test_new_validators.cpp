@@ -28,20 +28,22 @@ using namespace pydantic_core;
 // ---------------------------------------------------------------------------
 TEST_SUITE("IsInstanceValidator") {
 
-TEST_CASE("IsInstanceValidator accepts any non-null input") {
-    // No class info (zero-arg): accepts any non-null input.
+TEST_CASE("IsInstanceValidator requires a Python input") {
+    // Rust asks input.as_python() and reports needs_python_object when the value
+    // never existed as a Python object, so a non-Python input is rejected even
+    // with no class configured.
     auto v = std::make_shared<IsInstanceValidator>();
     ValidationState state;
-    
-    // Accepts string
+
     StringInput str_input("hello");
-    auto result = v->validate(str_input, state);
-    CHECK(result.is_ok());
-    
-    // Accepts int
+    CHECK(v->validate(str_input, state).is_err());
+
     StringInput int_input("42");
-    auto result2 = v->validate(int_input, state);
-    CHECK(result2.is_ok());
+    CHECK(v->validate(int_input, state).is_err());
+
+    // A real Python object with no class info passes straight through.
+    PythonInput py_input(py::str("hello"));
+    CHECK(v->validate(py_input, state).is_ok());
 }
 
 TEST_CASE("IsInstanceValidator has correct name") {

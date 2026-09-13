@@ -408,6 +408,9 @@ public:
     std::optional<size_t> min_length;
     std::optional<size_t> max_length;
     std::string pattern;
+    // A compiled re.Pattern from the schema: Rust keeps it and uses the
+    // RegexEngine::PythonRe branch instead of compiling the source itself.
+    py::object pattern_re;
     bool strip_whitespace = false;
     bool to_lower = false;
     bool to_upper = false;
@@ -476,8 +479,23 @@ auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str)
             std::transform(str.begin(), str.end(), str.begin(), [](unsigned char c){ return std::toupper(c); });
         }
 
-        // Pattern matching (basic regex via C++ std::regex)
-        if (!pattern.empty()) {
+        // Pattern matching: python re for a compiled pattern, std::regex otherwise
+        if (!pattern.empty() && pattern_re.ptr() && !pattern_re.is_none()) {
+            bool matched = false;
+            try {
+                matched = !pattern_re.attr("search")(str).is_none();
+            } catch (const py::error_already_set&) {
+                PyErr_Clear();
+                matched = true;
+            }
+            if (!matched) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::StringPatternMismatch, "pattern", pattern),
+                    state.location(),
+                    python_str_repr(str)
+                );
+            }
+        } else if (!pattern.empty()) {
             try {
                 std::regex re(pattern);
                 if (!std::regex_search(str, re)) {
@@ -625,9 +643,10 @@ public:
         ValidationState& state
     ) override {
         // Rust cannot apply isinstance to a value that only exists in JSON, so
-        // the check asks for a Python object instead of silently comparing
-        // against the parsed representation.
-        if (state.input_type() != InputType::Python) {
+        // the check asks the input itself whether it is one, not whether the
+        // document came from JSON: the port parses JSON before validating, so
+        // those values really are Python objects by now.
+        if (input.input_type() != InputType::Python) {
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::NeedsPythonObject, "method_name", "isinstance"),
                 state.location(), input.as_error_value().repr);

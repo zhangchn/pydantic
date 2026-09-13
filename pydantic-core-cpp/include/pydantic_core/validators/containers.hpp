@@ -630,6 +630,9 @@ class TupleValidator : public Validator {
 public:
     std::optional<bool> strict;
     bool variadic = false;  // If true, last item_schema is repeated for remaining items
+    // A schema with items_schema and no variadic_item_index fixes the length,
+    // including the empty tuple.
+    bool fixed = false;
     std::vector<std::shared_ptr<Validator>> items; // Positional item validators
     mutable std::optional<std::string> display_name_cache_;
     bool fail_fast = false;
@@ -683,21 +686,23 @@ auto result = input.validate_tuple(state.strict_or_declared(strict));
         }
 
         // Enforce fixed tuple length (Rust: tuple.rs pushes Missing for absent
-        // items, Extra for surplus items when not variadic).
-        if (!items.empty() && !variadic) {
+        // items and replaces everything with one TooLong when items remain).
+        if (fixed && !variadic) {
             size_t expected = items.size();
+            if (tuple_size > expected) {
+                ErrorType err(ErrorType::Kind::TooLong);
+                err.context()["field_type"] = "Tuple";
+                err.set_ctx_object("max_length", std::to_string(expected),
+                                   py::int_(static_cast<int>(expected)));
+                err.set_ctx_object("actual_length", std::to_string(tuple_size),
+                                   py::int_(static_cast<int>(tuple_size)));
+                return ValError::line_error(err, state.location(), input.as_error_value().repr);
+            }
             if (tuple_size < expected) {
                 for (size_t i = tuple_size; i < expected; i++) {
                     state.push_loc(static_cast<int64_t>(i));
                     errors.push_back(std::make_shared<ValLineError>(
                         ValLineError{PydanticKnownError::missing(), state.location(), input.as_error_value().repr}));
-                    state.pop_loc();
-                }
-            } else if (tuple_size > expected) {
-                for (size_t i = expected; i < tuple_size; i++) {
-                    state.push_loc(static_cast<int64_t>(i));
-                    errors.push_back(std::make_shared<ValLineError>(
-                        ValLineError{ErrorType(ErrorType::Kind::ExtraForbidden), state.location(), input.as_error_value().repr}));
                     state.pop_loc();
                 }
             }

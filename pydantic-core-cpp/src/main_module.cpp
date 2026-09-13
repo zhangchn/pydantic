@@ -404,6 +404,57 @@ static bool json_leaf_convert(const std::string& type, const py::object& value,
 
 // Rust infer_to_python picks the JSON leaf form from the *value*, not from a
 // schema type, so the infer path needs its own dispatch.
+// Rust's Display for f64: the shortest digits that round-trip, written in plain
+// decimal notation (never with an exponent) and with inf/NaN spelled out.
+static std::string rust_f64_display(double value) {
+    if (std::isnan(value)) return "NaN";
+    if (std::isinf(value)) return value < 0 ? "-inf" : "inf";
+    std::string s = format_double(value);
+    size_t e = s.find('e');
+    if (e == std::string::npos) return s;
+    bool neg = !s.empty() && s[0] == '-';
+    if (neg) s.erase(s.begin());
+    std::string mantissa = s.substr(0, e);
+    int exp = std::stoi(s.substr(e + 1));
+    std::string digits;
+    int point = 0;
+    for (size_t i = 0; i < mantissa.size(); ++i) {
+        char c = mantissa[i];
+        if (c == '.') {
+            point = static_cast<int>(digits.size());
+            continue;
+        }
+        digits += c;
+    }
+    if (point == 0) point = static_cast<int>(digits.size());
+    int dec = point + exp;
+    std::string out;
+    if (dec <= 0) {
+        out = "0." + std::string(static_cast<size_t>(-dec), '0') + digits;
+    } else if (static_cast<size_t>(dec) >= digits.size()) {
+        out = digits + std::string(static_cast<size_t>(dec) - digits.size(), '0');
+    } else {
+        out = digits.substr(0, static_cast<size_t>(dec)) + "." + digits.substr(static_cast<size_t>(dec));
+    }
+    if (out.find('.') != std::string::npos) {
+        size_t last = out.find_last_not_of('0');
+        if (out[last] == '.') --last;
+        out.erase(last + 1);
+    }
+    return neg ? "-" + out : out;
+}
+
+// Rust serializers::type_serializers::complex::complex_to_str: the imaginary
+// part comes first, and the real part is prefixed only when it is non-zero.
+static std::string complex_to_str_rust(double re, double im) {
+    std::string s = rust_f64_display(im) + "j";
+    if (re != 0.0) {
+        std::string sign = (std::isnan(im) || !std::signbit(im)) ? "+" : "";
+        s = rust_f64_display(re) + sign + s;
+    }
+    return s;
+}
+
 static bool json_infer_leaf(const py::object& value, py::object& out) {
     ensure_datetime_api();
     std::string t;
@@ -412,6 +463,7 @@ static bool json_infer_leaf(const py::object& value, py::object& out) {
     else if (PyDateTime_Check(value.ptr())) t = "datetime";
     else if (PyDate_Check(value.ptr())) t = "date";
     else if (PyTime_Check(value.ptr())) t = "time";
+    else if (PyComplex_Check(value.ptr())) t = "complex";
     else return false;
     return json_leaf_convert(t, value, g_ser_extra.bytes_mode, g_ser_extra.timedelta_mode,
                              g_ser_extra.temporal_mode, out);
@@ -446,6 +498,12 @@ static bool json_leaf_convert(const std::string& type, const py::object& value,
             type == "ipv4interface" || type == "ipv6interface" ||
             type == "ipv4network" || type == "ipv6network") {
             out = py::str(value);
+            return true;
+        }
+        if (type == "complex") {
+            if (!PyComplex_Check(value.ptr())) return false;
+            out = py::str(complex_to_str_rust(PyComplex_RealAsDouble(value.ptr()),
+                                              PyComplex_ImagAsDouble(value.ptr())));
             return true;
         }
         if (type == "datetime" || type == "date" || type == "time") {
@@ -1329,12 +1387,19 @@ struct SerNode {
                     auto child = children[0];
                     // Create handler for wrap mode
                     if (child->type == "function-wrap") {
-                        py::object handler = py::cpp_function([child, root_val, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context](const py::object& v) -> py::object {
+                        py::object handler = py::cpp_function([child, root_val, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context](const py::object& v, py::object index_key) -> py::object {
+                            py::object inc = include, exc = exclude;
+                            if (!index_key.is_none()) {
+                                auto f = apply_ser_filter(index_key, include, exclude);
+                                if (f.omit) throw PydanticOmit();
+                                inc = f.include;
+                                exc = f.exclude;
+                            }
                             if (!child->children.empty()) {
-                                return child->children[0]->to_python(v, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
+                                return child->children[0]->to_python(v, json_mode, exc_none, round_trip, inc, exc, by_alias, exclude_unset, exclude_defaults, context);
                             }
                             return v;
-                        });
+                        }, py::arg("value"), py::arg("index_key") = py::none());
                         if (child->info_arg) {
                             auto info = make_ser_info(round_trip, "root", context, include, exclude);
                             return child->apply_return_ser(child->py_func(value, root_val, handler, py::cast(info)),
@@ -1392,10 +1457,17 @@ struct SerNode {
                                         include, exclude, by_alias, exclude_unset, exclude_defaults, context);
             }
             if (type == "function-after" || type == "function-before" || type == "function-wrap") {
-                py::object handler = py::cpp_function([this, value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context](const py::object& v) -> py::object {
-                    if (!children.empty()) return children[0]->to_python(v, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
+                py::object handler = py::cpp_function([this, value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context](const py::object& v, py::object index_key) -> py::object {
+                    py::object inc = include, exc = exclude;
+                    if (!index_key.is_none()) {
+                        auto f = apply_ser_filter(index_key, include, exclude);
+                        if (f.omit) throw PydanticOmit();
+                        inc = f.include;
+                        exc = f.exclude;
+                    }
+                    if (!children.empty()) return children[0]->to_python(v, json_mode, exc_none, round_trip, inc, exc, by_alias, exclude_unset, exclude_defaults, context);
                     return v;
-                });
+                }, py::arg("value"), py::arg("index_key") = py::none());
                 if (type == "function-wrap") {
                     if (info_arg) {
                         auto info = make_ser_info(round_trip, "", context, include, exclude);
@@ -1768,6 +1840,11 @@ struct SerNode {
             }
             return infer_json(value, ensure_ascii, indent);
         }
+        if (type == "complex" && PyComplex_Check(value.ptr())) {
+            return json_escape(complex_to_str_rust(PyComplex_RealAsDouble(value.ptr()),
+                                                   PyComplex_ImagAsDouble(value.ptr())),
+                                ensure_ascii);
+        }
         // Types that serialize as their str() representation
         if (type == "uuid" || type == "decimal" || type == "ipaddress" ||
             type == "ipv4address" || type == "ipv6address" ||
@@ -1954,12 +2031,19 @@ struct SerNode {
                     // For field serializers, call the function directly
                     if (child->type == "function-wrap") {
                         // Create handler that serializes to JSON
-                        py::object handler = py::cpp_function([child, root_val, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context](const py::object& v) -> py::object {
+                        py::object handler = py::cpp_function([child, root_val, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context](const py::object& v, py::object index_key) -> py::object {
+                            py::object inc = include, exc = exclude;
+                            if (!index_key.is_none()) {
+                                auto f = apply_ser_filter(index_key, include, exclude);
+                                if (f.omit) throw PydanticOmit();
+                                inc = f.include;
+                                exc = f.exclude;
+                            }
                             if (!child->children.empty()) {
-                                return py::str(child->children[0]->to_json(v, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context));
+                                return py::str(child->children[0]->to_json(v, ensure_ascii, indent, round_trip, inc, exc, by_alias, exclude_unset, exclude_defaults, exc_none, context));
                             }
                             return py::str(v);
-                        });
+                        }, py::arg("value"), py::arg("index_key") = py::none());
                         if (child->info_arg) {
                             auto info = make_ser_info(round_trip, "root", context, include, exclude);
                             return py::str(child->py_func(value, root_val, handler, py::cast(info)));
@@ -2171,6 +2255,11 @@ private:
             return py::str(py::repr(value)).cast<std::string>();
         }
         if (py::isinstance<py::str>(value)) return json_escape(value.cast<std::string>(), ensure_ascii);
+        if (PyComplex_Check(value.ptr())) {
+            return json_escape(complex_to_str_rust(PyComplex_RealAsDouble(value.ptr()),
+                                                   PyComplex_ImagAsDouble(value.ptr())),
+                                ensure_ascii);
+        }
         if (py::isinstance<py::bytes>(value)) {
             if (g_ser_extra.bytes_mode != "base64" && g_ser_extra.bytes_mode != "hex") {
                 try { return json_escape(value.cast<std::string>(), ensure_ascii); }
@@ -2534,12 +2623,19 @@ private:
                 try {
                     if (ser->type == "function-wrap") {
                         // For wrap mode, create a handler function
-                        py::object handler = py::cpp_function([ser, fv, exc_none, round_trip, next, by_alias, exclude_unset, exclude_defaults, context](const py::object& v) -> py::object {
+                        py::object handler = py::cpp_function([ser, fv, exc_none, round_trip, next, by_alias, exclude_unset, exclude_defaults, context](const py::object& v, py::object index_key) -> py::object {
+                            py::object inc = next.include, exc = next.exclude;
+                            if (!index_key.is_none()) {
+                                auto f = apply_ser_filter(index_key, next.include, next.exclude);
+                                if (f.omit) throw PydanticOmit();
+                                inc = f.include;
+                                exc = f.exclude;
+                            }
                             if (!ser->children.empty()) {
-                                return ser->children[0]->to_python(v, false, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context);
+                                return ser->children[0]->to_python(v, false, exc_none, round_trip, inc, exc, by_alias, exclude_unset, exclude_defaults, context);
                             }
                             return v;
-                        });
+                        }, py::arg("value"), py::arg("index_key") = py::none());
                         if (ser->is_field_serializer) {
                             if (ser->info_arg) {
                                 serialized = ser->py_func(value, fv, handler, py::cast(info));
@@ -2757,14 +2853,21 @@ private:
                     py::object result;
                     if (ser->type == "function-wrap") {
                         // For wrap mode, create a handler function
-                        py::object handler = py::cpp_function([ser, fv, ensure_ascii, round_trip, next, by_alias, exclude_unset, exclude_defaults, exc_none, context](const py::object& v) -> py::object {
+                        py::object handler = py::cpp_function([ser, fv, ensure_ascii, round_trip, next, by_alias, exclude_unset, exclude_defaults, exc_none, context](const py::object& v, py::object index_key) -> py::object {
+                            py::object inc = next.include, exc = next.exclude;
+                            if (!index_key.is_none()) {
+                                auto f = apply_ser_filter(index_key, next.include, next.exclude);
+                                if (f.omit) throw PydanticOmit();
+                                inc = f.include;
+                                exc = f.exclude;
+                            }
                             if (!ser->children.empty()) {
                                 // Call to_python and let infer_json handle the conversion
-                                auto py_result = ser->children[0]->to_python(v, true, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context);
+                                auto py_result = ser->children[0]->to_python(v, true, exc_none, round_trip, inc, exc, by_alias, exclude_unset, exclude_defaults, context);
                                 return py_result;
                             }
                             return v;
-                        });
+                        }, py::arg("value"), py::arg("index_key") = py::none());
                         if (ser->is_field_serializer) {
                             if (ser->info_arg) {
                                 result = ser->py_func(value, fv, handler, py::cast(info));
