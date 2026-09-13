@@ -448,47 +448,6 @@ public:
 
         if (py_func_.is_none()) return result;
 
-        // If the inner validator reused an existing instance (ModelValidator with
-        // revalidate_instances='never' returning PyObjectWrapper), the after-function
-        // must NOT re-run: the instance is already validated, and re-running would
-        // re-execute the model's after validators (fixes #8452: nested
-        // model_validator(mode='after') re-executed when a parent model receives an
-        // existing child instance). The result is stored as py::object so the
-        // "function-after" result type dispatch stays consistent.
-        if (inner_->effective_result_name().rfind("maybe_wrapper:", 0) == 0) {
-            std::string base_type = inner_->effective_result_name().substr(14);
-            if (base_type == "model" || base_type == "model-fields" || base_type == "typed-dict") {
-                // Both PyObjectWrapper and ValidatedModelFieldsOutput/TypedDictResult
-                // inherit from TypedResult, so the cast is safe.
-                try {
-                    auto* typed = static_cast<TypedResult*>(result.value().get());
-                    if (typed && std::string(typed->result_type()) == "py_object") {
-                        auto* wrapper = static_cast<PyObjectWrapper*>(typed);
-                        return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(wrapper->obj));
-                    }
-                } catch (...) {}
-            } else {
-                // Root model with primitive inner type (int, str, etc.): the result is
-                // either a PyObjectWrapper (existing instance, revalidate='never') or a
-                // primitive C++ value. We can't safely cast to TypedResult for primitive
-                // values, so check if the input was an existing instance of the model.
-                if (auto* mv = dynamic_cast<ModelValidator*>(inner_.get())) {
-                    py::object cls = mv->expected_class();
-                    if (!cls.is_none()) {
-                        try {
-                            py::object obj = input.as_python_object();
-                            if (py::isinstance(obj, cls)) {
-                                auto* wrapper = static_cast<PyObjectWrapper*>(result.value().get());
-                                if (wrapper) {
-                                    return ValResult<std::shared_ptr<void>>(
-                                        std::make_shared<py::object>(wrapper->obj));
-                                }
-                            }
-                        } catch (...) {}
-                    }
-                }
-            }
-        }
 
         // Convert the validated inner result to a Python object — Rust passes
         // the validated value to the after-function (model validators receive
