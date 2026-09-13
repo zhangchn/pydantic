@@ -1654,6 +1654,12 @@ struct SerNode {
                 }
                 i++;
             }
+            // JSON has no tuple type: Rust emits an array.
+            if (json_mode) {
+                py::list out;
+                for (auto item : temp) out.append(item);
+                return std::move(out);
+            }
             return py::tuple(temp);
         }
         if (type == "any") {
@@ -2265,6 +2271,19 @@ private:
         return py::isinstance(v, enum_cls);
     }
 
+    // Rust's infer_serialize classifies a fixed set of object kinds and has no
+    // generic attribute walk: a plain object is ObType::Unknown and JSON
+    // serialization fails with "Unable to serialize unknown type". Only the
+    // structured kinds Rust recognises keep the attribute walk here.
+    static bool dict_inferable_object(const py::object& value) {
+        if (py_hasattr(value, "__pydantic_fields__") || py_hasattr(value, "__dataclass_fields__")) return true;
+        try {
+            py::object dc = py::module_::import("dataclasses");
+            if (py::cast<bool>(dc.attr("is_dataclass")(value))) return true;
+        } catch (...) { PyErr_Clear(); }
+        return false;
+    }
+
     static std::string infer_json(const py::object& value, bool ensure_ascii, int indent) {
         std::vector<const void*>& st = json_rec_stack();
         const void* p = value.ptr();
@@ -2391,7 +2410,13 @@ private:
             }
         }
 
-        if (py_hasattr(value, "__dict__")) return infer_json(value.attr("__dict__"), ensure_ascii, indent);
+        if (py_hasattr(value, "__dict__")) {
+            if (dict_inferable_object(value)) return infer_json(value.attr("__dict__"), ensure_ascii, indent);
+            std::string type_repr_str;
+            try { type_repr_str = py::repr(py::type::of(value)).cast<std::string>(); }
+            catch (...) { PyErr_Clear(); type_repr_str = "<unknown>"; }
+            throw PydanticSerializationError("Unable to serialize unknown type: " + type_repr_str);
+        }
 
         return json_escape(py::repr(value).cast<std::string>(), ensure_ascii);
     }
@@ -2464,8 +2489,33 @@ private:
             for (auto item : t) {
                 temp.append(serialize_any_value(py::reinterpret_borrow<py::object>(item), exc_none, round_trip, json_mode));
             }
+            if (json_mode) return std::move(temp);  // JSON has no tuple type
             return py::tuple(temp);
         }
+        if (py::isinstance<py::set>(v) || py::isinstance<py::frozenset>(v)) {
+            py::list temp;
+            for (auto item : py::reinterpret_borrow<py::iterable>(v)) {
+                temp.append(serialize_any_value(py::reinterpret_borrow<py::object>(item), exc_none, round_trip, json_mode));
+            }
+            if (json_mode) return std::move(temp);  // JSON has no set type
+            return py::isinstance<py::frozenset>(v)
+                ? py::object(py::frozenset(temp))
+                : py::object(py::set(temp));
+        }
+        // Sequence[Model] serializes through pydantic's serialize_sequence_via_list,
+        // which hands back the container type it was given; the items still need
+        // serializing, as Rust's own sequence serializer does.
+        try {
+            py::object deque_cls = py::module_::import("collections").attr("deque");
+            if (py::isinstance(v, deque_cls)) {
+                py::list temp;
+                for (auto item : v) {
+                    temp.append(serialize_any_value(py::reinterpret_borrow<py::object>(item), exc_none, round_trip, json_mode));
+                }
+                if (json_mode) return std::move(temp);  // JSON has no deque type
+                return deque_cls(temp);
+            }
+        } catch (const py::error_already_set&) { PyErr_Clear(); }
         // Rust infer_to_python ObType::Unknown: the caller's `fallback` callable
         // gets a turn (its result is re-inferred) before the value is passed
         // through untouched.
