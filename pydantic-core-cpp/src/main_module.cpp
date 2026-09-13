@@ -1662,7 +1662,9 @@ struct SerNode {
             }
             return py::tuple(temp);
         }
-        if (type == "any") {
+        if (type == "any" || type == "call") {
+            // Rust builds no dedicated serializer for a call schema, so the
+            // value is inferred (a namedtuple thus becomes a plain tuple).
             return serialize_any_value(value, exc_none, round_trip, json_mode);
         }
         // Rust ToStringSerializer is a leaf: str(value), gated by when_used.
