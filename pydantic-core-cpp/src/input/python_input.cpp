@@ -335,7 +335,7 @@ bool PythonInput::is_instance_of(const char* module, const char* type_name) cons
 // Type validation implementations
 // ============================================================================
 
-ValResult<ValMatch<EitherString>> PythonInput::validate_str(bool strict, bool coerce_numbers) const {
+ValResult<ValMatch<EitherString>> PythonInput::validate_str(bool strict, bool coerce_numbers, bool json_input) const {
     if (is_str()) {
         // Rust keeps a str subclass as the value but records it as a strict
         // match, so it cannot outrank an exact str inside a union.
@@ -377,6 +377,15 @@ ValResult<ValMatch<EitherString>> PythonInput::validate_str(bool strict, bool co
         // raises string_type). Number coercion is opt-in via
         // coerce_numbers_to_str (constrained-str).
         if (coerce_numbers && (is_int() || is_float() || is_decimal())) {
+            // A JSON float is rendered the way Rust's JsonValue::Float does
+            // (f64::to_string), which differs from Python's str() for both
+            // whole numbers ("42") and small magnitudes ("0.0000001").
+            if (json_input && is_float()) {
+                try {
+                    return ValMatch<EitherString>::lax(
+                        EitherString(rust_float_to_string(obj_.cast<double>())));
+                } catch (...) {}
+            }
             try {
                 return ValMatch<EitherString>::lax(EitherString(py::str(obj_).cast<std::string>()));
             } catch (...) {}

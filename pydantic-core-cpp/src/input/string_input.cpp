@@ -42,7 +42,8 @@ py::object StringInput::as_python_object() const {
     return d;
 }
 
-ValResult<ValMatch<EitherString>> StringInput::validate_str(bool strict, bool coerce_numbers) const {
+ValResult<ValMatch<EitherString>> StringInput::validate_str(bool strict, bool coerce_numbers, bool json_input) const {
+    (void)json_input;
     if (single_value_) {
         // String input is always a string (exact match)
         return ValMatch<EitherString>::exact(EitherString(*single_value_));

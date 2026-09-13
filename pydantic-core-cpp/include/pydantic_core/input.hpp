@@ -5,6 +5,8 @@
 #include <optional>
 #include <vector>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -25,6 +27,51 @@ class JsonInput;
 class StringInput;
 class ValidationState;
 struct Location;
+
+// Rust renders a JSON float with `f64::to_string`: the shortest digits that
+// round-trip, always written out positionally ("42", "0.0000001"). Python's
+// repr would give "42.0" and "1e-07", so a JSON-sourced float must not be
+// stringified with str().
+inline std::string rust_float_to_string(double value) {
+    if (std::isnan(value)) return "NaN";
+    if (std::isinf(value)) return value < 0 ? "-inf" : "inf";
+    char buf[40];
+    std::string digits;
+    long point = 0;
+    for (int precision = 0; precision <= 17; ++precision) {
+        std::snprintf(buf, sizeof(buf), "%.*e", precision, value);
+        if (std::strtod(buf, nullptr) != value) continue;
+        // Split "[-]d.dddde[+-]dd" into its significant digits and the
+        // position of the decimal point.
+        const char* mantissa = buf[0] == '-' ? buf + 1 : buf;
+        long exponent = std::strtol(std::strchr(buf, 'e') + 1, nullptr, 10);
+        for (const char* it = mantissa; *it != 'e'; ++it) {
+            if (*it == '.') continue;
+            digits.push_back(*it);
+        }
+        point = exponent + 1;
+        break;
+    }
+    if (digits.empty()) {
+        std::snprintf(buf, sizeof(buf), "%.17g", value);
+        return buf;
+    }
+    std::string out;
+    if (std::signbit(value)) out.push_back('-');
+    if (point <= 0) {
+        out += "0.";
+        out.append(static_cast<size_t>(-point), '0');
+        out += digits;
+    } else if (point >= static_cast<long>(digits.size())) {
+        out += digits;
+        out.append(static_cast<size_t>(point - static_cast<long>(digits.size())), '0');
+    } else {
+        out += digits.substr(0, static_cast<size_t>(point));
+        out += ".";
+        out += digits.substr(static_cast<size_t>(point));
+    }
+    return out;
+}
 
 // Either types - union types for validated values
 // These represent the different possible representations of a value
@@ -473,7 +520,10 @@ public:
     }
 
     // Type validation methods - return ValResult<ValMatch<T>>
-    virtual ValResult<ValMatch<EitherString>> validate_str(bool strict, bool coerce_numbers = false) const = 0;
+    // `json_input` marks the value as JSON-sourced, where a float is
+    // stringified Rust-style instead of with Python's str().
+    virtual ValResult<ValMatch<EitherString>> validate_str(bool strict, bool coerce_numbers = false,
+                                                           bool json_input = false) const = 0;
     virtual ValResult<ValMatch<EitherBytes>> validate_bytes(bool strict) const = 0;
     virtual ValResult<ValMatch<bool>> validate_bool(bool strict) const = 0;
     virtual ValResult<ValMatch<EitherInt>> validate_int(bool strict) const = 0;

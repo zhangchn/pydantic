@@ -366,7 +366,8 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str);
+auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str,
+                                       state.input_type() == InputType::Json);
         if (result.is_err()) {
             return result.error();
         }
@@ -422,7 +423,8 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str);
+auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str,
+                                       state.input_type() == InputType::Json);
         if (result.is_err()) {
             return result.error();
         }

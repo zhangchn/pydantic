@@ -97,7 +97,8 @@ py::object JsonInput::as_python_object() const {
     return json_element_to_py(element_);
 }
 
-ValResult<ValMatch<EitherString>> JsonInput::validate_str(bool strict, bool coerce_numbers) const {
+ValResult<ValMatch<EitherString>> JsonInput::validate_str(bool strict, bool coerce_numbers, bool json_input) const {
+    (void)json_input;
     if (element_.type() == simdjson::dom::element_type::STRING) {
         auto str_result = element_.get_string();
         if (!str_result.error()) {
@@ -114,7 +115,7 @@ ValResult<ValMatch<EitherString>> JsonInput::validate_str(bool strict, bool coer
             return ValMatch<EitherString>::lax(EitherString(std::to_string(element_.get_uint64().value_unsafe())));
         }
         if (element_.type() == simdjson::dom::element_type::DOUBLE) {
-            return ValMatch<EitherString>::lax(EitherString(std::to_string(element_.get_double().value_unsafe())));
+            return ValMatch<EitherString>::lax(EitherString(rust_float_to_string(element_.get_double().value_unsafe())));
         }
         if (element_.type() == simdjson::dom::element_type::BOOL) {
             return ValMatch<EitherString>::lax(EitherString(element_.get_bool().value_unsafe() ? std::string("true") : std::string("false")));

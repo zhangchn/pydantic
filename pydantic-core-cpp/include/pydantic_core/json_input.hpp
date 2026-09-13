@@ -23,7 +23,7 @@ public:
     // Convert JSON to Python object
     py::object as_python_object() const override;
 
-    ValResult<ValMatch<EitherString>> validate_str(bool strict, bool coerce_numbers = false) const override;
+    ValResult<ValMatch<EitherString>> validate_str(bool strict, bool coerce_numbers = false, bool json_input = true) const override;
     ValResult<ValMatch<EitherBytes>> validate_bytes(bool strict) const override;
     ValResult<ValMatch<bool>> validate_bool(bool strict) const override;
     ValResult<ValMatch<EitherInt>> validate_int(bool strict) const override;
