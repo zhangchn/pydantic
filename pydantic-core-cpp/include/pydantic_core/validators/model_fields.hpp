@@ -1187,6 +1187,43 @@ public:
             }
         }
 
+        // Rust short-circuits construction in validate_construct when the class
+        // declares custom_init: the raw input goes to the class as keyword
+        // arguments and the class owns validation. An init_self (Rust's
+        // self_instance) means super().__init__ re-entered us, so the fields
+        // have to be validated onto that instance instead of calling __init__
+        // again.
+        if (custom_init_ && !class_.is_none() && state.init_self_py().is_none()) {
+            auto* py_input = dynamic_cast<const PythonInput*>(&input);
+            if (py_input) {
+                const py::object& obj = py_input->py_object();
+                if (py::isinstance<py::dict>(obj)) {
+                    py::object args = py::tuple();
+                    PyObject* raw = PyObject_Call(class_.ptr(), args.ptr(), obj.ptr());
+                    if (raw) {
+                        last_result_name_ = "py_object_wrapper";
+                        return ValResult<std::shared_ptr<void>>(
+                            std::make_shared<PyObjectWrapper>(py::reinterpret_steal<py::object>(raw)));
+                    }
+                    PyObject* exc_type = nullptr;
+                    PyObject* exc_val = nullptr;
+                    PyObject* exc_tb = nullptr;
+                    PyErr_Fetch(&exc_type, &exc_val, &exc_tb);
+                    PyErr_NormalizeException(&exc_type, &exc_val, &exc_tb);
+                    if (exc_val) {
+                        py::object exc = py::reinterpret_steal<py::object>(exc_val);
+                        if (exc_tb) Py_XDECREF(exc_tb);
+                        if (exc_type) Py_XDECREF(exc_type);
+                        return ValError::internal_err(std::move(exc));
+                    }
+                    if (exc_type) Py_XDECREF(exc_type);
+                    if (exc_tb) Py_XDECREF(exc_tb);
+                    PyErr_Clear();
+                    return ValError::internal_err(std::string("custom __init__ failed"));
+                }
+            }
+        }
+
         return fields_validator_->validate(input, state);
     }
 

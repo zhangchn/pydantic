@@ -1270,6 +1270,31 @@ static std::optional<bool> strict_opt_py(const py::dict& schema, const py::dict&
     return py_bool_opt(config, "strict");
 }
 
+// Helper: an optional string from py::dict; absent or non-string means absent.
+static std::optional<std::string> py_str_opt(const py::dict& d, const char* key) {
+    if (!d.contains(key) || !py::isinstance<py::str>(d[key])) return std::nullopt;
+    return d[key].cast<std::string>();
+}
+
+// Rust's class_repr: an explicit cls_repr wins, then the qualname of a real
+// type (no module prefix), then repr() of whatever object cls turned out to be.
+static std::string class_repr_py(const py::dict& schema, const py::object& cls) {
+    if (auto repr = py_str_opt(schema, "cls_repr")) return *repr;
+    if (py::isinstance<py::type>(cls)) {
+        try {
+            return py::str(py::getattr(cls, "__qualname__")).cast<std::string>();
+        } catch (...) {
+            PyErr_Clear();
+        }
+    }
+    try {
+        return py::str(cls).cast<std::string>();
+    } catch (...) {
+        PyErr_Clear();
+        return std::string();
+    }
+}
+
 // Rust resolves is_strict(schema, config) once per validator: an explicit schema
 // flag wins, then the config the validator is built under, otherwise not strict.
 static bool is_strict_py(const py::dict& schema, const py::dict& config) {
@@ -1746,23 +1771,13 @@ static std::shared_ptr<Validator> build_from_py_dict(
         auto v = std::make_shared<IsInstanceValidator>();
         if (schema.contains("cls")) {
             py::object cls = schema["cls"];
-            // Accept anything usable as the second isinstance argument:
-            // builtin/metaclass types, ABCMeta subclasses (collections.abc)
-            // and typing special forms like Sequence all pass here.
-            bool class_like = false;
-            try {
-                class_like = py::isinstance<py::type>(cls) || py_hasattr(cls, "__mro__");
-            } catch (...) {}
-            if (class_like) {
-                v->set_py_class(cls);
-                // Rust uses the class qualname (no module prefix) for the error ctx
-                try {
-                    v->set_class_name(py::str(py::getattr(cls, "__qualname__")).cast<std::string>());
-                } catch (...) {
-                    v->set_class_name(py::str(cls).cast<std::string>());
-                }
-            } else if (py::isinstance<py::str>(cls)) {
+            // Rust keeps whatever cls is and lets Python's isinstance decide, so
+            // typing aliases such as Sequence work as well as real types.
+            if (py::isinstance<py::str>(cls)) {
                 v->set_class_name(cls.cast<std::string>());
+            } else {
+                v->set_py_class(cls);
+                v->set_class_name(class_repr_py(schema, cls));
             }
         }
         return v;
@@ -1780,12 +1795,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
                 v->set_class_name(cls.cast<std::string>());
             } else if (sub_like) {
                 v->set_py_class(cls);
-                // Rust uses the class qualname (no module prefix) for the error ctx
-                try {
-                    v->set_class_name(py::str(py::getattr(cls, "__qualname__")).cast<std::string>());
-                } catch (...) {
-                    v->set_class_name(py::str(cls).cast<std::string>());
-                }
+                v->set_class_name(class_repr_py(schema, cls));
             }
         }
         return v;
@@ -2277,7 +2287,11 @@ static std::shared_ptr<Validator> build_from_py_dict(
         }
         // Default is "never" which maps to RevalidateInstances::Never
 
-        auto v = std::make_shared<ModelValidator>(inner, model_name, /*frozen=*/false, /*custom_init=*/false, root_model, model_cls, revalidate);
+        bool custom_init = false;
+        if (schema.contains("custom_init") && py::isinstance<py::bool_>(schema["custom_init"])) {
+            custom_init = schema["custom_init"].cast<bool>();
+        }
+        auto v = std::make_shared<ModelValidator>(inner, model_name, /*frozen=*/false, custom_init, root_model, model_cls, revalidate);
         return v;
     }
 
