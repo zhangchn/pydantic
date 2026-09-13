@@ -1670,6 +1670,12 @@ public:
                         output_args.append(conv);
                     }
                 } else {
+                    if (result.error().is_internal()) {
+                        // Rust propagates an InternalErr (an exception that is not a
+                        // validation failure) out of the whole validation instead of
+                        // collecting it as a line error.
+                        return ValResult<std::shared_ptr<void>>(result.error());
+                    }
                     collect_line_errors(result.error(), line_errors);
                 }
             } else if (kw_value) {
@@ -1691,6 +1697,12 @@ public:
                         output_kwargs[py::str(p.name)] = conv;
                     }
                 } else {
+                    if (result.error().is_internal()) {
+                        // Rust propagates an InternalErr (an exception that is not a
+                        // validation failure) out of the whole validation instead of
+                        // collecting it as a line error.
+                        return ValResult<std::shared_ptr<void>>(result.error());
+                    }
                     collect_line_errors(result.error(), line_errors);
                 }
             } else {
@@ -1755,6 +1767,12 @@ public:
                     if (result.is_ok()) {
                         output_args.append(value_to_python(result.value(), var_args_validator->effective_result_name(), &item));
                     } else {
+                        if (result.error().is_internal()) {
+                            // Rust propagates an InternalErr (an exception that is not a
+                            // validation failure) out of the whole validation instead of
+                            // collecting it as a line error.
+                            return ValResult<std::shared_ptr<void>>(result.error());
+                        }
                         collect_line_errors(result.error(), line_errors);
                     }
                 } else {
@@ -1784,6 +1802,12 @@ public:
                 if (result.is_ok()) {
                     output_kwargs[py::str(key)] = value_to_python(result.value(), var_kwargs_validator->effective_result_name(), &value);
                 } else {
+                    if (result.error().is_internal()) {
+                        // Rust propagates an InternalErr (an exception that is not a
+                        // validation failure) out of the whole validation instead of
+                        // collecting it as a line error.
+                        return ValResult<std::shared_ptr<void>>(result.error());
+                    }
                     collect_line_errors(result.error(), line_errors);
                 }
             } else if (extra == ExtraBehavior::Forbid) {
@@ -1828,6 +1852,12 @@ public:
                     }
                 }
             } else {
+                if (result.error().is_internal()) {
+                    // Rust propagates an InternalErr (an exception that is not a
+                    // validation failure) out of the whole validation instead of
+                    // collecting it as a line error.
+                    return ValResult<std::shared_ptr<void>>(result.error());
+                }
                 collect_line_errors(result.error(), line_errors);
             }
         }
