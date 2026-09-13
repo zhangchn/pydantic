@@ -1635,6 +1635,9 @@ static std::shared_ptr<Validator> build_from_py_dict(
     if (type == "uuid") {
         auto v = std::make_shared<UuidValidator>();
         v->strict = is_strict_py(schema, config);
+        if (schema.contains("version") && py::isinstance<py::int_>(schema["version"])) {
+            v->version = schema["version"].cast<int>();
+        }
         return v;
     }
 

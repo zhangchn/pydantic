@@ -1135,6 +1135,9 @@ public:
 class UuidValidator : public Validator {
 public:
     bool strict = false;
+    // Rust reads the schema's "version" and rejects a UUID whose version bits
+    // differ (uuid_version, with expected_version in the ctx).
+    std::optional<int> version;
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -1143,14 +1146,32 @@ public:
         // Validate UUID using Python's uuid module
         py::object input_py = input.as_python_object();
 
+        auto finish_uuid = [&](const py::object& uuid_obj) -> ValResult<std::shared_ptr<void>> {
+            if (version) {
+                int actual = -1;
+                try {
+                    py::object v = uuid_obj.attr("version");
+                    if (!v.is_none()) actual = v.cast<int>();
+                } catch (...) {
+                    PyErr_Clear();
+                }
+                if (actual != *version) {
+                    ErrorType err(ErrorType::Kind::UuidVersion);
+                    err.set_ctx_object("expected_version", std::to_string(*version), py::int_(*version));
+                    return ValError::line_error(err, state.location(), input.as_error_value().repr);
+                }
+            }
+            return ValResult<std::shared_ptr<void>>(
+                std::make_shared<std::string>(py::str(uuid_obj).cast<std::string>())
+            );
+        };
+
         // If already a UUID object, accept it
         try {
             py::object uuid_mod = py::module_::import("uuid");
             py::object uuid_class = uuid_mod.attr("UUID");
             if (py::isinstance(input_py, uuid_class)) {
-                return ValResult<std::shared_ptr<void>>(
-                    std::make_shared<std::string>(py::str(input_py).cast<std::string>())
-                );
+                return finish_uuid(input_py);
             }
         } catch (...) {}
 
@@ -1169,9 +1190,7 @@ public:
             try {
                 py::object uuid_mod = py::module_::import("uuid");
                 py::object uuid_obj = uuid_mod.attr("UUID")(uuid_str);
-                return ValResult<std::shared_ptr<void>>(
-                    std::make_shared<std::string>(py::str(uuid_obj).cast<std::string>())
-                );
+                return finish_uuid(uuid_obj);
             } catch (py::error_already_set& e) {
                 std::string msg = e.what();
                 // Swallow the error: restore() releases the fetched refs so
@@ -1206,9 +1225,7 @@ public:
                         if (b.size() == 16) {
                             try {
                                 uuid_obj = uuid_mod.attr("UUID")(py::arg("bytes") = input_py);
-                                return ValResult<std::shared_ptr<void>>(
-                                    std::make_shared<std::string>(py::str(uuid_obj).cast<std::string>())
-                                );
+                                return finish_uuid(uuid_obj);
                             } catch (py::error_already_set& e3) {
                                 e3.restore();
                                 PyErr_Clear();
@@ -1220,9 +1237,7 @@ public:
                                                     input.as_error_value().repr);
                     }
                 }
-                return ValResult<std::shared_ptr<void>>(
-                    std::make_shared<std::string>(py::str(uuid_obj).cast<std::string>())
-                );
+                return finish_uuid(uuid_obj);
             } catch (...) {}
         }
 
