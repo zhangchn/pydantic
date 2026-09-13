@@ -594,7 +594,7 @@ def _from_exception_data(cls, title: str, line_errors: list[dict], input_type: s
             details = f'type={err_type}'
         else:
             details = f'type={err_type}, input_value={input_repr}, input_type={type(input_val).__name__}'
-        error_parts.append(f'  {loc_str}\n    {msg} [{details}]')
+        error_parts.append(f'{loc_str}\n  {msg} [{details}]')
 
         # Build error dict
         err_dict = {
