@@ -596,6 +596,9 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
+        // Rust reports the failing URL with the input's Python repr, quoted
+        // like any other input value, not with the trimmed text it parsed.
+        const std::string input_repr = input.as_error_value().repr;
         // Accept an already-validated Url object (Rust downcast_python_input::<PyUrl>)
         py::object input_py = input.as_python_object();
         try {
@@ -643,18 +646,18 @@ public:
             ErrorType err(ErrorType::Kind::UrlTooLong);
             err.context()["max_length"] = std::to_string(max_length.value());
             err.context()["s"] = max_length.value() == 1 ? "" : "s";
-            return ValError::line_error(err, state.location(), url_str);
+            return ValError::line_error(err, state.location(), input_repr);
         }
 
         auto url_parsing_err = [&](const std::string& error) {
             ErrorType err(ErrorType::Kind::UrlParsing);
             err.context()["error"] = error;
-            return ValError::line_error(err, state.location(), url_str);
+            return ValError::line_error(err, state.location(), input_repr);
         };
         auto syntax_violation_err = [&](const std::string& error) {
             ErrorType err(ErrorType::Kind::UrlSyntaxViolation);
             err.context()["error"] = error;
-            return ValError::line_error(err, state.location(), url_str);
+            return ValError::line_error(err, state.location(), input_repr);
         };
         auto scheme_err = [&]() {
             ErrorType err(ErrorType::Kind::UrlScheme);
@@ -664,7 +667,7 @@ public:
                 expected += "'" + allowed_schemes[i] + "'";
             }
             err.context()["expected_schemes"] = expected;
-            return ValError::line_error(err, state.location(), url_str);
+            return ValError::line_error(err, state.location(), input_repr);
         };
 
         const bool strict = state.strict_or(this->strict);
@@ -802,6 +805,9 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
+        // Rust reports the failing URL with the input's Python repr, quoted
+        // like any other input value, not with the trimmed text it parsed.
+        const std::string input_repr = input.as_error_value().repr;
         py::object input_py = input.as_python_object();
 
         // Check if already a MultiHostUrl object
@@ -842,7 +848,7 @@ public:
             ErrorType err(ErrorType::Kind::UrlTooLong);
             err.context()["max_length"] = std::to_string(max_length.value());
             err.context()["s"] = max_length.value() == 1 ? "" : "s";
-            return ValError::line_error(err, state.location(), url_str);
+            return ValError::line_error(err, state.location(), input_repr);
         }
 
         UrlDefaults defaults;
@@ -856,15 +862,15 @@ public:
         } catch (const UrlEmptyHostError&) {
             ErrorType err(ErrorType::Kind::UrlParsing);
             err.context()["error"] = "empty host";
-            return ValError::line_error(err, state.location(), url_str);
+            return ValError::line_error(err, state.location(), input_repr);
         } catch (const std::invalid_argument& e) {
             ErrorType err(ErrorType::Kind::UrlParsing);
             err.context()["error"] = e.what();
-            return ValError::line_error(err, state.location(), url_str);
+            return ValError::line_error(err, state.location(), input_repr);
         } catch (...) {
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::UrlType),
-                state.location(), url_str);
+                state.location(), input_repr);
         }
 
         // Scheme allow-list (checked after parsing, matching Rust order)
@@ -882,7 +888,7 @@ public:
                     expected += "'" + allowed_schemes[i] + "'";
                 }
                 err.context()["expected_schemes"] = expected;
-                return ValError::line_error(err, state.location(), url_str);
+                return ValError::line_error(err, state.location(), input_repr);
             }
         }
 
@@ -891,7 +897,7 @@ public:
         if (host_req && !url_obj->has_host()) {
             ErrorType err(ErrorType::Kind::UrlParsing);
             err.context()["error"] = "empty host";
-            return ValError::line_error(err, state.location(), url_str);
+            return ValError::line_error(err, state.location(), input_repr);
         }
 
         return ValResult<std::shared_ptr<void>>(
