@@ -1628,7 +1628,7 @@ private:
             }
         } catch (...) {}
 
-auto str_result = input.validate_str(state.strict_or(false), false);
+auto str_result = input.validate_str(state.strict_or(declared_strict_.value_or(false)), false);
         if (str_result.is_err()) {
             return str_result.error();
         }
@@ -1674,7 +1674,7 @@ auto str_result = input.validate_str(state.strict_or(false), false);
     std::optional<bool> declared_strict_;
 
     bool strict_active(const ValidationState& state) const {
-        return declared_strict_.value_or(state.strict_or(false));
+        return state.strict_or(declared_strict_.value_or(false));
     }
 };
 

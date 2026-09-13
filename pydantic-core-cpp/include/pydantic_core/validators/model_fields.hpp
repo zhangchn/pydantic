@@ -193,7 +193,7 @@ public:
                 // any other object must come from a module that may be read by
                 // attribute, otherwise the input is reported as
                 // model_attributes_type rather than a set of missing fields.
-                if (!state.strict_or(false) && py_is_mapping_instance(obj)) {
+                if (!state.strict_or(strict_) && py_is_mapping_instance(obj)) {
                     try {
                         py::dict from_mapping;
                         for (py::handle item : obj.attr("items")()) {
@@ -266,7 +266,7 @@ public:
             );
         }
 
-        auto dict_result = input.validate_dict(state.strict_or(false));
+        auto dict_result = input.validate_dict(state.strict_or(strict_));
         if (dict_result.is_err()) {
             ErrorType err(ErrorType::Kind::ModelType);
             err.context()["class_name"] = model_name_.empty() ? "Model" : model_name_;
@@ -635,6 +635,8 @@ public:
     void set_extras_validator(std::shared_ptr<Validator> v) { extras_validator_ = std::move(v); }
     void set_extras_keys_validator(std::shared_ptr<Validator> v) { extras_keys_validator_ = std::move(v); }
     void set_from_attributes(bool value) { from_attributes_ = value; }
+    // Rust reads is_strict(schema, config) for the fields validator itself.
+    void set_strict(bool value) { strict_ = value; }
     bool from_attributes() const { return from_attributes_; }
     void set_validate_by_name(bool value) { validate_by_name_ = value; }
     void set_validate_by_alias(bool value) { validate_by_alias_ = value; }
@@ -1067,6 +1069,7 @@ protected:
     std::shared_ptr<Validator> extras_keys_validator_;
     std::string model_name_;
     bool from_attributes_ = false;  // from_attributes setting from schema
+    bool strict_ = false;  // is_strict(schema, config) for this validator
     // Alias lookup mode (Rust LookupPathCollection semantics):
     // - validate_by_alias (default true): the alias(es) are lookup keys.
     // - validate_by_name (default false): the field name is a lookup key
@@ -1099,7 +1102,7 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        auto dict_result = input.validate_dict(state.strict_or(false));
+        auto dict_result = input.validate_dict(state.strict_or(strict_));
         if (dict_result.is_err()) {
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::DictType),
@@ -1601,7 +1604,7 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        auto dict_result = input.validate_dict(state.strict_or(false));
+        auto dict_result = input.validate_dict(state.strict_or_config(false));
         if (dict_result.is_err()) {
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::DataclassType),

@@ -22,6 +22,11 @@ public:
     // Configuration for validation
     struct Config {
         std::optional<bool> strict;
+        // Rust keeps the schema/config strict value inside each validator (is_strict)
+        // and carries only the call-time `strict` argument in the state, so the
+        // argument outranks a field-level Field(strict=False) under a
+        // ConfigDict(strict=True) model.
+        std::optional<bool> strict_override;
         std::optional<ExtraBehavior> extra_behavior;
         std::optional<bool> from_attributes;
         StringCacheMode cache_strings = StringCacheMode::All;
@@ -47,8 +52,11 @@ public:
         allow_partial_(allow_partial), field_name_(field_name), self_instance_(self_instance) {}
     
     // Accessors
-    std::optional<bool> strict() const { return config_.strict; }
-    void set_strict(bool value) { config_.strict = value; }
+    std::optional<bool> strict() const { return config_.strict_override; }
+    // The config-declared value, kept apart from the call-time argument so a
+    // validator can still fall back to it when its schema node says nothing.
+    std::optional<bool> config_strict() const { return config_.strict; }
+    void set_strict(bool value) { config_.strict_override = value; }
     std::optional<ExtraBehavior> extra_behavior() const { return config_.extra_behavior; }
     void set_extra_behavior(ExtraBehavior value) { config_.extra_behavior = value; }
     std::optional<bool> from_attributes() const { return config_.from_attributes; }
@@ -60,17 +68,22 @@ public:
     void set_by_name(bool value) { config_.by_name = value; }
     TimestampUnit val_temporal_unit() const { return config_.val_temporal_unit; }
     
-    // Determine strict mode - use state setting or validator's default
+    // Determine strict mode - the call-time argument wins, otherwise the
+    // validator's own is_strict(schema, config) value.
     bool strict_or(bool default_strict) const {
-        return config_.strict.value_or(default_strict);
+        return config_.strict_override.value_or(default_strict);
     }
 
-    // Rust resolves is_strict(schema, config) once per validator, and an explicit
-    // schema flag outranks the config value.  The port keeps the model-wide config
-    // in the state, so a schema-declared flag has to outrank it here as well.
+    // A validator that never captured its own strict flag still has to see the
+    // config the validator tree was built with.
+    bool strict_or_config(bool default_strict) const {
+        return config_.strict_override.value_or(config_.strict.value_or(default_strict));
+    }
+
+    // `declared` already folds the build-time config in (strict_opt_py), so it
+    // only has to lose to the call-time argument.
     bool strict_or_declared(std::optional<bool> declared, bool default_strict = false) const {
-        if (declared.has_value()) return *declared;
-        return config_.strict.value_or(default_strict);
+        return strict_or(declared.value_or(config_.strict.value_or(default_strict)));
     }
     
     // Extra behavior - use state setting or default
@@ -119,6 +132,7 @@ public:
         ValidationState s(config_);
         if (force_lax) {
             s.config_.strict = false;
+            s.config_.strict_override = false;
         }
         s.recursion_state_ = recursion_state_;
         s.allow_partial_ = allow_partial_;

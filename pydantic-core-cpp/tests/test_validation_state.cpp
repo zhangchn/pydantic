@@ -149,7 +149,7 @@ TEST_SUITE("ValidationState") {
         
         ValidationState state(config);
         
-        CHECK(state.strict().value() == true);
+        CHECK(state.config_strict().value() == true);
         CHECK(state.extra_behavior().value() == ExtraBehavior::Forbid);
         CHECK(state.from_attributes().value() == false);
         CHECK(state.cache_strings() == StringCacheMode::Keys);
@@ -165,9 +165,10 @@ TEST_SUITE("ValidationState") {
         CHECK(state.strict_or(true) == true);
         CHECK(state.strict_or(false) == false);
         
-        // Set explicit strict
+        // Only the call-time argument reaches strict_or; the config-declared
+        // value lives in each validator (Rust's is_strict) instead.
         ValidationState::Config config2;
-        config2.strict = true;
+        config2.strict_override = true;
         ValidationState state2(config2);
         
         CHECK(state2.strict_or(false) == true);  // Explicit true overrides default
@@ -203,7 +204,7 @@ TEST_SUITE("ValidationState") {
     
     TEST_CASE("Child state") {
         ValidationState::Config config;
-        config.strict = true;
+        config.strict_override = true;
         
         ValidationState state(config);
         state.push_loc("root");

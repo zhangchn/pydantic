@@ -2398,6 +2398,9 @@ static std::shared_ptr<Validator> build_from_py_dict(
         } else {
             v = std::make_shared<ModelFieldsValidator>();
         }
+        // Rust reads is_strict(schema, config) for the fields validator itself, so the
+        // model-wide strict config also decides how the input container is read.
+        v->set_strict(strict_opt_py(schema, inner_config).value_or(false));
         if (schema.contains("fields")) {
             auto fields_dict = schema["fields"].cast<py::dict>();
             for (auto item : fields_dict) {

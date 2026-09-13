@@ -536,7 +536,7 @@ public:
             }
         } else {
             // Non-Python inputs (e.g. JSON): accept array-like values.
-            auto result = input.validate_list(state.strict_or(false));
+            auto result = input.validate_list(state.strict_or_declared(strict));
             if (result.is_ok()) {
                 auto& list = result.value().value();
                 matched = true;

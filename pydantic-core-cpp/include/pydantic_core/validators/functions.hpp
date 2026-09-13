@@ -1371,7 +1371,7 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        if (declared.value_or(state.strict_or(false))) {
+        if (state.strict_or_declared(declared)) {
             if (!strict_) {
                 return ValError::line_error(
                     ErrorType(ErrorType::Kind::CustomError),
