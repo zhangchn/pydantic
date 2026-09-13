@@ -1488,7 +1488,14 @@ class SchemaValidator:
         # schema, whatever entry point raised the error.
         if not hasattr(e, '_cpp_msg'):
             e._cpp_msg = _orig_str(e)
-        model_name = _get_model_name(self._schema) if hasattr(self, '_schema') else ''
+        # Rust uses the config's title when it carries one; that is how
+        # @validate_call ends up titling an error after the function it wraps
+        # instead of after the root validator.
+        config = getattr(self, '_config', None)
+        config_title = config.get('title') if isinstance(config, dict) else None
+        model_name = config_title if isinstance(config_title, str) and config_title else ''
+        if not model_name:
+            model_name = _get_model_name(self._schema) if hasattr(self, '_schema') else ''
         if not model_name:
             # Non-model roots (list[int], a bare int, ...) are titled after the
             # root validator by Rust.
