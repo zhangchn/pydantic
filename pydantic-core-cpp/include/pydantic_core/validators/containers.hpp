@@ -772,37 +772,9 @@ public:
             );
         }
 
-        // For list/tuple inputs, validate eagerly and return a list (matching Rust)
-        // For generators/iterators, return a lazy ValidatorIterator
-        bool is_eager = py::isinstance<py::list>(py_in) || py::isinstance<py::tuple>(py_in);
-
-        if (is_eager) {
-            py::list result;
-            size_t idx = 0;
-            for (auto item : py::iter(py_in)) {
-                state.location().push(idx);
-                ValidationState sub_state = state.sub_copy(state.coerce_strings());
-                if (items_schema) {
-                    PythonInput py_item(py::reinterpret_borrow<py::object>(item));
-                    py_item.set_current_location(state.location());
-                    auto item_result = items_schema->validate(py_item, sub_state);
-                    if (item_result.is_err()) {
-                        return item_result.error();
-                    }
-                    auto py_val = value_to_python_with_type(item_result.value(), items_schema->effective_result_name());
-                    result.append(py_val);
-                } else {
-                    result.append(py::reinterpret_borrow<py::object>(item));
-                }
-                state.location().pop();
-                idx++;
-            }
-            return ValResult<std::shared_ptr<void>>(
-                std::make_shared<py::object>(std::move(result))
-            );
-        }
-
-        // Lazy path: return a ValidatorIterator that validates on demand
+        // Rust's GeneratorValidator never consumes the input: even a plain list
+        // becomes a lazy ValidatorIterator, so an item error surfaces on the
+        // next() that produced it rather than during validation.
         py::object source_iter = py::iter(py_in);
         std::string type_name = items_schema ? items_schema->effective_result_name() : "";
         std::string schema_repr = items_schema ? items_schema->name() : "None";
@@ -838,7 +810,7 @@ public:
                     // callable that consumes the iterator mid-validation keeps the
                     // item's error type and index instead of getting value_error.
                     wrap_detail::stack().push_back(err);
-                    ValidationError ve("validation", InputType::Python, err, py::object(item));
+                    ValidationError ve("ValidatorIterator", InputType::Python, err, py::object(item));
                     throw ve;
                 }
                 return value_to_python_with_type(result.value(), type_name);
