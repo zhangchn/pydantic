@@ -1171,6 +1171,23 @@ public:
                         return ValResult<std::shared_ptr<void>>(std::make_shared<PyObjectWrapper>(obj));
                     }
                 } else {
+                    // A parametrized generic model and an instance of the same
+                    // generic with different parameters (InnerT[int] vs the
+                    // subclassed InnerT[Any]) fail isinstance, but Rust accepts
+                    // the instance and forces revalidation: the field values are
+                    // read out of __dict__ (plus __pydantic_extra__) so this
+                    // model's field schemas run over them again.
+                    bool origin_instance = false;
+                    if (!generic_origin_.is_none()) {
+                        try { origin_instance = py::isinstance(obj, generic_origin_); } catch (...) {}
+                    }
+                    if (origin_instance) {
+                        py::object inner = model_data_dict(obj);
+                        if (!inner.is_none()) {
+                            PythonInput inner_input(inner);
+                            return fields_validator_->validate(inner_input, state);
+                        }
+                    }
                     // Input is a model instance of a different class — reject with model_type error
                     // (unless it's a dict, which is valid model input). A root model is
                     // different: its input is the root value, validated against the inner
@@ -1351,6 +1368,10 @@ public:
     // exact-class branch when the input is already a model instance).
     const py::object& expected_class() const { return class_; }
 
+    // Generic origin of a parametrized model class (InnerT for InnerT[int]).
+    // Instances of the origin are accepted and revalidated.
+    void set_generic_origin(py::object origin) { generic_origin_ = std::move(origin); }
+
     // The type name matching this model's actual result value:
     // - models wrapping a function-after/wrap/plain validator produce a
     //   py::object (the Python callable's output)
@@ -1372,6 +1393,27 @@ public:
         constexpr std::string_view prefix = "maybe_wrapper:";
         if (name.rfind(prefix, 0) == 0) return name.substr(prefix.size());
         return name;
+    }
+
+    // Rust reads __dict__ and merges __pydantic_extra__ into it when revalidating
+    // an existing instance, so extra fields reach the field lookup as well.
+    static py::object model_data_dict(const py::object& obj) {
+        if (!py_hasattr(obj, "__dict__")) return py::none();
+        py::object dict = obj.attr("__dict__");
+        if (!py::isinstance<py::dict>(dict)) return py::none();
+        py::object extra = py_hasattr(obj, "__pydantic_extra__")
+            ? py::object(obj.attr("__pydantic_extra__")) : py::none();
+        if (extra.is_none() || !py::isinstance<py::dict>(extra) ||
+            PyDict_Size(extra.ptr()) == 0) {
+            return dict;
+        }
+        PyObject* merged = PyDict_Copy(dict.ptr());
+        if (!merged) {
+            PyErr_Clear();
+            return dict;
+        }
+        PyDict_Merge(merged, extra.ptr(), 1);
+        return py::reinterpret_steal<py::object>(merged);
     }
 
     std::string effective_result_name() const override {
@@ -1478,6 +1520,7 @@ private:
     bool custom_init_ = false;
     bool root_model_ = false;
     py::object class_ = py::none();
+    py::object generic_origin_ = py::none();
     RevalidateInstances revalidate_ = RevalidateInstances::Never;
 };
 

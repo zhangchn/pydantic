@@ -1471,13 +1471,31 @@ static std::shared_ptr<Validator> build_from_py_dict(
         // Rust: ascii_only is a StrValidator field read with schema_or_config_same.
         std::optional<bool> ascii_only = sch_bool("ascii_only");
         if (!ascii_only) ascii_only = cfg_bool("ascii_only");
-        bool has_pattern = schema.contains("pattern") && py::isinstance<py::str>(schema["pattern"]);
+        // Rust accepts a str or a compiled re.Pattern; a compiled one is kept
+        // as-is and matched with the python re engine.
+        py::object pattern_obj = py::none();
+        bool pattern_compiled = false;
+        std::optional<std::string> pattern_str;
+        if (schema.contains("pattern")) {
+            py::object p = schema["pattern"];
+            if (py::isinstance<py::str>(p)) {
+                pattern_str = p.cast<std::string>();
+            } else if (py::hasattr(p, "pattern")) {
+                pattern_obj = p;
+                pattern_compiled = true;
+                pattern_str = py::getattr(p, "pattern").cast<std::string>();
+            }
+        }
+        bool has_pattern = pattern_str.has_value();
         if (min_len || max_len || has_pattern || strip_ws || to_lower || to_upper ||
             ascii_only.value_or(false)) {
             auto v = std::make_shared<StrConstrainedValidator>();
             if (min_len) v->min_length = min_len;
             if (max_len) v->max_length = max_len;
-            if (has_pattern) v->pattern = schema["pattern"].cast<std::string>();
+            if (has_pattern) {
+                v->pattern = *pattern_str;
+                if (pattern_compiled) v->pattern_re = pattern_obj;
+            }
             if (strip_ws) v->strip_whitespace = *strip_ws;
             if (to_lower) v->to_lower = *to_lower;
             if (to_upper) v->to_upper = *to_upper;
@@ -1973,7 +1991,9 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("strict_schema")) {
             strict = build_from_py_dict(schema["strict_schema"].cast<py::dict>(), config, definitions);
         }
-        return std::make_shared<LaxOrStrictValidator>(lax, strict);
+        auto lv = std::make_shared<LaxOrStrictValidator>(lax, strict);
+        lv->declared = py_bool_opt(schema, "strict");
+        return lv;
     }
 
     // --- JsonOrPython ---
@@ -2145,6 +2165,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("variadic_item_index")) {
             tv->variadic = true;
         }
+        tv->fixed = schema.contains("items_schema") && !schema.contains("variadic_item_index");
         tv->strict = strict_opt_py(schema, config);
         tv->fail_fast = py_bool(schema, "fail_fast");
         return tv;
@@ -2273,6 +2294,12 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("cls")) {
             try { model_cls = schema["cls"].cast<py::object>(); } catch (...) {}
         }
+        // pydantic records the unparametrized class of a generic model so the
+        // validator can still accept instances of it (see Rust model.rs).
+        py::object generic_origin = py::none();
+        if (schema.contains("generic_origin") && !schema["generic_origin"].is_none()) {
+            try { generic_origin = schema["generic_origin"].cast<py::object>(); } catch (...) {}
+        }
 
         // Parse revalidate_instances from schema or the model's own config
         // (models ignore the parent config and always use the config from this model)
@@ -2300,6 +2327,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
             custom_init = schema["custom_init"].cast<bool>();
         }
         auto v = std::make_shared<ModelValidator>(inner, model_name, /*frozen=*/false, custom_init, root_model, model_cls, revalidate);
+        v->set_generic_origin(generic_origin);
         return v;
     }
 
