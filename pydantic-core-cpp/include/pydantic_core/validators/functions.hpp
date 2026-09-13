@@ -237,6 +237,30 @@ inline std::optional<ValError> take_pending(py::error_already_set& e) {
 }
 } // namespace wrap_detail
 
+// Rust names a function validator "<type>[<function name>()]", appending the
+// inner schema name for before/after; the union uses that label for each
+// choice's line errors and for the "N validation errors for ..." header.
+inline std::string python_function_name(const py::object& func) {
+    try {
+        return py::str(func.attr("__name__")).cast<std::string>();
+    } catch (...) {
+        PyErr_Clear();
+    }
+    try {
+        return py::repr(func).cast<std::string>();
+    } catch (...) {
+        PyErr_Clear();
+    }
+    return std::string();
+}
+
+inline std::string function_display_name(const char* kind, const py::object& func,
+                                         const std::shared_ptr<Validator>& inner) {
+    std::string out = std::string(kind) + "[" + python_function_name(func) + "()";
+    if (inner) out += ", " + inner->display_name();
+    return out + "]";
+}
+
 // FunctionBeforeValidator - runs Python function before validation
 // Python signature: func(input, info) -> transformed_input
 class FunctionBeforeValidator : public Validator {
@@ -304,6 +328,10 @@ public:
     }
 
     std::string name() const override { return "function-before"; }
+
+    std::string display_name() const override {
+        return function_display_name("function-before", py_func_, inner_);
+    }
 
     std::shared_ptr<Validator> inner_validator() const override { return inner_; }
 
@@ -823,6 +851,10 @@ public:
 
     std::string name() const override { return "function-after"; }
 
+    std::string display_name() const override {
+        return function_display_name("function-after", py_func_, inner_);
+    }
+
     // Rust FunctionAfterValidator::validate_assignment: run the inner
     // assignment validation, then hand its result to the callable.
     ValResult<std::shared_ptr<void>> validate_assignment(
@@ -940,6 +972,10 @@ public:
     }
 
     std::string name() const override { return "function-plain"; }
+
+    std::string display_name() const override {
+        return function_display_name("function-plain", py_func_, std::shared_ptr<Validator>());
+    }
     void set_py_func(py::object func) { py_func_ = std::move(func); }
 
 private:
@@ -1028,6 +1064,10 @@ public:
     }
 
     std::string name() const override { return "function-wrap"; }
+
+    std::string display_name() const override {
+        return function_display_name("function-wrap", py_func_, std::shared_ptr<Validator>());
+    }
 
     // Assignment: delegate straight to the inner validator (the wrap
     // function itself is not re-run on assignments).

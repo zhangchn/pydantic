@@ -1197,8 +1197,14 @@ class SchemaValidator:
                     # If the C++ validator reused an existing instance (exact
                     # union-class match), keep it as-is
                     cls = choice.get("cls")
-                    if cls is not None and isinstance(data, cls):
-                        return data
+                    if cls is not None:
+                        try:
+                            if isinstance(data, cls):
+                                return data
+                        except TypeError:
+                            # A TypedDict class refuses instance checks, so the
+                            # structural conversion below decides instead.
+                            pass
                     result = self._dict_to_model(data, choice)
                     if result != data:
                         return result

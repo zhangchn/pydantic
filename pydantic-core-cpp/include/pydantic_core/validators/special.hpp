@@ -1223,6 +1223,10 @@ public:
             );
         }
 
+        // Rust notes that a non-UUID input is a coercion (so a smart union knows
+        // an exact choice still wins); a JSON string stays an exact match.
+        if (state.input_type() == InputType::Python) state.floor_exactness(Exactness::Lax);
+
         // String: parse it (Rust: UuidParsing on failure)
         if (py::isinstance<py::str>(input_py)) {
             std::string uuid_str = py::str(input_py).cast<std::string>();
@@ -1533,6 +1537,10 @@ private:
                 ErrorType(ErrorType::Kind::IsInstanceType, "class", class_repr_),
                 state.location(), input.as_error_value().repr);
         }
+
+        // Rust floors exactness to Lax here: past this point a member is chosen by
+        // coercing the input, never by it already being the member.
+        state.floor_exactness(Exactness::Lax);
 
         // Match on the member value, with the coercion Rust applies per sub_type.
         std::vector<PyObject*> candidates;
