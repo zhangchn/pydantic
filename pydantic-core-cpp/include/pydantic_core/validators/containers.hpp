@@ -299,9 +299,9 @@ public:
                 const auto& entry = entries[ei];
                 last_entry = (ei == entries.size() - 1);
                 bool is_last_partial = state.is_partial() && last_entry;
-                state.location().push(entry.key);
-                ValidationState sub_state = state.sub_copy(state.coerce_strings());
                 py::object key_obj = dict->get_key(entry.key).value_or(py::str(entry.key));
+                push_key_loc(state.location(), key_obj, entry.key);
+                ValidationState sub_state = state.sub_copy(state.coerce_strings());
                 py::object val_obj = dict->get_value(entry.key).value_or(py::none());
                 bool skip_entry = false;
 
@@ -385,6 +385,28 @@ public:
             }
             return ValResult<std::shared_ptr<void>>(std::make_shared<py::dict>(std::move(result_dict)));
         }
+    }
+
+    // Rust builds the location item straight from the key object, so a dict with
+    // int keys reports an integer index instead of the stringified key.
+    static void push_key_loc(Location& location, const py::object& key_obj, const std::string& fallback) {
+        if (py::isinstance<py::str>(key_obj)) {
+            try {
+                location.push(key_obj.cast<std::string>());
+                return;
+            } catch (...) {}
+        }
+        if (PyLong_Check(key_obj.ptr())) {
+            try {
+                location.push(py::cast<int64_t>(key_obj));
+                return;
+            } catch (...) {}
+        }
+        try {
+            location.push(py::repr(key_obj).cast<std::string>());
+            return;
+        } catch (...) {}
+        location.push(fallback);
     }
 
     std::string name() const override { return "dict"; }
