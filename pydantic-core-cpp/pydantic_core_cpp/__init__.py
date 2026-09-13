@@ -1302,9 +1302,9 @@ class SchemaValidator:
                 # Nested inline model schemas have their cls removed during
                 # extraction; recover it via the schema ref
                 cls = self._model_classes.get(schema.get("ref"))
-            inner_schema = schema.get("schema", {})
-            if isinstance(inner_schema, dict) and inner_schema.get("type") in ("model-fields", "typed-dict"):
-                data = self._process_model_fields(data, inner_schema)
+            fields_schema = self._fields_schema(schema.get("schema", {}))
+            if fields_schema is not None:
+                data = self._process_model_fields(data, fields_schema)
             if cls is not None and callable(cls):
                 # Direct model schema (not in definitions) — use schema's own inner schema
                 extra = data.pop('__pydantic_extra__', None)
@@ -1329,6 +1329,36 @@ class SchemaValidator:
 
         return data
 
+    def _fields_schema(self, schema, _depth=0):
+        """Find the model-fields/typed-dict node a model schema validates with.
+
+        A model-level model_validator (mode=before/after/wrap/plain) wraps the
+        fields schema in a function-* node, so the fields are only reachable by
+        stepping through the wrappers; Rust reaches them directly because its
+        model validator owns them.
+        """
+        if not isinstance(schema, dict) or _depth > 12:
+            return None
+        if schema.get("type") in ("model-fields", "typed-dict"):
+            return schema
+        inner = schema.get("schema")
+        if inner is not None:
+            found = self._fields_schema(inner, _depth + 1)
+            if found is not None:
+                return found
+        for key in ("python_schema", "json_schema", "strict_schema", "lax_schema"):
+            inner = schema.get(key)
+            if inner is not None:
+                found = self._fields_schema(inner, _depth + 1)
+                if found is not None:
+                    return found
+        ref = schema.get("schema_ref")
+        if isinstance(ref, str):
+            for defn in self._schema.get("definitions", []) or []:
+                if isinstance(defn, dict) and defn.get("ref") == ref:
+                    return self._fields_schema(defn, _depth + 1)
+        return None
+
     def _build_model(self, data, cls, ref):
         """Build a model instance from dict data by looking up the definition ref.
 
@@ -1352,9 +1382,9 @@ class SchemaValidator:
                 # Root model definitions wrap the value via _dict_to_model
                 if defn.get("type") == "model" and defn.get("root_model"):
                     return self._dict_to_model(data, defn)
-                inner_schema = defn.get("schema", {})
-                if isinstance(inner_schema, dict) and inner_schema.get("type") in ("model-fields", "typed-dict"):
-                    data = self._process_model_fields(data, inner_schema)
+                fields_schema = self._fields_schema(defn.get("schema", {}))
+                if fields_schema is not None:
+                    data = self._process_model_fields(data, fields_schema)
                 break
 
         # Extract __pydantic_extra__ from data if present
