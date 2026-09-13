@@ -105,7 +105,8 @@ public:
         std::optional<std::shared_ptr<void>> best_value;
         std::optional<Exactness> best_exactness;
         std::string best_type_name;
-        for (auto& validator : validators_) {
+        for (size_t i = 0; i < validators_.size(); ++i) {
+            auto& validator = validators_[i];
             if (smart) state.set_exactness(Exactness::Exact);
             auto result = validator->validate(input, state);
             if (result.is_ok()) {
@@ -143,7 +144,7 @@ public:
             }
             if (custom_error_type_) continue;
             if (!err.has_line_errors()) continue;
-            const std::string label = validator->display_name();
+            const std::string label = choice_label(i);
             for (const auto& le : err.line_errors()) {
                 auto copy = std::make_shared<ValLineError>(*le);
                 size_t at = std::min(own_loc_depth, copy->location.items.size());
@@ -196,7 +197,7 @@ public:
         std::string descr;
         for (size_t i = 0; i < validators_.size(); ++i) {
             if (i) descr += ",";
-            descr += validators_[i] ? validators_[i]->display_name() : std::string("any");
+            descr += choice_label(i);
         }
         display_name_cache_ = "union[" + descr + "]";
         return *display_name_cache_;
@@ -211,8 +212,20 @@ public:
     // choice that succeeds wins even if it needed a coercion.
     void set_left_to_right(bool value) { left_to_right_ = value; }
 
+    // Rust keeps a tag label next to each choice (a tagged union is built from
+    // (schema, label) pairs) and uses it in place of the choice's schema name.
+    void set_choice_labels(std::vector<std::string> labels) { labels_ = std::move(labels); }
+
 private:
+    // Rust uses the tag label when pydantic supplied one, else the validator's
+    // own schema-shaped name.
+    std::string choice_label(size_t i) const {
+        if (i < labels_.size() && !labels_[i].empty()) return labels_[i];
+        return validators_[i] ? validators_[i]->display_name() : std::string("any");
+    }
+
     std::vector<std::shared_ptr<Validator>> validators_;
+    std::vector<std::string> labels_;
     mutable std::string last_type_name_;
     mutable std::optional<std::string> display_name_cache_;
     std::optional<std::string> custom_error_type_;

@@ -2011,14 +2011,26 @@ static std::shared_ptr<Validator> build_from_py_dict(
     // --- Union ---
     if (type == "union") {
         std::vector<std::shared_ptr<Validator>> choices;
+        std::vector<std::string> labels;
         if (schema.contains("choices")) {
             auto choices_list = schema["choices"].cast<py::list>();
             for (auto item : choices_list) {
-                auto choice = build_from_py_dict(item.cast<py::dict>(), config, definitions);
-                choices.push_back(choice);
+                // pydantic spells a tagged choice as a (schema, label) pair; the
+                // label replaces the choice's schema name in the error loc.
+                py::object choice_obj = py::reinterpret_borrow<py::object>(item);
+                std::string label;
+                if (py::isinstance<py::tuple>(choice_obj)) {
+                    auto pair = choice_obj.cast<py::tuple>();
+                    choice_obj = pair[0];
+                    try { label = py::str(pair[1]).cast<std::string>(); }
+                    catch (const py::error_already_set&) { PyErr_Clear(); }
+                }
+                choices.push_back(build_from_py_dict(choice_obj.cast<py::dict>(), config, definitions));
+                labels.push_back(std::move(label));
             }
         }
         auto uv = std::make_shared<UnionValidator>(std::move(choices));
+        uv->set_choice_labels(std::move(labels));
         // Rust reads the mode off the schema: "smart" (default) or "left_to_right".
         if (py_str(schema, "mode") == "left_to_right") {
             uv->set_left_to_right(true);

@@ -238,12 +238,14 @@ ValResult<ValMatch<EitherTimedelta>> StringInput::validate_timedelta(bool strict
         return type_error(ErrorType::Kind::TimedeltaType, *this, this->current_location());
     }
     const std::string& s = *single_value_;
-    auto parsed = try_parse_timedelta_str(s);
+    std::string parse_error;
+    auto parsed = try_parse_timedelta_str(s, &parse_error);
     if (parsed) {
         return ValMatch<EitherTimedelta>::lax(EitherTimedelta(*parsed));
     }
+    if (parse_error.empty()) parse_error = "unable to parse string as an ISO 8601 duration";
     return ValError::line_error(
-        ErrorType(ErrorType::Kind::TimedeltaParsing, "error", "unable to parse string as an ISO 8601 duration"),
+        ErrorType(ErrorType::Kind::TimedeltaParsing, "error", parse_error),
         this->current_location(),
         this->as_error_value().repr
     );

@@ -1292,12 +1292,13 @@ ValResult<ValMatch<EitherTimedelta>> PythonInput::validate_timedelta(bool strict
     if (is_str() && !strict) {
         // Lax mode: try to parse ISO 8601 duration string
         std::string s = as_str();
-        auto parsed = try_parse_timedelta_str(s);
+        std::string parse_error;
+        auto parsed = try_parse_timedelta_str(s, &parse_error);
         if (parsed) {
             return ValMatch<EitherTimedelta>::lax(EitherTimedelta(*parsed));
         }
         // A bare number (e.g. "30") expects a "day" identifier (e.g. "30d").
-        std::string err_msg = "unable to parse string as an ISO 8601 duration";
+        std::string err_msg = parse_error.empty() ? "unable to parse string as an ISO 8601 duration" : parse_error;
         if (is_bare_number(s)) err_msg = "\"day\" identifier";
         return ValError::line_error(
             ErrorType(ErrorType::Kind::TimedeltaParsing, "error", err_msg),
@@ -1309,11 +1310,12 @@ ValResult<ValMatch<EitherTimedelta>> PythonInput::validate_timedelta(bool strict
     if (is_bytes() && !strict) {
         // Lax mode: decode bytes as UTF-8 and try to parse a duration
         std::string s = py::bytes(obj_).cast<std::string>();
-        auto parsed = try_parse_timedelta_str(s);
+        std::string parse_error;
+        auto parsed = try_parse_timedelta_str(s, &parse_error);
         if (parsed) {
             return ValMatch<EitherTimedelta>::lax(EitherTimedelta(*parsed));
         }
-        std::string err_msg = "unable to parse string as an ISO 8601 duration";
+        std::string err_msg = parse_error.empty() ? "unable to parse string as an ISO 8601 duration" : parse_error;
         if (is_bare_number(s)) err_msg = "\"day\" identifier";
         return ValError::line_error(
             ErrorType(ErrorType::Kind::TimedeltaParsing, "error", err_msg),

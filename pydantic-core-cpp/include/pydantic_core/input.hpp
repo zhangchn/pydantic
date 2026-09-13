@@ -197,16 +197,24 @@ inline bool all_digits(const std::string& s, size_t b, size_t e) {
 // fraction digits are truncated rather than rejected, and hours are capped at
 // 23 once a days prefix has already carried the date part.
 inline bool parse_time_tail(const std::string& t, bool hours_capped,
-                            long long* seconds, long long* micros) {
+                            long long* seconds, long long* micros,
+                            bool* extra_characters = nullptr) {
     size_t c1 = t.find(':');
     if (c1 == std::string::npos) return false;
     size_t c2 = t.find(':', c1 + 1);
     if (c2 == std::string::npos) {
         if (c1 < 2 || !all_digits(t, 0, c1)) return false;
-        if (t.size() - (c1 + 1) != 2 || !all_digits(t, c1 + 1, t.size())) return false;
+        if (t.size() - (c1 + 1) < 2 || !all_digits(t, c1 + 1, c1 + 3)) return false;
         long long h = std::stoll(t.substr(0, c1));
         long long m = std::stoll(t.substr(c1 + 1, 2));
         if (m > 59 || h > 999999999LL || (hours_capped && h > 23)) return false;
+        if (t.size() > c1 + 3) {
+            // speedate stops after the minutes field and reports what is left
+            // over, so "15:30.0001broken" is extra characters rather than a
+            // duration it could not read at all.
+            if (extra_characters) *extra_characters = true;
+            return false;
+        }
         *seconds = h * 3600 + m * 60;
         *micros = 0;
         return true;
@@ -262,7 +270,11 @@ inline bool is_bare_number(const std::string& s) {
     return seen_digit;
 }
 
-inline std::optional<Timedelta> try_parse_timedelta_str(const std::string& input) {
+// error_out (optional) receives speedate's own diagnosis when the input holds a
+// readable prefix followed by more characters, so callers can report that rather
+// than the generic "could not parse" text.
+inline std::optional<Timedelta> try_parse_timedelta_str(const std::string& input,
+                                                        std::string* error_out = nullptr) {
     std::string s = input;
     bool negative = false;
     if (!s.empty() && s[0] == '-') {
@@ -345,7 +357,9 @@ inline std::optional<Timedelta> try_parse_timedelta_str(const std::string& input
                     parsed_any = true;
                 } else {
                     long long tsec = 0, tmicro = 0;
-                    if (!timedelta_detail::parse_time_tail(s.substr(tail), true, &tsec, &tmicro)) {
+                    bool extra = false;
+                    if (!timedelta_detail::parse_time_tail(s.substr(tail), true, &tsec, &tmicro, &extra)) {
+                        if (extra && error_out) *error_out = "unexpected extra characters at the end of the input";
                         return std::nullopt;
                     }
                     total_seconds = day_part * 86400LL + tsec;
@@ -354,7 +368,11 @@ inline std::optional<Timedelta> try_parse_timedelta_str(const std::string& input
                 }
             } else {
                 long long tsec = 0, tmicro = 0;
-                if (!timedelta_detail::parse_time_tail(s, false, &tsec, &tmicro)) return std::nullopt;
+                bool extra = false;
+                if (!timedelta_detail::parse_time_tail(s, false, &tsec, &tmicro, &extra)) {
+                    if (extra && error_out) *error_out = "unexpected extra characters at the end of the input";
+                    return std::nullopt;
+                }
                 total_seconds = tsec;
                 micros = tmicro;
                 parsed_any = true;
