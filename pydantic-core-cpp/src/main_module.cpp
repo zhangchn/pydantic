@@ -1662,7 +1662,14 @@ struct SerNode {
         }
         if (type == "int" || type == "int-constrained") {
             if (py::isinstance<py::bool_>(value)) return value.cast<bool>() ? "true" : "false";
-            return std::to_string(value.cast<int64_t>());
+            int overflow = 0;
+            long long iv = PyLong_AsLongLongAndOverflow(value.ptr(), &overflow);
+            if (overflow != 0 || (iv == -1 && PyErr_Occurred())) {
+                // Rust prints its BigInt arm from the digits; do the same here.
+                PyErr_Clear();
+                return py::str(value).cast<std::string>();
+            }
+            return std::to_string(iv);
         }
         if (type == "float" || type == "float-constrained") {
             double d = value.cast<double>();

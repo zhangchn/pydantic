@@ -395,7 +395,9 @@ ValResult<ValMatch<EitherBytes>> PythonInput::validate_bytes(bool strict) const 
         if (PyBytes_CheckExact(obj_.ptr())) {
             return ValMatch<EitherBytes>::exact(EitherBytes(as_bytes()));
         }
-        return ValMatch<EitherBytes>::strict(EitherBytes(as_bytes()));
+        auto subclass_match = ValMatch<EitherBytes>::strict(EitherBytes(as_bytes()));
+        subclass_match.value().original = obj_;
+        return subclass_match;
     }
 
     if (!strict && is_bytes()) {
@@ -464,6 +466,29 @@ ValResult<ValMatch<bool>> PythonInput::validate_bool(bool strict) const {
     return type_error(ErrorType::Kind::BoolType, *this, this->current_location());
 }
 
+// jiter's python-mode int parse also takes a float-shaped string when the
+// value is whole ('1.0', '3.0000'), but rejects an exponent, a trailing dot
+// ('1.') or a leading one ('.5').
+static std::optional<int64_t> whole_float_as_int(const std::string& s) {
+    size_t i = 0;
+    if (i < s.size() && (s[i] == '+' || s[i] == '-')) i++;
+    size_t int_start = i;
+    while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) i++;
+    if (i == int_start) return std::nullopt;
+    if (i >= s.size() || s[i] != '.') return std::nullopt;
+    i++;
+    size_t frac_start = i;
+    while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) i++;
+    if (i == frac_start || i != s.size()) return std::nullopt;
+    try {
+        double d = std::stod(s);
+        if (std::isnan(d) || std::isinf(d) || std::floor(d) != d) return std::nullopt;
+        return static_cast<int64_t>(d);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 ValResult<ValMatch<EitherInt>> PythonInput::validate_int(bool strict) const {
     if (is_int()) {
         // Rust upcasts a non-bool int subclass to a plain int and marks the
@@ -480,6 +505,12 @@ ValResult<ValMatch<EitherInt>> PythonInput::validate_int(bool strict) const {
                 uint64_t v = obj_.cast<uint64_t>();
                 return wrap(EitherInt(v));
             } catch (...) {
+                // Past uint64 the value is still an int for Rust (EitherInt::
+                // BigInt), so keep the Python object rather than rejecting it.
+                if (PyLong_Check(obj_.ptr())) {
+                    return ValMatch<EitherInt>::exact(
+                        EitherInt(py::reinterpret_borrow<py::object>(obj_)));
+                }
                 return type_error(ErrorType::Kind::IntType, *this, this->current_location());
             }
         }
@@ -541,6 +572,9 @@ ValResult<ValMatch<EitherInt>> PythonInput::validate_int(bool strict) const {
                                                 as_error_value().repr);
                 }
                 if (endp && *endp != '\0') {
+                    if (auto whole = whole_float_as_int(cleaned)) {
+                        return ValMatch<EitherInt>::lax(EitherInt(*whole));
+                    }
                     // Not a plain integer (e.g. "1.5", "12abc") — Rust tries Python int()
                     // for strings with underscores/whitespace; reject otherwise.
                     return type_error(ErrorType::Kind::IntParsing, *this, this->current_location());

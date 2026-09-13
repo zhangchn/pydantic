@@ -60,6 +60,11 @@ struct EitherBytes {
     EitherBytes(const std::vector<uint8_t>& b) : data(b) {}
     EitherBytes(std::string_view b) : data(b) {}
     
+    // Set when the value came from a Python bytes subclass: Rust returns the
+    // input object itself, so the subclass has to survive to the output.
+    // Declared after `data` so the existing layout-based casts keep working.
+    py::object original;
+
     std::vector<uint8_t> to_vector() const {
         if (auto* v = std::get_if<std::vector<uint8_t>>(&data)) {
             return *v;

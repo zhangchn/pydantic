@@ -1001,6 +1001,10 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
         try {
             auto* ei = static_cast<EitherInt*>(value.get());
             if (ei) {
+                // Past the uint64 range the arm is a live Python int (Rust's
+                // EitherInt::BigInt); reading it as a fixed-width int would
+                // hand back the pointer instead of the value.
+                if (ei->is_python()) return ei->as_python();
                 if (auto i64 = ei->as_i64()) {
                     return py::int_(*i64);
                 }
@@ -1032,6 +1036,10 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
         } catch (...) {}
     }
     if (try_all || matches_type("bytes")) {
+        try {
+            auto* eb = static_cast<EitherBytes*>(value.get());
+            if (eb && eb->original.ptr()) return eb->original;
+        } catch (...) {}
         try {
             auto* v = static_cast<std::vector<uint8_t>*>(value.get());
             if (v) return py::bytes(reinterpret_cast<const char*>(v->data()), v->size());
