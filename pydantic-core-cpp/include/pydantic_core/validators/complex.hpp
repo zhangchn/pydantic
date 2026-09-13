@@ -419,9 +419,14 @@ private:
     bool has_custom_error() const { return !custom_error_type_.empty(); }
 
     ValError custom_error(const Input& input, ValidationState& state) const {
-        ErrorType err(ErrorType::Kind::CustomError);
-        err.context()["custom_error_type"] = custom_error_type_;
-        if (!custom_error_message_.empty()) err.context()["msg"] = custom_error_message_;
+        // Rust builds a PydanticCustomError: the type is the caller's code and the
+        // message is the caller's text, with no ctx left behind.
+        ErrorType err = ErrorType::build_known_type(custom_error_type_);
+        if (err.is_custom()) {
+            err = ErrorType(custom_error_type_,
+                            custom_error_message_.empty() ? std::string("Validation error")
+                                                          : custom_error_message_);
+        }
         return ValError::line_error(std::move(err), state.location(), input.as_error_value().repr);
     }
 

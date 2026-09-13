@@ -1468,8 +1468,12 @@ static std::shared_ptr<Validator> build_from_py_dict(
         // overrides the config value.
         std::optional<bool> coerce_numbers = sch_bool("coerce_numbers_to_str");
         if (!coerce_numbers) coerce_numbers = cfg_bool("coerce_numbers_to_str");
+        // Rust: ascii_only is a StrValidator field read with schema_or_config_same.
+        std::optional<bool> ascii_only = sch_bool("ascii_only");
+        if (!ascii_only) ascii_only = cfg_bool("ascii_only");
         bool has_pattern = schema.contains("pattern") && py::isinstance<py::str>(schema["pattern"]);
-        if (min_len || max_len || has_pattern || strip_ws || to_lower || to_upper) {
+        if (min_len || max_len || has_pattern || strip_ws || to_lower || to_upper ||
+            ascii_only.value_or(false)) {
             auto v = std::make_shared<StrConstrainedValidator>();
             if (min_len) v->min_length = min_len;
             if (max_len) v->max_length = max_len;
@@ -1478,6 +1482,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
             if (to_lower) v->to_lower = *to_lower;
             if (to_upper) v->to_upper = *to_upper;
             if (coerce_numbers) v->coerce_numbers_to_str = *coerce_numbers;
+            if (ascii_only) v->ascii_only = *ascii_only;
             return v;
         }
         auto v = std::make_shared<StringValidator>();

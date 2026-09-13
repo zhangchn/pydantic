@@ -436,6 +436,19 @@ auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str)
             }
         }
 
+        // Rust checks ascii_only right after stripping and before the lengths.
+        if (ascii_only) {
+            for (char c : str) {
+                if (static_cast<unsigned char>(c) > 127) {
+                    return ValError::line_error(
+                        ErrorType(ErrorType::Kind::StringNotAscii),
+                        state.location(),
+                        python_str_repr(str)
+                    );
+                }
+            }
+        }
+
         // Length check using char count (Unicode-aware approximation)
         size_t char_count = str.size();  // UTF-8 byte count as proxy
         if (min_length.has_value() && char_count < min_length.value()) {
@@ -453,18 +466,6 @@ auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str)
                 state.location(),
                 python_str_repr(str)
             );
-        }
-
-        if (ascii_only) {
-            for (char c : str) {
-                if (static_cast<unsigned char>(c) > 127) {
-                    return ValError::line_error(
-                        ErrorType(ErrorType::Kind::StringNotAscii),
-                        state.location(),
-                        python_str_repr(str)
-                    );
-                }
-            }
         }
 
         // Apply transformations

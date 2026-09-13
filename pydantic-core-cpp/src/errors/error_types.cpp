@@ -306,7 +306,7 @@ std::string ErrorType::message_template() const {
         {Kind::FiniteNumber, "Input should be a finite number"},
         {Kind::TooShort, "{field_type} should have at least {min_length} item{s} after validation, not {actual_length}"},
         {Kind::TooLong, "{field_type} should have at most {max_length} item{s} after validation, not {actual_length}"},
-        {Kind::StringNotAscii, "Input should be ASCII"},
+        {Kind::StringNotAscii, "String should contain only ASCII characters"},
 
         // Date/Time errors
         {Kind::DateType, "Input should be a valid date"},

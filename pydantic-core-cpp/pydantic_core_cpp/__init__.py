@@ -37,6 +37,7 @@ from ._pydantic_core_cpp import (
     Url,
     ValidationError,
     __version__,
+    from_json as _native_from_json,
     to_json,
     to_jsonable_python,
 )
@@ -1966,8 +1967,19 @@ def __getattr__(name: str) -> _Any:
 # 4. Standalone functions (still from Rust until C++ implements them)
 # ============================================================================
 
-def from_json(*args: _Any, **kwargs: _Any) -> _Any:
-    return _rust().from_json(*args, **kwargs)
+def from_json(
+    data: _Any,
+    *,
+    allow_inf_nan: bool = True,
+    cache_strings: _Any = 'all',
+    allow_partial: _Any = False,
+) -> _Any:
+    return _native_from_json(
+        data,
+        allow_inf_nan=allow_inf_nan,
+        cache_strings=cache_strings,
+        allow_partial=allow_partial,
+    )
 
 
 # ============================================================================

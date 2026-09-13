@@ -4363,6 +4363,44 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
           py::arg("serialize_as_any") = false, py::arg("polymorphic_serialization") = py::none(),
           py::arg("context") = py::none());
 
+    // Rust's from_json: parse JSON into Python objects, optionally repairing
+    // truncated input (jiter's allow_partial).  A parse failure is a ValueError
+    // carrying jiter's own wording, not the json module's.
+    m.def("from_json",
+          [](py::object data, bool allow_inf_nan, py::object cache_strings,
+             py::object allow_partial) -> py::object {
+              (void)allow_inf_nan;
+              (void)cache_strings;
+              std::string text;
+              if (PyUnicode_Check(data.ptr())) {
+                  text = py::cast<std::string>(data);
+              } else if (PyBytes_Check(data.ptr())) {
+                  text.assign(PyBytes_AS_STRING(data.ptr()), PyBytes_GET_SIZE(data.ptr()));
+              } else if (PyByteArray_Check(data.ptr())) {
+                  text.assign(PyByteArray_AS_STRING(data.ptr()), PyByteArray_GET_SIZE(data.ptr()));
+              } else {
+                  throw py::type_error("Expected bytes, bytearray or str");
+              }
+              bool partial = false;
+              if (!allow_partial.is_none()) {
+                  if (py::isinstance<py::bool_>(allow_partial)) {
+                      partial = allow_partial.cast<bool>();
+                  } else if (py::isinstance<py::str>(allow_partial)) {
+                      std::string mode = allow_partial.cast<std::string>();
+                      partial = (mode == "on" || mode == "trailing-strings");
+                  }
+              }
+              try {
+                  return partial ? json_to_pyobj_partial(text) : json_to_pyobj(text);
+              } catch (const py::error_already_set& e) {
+                  std::string python_message = py::str(e.value()).cast<std::string>();
+                  auto diagnosis = json_diagnose_parse_error(text);
+                  throw py::value_error(diagnosis.value_or(python_message));
+              }
+          },
+          py::arg("data"), py::kw_only(), py::arg("allow_inf_nan") = true,
+          py::arg("cache_strings") = "all", py::arg("allow_partial") = false);
+
     // Url class - URL type with parsing and validation
     py::class_<Url>(m, "Url")
         .def(py::init([](const std::string& url_str) {
