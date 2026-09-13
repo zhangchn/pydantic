@@ -37,7 +37,8 @@ static std::string py_default_to_json_str(const py::object& py_default) {
 static ExtraBehavior extra_behavior_from_string(const std::string& s) {
     if (s == "allow") return ExtraBehavior::Allow;
     if (s == "forbid") return ExtraBehavior::Forbid;
-    return ExtraBehavior::Ignore;
+    if (s == "ignore") return ExtraBehavior::Ignore;
+    throw SchemaError("Invalid extra_behavior: `" + s + "`");
 }
 
 // Forward declarations for internal recursive schema parsing
@@ -1263,6 +1264,19 @@ static bool py_bool(const py::dict& d, const char* key, bool fallback = false) {
     return false;
 }
 
+// Same lookup for validators that keep strict as "not declared" rather than false.
+static std::optional<bool> strict_opt_py(const py::dict& schema, const py::dict& config) {
+    if (auto declared = py_bool_opt(schema, "strict")) return declared;
+    return py_bool_opt(config, "strict");
+}
+
+// Rust resolves is_strict(schema, config) once per validator: an explicit schema
+// flag wins, then the config the validator is built under, otherwise not strict.
+static bool is_strict_py(const py::dict& schema, const py::dict& config) {
+    if (auto declared = strict_opt_py(schema, config)) return *declared;
+    return false;
+}
+
 // Forward declaration for recursive building
 static std::shared_ptr<Validator> build_from_py_dict(
     const py::dict& schema,
@@ -1311,9 +1325,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
     if (type == "missing-sentinel") return std::make_shared<MissingSentinelValidator>();
     if (type == "bool") {
         auto v = std::make_shared<BoolValidator>();
-        if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
-            v->strict = schema["strict"].cast<bool>();
-        }
+        v->strict = is_strict_py(schema, config);
         return v;
     }
 
@@ -1321,9 +1333,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("multiple_of") || schema.contains("le") || schema.contains("ge") ||
             schema.contains("lt") || schema.contains("gt")) {
             auto v = std::make_shared<ConstrainedIntValidator>();
-            if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
-                v->strict = schema["strict"].cast<bool>();
-            }
+            v->strict = is_strict_py(schema, config);
             auto get_i64 = [&](const char* k) -> std::optional<int64_t> {
                 if (!schema.contains(k)) return std::nullopt;
                 py::object val = schema[k];
@@ -1338,9 +1348,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
             return v;
         }
         auto v = std::make_shared<IntValidator>();
-        if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
-            v->strict = schema["strict"].cast<bool>();
-        }
+        v->strict = is_strict_py(schema, config);
         return v;
     }
 
@@ -1360,9 +1368,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
             schema.contains("lt") || schema.contains("gt")) {
             auto v = std::make_shared<ConstrainedFloatValidator>();
             v->allow_inf_nan = allow_inf_nan;
-            if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
-                v->strict = schema["strict"].cast<bool>();
-            }
+            v->strict = is_strict_py(schema, config);
             auto get_f = [&](const char* k) -> std::optional<double> {
                 if (!schema.contains(k)) return std::nullopt;
                 py::object val = schema[k];
@@ -1379,17 +1385,13 @@ static std::shared_ptr<Validator> build_from_py_dict(
         }
         auto v = std::make_shared<FloatValidator>();
         v->allow_inf_nan = allow_inf_nan;
-        if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
-            v->strict = schema["strict"].cast<bool>();
-        }
+        v->strict = is_strict_py(schema, config);
         return v;
     }
 
     if (type == "complex") {
         auto v = std::make_shared<ComplexValidator>();
-        if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
-            v->strict = schema["strict"].cast<bool>();
-        }
+        v->strict = is_strict_py(schema, config);
         return v;
     }
 
@@ -1454,9 +1456,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
             return v;
         }
         auto v = std::make_shared<StringValidator>();
-        if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
-            v->strict = schema["strict"].cast<bool>();
-        }
+        v->strict = is_strict_py(schema, config);
         if (coerce_numbers) v->coerce_numbers_to_str = *coerce_numbers;
         return v;
     }
@@ -1464,7 +1464,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
     if (type == "bytes" || type == "bytes-constrained" || type == "constr-bytes") {
         if (schema.contains("max_length") || schema.contains("min_length")) {
             auto v = std::make_shared<BytesConstrainedValidator>();
-            v->strict = py_bool_opt(schema, "strict");
+            v->strict = strict_opt_py(schema, config);
             auto ps = [&](const char* k) -> std::optional<size_t> {
                 if (!schema.contains(k)) return std::nullopt;
                 py::object val = schema[k];
@@ -1479,7 +1479,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
             return v;
         }
         auto bv = std::make_shared<BytesValidator>();
-        bv->strict = py_bool_opt(schema, "strict");
+        bv->strict = strict_opt_py(schema, config);
         if (config.contains("val_json_bytes")) {
             bv->val_json_bytes = config["val_json_bytes"].cast<std::string>();
         }
@@ -1488,7 +1488,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
 
     // --- Date/time validators ---
     if (type == "date") {
-        auto v = std::make_shared<DateValidator>(py_bool(schema, "strict"));
+        auto v = std::make_shared<DateValidator>(is_strict_py(schema, config));
         for (const char* k : {"gt", "lt", "ge", "le"}) {
             if (schema.contains(k) && !schema[k].is_none()) {
                 if (std::string(k) == "gt") v->gt = schema[k];
@@ -1503,7 +1503,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
         return v;
     }
     if (type == "time") {
-        auto v = std::make_shared<TimeValidator>(py_bool(schema, "strict"));
+        auto v = std::make_shared<TimeValidator>(is_strict_py(schema, config));
         for (const char* k : {"gt", "lt", "ge", "le"}) {
             if (schema.contains(k) && !schema[k].is_none()) {
                 if (std::string(k) == "gt") v->gt = schema[k];
@@ -1515,7 +1515,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
         return v;
     }
     if (type == "datetime") {
-        auto v = std::make_shared<DatetimeValidator>(py_bool(schema, "strict"));
+        auto v = std::make_shared<DatetimeValidator>(is_strict_py(schema, config));
         for (const char* k : {"gt", "lt", "ge", "le"}) {
             if (schema.contains(k) && !schema[k].is_none()) {
                 if (std::string(k) == "gt") v->gt = schema[k];
@@ -1532,7 +1532,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
         }
         return v;
     }
-    if (type == "timedelta") return std::make_shared<TimedeltaValidator>(py_bool(schema, "strict"));
+    if (type == "timedelta") return std::make_shared<TimedeltaValidator>(is_strict_py(schema, config));
 
     // --- URL validators ---
     if (type == "url") {
@@ -1567,9 +1567,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("default_path") && !schema["default_path"].is_none()) {
             v->default_path = schema["default_path"].cast<std::string>();
         }
-        if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
-            v->strict = schema["strict"].cast<bool>();
-        }
+        v->strict = is_strict_py(schema, config);
         return v;
     }
     if (type == "multi-host-url") {
@@ -1604,27 +1602,21 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("default_path") && !schema["default_path"].is_none()) {
             v->default_path = schema["default_path"].cast<std::string>();
         }
-        if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
-            v->strict = schema["strict"].cast<bool>();
-        }
+        v->strict = is_strict_py(schema, config);
         return v;
     }
 
     // --- UUID ---
     if (type == "uuid") {
         auto v = std::make_shared<UuidValidator>();
-        if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
-            v->strict = schema["strict"].cast<bool>();
-        }
+        v->strict = is_strict_py(schema, config);
         return v;
     }
 
     // --- Decimal ---
     if (type == "decimal" || type == "decimal-constrained") {
         auto v = std::make_shared<DecimalValidator>();
-        if (schema.contains("strict") && py::isinstance<py::bool_>(schema["strict"])) {
-            v->strict = schema["strict"].cast<bool>();
-        }
+        v->strict = is_strict_py(schema, config);
         auto get_u64 = [&](const char* key) -> std::optional<int64_t> {
             if (!schema.contains(key)) return std::nullopt;
             py::object val = schema[key];
@@ -1741,14 +1733,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
             } catch (const py::error_already_set&) {
                 PyErr_Clear();
             }
-            std::optional<bool> declared_strict;
-            if (schema.contains("strict")) {
-                try {
-                    declared_strict = schema["strict"].cast<bool>();
-                } catch (const py::error_already_set&) {
-                    PyErr_Clear();
-                }
-            }
+            std::optional<bool> declared_strict = strict_opt_py(schema, config);
             v->configure_class(std::move(cls), std::move(cls_members), std::move(sub_type),
                                EnumValidator::join_expected(value_reprs),
                                EnumValidator::type_qualname(schema["cls"].ptr()), declared_strict);
@@ -2099,7 +2084,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("max_length")) {
             v->max_length = schema["max_length"].cast<size_t>();
         }
-        v->strict = py_bool_opt(schema, "strict");
+        v->strict = strict_opt_py(schema, config);
         v->fail_fast = py_bool(schema, "fail_fast");
         return v;
     }
@@ -2142,7 +2127,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("variadic_item_index")) {
             tv->variadic = true;
         }
-        tv->strict = py_bool_opt(schema, "strict");
+        tv->strict = strict_opt_py(schema, config);
         tv->fail_fast = py_bool(schema, "fail_fast");
         return tv;
     }
@@ -2164,7 +2149,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
         }
         // Rust builds the dict with is_strict(schema, config); without the
         // schema flag a strict dict would still accept Mapping inputs.
-        v->strict = py_bool_opt(schema, "strict");
+        v->strict = strict_opt_py(schema, config);
         v->fail_fast = py_bool(schema, "fail_fast");
         return v;
     }
@@ -2172,7 +2157,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
     // --- Set ---
     if (type == "set" || type == "set-constrained" || type == "constr-set") {
         auto v = std::make_shared<SetValidator>();
-        v->strict = py_bool_opt(schema, "strict");
+        v->strict = strict_opt_py(schema, config);
         if (schema.contains("items_schema")) {
             v->items_schema = build_from_py_dict(schema["items_schema"].cast<py::dict>(), config, definitions);
         }
@@ -2187,7 +2172,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
     }
     if (type == "frozenset" || type == "frozenset-constrained") {
         auto v = std::make_shared<FrozenSetValidator>();
-        v->strict = py_bool_opt(schema, "strict");
+        v->strict = strict_opt_py(schema, config);
         if (schema.contains("items_schema")) {
             v->items_schema = build_from_py_dict(schema["items_schema"].cast<py::dict>(), config, definitions);
         }
@@ -2203,13 +2188,11 @@ static std::shared_ptr<Validator> build_from_py_dict(
 
     // --- Model ---
     if (type == "model") {
-        // Merge model's own config into the config dict for inner validators
-        py::dict inner_config = config;
+        // A model ignores the parent config and always uses the config from this
+        // model, so the inner validators are built from schema["config"] alone.
+        py::dict inner_config = py::dict();
         if (schema.contains("config") && py::isinstance<py::dict>(schema["config"])) {
-            py::dict model_config = schema["config"].cast<py::dict>();
-            for (auto item : model_config) {
-                inner_config[item.first] = item.second;
-            }
+            inner_config = schema["config"].cast<py::dict>();
         }
         std::shared_ptr<Validator> inner;
         if (schema.contains("schema")) {
@@ -2239,8 +2222,8 @@ static std::shared_ptr<Validator> build_from_py_dict(
             bool fa = false;
             if (schema.contains("from_attributes") && !schema["from_attributes"].is_none()) {
                 fa = schema["from_attributes"].cast<bool>();
-            } else if (config.contains("from_attributes") && py::isinstance<py::bool_>(config["from_attributes"])) {
-                fa = config["from_attributes"].cast<bool>();
+            } else if (inner_config.contains("from_attributes") && py::isinstance<py::bool_>(inner_config["from_attributes"])) {
+                fa = inner_config["from_attributes"].cast<bool>();
             }
             if (fa) {
                 if (auto mfv = std::dynamic_pointer_cast<ModelFieldsValidator>(inner)) {
@@ -2314,10 +2297,17 @@ static std::shared_ptr<Validator> build_from_py_dict(
     // (dataclass-args is handled separately below — its fields are a list,
     // not a dict, so the model-fields path must not intercept it)
     if (type == "model-fields" || type == "typed-dict") {
-        // A typed-dict carries its own config on the schema, and pydantic also
-        // spells extra_behavior as a typed-dict key. Both have to reach the field
-        // and extras validators built below, or e.g. str_to_lower is lost.
-        py::dict inner_config = config;
+        // A typed-dict ignores the parent config and always uses the config from
+        // this TypedDict; pydantic also spells extra_behavior as a typed-dict key.
+        // Both have to reach the field and extras validators built below, or e.g.
+        // str_to_lower is lost.
+        py::dict inner_config;
+        for (auto item : config) {
+            inner_config[item.first] = item.second;
+        }
+        if (type == "typed-dict") {
+            inner_config = py::dict();
+        }
         if (schema.contains("config") && py::isinstance<py::dict>(schema["config"])) {
             for (auto item : schema["config"].cast<py::dict>()) {
                 inner_config[item.first] = item.second;
