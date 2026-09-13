@@ -721,6 +721,16 @@ static void ser_warn_leave(bool discard) {
     }
 }
 
+// Depth of "a union is trying its candidates" regions. A serializer function
+// that rejects its value while a candidate is merely being tried is not a
+// warning: Rust keeps those errors for itself and only reports them once every
+// choice failed (union.rs register_union_serialization_warnings).
+static thread_local int g_ser_attempt_depth = 0;
+struct SerAttemptScope {
+    SerAttemptScope() { ++g_ser_attempt_depth; }
+    ~SerAttemptScope() { --g_ser_attempt_depth; }
+};
+
 static void ser_warn_register(const std::string& text) {
     auto& stack = ser_warn_stack();
     if (stack.empty() || !stack.back().enabled) return;
@@ -920,7 +930,17 @@ static bool handle_ser_call_error(const py::error_already_set& e, const std::str
     try {
         py::object unexpected = py::module_::import("pydantic_core_cpp").attr("PydanticSerializationUnexpectedValue");
         if (PyObject_IsInstance(exc, unexpected.ptr()) == 1) {
+            if (g_ser_check != 0 || g_ser_attempt_depth != 0) {
+                // Rust on_error: while a union checks its candidates the error
+                // propagates (Err(err)) so the next choice is tried; falling
+                // back to inference here would let the wrong branch succeed.
+                PyErr_SetObject(reinterpret_cast<PyObject*>(Py_TYPE(exc)), exc);
+                throw py::error_already_set();
+            }
+            std::string msg;
+            try { msg = py::str(e.value()).cast<std::string>(); } catch (...) { PyErr_Clear(); }
             PyErr_Clear();
+            ser_warn_register("PydanticSerializationUnexpectedValue(" + msg + ")");
             return true;
         }
     } catch (...) { PyErr_Clear(); }
@@ -1242,6 +1262,7 @@ struct SerNode {
             if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
         }
         if (type == "union") {
+            SerAttemptScope attempt;
             // Rust UnionChoices::serialize: try the choices left to right with
             // strict class checks, then again with lax (isinstance) checks.
             for (int level = 1; level <= 2; level++) {
@@ -1255,6 +1276,7 @@ struct SerNode {
             }
         }
         if (type == "tagged-union" && !tagged_left_to_right.empty()) {
+            SerAttemptScope attempt;
             // Rust TaggedUnionSerializer resolves the discriminator and
             // serializes with the matching choice. Reading it only from a dict
             // key (and guessing the key name) meant a validated model instance
@@ -1448,13 +1470,21 @@ struct SerNode {
                 return value;
             }
             if (type == "function-plain") {
-                if (info_arg) {
-                    auto info = make_ser_info(round_trip, "", context, include, exclude);
-                    return apply_return_ser(py_func(value, py::cast(info)), json_mode, exc_none, round_trip,
+                try {
+                    if (info_arg) {
+                        auto info = make_ser_info(round_trip, "", context, include, exclude);
+                        return apply_return_ser(py_func(value, py::cast(info)), json_mode, exc_none, round_trip,
+                                                include, exclude, by_alias, exclude_unset, exclude_defaults, context);
+                    }
+                    return apply_return_ser(py_func(value), json_mode, exc_none, round_trip,
                                             include, exclude, by_alias, exclude_unset, exclude_defaults, context);
+                } catch (const py::error_already_set& e) {
+                    // Rust (function.rs on_error + infer_to_python): a serializer
+                    // function that rejects its own value leaves a warning behind
+                    // and the value is serialized by inference instead.
+                    if (!handle_ser_call_error(e, func_name)) throw;
+                    return SerNode::serialize_any_value(value, exc_none, round_trip, json_mode);
                 }
-                return apply_return_ser(py_func(value), json_mode, exc_none, round_trip,
-                                        include, exclude, by_alias, exclude_unset, exclude_defaults, context);
             }
             if (type == "function-after" || type == "function-before" || type == "function-wrap") {
                 py::object handler = py::cpp_function([this, value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context](const py::object& v, py::object index_key) -> py::object {
@@ -1694,6 +1724,7 @@ struct SerNode {
             if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
         }
         if (type == "union") {
+            SerAttemptScope attempt;
             // Rust UnionChoices::serialize: strict pass, lax pass, then uncheck.
             for (int level = 1; level <= 2; level++) {
                 SerCheckScope scope(level);
@@ -2089,11 +2120,16 @@ struct SerNode {
             }
             py::object result;
             if (type == "function-plain") {
-                if (info_arg) {
-                    auto info = make_ser_info(round_trip, "", context, include, exclude);
-                    result = py_func(value, py::cast(info));
-                } else {
-                    result = py_func(value);
+                try {
+                    if (info_arg) {
+                        auto info = make_ser_info(round_trip, "", context, include, exclude);
+                        result = py_func(value, py::cast(info));
+                    } else {
+                        result = py_func(value);
+                    }
+                } catch (const py::error_already_set& e) {
+                    if (!handle_ser_call_error(e, func_name)) throw;
+                    return infer_json(value, ensure_ascii, indent);
                 }
             } else {
                 result = to_python(value, true, exc_none, round_trip, include, exclude, by_alias,
