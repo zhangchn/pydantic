@@ -1566,7 +1566,7 @@ struct SerNode {
                     for (auto item : seq) {
                         auto next = apply_ser_filter(py::int_(idx), inc, exc);
                         if (!next.omit) {
-                            jresult.append(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, next.include, next.exclude));
+                            jresult.append(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context));
                         }
                         idx++;
                     }
@@ -1576,7 +1576,7 @@ struct SerNode {
                 for (auto item : seq) {
                     auto next = apply_ser_filter(py::int_(idx), inc, exc);
                     if (!next.omit) {
-                        result.add(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, next.include, next.exclude));
+                        result.add(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context));
                     }
                     idx++;
                 }
@@ -1588,7 +1588,7 @@ struct SerNode {
                     for (auto item : seq) {
                         auto next = apply_ser_filter(py::int_(idx), inc, exc);
                         if (!next.omit) {
-                            jtemp.append(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, next.include, next.exclude));
+                            jtemp.append(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context));
                         }
                         idx++;
                     }
@@ -1598,7 +1598,7 @@ struct SerNode {
                 for (auto item : seq) {
                     auto next = apply_ser_filter(py::int_(idx), inc, exc);
                     if (!next.omit) {
-                        temp.add(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, next.include, next.exclude));
+                        temp.add(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context));
                     }
                     idx++;
                 }
@@ -1608,7 +1608,7 @@ struct SerNode {
                 for (auto item : seq) {
                     auto next = apply_ser_filter(py::int_(idx), inc, exc);
                     if (!next.omit) {
-                        result.append(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, next.include, next.exclude));
+                        result.append(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context));
                     }
                     idx++;
                 }
@@ -1650,7 +1650,7 @@ struct SerNode {
                 auto next = apply_ser_filter(py::int_(static_cast<py::ssize_t>(i)), inc, exc);
                 if (!next.omit) {
                     auto v = py::reinterpret_borrow<py::object>(item);
-                    temp.append(i < children.size() ? children[i]->to_python(check_item_type(children[i], v), json_mode, exc_none, round_trip, next.include, next.exclude) : children.back()->to_python(check_item_type(children.back(), v), json_mode, exc_none, round_trip, next.include, next.exclude));
+                    temp.append(i < children.size() ? children[i]->to_python(check_item_type(children[i], v), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context) : children.back()->to_python(check_item_type(children.back(), v), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context));
                 }
                 i++;
             }
