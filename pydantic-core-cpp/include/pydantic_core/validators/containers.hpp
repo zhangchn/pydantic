@@ -5,6 +5,7 @@
 #include "pydantic_core/python_input.hpp"
 #include "pydantic_core/string_input.hpp"
 #include "pydantic_core/py_time.hpp"
+#include "pydantic_core/validators/functions.hpp"
 #include <memory>
 #include <optional>
 #include <string>
@@ -808,23 +809,35 @@ public:
 
         // Create a C++ callable that validates a single item
         auto validator = items_schema;
+        // The iterator is consumed after this call returns, so the enclosing
+        // error location (the field name, or the path to the field) has to
+        // travel with it: Rust's ValidatorIterator borrows the state's location.
+        Location base_loc = state.location();
         auto validate_fn = py::cpp_function(
-            [validator, type_name](const py::object& item, size_t index) -> py::object {
+            [validator, type_name, base_loc](const py::object& item, size_t index) -> py::object {
                 if (!validator) {
                     return item;
                 }
+                Location loc = base_loc;
+                loc.push(static_cast<int64_t>(index));
                 PythonInput py_item(py::reinterpret_borrow<py::object>(item));
+                py_item.set_current_location(loc);
                 ValidationState sub_state;
-                sub_state.location().push(index);
+                sub_state.location() = loc;
                 auto result = validator->validate(py_item, sub_state);
                 if (result.is_err()) {
                     auto err = result.error();
-                    // Leaf validators don't propagate the accumulated location,
-                    // so prepend the item index here (matching Rust's
-                    // ValidatorIterator, which reports errors at (index, ...)).
+                    // Leaf validators build their line error from the input's
+                    // location, which the item input now carries; only fill in
+                    // the path when a leaf reported none of it.
                     for (const auto& le : err.line_errors()) {
-                        le->location.items.insert(le->location.items.begin(), static_cast<int64_t>(index));
+                        if (le->location.items.empty()) le->location = loc;
                     }
+                    // Rust re-raises the ValidationError and the enclosing
+                    // validator casts it back to these line errors, so a Python
+                    // callable that consumes the iterator mid-validation keeps the
+                    // item's error type and index instead of getting value_error.
+                    wrap_detail::stack().push_back(err);
                     ValidationError ve("validation", InputType::Python, err, py::object(item));
                     throw ve;
                 }

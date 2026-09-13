@@ -34,6 +34,51 @@ inline void error_type_context_from_py(ErrorType& et, const py::object& ctx) {
     }
 }
 
+// Wrap-function handler error propagation: when the inner validator fails
+// inside a Python wrap-handler, the typed ValError must reach the outer
+// function-wrap validator unchanged (Rust re-raises the ValidationError).
+// A stack of pending errors plus a marker exception text achieves this.
+namespace wrap_detail {
+inline constexpr const char* kMarker = "\x01PYC_WRAP_INNER_ERROR\x01";
+inline std::vector<ValError>& stack() {
+    static thread_local std::vector<ValError> s;
+    return s;
+}
+// If the caught Python exception is the inner ValidationError (raised by the
+// handler, possibly re-raised by the Python wrap function), pop and return
+// the inner error. The pending stack being non-empty is the signal that the
+// inner validation failed; we additionally require the exception to be a
+// ValidationError (not e.g. a TypeError raised by the wrap function itself).
+inline std::optional<ValError> take_pending(py::error_already_set& e) {
+    auto& s = stack();
+    if (s.empty()) return std::nullopt;
+    // The handler raises the actual ValidationError; accept it (or the legacy
+    // marker ValueError) so the typed inner error reaches the outer validator.
+    // We identify the inner error by its exception type name ("ValidationError")
+    // or the legacy marker message, since py::type::of<ValidationError> is not
+    // available for register_exception-registered types.
+    bool is_inner = false;
+    try {
+        py::object exc_type = e.type();
+        std::string type_name = py::str(exc_type.attr("__name__")).cast<std::string>();
+        is_inner = (type_name == "ValidationError");
+    } catch (...) {
+        // Fall back to the marker check if the type name lookup fails.
+        std::string msg;
+        try {
+            msg = py::str(e.value()).cast<std::string>();
+        } catch (...) {
+            return std::nullopt;
+        }
+        is_inner = (msg == kMarker);
+    }
+    if (!is_inner) return std::nullopt;
+    ValError out = std::move(s.back());
+    s.pop_back();
+    return out;
+}
+} // namespace wrap_detail
+
 // Convert a Python exception raised by a validator function into a ValError,
 // mirroring Rust's convert_err: PydanticCustomError / PydanticKnownError
 // carry their own error type + message, plain ValueError -> value_error,
@@ -59,6 +104,12 @@ inline bool exception_is_use_default(PyObject* exc) {
 }
 
 inline ValError function_error_from_exception(py::error_already_set& e, const Input& input, ValidationState& state) {
+    // Rust convert_err casts a ValidationError raised by the callable back to
+    // its own line errors instead of wrapping it in value_error, so an inner
+    // validation failure keeps its type and location.
+    if (auto inner = wrap_detail::take_pending(e)) {
+        return std::move(*inner);
+    }
     // Keep a reference to the exception object for ctx['error'] — value()
     // returns a new reference, so it stays valid after e.restore().
     py::object exc_value = e.value();
@@ -144,6 +195,10 @@ inline py::object make_validation_info(ValidationState& state) {
         info_dict["field_name"] = py::str(*state.field_name());
     }
     info_dict["strict"] = state.strict_or(false);
+    // Rust ValidationInfo.mode reports the input type being validated.
+    info_dict["mode"] = py::str(state.input_type() == InputType::Json
+                                    ? "json"
+                                    : state.input_type() == InputType::String ? "strings" : "python");
     if (!state.context_py().is_none()) {
         info_dict["context"] = state.context_py();
     }
@@ -192,50 +247,6 @@ inline bool reaches_model(const std::shared_ptr<Validator>& v) {
     return false;
 }
 
-// Wrap-function handler error propagation: when the inner validator fails
-// inside a Python wrap-handler, the typed ValError must reach the outer
-// function-wrap validator unchanged (Rust re-raises the ValidationError).
-// A stack of pending errors plus a marker exception text achieves this.
-namespace wrap_detail {
-inline constexpr const char* kMarker = "\x01PYC_WRAP_INNER_ERROR\x01";
-inline std::vector<ValError>& stack() {
-    static thread_local std::vector<ValError> s;
-    return s;
-}
-// If the caught Python exception is the inner ValidationError (raised by the
-// handler, possibly re-raised by the Python wrap function), pop and return
-// the inner error. The pending stack being non-empty is the signal that the
-// inner validation failed; we additionally require the exception to be a
-// ValidationError (not e.g. a TypeError raised by the wrap function itself).
-inline std::optional<ValError> take_pending(py::error_already_set& e) {
-    auto& s = stack();
-    if (s.empty()) return std::nullopt;
-    // The handler raises the actual ValidationError; accept it (or the legacy
-    // marker ValueError) so the typed inner error reaches the outer validator.
-    // We identify the inner error by its exception type name ("ValidationError")
-    // or the legacy marker message, since py::type::of<ValidationError> is not
-    // available for register_exception-registered types.
-    bool is_inner = false;
-    try {
-        py::object exc_type = e.type();
-        std::string type_name = py::str(exc_type.attr("__name__")).cast<std::string>();
-        is_inner = (type_name == "ValidationError");
-    } catch (...) {
-        // Fall back to the marker check if the type name lookup fails.
-        std::string msg;
-        try {
-            msg = py::str(e.value()).cast<std::string>();
-        } catch (...) {
-            return std::nullopt;
-        }
-        is_inner = (msg == kMarker);
-    }
-    if (!is_inner) return std::nullopt;
-    ValError out = std::move(s.back());
-    s.pop_back();
-    return out;
-}
-} // namespace wrap_detail
 
 // Rust names a function validator "<type>[<function name>()]", appending the
 // inner schema name for before/after; the union uses that label for each
