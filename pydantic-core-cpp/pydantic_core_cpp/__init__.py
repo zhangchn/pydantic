@@ -1230,6 +1230,22 @@ class SchemaValidator:
                 return [self._dict_to_model(item, items_schema) for item in data]
             return data
 
+        if schema.get("type") == "tuple":
+            item_schemas = schema.get("items_schema") or []
+            variadic = schema.get("tuple_variadic_schema")
+            if isinstance(data, (list, tuple)) and isinstance(item_schemas, list):
+                out = []
+                for i, item in enumerate(data):
+                    if i < len(item_schemas):
+                        inner = item_schemas[i]
+                    elif isinstance(variadic, dict):
+                        inner = variadic
+                    else:
+                        inner = {}
+                    out.append(self._dict_to_model(item, inner))
+                return tuple(out) if isinstance(data, tuple) else out
+            return data
+
         # Root models: wrap the validated value (scalar or nested model dict)
         # in the model class as the 'root' attribute.
         if schema.get("type") == "model" and schema.get("root_model"):
@@ -1505,6 +1521,10 @@ class SchemaValidator:
         if isinstance(result, dict):
             # Recursively convert nested dicts to model instances
             result = self._dict_to_model(result)
+        elif isinstance(result, (list, tuple)):
+            # A container at the root holds its members as plain dicts until the
+            # schema walk rebuilds them, so list[Model] must convert each item.
+            result = self._dict_to_model(result)
             
             # If result is a model instance, return it
             if not isinstance(result, dict):
@@ -1629,6 +1649,8 @@ class SchemaValidator:
             raise
         if isinstance(result, dict):
             result = self._dict_to_model(result)
+        elif isinstance(result, (list, tuple)):
+            result = self._dict_to_model(result)
         else:
             # For root models, the result is a scalar value — wrap it in the model class
             schema_type = self._schema.get("type") if hasattr(self._schema, "get") else None
@@ -1648,6 +1670,8 @@ class SchemaValidator:
             result = self._dict_to_model(result)
             if not isinstance(result, dict):
                 return result
+        elif isinstance(result, (list, tuple)):
+            result = self._dict_to_model(result)
             schema_type = self._schema.get("type") if hasattr(self._schema, "get") else None
             if schema_type == "definitions":
                 inner = self._schema.get("schema", {})
