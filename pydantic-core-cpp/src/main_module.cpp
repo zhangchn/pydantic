@@ -4484,6 +4484,16 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
              py::arg("allow_partial") = py::none())
         .def("validate_json", [](SchemaValidator& self, const py::object& jd, py::object strict, py::object context, py::object extra,
                                   py::object allow_partial, py::object by_alias, py::object by_name) {
+            // Rust reads the payload through validate_bytes, so anything that is not a
+            // string/bytes/bytearray becomes a json_type error carrying the original
+            // object rather than a binding cast failure.
+            if (!py::isinstance<py::str>(jd) && !py::isinstance<py::bytes>(jd) &&
+                !py::isinstance<py::bytearray>(jd)) {
+                ErrorType error_type(ErrorType::Kind::JsonType);
+                Location location;
+                ValError val_error = ValError::line_error(error_type, location, std::string());
+                throw ValidationError(self.title(), InputType::Json, val_error, jd, false);
+            }
             std::string js = py::isinstance<py::bytes>(jd) ? jd.cast<std::string>() : jd.cast<std::string>();
             // Parse allow_partial to decide whether to use partial JSON parsing.
             bool partial_active = false;
