@@ -1122,6 +1122,11 @@ struct SerNode {
     // Rust ModelSerializer::has_extra - only a model whose own config sets
     // extra_fields_behavior="allow" serializes its __pydantic_extra__ entries.
     bool extra_allowed = false;
+    // Rust TypedDictSerializer with extra_behavior=allow (FieldsMode::TypedDictAllow):
+    // a typed-dict keeps its undeclared keys in its own dict, and an optional
+    // extras_schema says how to serialize them.
+    bool typed_dict_allow_extra = false;
+    SerRef extra_ser;
     // For inf/nan serialization mode: "constants" (default) or "strings"
     std::string inf_nan_mode = "constants";
     // For bytes serialization: "utf8" (default), "base64", or "hex"
@@ -1157,6 +1162,8 @@ struct SerNode {
         class_ = other.class_;
         polymorphic_from_config = other.polymorphic_from_config;
         extra_allowed = other.extra_allowed;
+        typed_dict_allow_extra = other.typed_dict_allow_extra;
+        extra_ser = other.extra_ser;
         inf_nan_mode = other.inf_nan_mode;
         ser_json_bytes = other.ser_json_bytes;
         ser_json_timedelta = other.ser_json_timedelta;
@@ -2727,6 +2734,27 @@ private:
             }
             result[py::str(output_key)] = serialized;
         }
+        // Rust FieldsMode::TypedDictAllow: the extras of a typed-dict live in
+        // the dict itself rather than in __pydantic_extra__, so every key the
+        // schema does not declare is serialized too.
+        if (typed_dict_allow_extra) {
+            for (auto item : main) {
+                std::string k = py::str(item.first).cast<std::string>();
+                if (fields.find(k) != fields.end()) continue;
+                if (k == "__pydantic_extra__" || k == "__pydantic_fields_set__" ||
+                    k == "__pydantic_defaults__") continue;
+                auto next = apply_ser_filter(py::str(k), include, exclude);
+                if (next.omit) continue;
+                py::object v = py::reinterpret_borrow<py::object>(item.second);
+                if (exc_none && v.is_none()) continue;
+                if (v.is(missing_obj)) continue;
+                py::object serialized = extra_ser
+                    ? extra_ser->to_python(v, json_mode, exc_none, round_trip, next.include, next.exclude,
+                                           by_alias, exclude_unset, exclude_defaults, context)
+                    : serialize_any_value(v, exc_none, round_trip, json_mode);
+                result[py::str(k)] = serialized;
+            }
+        }
         // Extra fields - also apply include/exclude if they match by name
         if (extra_allowed && py_hasattr(value, "__pydantic_extra__")) {
             auto extra = py::getattr(value, "__pydantic_extra__");
@@ -2959,6 +2987,28 @@ private:
             if (!first) out += ",";
             first = false;
             out += json_escape(output_key, ensure_ascii) + ":" + field_json;
+        }
+        // Rust FieldsMode::TypedDictAllow: undeclared keys of a typed-dict are
+        // part of the dict itself and are serialized with extras_schema.
+        if (typed_dict_allow_extra) {
+            for (auto item : main) {
+                std::string k = py::str(item.first).cast<std::string>();
+                if (fields.find(k) != fields.end()) continue;
+                if (k == "__pydantic_extra__" || k == "__pydantic_fields_set__" ||
+                    k == "__pydantic_defaults__") continue;
+                auto next = apply_ser_filter(py::str(k), include, exclude);
+                if (next.omit) continue;
+                py::object v = py::reinterpret_borrow<py::object>(item.second);
+                if (exc_none && v.is_none()) continue;
+                if (v.is(missing_obj)) continue;
+                std::string field_json = extra_ser
+                    ? extra_ser->to_json(v, ensure_ascii, -1, round_trip, next.include, next.exclude,
+                                         by_alias, exclude_unset, exclude_defaults, exc_none, context)
+                    : infer_json(v, ensure_ascii, -1);
+                if (!first) out += ",";
+                first = false;
+                out += json_escape(k, ensure_ascii) + ":" + field_json;
+            }
         }
         if (extra_allowed && py_hasattr(value, "__pydantic_extra__")) {
             auto extra = py::getattr(value, "__pydantic_extra__");
@@ -3466,7 +3516,27 @@ static SerRef build_ser_impl(const py::dict& schema,
                     node->field_order.push_back(k);
                 }
             }
-            // Collect computed field names (excluded when round_trip=True)
+        } catch (...) {}
+        // A typed-dict with extra_behavior=allow keeps undeclared keys in its
+        // own dict, so they are serialized as well; extras_schema (only legal
+        // with extra_behavior=allow, as Rust enforces) names their serializer.
+        if (type == "typed-dict") {
+            std::string eb;
+            try { if (schema.contains("extra_behavior")) eb = schema["extra_behavior"].cast<std::string>(); } catch (...) { PyErr_Clear(); }
+            if (eb.empty() && schema.contains("config") && py::isinstance<py::dict>(schema["config"])) {
+                try {
+                    py::dict cfg = schema["config"].cast<py::dict>();
+                    if (cfg.contains("extra_fields_behavior")) eb = cfg["extra_fields_behavior"].cast<std::string>();
+                } catch (...) { PyErr_Clear(); }
+            }
+            if (eb == "allow") {
+                node->typed_dict_allow_extra = true;
+                if (schema.contains("extras_schema") && !schema["extras_schema"].is_none()) {
+                    try { node->extra_ser = build_ser(schema["extras_schema"].cast<py::dict>(), defs); } catch (...) { PyErr_Clear(); }
+                }
+            }
+        }
+        try {
             // Also add them to fields map with their return_schema serializer
             if (schema.contains("computed_fields")) {
                 for (auto cf_item : schema["computed_fields"].cast<py::list>()) {

@@ -1096,6 +1096,18 @@ class SchemaValidator:
             inner = schema.get("schema", {})
             return self._dict_to_model(data, inner)
 
+        if schema.get("type") == "json-or-python":
+            # Validation already picked a branch, so the Python branch describes
+            # the shape the value ended up with.
+            inner = schema.get("python_schema") or schema.get("json_schema") or {}
+            return self._dict_to_model(data, inner)
+
+        if schema.get("type") == "json":
+            # A Json[...] field holds whatever its inner schema produced from the
+            # text, so the result converts exactly like the inner type would:
+            # Json[Model] must end up as a model instance, not a plain dict.
+            return self._dict_to_model(data, schema.get("schema", {}))
+
         # Unwrap function-wrapper types (function-before, function-after, function-wrap)
         # These wrap the actual validator schema with a Python function
         if schema.get("type") in ("function-after", "function-before", "function-wrap"):
