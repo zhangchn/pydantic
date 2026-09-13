@@ -67,6 +67,7 @@ SchemaValidator::SchemaValidator(const py::dict& schema,
         else if (eb == "forbid") config_.extra_behavior = ExtraBehavior::Forbid;
         else config_.extra_behavior = ExtraBehavior::Ignore;
     }
+    config_.py_config = py::reinterpret_borrow<py::object>(config);
     config_.cache_strings = StringCacheMode::All;
     if (config.contains("val_temporal_unit") && !config["val_temporal_unit"].is_none()) {
         bool ok = false;

@@ -33,6 +33,11 @@ public:
         std::optional<bool> by_alias;
         std::optional<bool> by_name;
         TimestampUnit val_temporal_unit = TimestampUnit::Infer;
+#ifdef HAS_PYBIND11
+        // Rust's ValidationInfo.config exposes the config the schema validator
+        // was built with, so it travels with the state rather than the schema.
+        py::object py_config = py::none();
+#endif
     };
     
     ValidationState() = default;
@@ -165,6 +170,11 @@ public:
         if (exactness_ == Exactness::Strict && e == Exactness::Lax) exactness_ = e;
     }
     
+#ifdef HAS_PYBIND11
+    // The raw config dict (Rust ValidationInfo.config).
+    py::object config_py() const { return config_.py_config; }
+#endif
+
     // Context (for validation functions)
     void* context() const { return context_; }
     void set_context(void* ctx) { context_ = ctx; }

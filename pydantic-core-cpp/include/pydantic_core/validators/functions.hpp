@@ -206,6 +206,9 @@ inline py::object make_validation_info(ValidationState& state) {
     if (!data.is_none()) {
         info_dict["data"] = data;
     }
+    if (!state.config_py().is_none()) {
+        info_dict["config"] = state.config_py();
+    }
     try {
         // Convert info_dict to an object with attribute access (like
         // ValidationInfo); missing attributes return None.
