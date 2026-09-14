@@ -412,6 +412,101 @@ inline py::object materialize_into_fn() {
     return *fn;
 }
 
+// A function-wrap/before chain can hide the model it wraps, so walk through
+// those wrappers to find the ModelValidator whose instance a model callable
+// expects to receive.
+inline std::shared_ptr<Validator> model_validator_through_wrappers(const std::shared_ptr<Validator>& inner) {
+    std::shared_ptr<Validator> cur = inner;
+    while (cur) {
+        if (dynamic_cast<ModelValidator*>(cur.get())) break;
+        std::string cn = cur->name();
+        if (cn == "function-wrap" || cn == "function-before") {
+            cur = cur->inner_validator();
+        } else {
+            break;
+        }
+    }
+    return cur;
+}
+
+// Rust hands a model callable the model INSTANCE, while the C++ pipeline keeps
+// the validated fields in a dict until the Python boundary, so the instance is
+// built here. In the BaseModel.__init__ path the instance IS the caller's self
+// object (Rust validate_init): populate it in place so validators mutating
+// self behave naturally and returning self does not look "foreign".
+inline py::object materialize_model_instance(ModelValidator* model_validator,
+                                             py::object validated_obj,
+                                             const Input& input,
+                                             ValidationState& state) {
+    py::object model_cls = model_validator->expected_class();
+    if (model_cls.is_none()) return validated_obj;
+    try {
+        bool have_init_self = !state.init_self_py().is_none() && state.top_input_ptr();
+        py::object py_in_check = have_init_self ? input.as_python_object() : py::none();
+        bool is_init_path = have_init_self && py_in_check.ptr() &&
+            static_cast<const void*>(py_in_check.ptr()) == state.top_input_ptr();
+        // Construct the model instance WITHOUT triggering validation
+        // (to avoid infinite recursion with model_validator)
+        py::object instance;
+        if (model_validator->root_model()) {
+            if (py_hasattr(model_cls, "model_construct")) {
+                instance = model_cls.attr("model_construct")(validated_obj);
+            } else {
+                instance = py::module_::import("builtins").attr("object").attr("__new__")(model_cls);
+                instance.attr("__dict__") = py::dict(py::arg("root") = validated_obj);
+            }
+        } else if (is_init_path) {
+            // Populate the caller's self object in place.
+            instance = state.init_self_py();
+            if (py::isinstance<py::dict>(validated_obj)) {
+                py::dict fields_dict = validated_obj.cast<py::dict>();
+                py::object extra = fields_dict.attr("pop")("__pydantic_extra__", py::none());
+                py::object fields_set = fields_dict.attr("pop")("__pydantic_fields_set__", py::set());
+                fields_dict.attr("pop")("__pydantic_defaults__", py::none());
+                instance.attr("__dict__").attr("update")(fields_dict);
+                if (!py_hasattr(instance, "__pydantic_private__")) {
+                    py::setattr(instance, "__pydantic_private__", py::none());
+                }
+                py::setattr(instance, "__pydantic_extra__",
+                    extra.is_none() ? py::none() : extra);
+                py::setattr(instance, "__pydantic_fields_set__", fields_set);
+            }
+        } else {
+            // For BaseModel, use model_construct to avoid validation
+            if (py::isinstance<py::dict>(validated_obj)) {
+                py::dict fields_dict = validated_obj.cast<py::dict>();
+                py::object extra = fields_dict.attr("pop")("__pydantic_extra__", py::none());
+                py::object fields_set = fields_dict.attr("pop")("__pydantic_fields_set__", py::set());
+                fields_dict.attr("pop")("__pydantic_defaults__", py::none());
+
+                instance = py::module_::import("builtins").attr("object").attr("__new__")(model_cls);
+                instance.attr("__dict__").attr("update")(fields_dict);
+                py::setattr(instance, "__pydantic_private__", py::none());
+                py::setattr(instance, "__pydantic_extra__",
+                    extra.is_none() ? py::none() : extra);
+                py::setattr(instance, "__pydantic_fields_set__", fields_set);
+            } else {
+                instance = validated_obj;
+            }
+        }
+        // The C++ pipeline leaves nested models as plain dicts until
+        // the Python boundary, so an after-callable that walks
+        // self.<field> would see dicts; build them now (Rust parity).
+        py::object materialize = materialize_into_fn();
+        if (!materialize.is_none()) {
+            try {
+                materialize(instance);
+            } catch (const py::error_already_set&) {
+                PyErr_Clear();
+            }
+        }
+        return instance;
+    } catch (...) {
+        // If construction fails, continue with the validated_obj as-is
+        return validated_obj;
+    }
+}
+
 // FunctionAfterValidator - runs Python function after validation
 // Rust decides from the schema's function "type" whether the callable takes an
 // info argument, so a TypeError raised by the callable itself is genuine and
@@ -555,88 +650,9 @@ public:
         // behave naturally and returning self does not look "foreign".
         // Resolve a ModelValidator through function-wrap/before wrappers so
         // wrapped models are materialized before the after-function runs.
-        std::shared_ptr<Validator> mv_holder = inner_;
-        {
-            std::shared_ptr<Validator> cur = inner_;
-            while (cur) {
-                if (dynamic_cast<ModelValidator*>(cur.get())) break;
-                std::string cn = cur->name();
-                if (cn == "function-wrap" || cn == "function-before") {
-                    cur = cur->inner_validator();
-                } else {
-                    break;
-                }
-            }
-            if (cur) mv_holder = cur;
-        }
-        if (auto* model_validator = dynamic_cast<ModelValidator*>(mv_holder.get())) {
-            py::object model_cls = model_validator->expected_class();
-            if (!model_cls.is_none()) {
-                try {
-                    bool have_init_self = !state.init_self_py().is_none() && state.top_input_ptr();
-                    py::object py_in_check = have_init_self ? input.as_python_object() : py::none();
-                    bool is_init_path = have_init_self && py_in_check.ptr() &&
-                        static_cast<const void*>(py_in_check.ptr()) == state.top_input_ptr();
-                    // Construct the model instance WITHOUT triggering validation
-                    // (to avoid infinite recursion with model_validator)
-                    py::object instance;
-                    if (model_validator->root_model()) {
-                        if (py_hasattr(model_cls, "model_construct")) {
-                            instance = model_cls.attr("model_construct")(validated_obj);
-                        } else {
-                            instance = py::module_::import("builtins").attr("object").attr("__new__")(model_cls);
-                            instance.attr("__dict__") = py::dict(py::arg("root") = validated_obj);
-                        }
-                    } else if (is_init_path) {
-                        // Populate the caller's self object in place.
-                        instance = state.init_self_py();
-                        if (py::isinstance<py::dict>(validated_obj)) {
-                            py::dict fields_dict = validated_obj.cast<py::dict>();
-                            py::object extra = fields_dict.attr("pop")("__pydantic_extra__", py::none());
-                            py::object fields_set = fields_dict.attr("pop")("__pydantic_fields_set__", py::set());
-                            fields_dict.attr("pop")("__pydantic_defaults__", py::none());
-                            instance.attr("__dict__").attr("update")(fields_dict);
-                            if (!py_hasattr(instance, "__pydantic_private__")) {
-                                py::setattr(instance, "__pydantic_private__", py::none());
-                            }
-                            py::setattr(instance, "__pydantic_extra__",
-                                extra.is_none() ? py::none() : extra);
-                            py::setattr(instance, "__pydantic_fields_set__", fields_set);
-                        }
-                    } else {
-                        // For BaseModel, use model_construct to avoid validation
-                        if (py::isinstance<py::dict>(validated_obj)) {
-                            py::dict fields_dict = validated_obj.cast<py::dict>();
-                            py::object extra = fields_dict.attr("pop")("__pydantic_extra__", py::none());
-                            py::object fields_set = fields_dict.attr("pop")("__pydantic_fields_set__", py::set());
-                            fields_dict.attr("pop")("__pydantic_defaults__", py::none());
-
-                            instance = py::module_::import("builtins").attr("object").attr("__new__")(model_cls);
-                            instance.attr("__dict__").attr("update")(fields_dict);
-                            py::setattr(instance, "__pydantic_private__", py::none());
-                            py::setattr(instance, "__pydantic_extra__",
-                                extra.is_none() ? py::none() : extra);
-                            py::setattr(instance, "__pydantic_fields_set__", fields_set);
-                        } else {
-                            instance = validated_obj;
-                        }
-                    }
-                    // The C++ pipeline leaves nested models as plain dicts until
-                    // the Python boundary, so an after-callable that walks
-                    // self.<field> would see dicts; build them now (Rust parity).
-                    py::object materialize = materialize_into_fn();
-                    if (!materialize.is_none()) {
-                        try {
-                            materialize(instance);
-                        } catch (const py::error_already_set&) {
-                            PyErr_Clear();
-                        }
-                    }
-                    validated_obj = instance;
-                } catch (...) {
-                    // If construction fails, continue with the validated_obj as-is
-                }
-            }
+        if (auto* model_validator =
+                dynamic_cast<ModelValidator*>(model_validator_through_wrappers(inner_).get())) {
+            validated_obj = materialize_model_instance(model_validator, validated_obj, input, state);
         }
 
         // PyDataclassValidator: in the self_instance (init) path the inner
@@ -991,7 +1007,17 @@ public:
                     }
                     // Convert the validated result to a Python object by its
                     // actual stored type (e.g. EitherDate for date fields).
-                    return value_to_python_with_type(result.value(), inner_->effective_result_name());
+                    py::object out =
+                        value_to_python_with_type(result.value(), inner_->effective_result_name());
+                    // pydantic wraps a model_validator(mode='wrap') around the
+                    // model schema, and Rust hands the callable the model
+                    // instance the inner validator produced - not the fields
+                    // dict - so that `model.x` works inside the callable.
+                    if (auto* model_validator = dynamic_cast<ModelValidator*>(
+                            model_validator_through_wrappers(inner_).get())) {
+                        out = materialize_model_instance(model_validator, out, *py_input, state);
+                    }
+                    return out;
                 }
                 return v;
             });
