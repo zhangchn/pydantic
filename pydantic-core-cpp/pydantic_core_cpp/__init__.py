@@ -1306,6 +1306,29 @@ class SchemaValidator:
                 return tuple(out) if isinstance(data, tuple) else out
             return data
 
+        if schema.get("type") == "dict":
+            # A mapping's values are validated against values_schema, so they
+            # convert exactly like a field of that schema would - otherwise a
+            # model behind a dict key stayed a plain dict. A mapping that needed
+            # no conversion is handed back untouched: a dict subclass is the
+            # caller's object, and rebuilding it would change its type.
+            values_schema = schema.get("values_schema")
+            if isinstance(data, dict) and isinstance(values_schema, dict):
+                converted = {}
+                changed = False
+                for k, v in data.items():
+                    nv = self._dict_to_model(v, values_schema)
+                    if nv is not v:
+                        changed = True
+                    converted[k] = nv
+                if not changed:
+                    return data
+                try:
+                    return type(data)(converted)
+                except Exception:
+                    return data
+            return data
+
         # Root models: wrap the validated value (scalar or nested model dict)
         # in the model class as the 'root' attribute.
         if schema.get("type") == "model" and schema.get("root_model"):
