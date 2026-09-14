@@ -172,7 +172,10 @@ public:
                 std::string message = custom_error_message_.value_or("");
                 et = ErrorType(type, message.empty() ? "Validation error" : message);
             }
-            return ValError::line_error(et, state.location(), input.as_error_value().repr);
+            // Rust builds the error from the input itself, so the rejected value
+            // travels with it and input_type names its real type.
+            return ValError::line_error(et, state.location(), input.as_error_value().repr,
+                                        input.as_python_object());
         }
         return ValError::line_error(
             ErrorType(ErrorType::Kind::CustomError),
@@ -440,7 +443,10 @@ private:
                             custom_error_message_.empty() ? std::string("Validation error")
                                                           : custom_error_message_);
         }
-        return ValError::line_error(std::move(err), state.location(), input.as_error_value().repr);
+        // The rejected value travels with the error, as in Rust, so input_type
+        // names its real type instead of being guessed back from the repr.
+        return ValError::line_error(std::move(err), state.location(), input.as_error_value().repr,
+                                    input.as_python_object());
     }
 
     ValError tag_not_found(const Input& input, ValidationState& state) const {
