@@ -797,10 +797,13 @@ public:
         // Check if input is callable
         py::object input_py = input.as_python_object();
         if (!py_hasattr(input_py, "__call__")) {
+            // Rust builds the line error from the input itself, so the error
+            // reports the rejected value rather than a fixed sentence.
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::CallableType),
                 state.location(),
-                "Input is not callable"
+                input.as_error_value().repr,
+                input_py
             );
         }
         return ValResult<std::shared_ptr<void>>(
