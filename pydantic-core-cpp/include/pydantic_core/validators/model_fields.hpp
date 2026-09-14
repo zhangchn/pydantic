@@ -282,11 +282,16 @@ public:
             : static_cast<const void*>(&input);
         auto rec_entry = state.enter_recursion(rec_key);
         if (!rec_entry.allowed()) {
-            return ValError::line_error(
-                ErrorType(ErrorType::Kind::RecursionLoop),
-                state.location(),
-                "Recursion error - cyclic reference detected"
-            );
+            // Rust reports the rejected value as the input, not the message,
+            // so the error renders the (self-referential) input dict.
+            auto line_err = std::make_shared<ValLineError>(
+                ValLineError{ErrorType(ErrorType::Kind::RecursionLoop),
+                             state.location(),
+                             input.as_error_value().repr});
+            if (auto* py_input = dynamic_cast<const PythonInput*>(&input)) {
+                line_err->raw_input_obj = py_input->py_object();
+            }
+            return ValError::line_errors({std::move(line_err)});
         }
 
         auto dict_result = input.validate_dict(state.strict_or(strict_));

@@ -128,6 +128,7 @@ def _errors_with_include_url(self, *args, include_url: bool = True, **kwargs):
         import __main__ as _main
         if result and not getattr(_main, '_last_assignment_error', False):
             raw_input = getattr(_main, '_last_raw_input', None)
+            own_inputs = getattr(_main, '_last_error_input_objs', None)
             if raw_input is not None:
                 for i, err in enumerate(result):
                     cur = err.get('input')
@@ -137,6 +138,20 @@ def _errors_with_include_url(self, *args, include_url: bool = True, **kwargs):
                     # int, ...), keep it — it is the authoritative input.
                     if not isinstance(cur, _UnparsedInput):
                         continue
+                    # A line error can carry the object its validator actually
+                    # received; that is Rust's input_value and outranks the
+                    # location lookup, which only ever finds what the caller
+                    # passed in (a before-validator may have replaced it).
+                    if own_inputs is not None and i < len(own_inputs):
+                        own = own_inputs[i]
+                        if own is not None:
+                            try:
+                                matches = cur == repr(own)
+                            except Exception:
+                                matches = False
+                            if matches:
+                                result[i]['input'] = own
+                                continue
                     loc = err.get('loc', ())
                     if isinstance(loc, tuple) and len(loc) > 0:
                         val = _lookup_value_by_loc(raw_input, loc)
@@ -281,9 +296,37 @@ def _parse_input(raw: str):
     if s != raw:
         return raw
     try:
-        return _ast.literal_eval(raw)
+        parsed = _ast.literal_eval(raw)
     except Exception:
         return _UnparsedInput(raw)
+    # A recursive container renders as {...}/[...] with the self-reference
+    # elided, and literal_eval happily turns that into a real Ellipsis, which
+    # no validator ever received (repr() spells the sentinel as 'Ellipsis').
+    # Such a value is a truncated repr, not a literal.
+    if _contains_ellipsis(parsed):
+        return _UnparsedInput(raw)
+    return parsed
+
+
+def _contains_ellipsis(value) -> bool:
+    stack = [value]
+    seen = set()
+    while stack:
+        v = stack.pop()
+        if v is Ellipsis:
+            return True
+        if isinstance(v, (list, tuple, set, frozenset)):
+            if id(v) in seen:
+                continue
+            seen.add(id(v))
+            stack.extend(v)
+        elif isinstance(v, dict):
+            if id(v) in seen:
+                continue
+            seen.add(id(v))
+            stack.extend(v.keys())
+            stack.extend(v.values())
+    return False
 
 
 # C++ message -> Rust-compatible message mapping

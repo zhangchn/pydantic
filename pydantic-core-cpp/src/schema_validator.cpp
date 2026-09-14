@@ -794,6 +794,7 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
             // ctx['error'] for value_error/assertion_error entries.
             py::list err_objs;
             py::list err_ctx_objs;
+            py::list err_input_objs;
             if (result.error().has_line_errors()) {
                 for (const auto& le : result.error().line_errors()) {
                     err_objs.append(le->raw_error_obj.ptr() ? py::object(le->raw_error_obj) : py::none());
@@ -802,10 +803,14 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
                         ctx_d[py::str(k)] = v;
                     }
                     err_ctx_objs.append(std::move(ctx_d));
+                    // The object the failing validator actually received, which
+                    // is what Rust writes into input_value.
+                    err_input_objs.append(le->raw_input_obj.ptr() ? py::object(le->raw_input_obj) : py::none());
                 }
             }
             m.attr("_last_error_objs") = err_objs;
             m.attr("_last_error_ctx_objs") = err_ctx_objs;
+            m.attr("_last_error_input_objs") = err_input_objs;
         } catch (...) {
             // Silently ignore if module state setting fails
         }
