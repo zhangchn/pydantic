@@ -245,6 +245,20 @@ class _UnparsedInput(str):
     """
 
 
+def _split_input_type(raw: str) -> tuple[str, str | None]:
+    """Split a trailing ``, input_type=X`` segment off a parsed input_value.
+
+    The C++ renderer appends the input's own type name after the repr, the way
+    Rust's message renderer does, so it must not be read back as part of the
+    input value. Repr-only messages (older or inferred errors) have no such
+    segment and are returned unchanged.
+    """
+    m = _re.search(r',\s*input_type=([^\]]+)$', raw)
+    if not m:
+        return raw, None
+    return raw[: m.start()].strip(), m.group(1)
+
+
 def _parse_input(raw: str):
     """Try to parse an input_value string as a Python literal (dict, list, etc.)."""
     import ast as _ast
@@ -402,7 +416,7 @@ def _parse_errors_from_message(msg: str) -> list[dict]:
         if match:
             # Single-line error: just the message (no location or location on previous line)
             err_type = _TYPE_MAP.get(match.group(1), match.group(1))
-            raw_input = (match.group(2) or '').strip()
+            raw_input, _ = _split_input_type((match.group(2) or '').strip())
             input_value = _parse_input(raw_input)
             cpp_msg = line[:match.start()].strip()
             display_msg = _MSG_MAP.get(cpp_msg, cpp_msg)
@@ -420,7 +434,7 @@ def _parse_errors_from_message(msg: str) -> list[dict]:
             if next_match:
                 # Two-line format: loc_line, then msg_line
                 err_type = _TYPE_MAP.get(next_match.group(1), next_match.group(1))
-                raw_input = (next_match.group(2) or '').strip()
+                raw_input, _ = _split_input_type((next_match.group(2) or '').strip())
                 input_value = _parse_input(raw_input)
                 cpp_msg = next_line[:next_match.start()].strip()
                 display_msg = _MSG_MAP.get(cpp_msg, cpp_msg)
@@ -823,12 +837,16 @@ def _format_rust_error(msg: str, model_name: str = '') -> str:
                 # Use the real input value from the message's
                 # [type=..., input_value=...] segment when present
                 if seg:
-                    raw_input = seg.group(2).strip()
+                    raw_input, emitted_type = _split_input_type(seg.group(2).strip())
                     input_val = _truncate_input(raw_input)
                     try:
                         input_type = type(_ast.literal_eval(raw_input)).__name__
                     except Exception:
                         pass
+                    # The type name taken from the actual input object wins over
+                    # the guess reconstructed from its repr.
+                    if emitted_type:
+                        input_type = emitted_type
                 # Keep the full message text for errors that carry a
                 # detail after the prefix (e.g. "Value error, foo"
                 # must not be truncated to "Value error").
@@ -843,12 +861,14 @@ def _format_rust_error(msg: str, model_name: str = '') -> str:
                 rust_msg = msg_line_base
             elif seg:
                 err_type = seg.group(1)
-                raw_input = seg.group(2).strip()
+                raw_input, emitted_type = _split_input_type(seg.group(2).strip())
                 input_val = _truncate_input(raw_input)
                 try:
                     input_type = type(_ast.literal_eval(raw_input)).__name__
                 except Exception:
                     input_type = 'str'
+                if emitted_type:
+                    input_type = emitted_type
                 rust_msg = msg_line[:seg.start()].strip()
 
         if loc_text:

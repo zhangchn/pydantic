@@ -46,6 +46,20 @@ public:
         return err;
     }
 
+#ifdef HAS_PYBIND11
+    // Rust's ValLineError owns the input it failed on, which is what lets the
+    // message renderer print input_type from the object itself instead of
+    // guessing it back from the repr.
+    static ValError line_error(const ErrorType& error_type, const Location& location,
+                               const std::string& input_value, const py::object& raw_input) {
+        ValError err(Kind::LineErrors);
+        ValLineError line{error_type, location, input_value};
+        line.raw_input_obj = raw_input;
+        err.line_errors_.push_back(std::make_shared<ValLineError>(std::move(line)));
+        return err;
+    }
+#endif
+
     static ValError line_errors(std::vector<std::shared_ptr<ValLineError>> errors) {
         ValError err(Kind::LineErrors);
         err.line_errors_ = std::move(errors);
@@ -119,6 +133,9 @@ public:
         std::vector<LocItem> loc_items;  // raw location items (preserves empty-string keys)
         std::string msg;
         std::string input;
+        // Rust renders the input type as input_value.get_type().qualname();
+        // empty when the line error carries no Python input object.
+        std::string input_type;
         std::unordered_map<std::string, std::string> ctx;
         bool is_custom = false;
 #ifdef HAS_PYBIND11
@@ -155,6 +172,10 @@ private:
     bool hide_input_ = false;
 
     void build_errors_from_val_error(const ValError& val_error);
+
+    // The user-facing text (count header + one block per line error) that
+    // what() returns; rebuilt once the raw input objects are attached.
+    std::string format_what_message() const;
 };
 
 // SchemaError

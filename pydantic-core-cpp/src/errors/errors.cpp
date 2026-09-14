@@ -26,6 +26,34 @@ std::string json_quote(const std::string& s) {
     return oss.str();
 }
 
+#ifdef HAS_PYBIND11
+// Rust renders the error's input type from input_value.get_type().qualname().
+std::string input_type_name(const py::object& obj) {
+    if (!obj.ptr()) return std::string();
+    PyObject* type_obj = reinterpret_cast<PyObject*>(Py_TYPE(obj.ptr()));
+    PyObject* name = PyObject_GetAttrString(type_obj, "__qualname__");
+    if (!name) {
+        PyErr_Clear();
+        name = PyObject_GetAttrString(type_obj, "__name__");
+    }
+    if (!name) {
+        PyErr_Clear();
+        return std::string();
+    }
+    std::string out;
+    PyObject* utf8 = PyUnicode_AsUTF8String(name);
+    if (utf8) {
+        const char* c = PyBytes_AsString(utf8);
+        if (c) out = c;
+        Py_DECREF(utf8);
+    } else {
+        PyErr_Clear();
+    }
+    Py_DECREF(name);
+    return out;
+}
+#endif
+
 } // namespace
 
 std::string ValLineError::message() const {
@@ -41,6 +69,10 @@ ValidationError::ValidationError(const std::string& title, InputType input_type,
     : title_(title), input_type_(input_type), hide_input_(hide_input) {
     build_errors_from_val_error(val_error);
 
+    what_message_ = format_what_message();
+}
+
+std::string ValidationError::format_what_message() const {
     std::ostringstream oss;
     oss << error_count() << " validation error(s) for " << title_ << "\n";
     for (const auto& err : errors_) {
@@ -52,14 +84,17 @@ ValidationError::ValidationError(const std::string& title, InputType input_type,
         // Rust: when hide_input is set, omit input_value/input_type entirely
         if (!hide_input_) {
             oss << ", input_value=" << err.input;
+            if (!err.input_type.empty()) {
+                oss << ", input_type=" << err.input_type;
+            }
         }
         oss << "]\n";
     }
-    // Structured error details (with ctx and typed loc items) — the Python
+    // Structured error details (with ctx and typed loc items) - the Python
     // wrapper uses this to build errors() since register_exception instances
     // cannot be cast back to the C++ type.
     oss << "__PYDANTIC_ERRORS__:" << errors_to_json() << "\n";
-    what_message_ = oss.str();
+    return oss.str();
 }
 
 #ifdef HAS_PYBIND11
@@ -75,7 +110,11 @@ ValidationError::ValidationError(const std::string& title, InputType input_type,
             details.has_raw_input = true;
             details.raw_input_obj = raw_input;
         }
+        if (details.input_type.empty() && details.raw_input_obj.ptr()) {
+            details.input_type = input_type_name(details.raw_input_obj);
+        }
     }
+    what_message_ = format_what_message();
 }
 #endif
 
@@ -157,6 +196,7 @@ void ValidationError::build_errors_from_val_error(const ValError& val_error) {
             if (line_err->raw_input_obj.ptr()) {
                 details.has_raw_input = true;
                 details.raw_input_obj = line_err->raw_input_obj;
+                details.input_type = input_type_name(details.raw_input_obj);
             }
             // Preserve the Python exception for ctx['error'] (value_error/assertion_error).
             // Note: default-constructed py::object has a null handle, so check ptr()

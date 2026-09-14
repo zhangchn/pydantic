@@ -579,7 +579,8 @@ protected:
 
 // Helper to create type error — use input.current_location() when available
 inline ValError type_error(ErrorType::Kind kind, const Input& input, const Location& loc) {
-    return ValError::line_error(ErrorType(kind), loc, input.as_error_value().repr);
+    return ValError::line_error(ErrorType(kind), loc, input.as_error_value().repr,
+                                 input.as_python_object());
 }
 
 } // namespace pydantic_core

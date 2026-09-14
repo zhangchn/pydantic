@@ -743,7 +743,8 @@ public:
                     return ValError::line_error(
                         ErrorType(ErrorType::Kind::IsSubclassType, "class", class_name_),
                         state.location(),
-                        input.as_error_value().repr
+                        input.as_error_value().repr,
+                        input.as_python_object()
                     );
                 }
                 // Check subclass relationship using Python's issubclass()
@@ -753,7 +754,8 @@ public:
                     return ValError::line_error(
                         ErrorType(ErrorType::Kind::IsSubclassType, "class", class_name_),
                         state.location(),
-                        input.as_error_value().repr
+                        input.as_error_value().repr,
+                        input.as_python_object()
                     );
                 }
                 // Store as PyObject* — leak the reference to avoid GIL issues
@@ -770,7 +772,8 @@ public:
                 return ValError::line_error(
                     ErrorType(ErrorType::Kind::IsSubclassType, "class", class_name_),
                     state.location(),
-                    input.as_error_value().repr
+                    input.as_error_value().repr,
+                    input.as_python_object()
                 );
             }
         }
