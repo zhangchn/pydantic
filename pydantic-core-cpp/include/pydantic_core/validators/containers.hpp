@@ -32,7 +32,7 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-auto result = input.validate_list(state.strict_or_declared(strict));
+        auto result = input.validate_list(state.container_strict(strict));
         if (result.is_err()) {
             return result.error();
         }
@@ -239,7 +239,7 @@ public:
         ValidationState& state
     ) override {
         // Rust combines the schema-level flag with the state override.
-        auto result = input.validate_dict(state.strict_or_declared(strict));
+        auto result = input.validate_dict(state.container_strict(strict));
         if (result.is_err()) {
             return result.error();
         }
@@ -435,7 +435,7 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-auto seq_result = input.validate_set(state.strict_or_declared(strict));
+        auto seq_result = input.validate_set(state.container_strict(strict));
         if (seq_result.is_err()) {
             return seq_result.error();
         }
@@ -535,7 +535,7 @@ public:
 
         if (auto* py_input = dynamic_cast<const PythonInput*>(&input)) {
             const py::object& obj = py_input->py_object();
-            const bool strict_mode = state.strict_or_declared(strict);
+            const bool strict_mode = state.container_strict(strict);
 
             if (py::isinstance<py::frozenset>(obj)) {
                 matched = true;
@@ -559,7 +559,7 @@ public:
             }
         } else {
             // Non-Python inputs (e.g. JSON): accept array-like values.
-            auto result = input.validate_list(state.strict_or_declared(strict));
+            auto result = input.validate_list(state.container_strict(strict));
             if (result.is_ok()) {
                 auto& list = result.value().value();
                 matched = true;
@@ -666,7 +666,7 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-auto result = input.validate_tuple(state.strict_or_declared(strict));
+        auto result = input.validate_tuple(state.container_strict(strict));
         if (result.is_err()) {
             return result.error();
         }

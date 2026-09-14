@@ -90,6 +90,14 @@ public:
     bool strict_or_declared(std::optional<bool> declared, bool default_strict = false) const {
         return strict_or(declared.value_or(config_.strict.value_or(default_strict)));
     }
+
+    // Rust's JSON input ignores strict for containers - an array is the only
+    // way to spell a tuple or a set in JSON - so a strict model still accepts
+    // [1, 2] for tuple[int, int] when the document came from JSON.
+    bool container_strict(std::optional<bool> declared, bool default_strict = false) const {
+        if (input_type() == InputType::Json) return false;
+        return strict_or_declared(declared, default_strict);
+    }
     
     // Extra behavior - use state setting or default
     ExtraBehavior extra_behavior_or(ExtraBehavior default_behavior) const {
