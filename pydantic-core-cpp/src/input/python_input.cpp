@@ -1120,9 +1120,20 @@ ValResult<ValMatch<EitherDateTime>> PythonInput::validate_datetime(
         if (py_hasattr(py_dt, "tzinfo") && !py_dt.attr("tzinfo").is_none()) {
             py::object tzinfo = py_dt.attr("tzinfo");
             if (py_hasattr(tzinfo, "utcoffset")) {
-                py::object offset = tzinfo.attr("utcoffset")(py_dt);
-                if (!offset.is_none()) {
-                    tz_offset = static_cast<int>(offset.attr("total_seconds")().cast<double>() / 60);
+                // Rust reads utcoffset() while converting and turns a raising
+                // tzinfo into a datetime_object_invalid error rather than
+                // letting the exception escape.
+                try {
+                    py::object offset = tzinfo.attr("utcoffset")(py_dt);
+                    if (!offset.is_none()) {
+                        tz_offset = static_cast<int>(offset.attr("total_seconds")().cast<double>() / 60);
+                    }
+                } catch (py::error_already_set& e) {
+                    ErrorType et(ErrorType::Kind::DatetimeObjectInvalid);
+                    et.context()["error"] = py_caught_exception_string(e);
+                    PyErr_Clear();
+                    return ValError::line_error(
+                        et, this->current_location(), this->as_error_value().repr);
                 }
             }
         }
