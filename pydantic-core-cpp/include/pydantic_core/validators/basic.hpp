@@ -454,8 +454,12 @@ auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str,
             }
         }
 
-        // Length check using char count (Unicode-aware approximation)
-        size_t char_count = str.size();  // UTF-8 byte count as proxy
+        // Rust measures the string as str.chars().count() - Unicode scalars, so
+        // a snowman counts once however many bytes its UTF-8 form needs.
+        size_t char_count = 0;
+        for (unsigned char c : str) {
+            if ((c & 0xC0) != 0x80) ++char_count;
+        }
         if (min_length.has_value() && char_count < min_length.value()) {
             std::string s = min_length.value() == 1 ? "" : "s";
             return ValError::line_error(
