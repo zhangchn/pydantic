@@ -1496,9 +1496,25 @@ class SchemaValidator:
 
         return result
 
+    def _schema_title(self) -> str:
+        # Rust titles a validator after the thing it validates: the config title
+        # wins, then the model named by the schema, then the root validator's own
+        # display name (a bare list[int] is titled after the list).
+        config = getattr(self, "_config", None)
+        config_title = config.get('title') if isinstance(config, dict) else None
+        if isinstance(config_title, str) and config_title:
+            return config_title
+        name = _get_model_name(self._schema) if hasattr(self, '_schema') else ''
+        if not name:
+            name = getattr(self._base, 'validator_display_name', '') or ''
+        return name
+
     @property
     def title(self):
-        return self._base.title
+        base = self._base.title
+        if isinstance(base, str) and base and base != 'Schema':
+            return base
+        return self._schema_title() or base
 
     def _get_field_defaults(self, schema):
         """Extract default values for fields from schema."""
@@ -1561,15 +1577,7 @@ class SchemaValidator:
         # Rust uses the config's title when it carries one; that is how
         # @validate_call ends up titling an error after the function it wraps
         # instead of after the root validator.
-        config = getattr(self, '_config', None)
-        config_title = config.get('title') if isinstance(config, dict) else None
-        model_name = config_title if isinstance(config_title, str) and config_title else ''
-        if not model_name:
-            model_name = _get_model_name(self._schema) if hasattr(self, '_schema') else ''
-        if not model_name:
-            # Non-model roots (list[int], a bare int, ...) are titled after the
-            # root validator by Rust.
-            model_name = getattr(self._base, 'validator_display_name', '') or ''
+        model_name = self._schema_title()
         if model_name and model_name != 'Schema':
             e._model_name = model_name
 
