@@ -1361,7 +1361,24 @@ class SchemaValidator:
                     else:
                         inner = {}
                     out.append(self._dict_to_model(item, inner))
-                return tuple(out) if isinstance(data, tuple) else out
+                if not isinstance(data, tuple):
+                    return out
+                # As with a list, only a tuple that needed converting is rebuilt,
+                # and then through the original type so a tuple subclass built by
+                # an after-validator (CustomTuple) survives. A namedtuple takes its
+                # items positionally, so it is rebuilt with _make.
+                if all(a is b for a, b in zip(out, data)):
+                    return data
+                make = getattr(type(data), '_make', None)
+                if callable(make) and hasattr(type(data), '_fields'):
+                    try:
+                        return make(out)
+                    except Exception:
+                        return tuple(out)
+                try:
+                    return type(data)(out)
+                except Exception:
+                    return tuple(out)
             return data
 
         if schema.get("type") == "dict":
