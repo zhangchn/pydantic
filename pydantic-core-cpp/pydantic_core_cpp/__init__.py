@@ -1859,10 +1859,13 @@ def _schema_copy_clean(schema):
     if isinstance(schema, dict):
         # An enum node needs ``cls`` so the C++ validator can call the Enum class
         # and emit is-instance errors the way Rust does.
+        is_schema_node = "type" in schema
         keep_cls = schema.get("type") in ("is-instance", "is-subclass", "model", "dataclass", "enum")
         result = {}
         for k, v in schema.items():
-            if k == "cls" and not keep_cls:
+            # As in _schema_clean_cls_keys: drop the class-level "cls" only from a
+            # schema node, never from a field mapping that happens to name a field "cls".
+            if k == "cls" and is_schema_node and not keep_cls:
                 continue
             result[k] = _schema_copy_clean(v)
         if schema.get("type") == "typed-dict" and "cls_name" not in result:
@@ -1987,7 +1990,10 @@ def _schema_clean_cls_keys(d):
     which need ``cls`` for class checking / union discrimination.
     """
     if isinstance(d, dict):
-        if d.get("type") not in ("is-instance", "is-subclass", "model", "dataclass"):
+        if "type" in d and d.get("type") not in ("is-instance", "is-subclass", "model", "dataclass"):
+            # Only a schema node owns a class-level "cls". A dict without a
+            # "type" - e.g. the model-fields mapping - can legitimately have a
+            # field named "cls", whose key must survive.
             d.pop("cls", None)
         for v in d.values():
             _schema_clean_cls_keys(v)
