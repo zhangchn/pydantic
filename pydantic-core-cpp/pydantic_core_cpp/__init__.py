@@ -1173,6 +1173,11 @@ class SchemaValidator:
         if schema.get("type") in ("function-after", "function-before", "function-wrap"):
             inner = schema.get("schema", {})
             if isinstance(inner, dict):
+                # use_enum_values / literal: the after-callable already produced
+                # the final scalar, so recursing into the enum node would wrongly
+                # rebuild a member from that value. Hand the scalar back untouched.
+                if schema.get("type") == "function-after" and inner.get("type") in ("enum", "literal"):
+                    return data
                 return self._dict_to_model(data, inner)
             return data
 
