@@ -231,6 +231,16 @@ public:
             name == "py_object" || name == "is-instance" || name == "is-subclass") {
             if (auto* o = static_cast<py::object*>(value.get())) return *o;
         }
+        // A nested model stores its validated fields output (or the instance it
+        // reused, behind the "maybe_wrapper:" prefix), which the list path
+        // converts through value_to_python_with_type. Without it a dict value
+        // kept the untouched input object and every coercion the value validator
+        // made was dropped.
+        if (name == "model" || name == "model-fields" || name == "typed-dict" ||
+            name == "dataclass" || name == "dataclass-args" ||
+            name.rfind("maybe_wrapper:", 0) == 0) {
+            return value_to_python_with_type(value, name);
+        }
         return std::nullopt;
     }
 
