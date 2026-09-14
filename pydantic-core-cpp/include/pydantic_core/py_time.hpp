@@ -15,6 +15,16 @@ namespace pydantic_core {
 // exactly datetime.date/time/datetime even when a caller has rebound those
 // names in the datetime module.
 inline py::object timezone_from_offset_minutes(int minutes) {
+    // Rust's temporal parsers hand back a pydantic_core.TzInfo for a fixed
+    // offset, not datetime.timezone, which is what makes a parsed value render
+    // as tzinfo=TzInfo(9000). The wrapper owns that class, so reach for it
+    // lazily and keep datetime.timezone as the fallback while it is still
+    // importing.
+    try {
+        return py::module_::import("pydantic_core_cpp").attr("TzInfo")(minutes * 60);
+    } catch (const py::error_already_set&) {
+        PyErr_Clear();
+    }
     py::object datetime_mod = py::module_::import("datetime");
     py::object tz_delta = datetime_mod.attr("timedelta")(py::arg("minutes") = minutes);
     return datetime_mod.attr("timezone")(tz_delta);
