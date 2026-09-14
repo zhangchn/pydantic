@@ -248,7 +248,26 @@ public:
                         try {
                             py::object value = obj.attr(key.c_str());
                             filtered[py::str(key)] = value;
-                        } catch (...) {}
+                        } catch (py::error_already_set& err) {
+                            // Rust: an AttributeError means the field is simply absent
+                            // (missing/default); any other exception means extracting
+                            // the attribute itself blew up, reported as
+                            // get_attribute_error at the field's location.
+                            if (err.matches(PyExc_AttributeError)) {
+                                PyErr_Clear();
+                                continue;
+                            }
+                            std::string exc_name, exc_msg;
+                            try { exc_name = py::str(err.type().attr("__name__")).cast<std::string>(); } catch (...) {}
+                            try { exc_msg = py::str(err.value()).cast<std::string>(); } catch (...) {}
+                            PyErr_Clear();
+                            ErrorType et(ErrorType::Kind::GetAttributeError);
+                            et.context()["error"] = exc_name + ": " + exc_msg;
+                            Location aloc = state.location();
+                            aloc.push(key);
+                            return ValError::line_error(
+                                et, aloc, input.as_error_value().repr);
+                        }
                     }
                 }
                 auto dict = std::make_unique<PythonValidatedDict>(filtered);
