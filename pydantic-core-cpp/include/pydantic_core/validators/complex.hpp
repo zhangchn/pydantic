@@ -2,6 +2,7 @@
 
 #include "pydantic_core/validator.hpp"
 #include "pydantic_core/python_input.hpp"
+#include "pydantic_core/validators/functions.hpp"
 #include <memory>
 #include <vector>
 #include <string>
@@ -172,6 +173,9 @@ public:
                 std::string message = custom_error_message_.value_or("");
                 et = ErrorType(type, message.empty() ? "Validation error" : message);
             }
+            // custom_error_context travels into ctx, as Rust copies it onto the
+            // error it builds for the union's fallback.
+            error_type_context_from_py(et, custom_error_context_);
             // Rust builds the error from the input itself, so the rejected value
             // travels with it and input_type names its real type.
             return ValError::line_error(et, state.location(), input.as_error_value().repr,
@@ -206,9 +210,11 @@ public:
         return *display_name_cache_;
     }
 
-    void set_custom_error(std::string type, std::string message) {
+    void set_custom_error(std::string type, std::string message,
+                          py::object context = py::none()) {
         custom_error_type_ = std::move(type);
         custom_error_message_ = std::move(message);
+        custom_error_context_ = std::move(context);
     }
 
     // union_mode='left_to_right' opts out of Rust's smart ranking: the first
@@ -234,6 +240,7 @@ private:
     std::optional<std::string> custom_error_type_;
     bool left_to_right_ = false;
     std::optional<std::string> custom_error_message_;
+    py::object custom_error_context_ = py::none();
 };
 
 // TaggedUnionValidator - union with discriminator tag
@@ -264,9 +271,11 @@ public:
         build_tags_repr();
     }
 
-    void set_custom_error(const std::string& type, const std::string& message) {
+    void set_custom_error(const std::string& type, const std::string& message,
+                          py::object context = py::none()) {
         custom_error_type_ = type;
         custom_error_message_ = message;
+        custom_error_context_ = context;
     }
 
     void set_from_attributes(bool value) { from_attributes_ = value; }
@@ -348,6 +357,7 @@ private:
     bool from_attributes_ = true;
     std::string custom_error_type_;
     std::string custom_error_message_;
+    py::object custom_error_context_ = py::none();
     mutable std::string last_type_name_;
 
     void build_tags_repr() {
@@ -443,6 +453,7 @@ private:
                             custom_error_message_.empty() ? std::string("Validation error")
                                                           : custom_error_message_);
         }
+        error_type_context_from_py(err, custom_error_context_);
         // The rejected value travels with the error, as in Rust, so input_type
         // names its real type instead of being guessed back from the repr.
         return ValError::line_error(std::move(err), state.location(), input.as_error_value().repr,

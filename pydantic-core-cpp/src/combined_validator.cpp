@@ -2025,7 +2025,12 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("custom_error_type") && !schema["custom_error_type"].is_none()) {
             std::string cmsg = schema.contains("custom_error_message") && !schema["custom_error_message"].is_none()
                 ? schema["custom_error_message"].cast<std::string>() : std::string();
-            uv->set_custom_error(schema["custom_error_type"].cast<std::string>(), cmsg);
+            py::object cctx = py::none();
+            if (schema.contains("custom_error_context") &&
+                !schema["custom_error_context"].is_none()) {
+                cctx = schema["custom_error_context"];
+            }
+            uv->set_custom_error(schema["custom_error_type"].cast<std::string>(), cmsg, cctx);
         }
         return uv;
     }
@@ -2104,7 +2109,12 @@ static std::shared_ptr<Validator> build_from_py_dict(
             std::string cmsg = (schema.contains("custom_error_message") &&
                                 !schema["custom_error_message"].is_none())
                 ? py::str(schema["custom_error_message"]).cast<std::string>() : std::string();
-            uv->set_custom_error(schema["custom_error_type"].cast<std::string>(), cmsg);
+            py::object cctx = py::none();
+            if (schema.contains("custom_error_context") &&
+                !schema["custom_error_context"].is_none()) {
+                cctx = schema["custom_error_context"];
+            }
+            uv->set_custom_error(schema["custom_error_type"].cast<std::string>(), cmsg, cctx);
         }
         return uv;
     }
