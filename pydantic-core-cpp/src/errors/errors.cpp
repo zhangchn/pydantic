@@ -54,6 +54,32 @@ std::string input_type_name(const py::object& obj) {
 }
 #endif
 
+// Rust chooses the message template from the input's type
+// (ErrorType::render_message -> message_template_json), so a container-shaped
+// error met in a JSON document talks about arrays and objects instead of the
+// Python container names.
+std::string json_message_for(const std::string& type_name, const std::string& msg) {
+    if (type_name == "none_required") return "Input should be null";
+    if (type_name == "list_type" || type_name == "tuple_type" ||
+        type_name == "iterable_type" || type_name == "set_type" ||
+        type_name == "frozenset_type") {
+        return "Input should be a valid array";
+    }
+    if (type_name == "model_type" || type_name == "model_attributes_type" ||
+        type_name == "dict_type" || type_name == "dataclass_type") {
+        return "Input should be an object";
+    }
+    if (type_name == "timedelta_type") return "Input should be a valid duration";
+    if (type_name == "timedelta_parsing") {
+        const std::string prefix = "Input should be a valid timedelta, ";
+        if (msg.compare(0, prefix.size(), prefix) == 0) {
+            return "Input should be a valid duration, " + msg.substr(prefix.size());
+        }
+    }
+    if (type_name == "arguments_type") return "Arguments must be an array or an object";
+    return msg;
+}
+
 } // namespace
 
 std::string ValLineError::message() const {
@@ -187,6 +213,9 @@ void ValidationError::build_errors_from_val_error(const ValError& val_error) {
             details.loc = line_err->location.to_string();
             details.loc_items = line_err->location.items;
             details.msg = line_err->error_type.message();
+            if (input_type_ != InputType::Python) {
+                details.msg = json_message_for(details.type, details.msg);
+            }
             details.input = line_err->input_value;
             details.is_custom = line_err->error_type.is_custom();
 #ifdef HAS_PYBIND11

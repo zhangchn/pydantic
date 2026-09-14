@@ -817,7 +817,10 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
             throw SchemaError(
                 "Uncaught Omit error, please check your usage of `default` validators.");
         }
-        auto err = prepare_error(result.error(), InputType::Python);
+        // The run's input type travels into the error: Rust renders a line
+        // error's message from the input it failed on, so a JSON document gets
+        // the array/object wording.
+        auto err = prepare_error(result.error(), input_type);
         throw err;
     }
 }
