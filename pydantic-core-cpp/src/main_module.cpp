@@ -1107,6 +1107,8 @@ struct SerNode {
     // For tagged-union: the discriminator lookup paths, and the choices in
     // declaration order for the left-to-right fallback.
     std::vector<std::vector<std::string>> tagged_discriminator;
+    // Discriminator(callable): Rust calls it on the value being serialized.
+    py::object tagged_discriminator_callable = py::none();
     std::vector<SerRef> tagged_left_to_right;
     // For model-fields: map from field_name -> serializer
     std::unordered_map<std::string, SerRef> fields;
@@ -1318,6 +1320,26 @@ struct SerNode {
             // key (and guessing the key name) meant a validated model instance
             // never matched, so the fallback below emitted a different
             // variant's fields.
+            if (!tagged_discriminator_callable.is_none()) {
+                // Rust: Discriminator::Function(func) => func.call1((value,)).ok(),
+                // so a callable that raises simply leaves no tag and the
+                // left-to-right fallback below takes over.
+                try {
+                    py::object tag_obj = tagged_discriminator_callable(value);
+                    std::string tag = ser_tag_string(tag_obj);
+                    auto cit = tagged.find(tag);
+                    if (cit != tagged.end()) {
+                        try {
+                            return cit->second->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
+                        } catch (const py::error_already_set&) {
+                            PyErr_Clear();
+                            ser_warn_message("Pydantic serialization failed for tagged union variant '" + tag + "'", value);
+                        }
+                    }
+                } catch (const py::error_already_set&) {
+                    PyErr_Clear();
+                }
+            }
             for (const auto& path : tagged_discriminator) {
                 py::object tag_obj;
                 if (!lookup_discriminator(value, path, &tag_obj)) continue;
@@ -3424,6 +3446,8 @@ static SerRef build_ser_impl(const py::dict& schema,
             py::object disc = schema["discriminator"];
             if (py::isinstance<py::str>(disc)) {
                 node->tagged_discriminator.push_back({disc.cast<std::string>()});
+            } else if (PyCallable_Check(disc.ptr())) {
+                node->tagged_discriminator_callable = disc;
             } else if (py::isinstance<py::list>(disc)) {
                 for (auto item : disc.cast<py::list>()) {
                     if (py::isinstance<py::str>(item)) {
