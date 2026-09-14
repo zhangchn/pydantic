@@ -1630,6 +1630,22 @@ inline py::object default_to_python(const std::shared_ptr<Validator>& validator,
 // ArgumentsValidator - validates function arguments (positional + keyword).
 // Matches Rust's ArgumentsValidator (arguments.rs).  Produces a Python tuple
 // of (validated_args, validated_kwargs) ready for a function call.
+// Rust hands a model-typed call parameter the model INSTANCE, while
+// value_to_python stops at the validated-field dict. Finish the conversion so
+// the function body can call methods on it. A TypedDict parameter is built as
+// a TypedDictValidator, not a ModelValidator, so it correctly stays a dict.
+inline py::object param_value_to_python(const std::shared_ptr<Validator>& val,
+                                        const std::shared_ptr<void>& result_value,
+                                        py::object* raw, const Input& input,
+                                        ValidationState& state) {
+    py::object conv = value_to_python(result_value, val->effective_result_name(), raw);
+    if (auto* mv = dynamic_cast<ModelValidator*>(
+            model_validator_through_wrappers(val).get())) {
+        conv = materialize_model_instance(mv, conv, input, state);
+    }
+    return conv;
+}
+
 class ArgumentsValidator : public Validator {
 public:
     struct Parameter {
@@ -1757,7 +1773,7 @@ public:
                 auto result = p.validator->validate(py_in, state);
                 state.location().pop();
                 if (result.is_ok()) {
-                    py::object conv = value_to_python(result.value(), p.validator->effective_result_name(), &*pos_value);
+                    py::object conv = param_value_to_python(p.validator, result.value(), &*pos_value, py_in, state);
                     if (dataclass_mode) {
                         try { arg_data[py::str(p.name)] = conv; } catch (...) {}
                         if (p.init_only) {
@@ -1784,7 +1800,7 @@ public:
                 auto result = p.validator->validate(py_in, state);
                 state.location().pop();
                 if (result.is_ok()) {
-                    py::object conv = value_to_python(result.value(), p.validator->effective_result_name(), &*kw_value);
+                    py::object conv = param_value_to_python(p.validator, result.value(), &*kw_value, py_in, state);
                     if (dataclass_mode) {
                         try { arg_data[py::str(p.name)] = conv; } catch (...) {}
                         if (p.init_only) {
@@ -1864,7 +1880,7 @@ public:
                     auto result = var_args_validator->validate(py_in, state);
                     state.location().pop();
                     if (result.is_ok()) {
-                        output_args.append(value_to_python(result.value(), var_args_validator->effective_result_name(), &item));
+                        output_args.append(param_value_to_python(var_args_validator, result.value(), &item, py_in, state));
                     } else {
                         if (result.error().is_internal()) {
                             // Rust propagates an InternalErr (an exception that is not a
@@ -1899,7 +1915,7 @@ public:
                 auto result = var_kwargs_validator->validate(py_in, state);
                 state.location().pop();
                 if (result.is_ok()) {
-                    output_kwargs[py::str(key)] = value_to_python(result.value(), var_kwargs_validator->effective_result_name(), &value);
+                    output_kwargs[py::str(key)] = param_value_to_python(var_kwargs_validator, result.value(), &value, py_in, state);
                 } else {
                     if (result.error().is_internal()) {
                         // Rust propagates an InternalErr (an exception that is not a
