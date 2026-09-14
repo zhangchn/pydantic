@@ -99,12 +99,21 @@ _ERROR_MSG_MAP: dict[str, tuple[str, str]] = {
 }
 
 
-def _errors_with_include_url(self, *args, include_url: bool = True, **kwargs):
+def _errors_with_include_url(
+    self,
+    *args,
+    include_url: bool = True,
+    include_context: bool = True,
+    include_input: bool = True,
+    **kwargs,
+):
     """Return the list of validation error details.
 
     Args:
         include_url: Whether to include a ``url`` key linking to
             pydantic error documentation (default ``True``).
+        include_context: Whether to include the per-error ``ctx`` dict.
+        include_input: Whether to include the rejected ``input`` value.
     """
     try:
         result = _orig_errors(self, *args, **kwargs)
@@ -163,6 +172,13 @@ def _errors_with_include_url(self, *args, include_url: bool = True, **kwargs):
                         # Top-level error: use the raw input itself
                         if cur == repr(raw_input):
                             result[i]['input'] = raw_input
+    # Rust drops the keys themselves rather than blanking them.
+    if not include_input:
+        for err in result:
+            err.pop("input", None)
+    if not include_context:
+        for err in result:
+            err.pop("ctx", None)
     if not include_url:
         for err in result:
             err.pop("url", None)
