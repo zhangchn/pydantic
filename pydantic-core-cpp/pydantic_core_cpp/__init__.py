@@ -593,7 +593,17 @@ def _from_exception_data(cls, title: str, line_errors: list[dict], input_type: s
         input_val = err.get('input')
         ctx = err.get('ctx')
 
-        msg = _format_err_msg(err_type, ctx)
+        # A caller may hand a custom-error instance as the type; Rust then
+        # reports that instance's own error type and renders the message from
+        # its own template (and gives it no documentation url).
+        custom = isinstance(err_type, PydanticCustomError)
+        if isinstance(err_type, (PydanticCustomError, PydanticKnownError)):
+            type_str = err_type.type
+            ctx = err_type.context or ctx
+            msg = err_type.message() if custom else _format_err_msg(type_str, ctx)
+        else:
+            type_str = err_type
+            msg = _format_err_msg(type_str, ctx)
         loc_str = '.'.join(str(x) for x in loc) if loc else '(root)'
 
         # Format input repr
@@ -605,19 +615,20 @@ def _from_exception_data(cls, title: str, line_errors: list[dict], input_type: s
         # Rust's pretty() appends the input only while inputs are shown; the
         # errors() dicts keep it either way.
         if hide_input:
-            details = f'type={err_type}'
+            details = f'type={type_str}'
         else:
-            details = f'type={err_type}, input_value={input_repr}, input_type={type(input_val).__name__}'
+            details = f'type={type_str}, input_value={input_repr}, input_type={type(input_val).__name__}'
         error_parts.append(f'{loc_str}\n  {msg} [{details}]')
 
         # Build error dict
         err_dict = {
-            'type': err_type,
+            'type': type_str,
             'loc': tuple(loc) if not isinstance(loc, tuple) else loc,
             'msg': msg,
             'input': input_val,
-            'url': f'https://errors.pydantic.dev/2.14/v/{err_type}',
         }
+        if not custom:
+            err_dict['url'] = f'https://errors.pydantic.dev/2.14/v/{type_str}'
         if ctx:
             err_dict['ctx'] = ctx
         error_dicts.append(err_dict)
