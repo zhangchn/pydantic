@@ -72,6 +72,10 @@ struct FieldInfo {
     // Rust: defaults are used raw unless validate_default is set (field or
     // config); when set, the default is validated and errors are reported.
     bool validate_default = false;
+    // Rust sets copy_default from the stored object: a default that cannot be
+    // hashed (list, dict, set) is deep-copied for every instance so one model
+    // cannot mutate another one's default.
+    bool copy_default = false;
 
     std::string display_name() const {
         return has_alias ? alias : name;
@@ -536,7 +540,13 @@ public:
         if (!field.default_py_obj.is_none()) {
             // Complex Python object default (callable result, date,
             // timedelta, etc.) — used raw unless validate_default.
-            apply_field_default(field.default_py_obj, field, state, fv, combined_errors);
+            const py::object* raw = &field.default_py_obj;
+            py::object copied;
+            if (field.copy_default) {
+                copied = py::module_::import("copy").attr("deepcopy")(field.default_py_obj);
+                raw = &copied;
+            }
+            apply_field_default(*raw, field, state, fv, combined_errors);
             return;
         }
         if (!field.default_value_str.empty()) {

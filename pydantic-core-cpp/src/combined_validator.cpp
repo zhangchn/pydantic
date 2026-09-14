@@ -13,26 +13,6 @@ namespace py = pybind11;
 
 namespace pydantic_core {
 
-// Helper: serialize a schema default value to a JSON string, handling
-// values that json.dumps cannot serialize directly (bytes, Enum members).
-static std::string py_default_to_json_str(const py::object& py_default) {
-    auto default_fn = py::cpp_function([](py::handle o) -> py::object {
-        if (py::isinstance<py::bytes>(o)) {
-            // Decode UTF-8 (matches ser_json_bytes='utf8' default)
-            return py::object(py::reinterpret_borrow<py::object>(o)).attr("decode")("utf-8");
-        }
-        if (py_hasattr(o, "_value_") && py_hasattr(o, "_name_")) {
-            // Enum member — use its name so the enum validator can rebuild it
-            return py::getattr(o, "name");
-        }
-        if (py_hasattr(o, "__dict__")) {
-            return py::getattr(o, "__dict__");
-        }
-        return py::str(py::repr(o));
-    });
-    return py::module_::import("json").attr("dumps")(py_default, py::arg("default") = default_fn).cast<std::string>();
-}
-
 // Helper: convert string to ExtraBehavior
 static ExtraBehavior extra_behavior_from_string(const std::string& s) {
     if (s == "allow") return ExtraBehavior::Allow;
@@ -2439,27 +2419,12 @@ static std::shared_ptr<Validator> build_from_py_dict(
                             auto py_default = field_schema_dict["default"];
                             if (py_default.is_none()) {
                                 default_val_str = "null";
-                            } else if (py_hasattr(py_default, "__call__")) {
-                                // Callable default — store as Python object, not JSON string
-                                // (will be handled by default_py_obj in missing-field path)
-                            } else if (py::isinstance<py::str>(py_default) || py::isinstance<py::int_>(py_default) ||
-                                       py::isinstance<py::float_>(py_default) || py::isinstance<py::bool_>(py_default) ||
-                                       py::isinstance<py::list>(py_default) || py::isinstance<py::dict>(py_default)) {
-                                // JSON-native types — try to convert to JSON string.
-                                // Dicts with non-serializable keys (e.g. Path, function)
-                                // fail; fall back to a live Python object.
-                                try {
-                                    default_val_str = py_default_to_json_str(py_default);
-                                } catch (py::error_already_set& e) {
-                                    e.restore();
-                                    PyErr_Clear();
-                                    default_val_str.clear();
-                                    field_default_py_obj = py_default;
-                                }
-                            } else {
-                                // Non-JSON types (timedelta, date, datetime, Decimal, etc.)
-                                // Store as Python object for proper validation later
-                                // Will be handled by default_py_obj in missing-field path
+                            } else if (!py_hasattr(py_default, "__call__")) {
+                                // Rust holds the default as the Python object it was
+                                // given, so its type and identity survive into the
+                                // validated model (an IntEnum default stays a member);
+                                // callables and None are handled by the caller below.
+                                field_default_py_obj = py_default;
                             }
                             required = false;
                         }
@@ -2507,9 +2472,13 @@ static std::shared_ptr<Validator> build_from_py_dict(
                         auto py_default = fsd["default"];
                         if (!py_default.is_none()) {
                             if (!field_default_py_obj.is_none()) {
-                                // JSON serialization failed (e.g. dict with
-                                // non-serializable keys) — use the live object.
+                                // Rust keeps the default as a live object and only
+                                // deep-copies it per instance when it cannot be
+                                // hashed, which is what keeps two instances from
+                                // sharing one mutable default.
                                 info.default_py_obj = field_default_py_obj;
+                                info.copy_default = PyObject_Hash(field_default_py_obj.ptr()) == -1;
+                                PyErr_Clear();
                                 info.required = false;
                             } else if (py_hasattr(py_default, "__call__")) {
                                 info.default_py_obj = py_default;
