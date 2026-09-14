@@ -150,7 +150,10 @@ inline ValError function_error_from_exception(py::error_already_set& e, const In
                 std::string custom_type = py::str(exc_value.attr("type")).cast<std::string>();
                 ErrorType et(custom_type, exc_str);
                 error_type_context_from_py(et, py::getattr(exc_value, "context", py::none()));
-                auto err = ValError::line_error(et, state.location(), input.as_error_value().repr);
+                // Rust builds the error from the input the callable received, so
+                // the rejected object itself travels with it (input_type included).
+                auto err = ValError::line_error(et, state.location(), input.as_error_value().repr,
+                                                input.as_python_object());
                 e.restore();
                 PyErr_Clear();
                 return err;
@@ -160,7 +163,8 @@ inline ValError function_error_from_exception(py::error_already_set& e, const In
                 std::string ktype = py::str(exc_value.attr("type")).cast<std::string>();
                 ErrorType et = ErrorType::build_known_type(ktype);
                 error_type_context_from_py(et, py::getattr(exc_value, "context", py::none()));
-                auto err = ValError::line_error(et, state.location(), input.as_error_value().repr);
+                auto err = ValError::line_error(et, state.location(), input.as_error_value().repr,
+                                                input.as_python_object());
                 e.restore();
                 PyErr_Clear();
                 return err;
@@ -170,7 +174,8 @@ inline ValError function_error_from_exception(py::error_already_set& e, const In
         }
         ErrorType et(ErrorType::Kind::ValueError);
         et.context()["error"] = exc_str;
-        auto err = ValError::line_error(et, state.location(), input.as_error_value().repr);
+        auto err = ValError::line_error(et, state.location(), input.as_error_value().repr,
+                                        input.as_python_object());
         err.line_errors()[0]->raw_error_obj = exc_value;
         // Swallow the exception: restore() + PyErr_Clear() leaves the Python error
         // indicator clear so the destructor's restore is a no-op.
@@ -181,7 +186,8 @@ inline ValError function_error_from_exception(py::error_already_set& e, const In
     if (e.matches(PyExc_AssertionError)) {
         ErrorType et(ErrorType::Kind::AssertionError);
         et.context()["error"] = exc_str;
-        auto err = ValError::line_error(et, state.location(), input.as_error_value().repr);
+        auto err = ValError::line_error(et, state.location(), input.as_error_value().repr,
+                                        input.as_python_object());
         err.line_errors()[0]->raw_error_obj = exc_value;
         // Swallow the exception: restore() + PyErr_Clear() leaves the Python error
         // indicator clear so the destructor's restore is a no-op.
