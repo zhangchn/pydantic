@@ -224,6 +224,11 @@ public:
     void set_init_fields_snapshot(py::object s) { init_fields_snapshot_ = std::move(s); }
 #endif
     
+    // Rust's ValidationState::has_field_error: set when a field validator or a
+    // field default fails, so a data-aware default factory can refuse to run
+    // instead of observing incomplete validated data.
+    bool has_field_error = false;
+
     // Recursion management
     RecursionState::RecursionEntry enter_recursion(const void* obj) {
         return recursion_state_->enter(obj);

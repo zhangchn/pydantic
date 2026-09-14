@@ -399,8 +399,15 @@ public:
                     }
                 }
                 bool field_use_default = false;
+                size_t errors_before_validate = combined_errors.line_errors().size();
                 auto validate_result = validate_field_value_from_object(*resolved_value, field, state, combined_errors,
                                                                        is_last_partial, &field_use_default);
+                if (combined_errors.line_errors().size() > errors_before_validate) {
+                    // Rust sets state.has_field_error when field.validator.validate()
+                    // returns line errors, so a later data-aware default factory knows
+                    // the validated data it would receive is incomplete.
+                    state.has_field_error = true;
+                }
                 if (state.has_hard_error()) {
                     state.pop_loc();
                     return state.take_hard_error();
@@ -425,7 +432,7 @@ public:
                     // UseDefault raised by the field validator is answered with the
                     // field's default rather than dropping the field.
                     ValidatedModelFieldsOutput::FieldValue fv;
-                    compute_field_default(field, output, state, fv, combined_errors);
+                    resolve_field_default(field, output, state, fv, combined_errors);
                     if (fv.value) {
                         output.fields[name] = std::move(fv);
                         output.fields_set.insert(name);
@@ -444,7 +451,7 @@ public:
                     combined_errors.merge(std::move(err));
                 } else {
                     ValidatedModelFieldsOutput::FieldValue fv;
-                    compute_field_default(field, output, state, fv, combined_errors);
+                    resolve_field_default(field, output, state, fv, combined_errors);
                     if (fv.value) {
                         output.fields[name] = std::move(fv);
                         output.field_order.push_back(name);
@@ -517,6 +524,21 @@ public:
         fv.type_name = "py_object";
     }
 
+    // Rust answers a missing/defaulted field with
+    // WithDefaultValidator::default_value, and line errors coming out of it
+    // set state.has_field_error exactly like a failed field validator does.
+    void resolve_field_default(const FieldInfo& field,
+                               const ValidatedModelFieldsOutput& output,
+                               ValidationState& state,
+                               ValidatedModelFieldsOutput::FieldValue& fv,
+                               ValError& combined_errors) {
+        size_t before = combined_errors.line_errors().size();
+        compute_field_default(field, output, state, fv, combined_errors);
+        if (combined_errors.line_errors().size() > before) {
+            state.has_field_error = true;
+        }
+    }
+
     // Resolve a field's default into fv: a default_factory (optionally fed the
     // already-validated fields), a live Python object default, or the stored
     // JSON text of a primitive. Shared by the missing-field path and by a
@@ -527,6 +549,17 @@ public:
                                ValidationState& state,
                                ValidatedModelFieldsOutput::FieldValue& fv,
                                ValError& combined_errors) {
+        // Rust skips a data-aware default factory once a field has already
+        // failed: its data argument would be incomplete, so it reports
+        // default_factory_not_called rather than running it (and raising an
+        // unhelpful KeyError/None for the caller). Note the flag is dedicated -
+        // a missing-field error alone must not suppress the factory.
+        if (field.default_factory_takes_data && state.has_field_error) {
+            ErrorType et(ErrorType::Kind::DefaultFactoryNotCalled);
+            combined_errors.merge(ValError::line_error(
+                et, state.location(), "PydanticUndefined"));
+            return;
+        }
         if (!field.default_factory.is_none()) {
             try {
                 py::object raw;

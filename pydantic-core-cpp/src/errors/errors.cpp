@@ -107,8 +107,10 @@ std::string ValidationError::format_what_message() const {
         }
         oss << err.msg
             << " [type=" << err.type;
-        // Rust: when hide_input is set, omit input_value/input_type entirely
-        if (!hide_input_) {
+        // Rust: when hide_input is set, omit input_value/input_type entirely.
+        // A default_factory_not_called error also drops the input segment -
+        // there is no meaningful input to show.
+        if (!hide_input_ && err.type != "default_factory_not_called") {
             oss << ", input_value=" << err.input;
             if (!err.input_type.empty()) {
                 oss << ", input_type=" << err.input_type;
