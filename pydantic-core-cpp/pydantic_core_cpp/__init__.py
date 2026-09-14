@@ -1287,7 +1287,17 @@ class SchemaValidator:
         if schema.get("type") == "list":
             items_schema = schema.get("items_schema", {})
             if isinstance(items_schema, dict) and isinstance(data, list):
-                return [self._dict_to_model(item, items_schema) for item in data]
+                # Rebuilding is only needed when a member actually converts; an
+                # unchanged list is handed back untouched so a subclass built by
+                # an after-validator (GenericList) survives. When members do
+                # change, rebuild through the original type to keep it a subclass.
+                converted = [self._dict_to_model(item, items_schema) for item in data]
+                if all(a is b for a, b in zip(converted, data)):
+                    return data
+                try:
+                    return type(data)(converted)
+                except Exception:
+                    return converted
             return data
 
         if schema.get("type") == "tuple":
