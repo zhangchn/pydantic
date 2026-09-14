@@ -3180,6 +3180,15 @@ static SerRef build_ser_impl(const py::dict& schema,
     auto node = std::make_shared<SerNode>();
     node->type = type;
 
+    // Rust's LiteralSerializer has no leaf of its own: with the optional
+    // validate-while-serializing switch off (the default) it hands the value to
+    // inference, which is what turns a str-Enum member into a plain string when
+    // the target is JSON.
+    if (type == "literal") {
+        node->type = "any";
+        return node;
+    }
+
     // Rust FormatSerializer/ToStringSerializer default `when_used` to `json-unless-none`.
     if (type == "format" || type == "to-string") {
         node->when_used = "json-unless-none";
