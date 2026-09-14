@@ -708,6 +708,12 @@ public:
 
     std::string name() const override { return "py_raw_object"; }
 
+    // Rust names the validator after the class it checks, and that name is
+    // the label every error inside it reports.
+    std::string display_name() const override {
+        return "is-instance[" + class_name_ + "]";
+    }
+
 private:
     std::string class_name_;
     py::object py_class_;
@@ -781,6 +787,12 @@ public:
     }
 
     std::string name() const override { return "py_raw_object"; }
+
+    // Rust names the validator after the class it checks, and that name is
+    // the label every error inside it reports.
+    std::string display_name() const override {
+        return "is-subclass[" + class_name_ + "]";
+    }
 
 private:
     std::string class_name_;

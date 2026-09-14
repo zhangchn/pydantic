@@ -1363,6 +1363,25 @@ public:
 
     std::string name() const override { return "chain"; }
 
+    // Rust names a chain after its steps, and that label is what each step's
+    // error location shows.
+    std::string display_name() const override {
+        if (display_name_cache_) return *display_name_cache_;
+        // A recursive schema can re-enter this validator while its own name is
+        // still being built; answer plainly rather than recurse forever.
+        static thread_local int depth = 0;
+        if (depth >= 8) return "chain";
+        ++depth;
+        struct Guard { ~Guard() { --depth; } } guard;
+        std::string descr;
+        for (size_t i = 0; i < validators_.size(); ++i) {
+            if (i) descr += ",";
+            descr += validators_[i]->display_name();
+        }
+        display_name_cache_ = "chain[" + descr + "]";
+        return *display_name_cache_;
+    }
+
     std::string effective_result_name() const override {
         // The result is whatever the last executed step produced
         if (last_used_ >= 0 && last_used_ < static_cast<int>(validators_.size())) {
@@ -1375,6 +1394,7 @@ public:
 private:
     std::vector<std::shared_ptr<Validator>> validators_;
     mutable int last_used_ = -1;
+    mutable std::optional<std::string> display_name_cache_;
 };
 
 // LaxOrStrictValidator - uses different validators for lax/strict mode
@@ -1476,6 +1496,14 @@ public:
     }
 
     std::string name() const override { return "json-or-python"; }
+
+    // Rust names the pair after both branches, which is what the error location
+    // of an inner failure shows.
+    std::string display_name() const override {
+        std::string j = json_ ? json_->display_name() : std::string("any");
+        std::string p = python_ ? python_->display_name() : std::string("any");
+        return "json-or-python[json=" + j + ",python=" + p + "]";
+    }
 
     std::string effective_result_name() const override {
         if (used_python_ && python_) return python_->effective_result_name();
