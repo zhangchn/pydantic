@@ -919,6 +919,9 @@ public:
     FunctionPlainValidator() : py_func_(py::none()) {}
     explicit FunctionPlainValidator(py::object py_func) : py_func_(std::move(py_func)) {}
 
+    // -1 = unknown, fall back to the call/retry heuristic; 0 = no-info; 1 = with-info.
+    void set_info_arg(int value) { info_arg_ = value; }
+
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
@@ -931,6 +934,20 @@ public:
             py::object info_obj = make_validation_info(state);
 
             py::object output;
+            // Rust decides from the function's declared type whether the
+            // callable takes an info argument; when it is declared, a TypeError
+            // from the callable itself is genuine and must propagate.
+            bool called = false;
+            if (info_arg_ >= 0) {
+                try {
+                    output = info_arg_ == 1 ? py_func_(input.as_python_object(), info_obj)
+                                            : py_func_(input.as_python_object());
+                    called = true;
+                } catch (py::error_already_set& e) {
+                    return propagate_function_error(e, input, state);
+                }
+            }
+            if (!called) {
             try {
                 // Try with info object (general/no-info-wrapped functions)
                 output = py_func_(input.as_python_object(), info_obj);
@@ -946,6 +963,7 @@ public:
                 } catch (py::error_already_set& e2) {
                     return function_error_from_exception(e2, input, state);
                 }
+            }
             }
             return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(output));
         } catch (py::error_already_set& e) {
@@ -969,6 +987,7 @@ public:
 
 private:
     py::object py_func_;
+    int info_arg_ = -1;
 };
 
 // FunctionWrapValidator - wraps validation with custom Python logic

@@ -1932,6 +1932,7 @@ static std::shared_ptr<Validator> build_from_py_dict(
 
     if (type == "function-plain") {
         py::object func = py::none();
+        int info_arg = -1;
         if (schema.contains("function")) {
             func = schema["function"];
             if (py::isinstance<py::dict>(func)) {
@@ -1939,9 +1940,15 @@ static std::shared_ptr<Validator> build_from_py_dict(
                 if (func_dict.contains("function")) {
                     func = func_dict["function"];
                 }
+                try {
+                    std::string ftype = func_dict["type"].cast<std::string>();
+                    info_arg = (ftype == "no-info") ? 0 : 1;
+                } catch (...) {}
             }
         }
-        return std::make_shared<FunctionPlainValidator>(func);
+        auto plain = std::make_shared<FunctionPlainValidator>(func);
+        plain->set_info_arg(info_arg);
+        return plain;
     }
 
     if (type == "function-wrap") {
