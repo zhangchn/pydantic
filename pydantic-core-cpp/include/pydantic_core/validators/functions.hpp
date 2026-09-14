@@ -29,7 +29,19 @@ inline void error_type_context_from_py(ErrorType& et, const py::object& ctx) {
         std::string k;
         try { k = py::str(item.first).cast<std::string>(); } catch (...) { continue; }
         std::string v;
-        try { v = py::str(item.second).cast<std::string>(); } catch (...) { v = ""; }
+        // Rust extracts a numeric context value as its number, so an int
+        // subclass with a custom __repr__ (a dataclass over int) renders as
+        // the integer literal, not the object repr. Plain numbers are unchanged.
+        PyObject* vp = item.second.ptr();
+        try {
+            if (PyFloat_Check(vp)) {
+                v = py::str(py::reinterpret_steal<py::object>(PyNumber_Float(vp))).cast<std::string>();
+            } else if (PyLong_Check(vp) && !PyBool_Check(vp)) {
+                v = py::str(py::reinterpret_steal<py::object>(PyNumber_Long(vp))).cast<std::string>();
+            } else {
+                v = py::str(item.second).cast<std::string>();
+            }
+        } catch (...) { v = ""; }
         et.context()[k] = v;
     }
 }
@@ -673,7 +685,14 @@ public:
             }
             if (dcur && dcur->is_dataclass_validator()) {
                 py::object dc_cls = dcur->expected_class();
-                if (!dc_cls.is_none()) {
+                // A non-init input that is already an instance hands the inner
+                // PyDataclassValidator straight through (Rust passes it on), so
+                // validated_obj is the finished object. Rebuilding it from a
+                // kwargs dict would drop fields - fatal for an int subclass,
+                // whose __new__(cls) silently yields 0 with no fields set.
+                bool already_instance = !dc_cls.is_none() &&
+                    py::isinstance(validated_obj, dc_cls);
+                if (!dc_cls.is_none() && !already_instance) {
                     try {
                         bool have_init_self = !state.init_self_py().is_none() && state.top_input_ptr();
                         py::object py_in_check = have_init_self ? input.as_python_object() : py::none();
