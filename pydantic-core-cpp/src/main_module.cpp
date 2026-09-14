@@ -3494,6 +3494,12 @@ static SerRef build_ser_impl(const py::dict& schema,
         // For function-plain with serialization override, build children from original schema for fallback
         if (type != "function-plain" || has_ser_dict) {
             auto c = sub();
+            if (!c && has_ser_dict) {
+                // Rust builds a serializer from the *serialization* schema, so a
+                // wrap serializer on a leaf that has no inner schema of its own
+                // (is-instance) still knows what to serialize underneath.
+                try { c = build_ser(ser_dict["schema"].cast<py::dict>(), defs); } catch (...) {}
+            }
             // Rust builds the fallback serializer from the outer schema, so a
             // nullable schema whose serializer is overridden must still map
             // None to null rather than hand None to the inner serializer.
