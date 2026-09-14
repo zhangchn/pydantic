@@ -85,3 +85,18 @@ def test_dict():
     assert ta.validate_json('{"a": 10, "b": 20, "c": 30}', **eap) == {'a': 10, 'b': 20, 'c': 30}
     assert ta.validate_json('{"a": 10, "b": 20, "c": 3', **eap) == {'a': 10, 'b': 20}
     assert ta.validate_json('{"a": 10, "b": 20, "c": 3}', **eap) == {'a': 10, 'b': 20}
+
+
+def test_trailing_strings():
+    ta = TypeAdapter(dict[str, str])
+    ets = dict(experimental_allow_partial='trailing-strings')
+
+    # A string value the input cut short is kept, escapes and all.
+    assert ta.validate_json('{"k": "v", "x": "p', **ets) == {'k': 'v', 'x': 'p'}
+    assert ta.validate_json('{"k": "un\\u00de', **ets) == {'k': 'unÞ'}
+    assert ta.validate_json('{"k": "esc\\', **ets) == {'k': 'esc'}
+    # A trailing key, with or without its colon, is still dropped with the
+    # pair it belongs to, and 'on' asks for the partial string to be dropped.
+    assert ta.validate_json('{"k": "v", "x"', **ets) == {'k': 'v'}
+    assert ta.validate_json('{"k": "v", "x": ', **ets) == {'k': 'v'}
+    assert ta.validate_json('{"k": "v", "x": "p', experimental_allow_partial=True) == {'k': 'v'}

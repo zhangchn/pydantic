@@ -179,7 +179,8 @@ static py::object json_to_pyobj(const std::string& json_str) {
 // allow_partial).  Tries json.loads first; on failure, repairs truncated JSON
 // by closing open brackets/braces/quotes and dropping incomplete trailing
 // key-value pairs, then retries.
-static py::object json_to_pyobj_partial(const std::string& json_str) {
+static py::object json_to_pyobj_partial(const std::string& json_str,
+                                        PartialMode mode = PartialMode::On) {
     py::object json_mod = py::module_::import("json");
     try {
         return json_mod.attr("loads")(json_str);
@@ -201,6 +202,10 @@ static py::object json_to_pyobj_partial(const std::string& json_str) {
     // Track the position where the last complete value ended (for dropping
     // incomplete trailing pairs).
     size_t last_complete_end = 0;
+    // Offset of the currently open string's quote, and whether a truncated
+    // escape sequence was left behind when the input ran out.
+    size_t open_string_start = std::string::npos;
+    bool dangling_escape = false;
 
     while (i < n) {
         char c = json_str[i];
@@ -213,6 +218,7 @@ static py::object json_to_pyobj_partial(const std::string& json_str) {
                     continue;
                 }
                 // Truncated escape sequence — drop the rest
+                dangling_escape = true;
                 break;
             } else if (c == '"') {
                 in_string = false;
@@ -225,6 +231,7 @@ static py::object json_to_pyobj_partial(const std::string& json_str) {
             if (c == '"') {
                 in_string = true;
                 string_terminated = false;
+                open_string_start = repaired.size();
                 repaired += c;
             } else if (c == '{' || c == '[') {
                 open_stack.push_back(c);
@@ -245,6 +252,24 @@ static py::object json_to_pyobj_partial(const std::string& json_str) {
             }
         }
         i++;
+    }
+
+    if (in_string && mode == PartialMode::TrailingStrings) {
+        // Rust (jiter allow_partial='trailing-strings') keeps a string value
+        // that the input cut short, so the caller sees the partial text. Only
+        // a value counts: a trailing key without its ':' is still dropped.
+        bool is_value = false;
+        for (size_t j = open_string_start; j > 0; j--) {
+            char prev = repaired[j - 1];
+            if (prev == ' ' || prev == '\n' || prev == '\t' || prev == '\r') continue;
+            is_value = (prev == ':');
+            break;
+        }
+        if (is_value) {
+            if (dangling_escape) repaired.pop_back();
+            repaired += '"';
+            in_string = false;
+        }
     }
 
     // If we ended inside an unterminated string, drop back to the last
@@ -4564,19 +4589,25 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             std::string js = py::isinstance<py::bytes>(jd) ? jd.cast<std::string>() : jd.cast<std::string>();
             // Parse allow_partial to decide whether to use partial JSON parsing.
             bool partial_active = false;
+            bool partial_trailing_strings = false;
             if (!allow_partial.is_none()) {
                 if (py::isinstance<py::bool_>(allow_partial)) {
                     partial_active = allow_partial.cast<bool>();
                 } else if (py::isinstance<py::str>(allow_partial)) {
                     std::string s = allow_partial.cast<std::string>();
                     partial_active = (s == "on" || s == "trailing-strings");
+                    partial_trailing_strings = (s == "trailing-strings");
                 }
             }
             // Parse JSON to Python object first, then validate as Python
             // This ensures proper type coercion (e.g., "Infinity" string -> float inf)
             py::object py_input;
             try {
-                py_input = partial_active ? json_to_pyobj_partial(js) : json_to_pyobj(js);
+                py_input = partial_active
+                                 ? json_to_pyobj_partial(js, partial_trailing_strings
+                                                            ? PartialMode::TrailingStrings
+                                                            : PartialMode::On)
+                                 : json_to_pyobj(js);
             } catch (const py::error_already_set& e) {
                 // Malformed JSON: convert JSONDecodeError to a ValidationError
                 // with json_invalid type (Rust: validate_json throws ValidationError
@@ -4726,16 +4757,22 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                   throw py::type_error("Expected bytes, bytearray or str");
               }
               bool partial = false;
+              bool partial_trailing = false;
               if (!allow_partial.is_none()) {
                   if (py::isinstance<py::bool_>(allow_partial)) {
                       partial = allow_partial.cast<bool>();
                   } else if (py::isinstance<py::str>(allow_partial)) {
                       std::string mode = allow_partial.cast<std::string>();
                       partial = (mode == "on" || mode == "trailing-strings");
+                      partial_trailing = (mode == "trailing-strings");
                   }
               }
               try {
-                  return partial ? json_to_pyobj_partial(text) : json_to_pyobj(text);
+                  return partial
+                           ? json_to_pyobj_partial(text, partial_trailing
+                                                        ? PartialMode::TrailingStrings
+                                                        : PartialMode::On)
+                           : json_to_pyobj(text);
               } catch (const py::error_already_set& e) {
                   std::string python_message = py::str(e.value()).cast<std::string>();
                   auto diagnosis = json_diagnose_parse_error(text);
