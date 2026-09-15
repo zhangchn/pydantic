@@ -856,6 +856,42 @@ static py::object map_negative_indices(const py::object& obj, py::ssize_t len) {
     return obj;
 }
 
+// Rust's GeneratorSerializer keeps a Python-mode iterator lazy: model_dump()
+// hands the caller a SerializationIterator that serializes each item as it is
+// pulled, so the items are never materialized and never measured.
+struct SerializationIterator {
+    py::object items;  // the wrapped iterator, also what its repr shows
+    SerRef child;
+    py::object include = py::none();
+    py::object exclude = py::none();
+    py::object context = py::none();
+    bool exc_none = false;
+    bool round_trip = false;
+    bool by_alias = false;
+    bool exclude_unset = false;
+    bool exclude_defaults = false;
+    size_t index = 0;
+};
+
+static py::object make_serialization_iterator(const py::object& value, const SerRef& child,
+                                              bool exc_none, bool round_trip,
+                                              const py::object& include, const py::object& exclude,
+                                              bool by_alias, bool exclude_unset, bool exclude_defaults,
+                                              const py::object& context) {
+    auto out = std::make_shared<SerializationIterator>();
+    out->items = py::iter(value);
+    out->child = child;
+    out->include = include;
+    out->exclude = exclude;
+    out->context = context;
+    out->exc_none = exc_none;
+    out->round_trip = round_trip;
+    out->by_alias = by_alias;
+    out->exclude_unset = exclude_unset;
+    out->exclude_defaults = exclude_defaults;
+    return py::cast(out);
+}
+
 // Apply call-time include/exclude to a key (or index).  Mirrors the Rust
 // FilterLogic::filter with default_filter = true (no schema-level filter).
 static SerFilterResult apply_ser_filter(const py::object& key, const py::object& include,
@@ -1655,18 +1691,24 @@ struct SerNode {
         // For list/dict/tuple/containers, serialize children
         if ((type == "list" || type == "set" || type == "frozenset" || type == "generator") && !children.empty()) {
             py::iterable seq = py::reinterpret_borrow<py::iterable>(value);
-            py::ssize_t len = py::len(seq);
-            py::object inc;
-            if (include.is_none()) {
-                inc = py::none();
-            } else {
-                inc = map_negative_indices(include, len);
+            // A length is only needed to resolve negative include/exclude keys,
+            // and an arbitrary iterable (a custom Iterable, a lazy validator
+            // iterator) has none.
+            py::ssize_t len = -1;
+            if (!include.is_none() || !exclude.is_none()) {
+                try {
+                    len = py::len(seq);
+                } catch (...) {
+                    PyErr_Clear();
+                }
             }
-            py::object exc;
-            if (exclude.is_none()) {
-                exc = py::none();
-            } else {
-                exc = map_negative_indices(exclude, len);
+            py::object inc = (include.is_none() || len < 0) ? py::none() : map_negative_indices(include, len);
+            py::object exc = (exclude.is_none() || len < 0) ? py::none() : map_negative_indices(exclude, len);
+            // In JSON the items have to become an array here, but Python mode
+            // keeps an iterator lazy for the caller to drain.
+            if (type == "generator" && !json_mode && PyIter_Check(value.ptr())) {
+                return make_serialization_iterator(value, children[0], exc_none, round_trip, inc, exc,
+                                                   by_alias, exclude_unset, exclude_defaults, context);
             }
             py::ssize_t idx = 0;
             if (type == "set") {
@@ -4520,6 +4562,34 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
         .def("__repr__", [](LazyValidator& self) -> std::string {
             return "ValidatorIterator(index=" + std::to_string(self.index) +
                    ", schema=Some(" + self.schema_repr + "))";
+        });
+
+    // SerializationIterator — the lazy Python-mode view of an iterator field
+    py::class_<SerializationIterator, std::shared_ptr<SerializationIterator>>(m, "SerializationIterator")
+        .def_property_readonly("index", [](const SerializationIterator& self) { return self.index; })
+        .def("__iter__", [](SerializationIterator& self) -> py::object {
+            return py::cast(self);
+        })
+        .def("__next__", [](SerializationIterator& self) -> py::object {
+            for (;;) {
+                py::object item;
+                try {
+                    item = py::module_::import("builtins").attr("next")(self.items);
+                } catch (py::stop_iteration&) {
+                    throw;
+                }
+                size_t idx = self.index++;
+                auto next = apply_ser_filter(py::int_(static_cast<long long>(idx)), self.include, self.exclude);
+                if (next.omit) continue;
+                return self.child->to_python(
+                    SerNode::check_item_type(self.child, py::reinterpret_borrow<py::object>(item)),
+                    false, self.exc_none, self.round_trip, next.include, next.exclude, self.by_alias,
+                    self.exclude_unset, self.exclude_defaults, self.context);
+            }
+        })
+        .def("__repr__", [](SerializationIterator& self) {
+            return "SerializationIterator(index=" + std::to_string(self.index) +
+                   ", iterator=" + py::repr(self.items).cast<std::string>() + ")";
         });
 
     // SchemaValidator
