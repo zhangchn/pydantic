@@ -676,7 +676,9 @@ std::string SchemaValidator::validator_display_name() const {
 }
 
 std::string SchemaValidator::repr() const {
-    return "SchemaValidator(title='" + title_ + "')";
+    std::string out = "SchemaValidator(title='" + title_ + "'";
+    if (validator_) out += ", validator=" + validator_->debug_repr();
+    return out + ")";
 }
 
 bool SchemaValidator::is_root_model() const {

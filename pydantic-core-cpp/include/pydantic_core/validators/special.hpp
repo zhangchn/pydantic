@@ -1451,19 +1451,41 @@ public:
 
     // cls/members/sub_type/expected_repr come straight from the core schema,
     // mirroring EnumValidator::from_config.
+    // `missing` is the core schema's own "missing" entry: pydantic sets it to
+    // the class's _missing_ only when the class defines one, exactly as Rust
+    // reads it (EnumValidator::from_config).
     void configure_class(py::object cls, std::vector<Member> members,
                          std::string sub_type, std::string expected_repr,
                          std::string class_repr,
-                         std::optional<bool> declared_strict) {
+                         std::optional<bool> declared_strict,
+                         py::object missing = py::none()) {
         cls_ = std::move(cls);
         members_ = std::move(members);
         sub_type_ = std::move(sub_type);
         expected_repr_ = std::move(expected_repr);
         class_repr_ = std::move(class_repr);
         declared_strict_ = declared_strict;
+        missing_ = std::move(missing);
     }
 
     std::string name() const override { return "enum"; }
+
+    // Rust's EnumValidator Debug says whether the class supplied a _missing_
+    // hook; this port looks the hook up on the class when it needs it, which is
+    // the same question answered at repr time.
+    std::string debug_repr() const override {
+        // Rust names the enum variant after the enum flavour and shows the
+        // cached _missing_ hook as Some(...).
+        std::string variant = "PlainEnum";
+        if (sub_type_ == "int") variant = "IntEnum";
+        else if (sub_type_ == "str") variant = "StrEnum";
+        else if (sub_type_ == "float") variant = "FloatEnum";
+        std::string missing = "None";
+        if (missing_ && !missing_.is_none()) {
+            missing = "Some(" + py::repr(missing_).cast<std::string>() + ")";
+        }
+        return variant + "(EnumValidator { class: " + class_repr_ + ", missing: " + missing + " })";
+    }
 
     // The validated value is the Enum member itself, so the result-to-Python
     // dispatch has to pass the object through untouched.
@@ -1667,6 +1689,7 @@ auto str_result = input.validate_str(state.strict_or(declared_strict_.value_or(f
     std::string sub_type_;
     std::string expected_repr_;
     std::string class_repr_;
+    py::object missing_;
     // Rust keeps is_strict(schema, config) per validator, so a field-level
     // Field(strict=False) overrides the model-wide config. The C++ state cannot
     // tell that config apart from a call-time override, so a schema-declared

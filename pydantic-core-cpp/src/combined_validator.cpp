@@ -1765,9 +1765,12 @@ static std::shared_ptr<Validator> build_from_py_dict(
                 PyErr_Clear();
             }
             std::optional<bool> declared_strict = strict_opt_py(schema, config);
+            py::object missing_hook = py::none();
+            if (schema.contains("missing")) missing_hook = schema["missing"];
             v->configure_class(std::move(cls), std::move(cls_members), std::move(sub_type),
                                EnumValidator::join_expected(value_reprs),
-                               EnumValidator::type_qualname(schema["cls"].ptr()), declared_strict);
+                               EnumValidator::type_qualname(schema["cls"].ptr()), declared_strict,
+                               missing_hook);
         }
         return v;
     }

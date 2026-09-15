@@ -119,6 +119,16 @@ public:
         }, variant_);
     }
 
+    // The Rust Debug-style form of the validator (see Validator::debug_repr).
+    std::string debug_repr() const {
+        return std::visit([](const auto& v) -> std::string {
+            if (v) {
+                return v->debug_repr();
+            }
+            return "unknown";
+        }, variant_);
+    }
+
     // Get default value
     ValResult<std::shared_ptr<void>> default_value(ValidationState& state) const {
         return std::visit([&](const auto& v) -> ValResult<std::shared_ptr<void>> {
