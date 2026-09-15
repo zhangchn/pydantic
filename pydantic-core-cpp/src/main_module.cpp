@@ -1229,19 +1229,62 @@ struct SerNode {
     // Rust leaf serializers report an unexpected value while a union is checking
     // its choices (SerCheck::Strict/Lax); without it a union would accept the
     // first choice that performs no type check at all.
+    // Rust ObTypeLookup::is_type compares type pointers: the exact type is
+    // IsType::Exact, a matching ancestor (bool for an int node, a str subclass
+    // for a str node) is IsType::Subclass, anything else is IsType::False.
+    // Returns 1/0/-1 for those.
+    static int ser_type_match(const std::string& node_type, const py::object& value) {
+        PyObject* v = value.ptr();
+        if (node_type == "str" || node_type == "string" || node_type == "str-constrained") {
+            if (Py_TYPE(v) == &PyUnicode_Type) return 1;
+            return PyUnicode_Check(v) ? 0 : -1;
+        }
+        if (node_type == "int" || node_type == "int-constrained") {
+            if (Py_TYPE(v) == &PyLong_Type) return 1;
+            // bool is a Python int subclass, so it reaches here as a subclass.
+            return PyLong_Check(v) ? 0 : -1;
+        }
+        if (node_type == "float" || node_type == "float-constrained") {
+            if (Py_TYPE(v) == &PyFloat_Type) return 1;
+            // Rust special-cases an int as subclass input to the float serializer.
+            if (PyFloat_Check(v) || PyLong_Check(v)) return 0;
+            return -1;
+        }
+        if (node_type == "bool") return PyBool_Check(v) ? 1 : -1;
+        if (node_type == "bytes") {
+            if (Py_TYPE(v) == &PyBytes_Type) return 1;
+            return PyBytes_Check(v) ? 0 : -1;
+        }
+        if (node_type == "list" || node_type == "generator") {
+            if (Py_TYPE(v) == &PyList_Type) return 1;
+            return PyList_Check(v) ? 0 : -1;
+        }
+        if (node_type == "set") {
+            if (Py_TYPE(v) == &PySet_Type) return 1;
+            return PySet_Check(v) ? 0 : -1;
+        }
+        if (node_type == "frozenset") {
+            if (Py_TYPE(v) == &PyFrozenSet_Type) return 1;
+            return PyFrozenSet_Check(v) ? 0 : -1;
+        }
+        if (node_type == "tuple") {
+            if (Py_TYPE(v) == &PyTuple_Type) return 1;
+            if (PyTuple_Check(v) || PyList_Check(v)) return 0;
+            return -1;
+        }
+        if (node_type == "dict") {
+            if (Py_TYPE(v) == &PyDict_Type) return 1;
+            return PyDict_Check(v) ? 0 : -1;
+        }
+        return 1;
+    }
+
     bool ser_check_accepts(const py::object& value) const {
         if (g_ser_check == 0) return true;
-        if (type == "str" || type == "string" || type == "str-constrained") return py::isinstance<py::str>(value);
-        if (type == "int" || type == "int-constrained") return py::isinstance<py::int_>(value);
-        if (type == "float" || type == "float-constrained") return py::isinstance<py::float_>(value) || py::isinstance<py::int_>(value);
-        if (type == "bool") return py::isinstance<py::bool_>(value);
-        if (type == "bytes") return py::isinstance<py::bytes>(value);
-        if (type == "list" || type == "generator") return py::isinstance<py::list>(value);
-        if (type == "set") return py::isinstance<py::set>(value);
-        if (type == "frozenset") return py::isinstance<py::frozenset>(value);
-        if (type == "tuple") return py::isinstance<py::tuple>(value) || py::isinstance<py::list>(value);
-        if (type == "dict") return py::isinstance<py::dict>(value);
-        return true;
+        int match = ser_type_match(type, value);
+        if (match != 0) return match > 0;
+        // IsType::Subclass: SerCheck::Strict refuses it, SerCheck::Lax allows it.
+        return g_ser_check == 2;
     }
 
     // Feed a custom serializer function's result through its declared return
@@ -1307,8 +1350,22 @@ struct SerNode {
         }
         if (type == "union") {
             SerAttemptScope attempt;
-            // Rust UnionChoices::serialize: try the choices left to right with
-            // strict class checks, then again with lax (isinstance) checks.
+            // Rust UnionChoices::serialize: an inner union does not run its own
+            // strict/lax rounds while an outer union is checking choices; it gets
+            // one pass at the current check level and the failure propagates so
+            // the outer union can move on to its next choice. Running every
+            // round per nesting level re-ran each choice's serializers.
+            if (g_ser_check != 0) {
+                std::exception_ptr last;
+                for (auto& c : children) {
+                    try { return c->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context); }
+                    catch (...) { last = std::current_exception(); }
+                }
+                if (last) std::rethrow_exception(last);
+                throw std::runtime_error("Unexpected value for serializer union");
+            }
+            // Top level: try the choices left to right with strict class checks,
+            // then again with lax (isinstance) checks.
             for (int level = 1; level <= 2; level++) {
                 SerCheckScope scope(level);
                 for (auto& c : children) {
@@ -1792,12 +1849,26 @@ struct SerNode {
             } pop{&g, pair};
             return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
         }
+        if (!ser_check_accepts(value)) {
+            throw std::runtime_error("Unexpected value for serializer " + type);
+        }
         if (type == "lax-or-strict") {
             if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
         }
         if (type == "union") {
             SerAttemptScope attempt;
-            // Rust UnionChoices::serialize: strict pass, lax pass, then uncheck.
+            // Rust UnionChoices::serialize: one pass at the current level and
+            // propagate when an outer union is already checking choices.
+            if (g_ser_check != 0) {
+                std::exception_ptr last;
+                for (auto& c : children) {
+                    try { return c->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context); }
+                    catch (...) { last = std::current_exception(); }
+                }
+                if (last) std::rethrow_exception(last);
+                throw std::runtime_error("Unexpected value for serializer union");
+            }
+            // Top level: strict pass, lax pass, then uncheck.
             for (int level = 1; level <= 2; level++) {
                 SerCheckScope scope(level);
                 for (auto& c : children) {
