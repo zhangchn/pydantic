@@ -1059,6 +1059,12 @@ struct SerNode {
     // disagrees with the declared item serializer, then fall back to inference.
     static const py::object& check_item_type(const SerRef& child, const py::object& item) {
         if (child && !value_matches_type(child, item)) {
+            // Rust CollectWarnings::on_fallback_py: while a union checks its
+            // choices (SerCheck::Strict/Lax) the mismatch is an error, not a
+            // warning, so the union bails out of this choice and tries the next.
+            if (g_ser_check != 0) {
+                throw std::runtime_error("Unexpected value for serializer " + type_name_for_warning(child));
+            }
             ser_warn_unexpected_value("", type_name_for_warning(child), item);
         }
         return item;
