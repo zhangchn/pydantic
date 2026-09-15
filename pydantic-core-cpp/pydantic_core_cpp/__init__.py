@@ -872,6 +872,15 @@ def _format_rust_error(msg: str, model_name: str = '') -> str:
         return repr_text[:mid] + '...' + repr_text[len(repr_text) - (mid - 1):]
 
     def _render_message(msg_line: str, loc_text: str) -> None:
+        head, head_sep, last_line = msg_line.partition('\n')
+        if head_sep:
+            # A message can span several lines (a pytest-rewritten assertion
+            # explains itself over several); only the last line carries the
+            # [type=...] suffix, and Rust indents the first line alone.
+            extra = head + '\n'
+            msg_line = last_line
+        else:
+            extra = ''
         # Hidden-input line (config hide_input_in_errors): ends with [type=x]
         # and carries no input_value segment.  Keep that shape instead of
         # appending an empty input segment.
@@ -921,7 +930,9 @@ def _format_rust_error(msg: str, model_name: str = '') -> str:
                 # detail after the prefix (e.g. "Value error, foo"
                 # must not be truncated to "Value error").
                 if err_type in ('value_error', 'assertion_error'):
-                    rust_msg = msg_line[:seg.start()].strip() if seg else msg_line_base
+                    # rstrip, not strip: a continuation line keeps its own
+                    # leading whitespace (" +  where ..." from pytest).
+                    rust_msg = msg_line[:seg.start()].rstrip() if seg else msg_line_base
                 break
         else:
             # Unmapped message: strip the trailing [type=..., input_value=...]
@@ -939,15 +950,15 @@ def _format_rust_error(msg: str, model_name: str = '') -> str:
                     input_type = 'str'
                 if emitted_type:
                     input_type = emitted_type
-                rust_msg = msg_line[:seg.start()].strip()
+                rust_msg = msg_line[:seg.start()].rstrip()
 
         if loc_text:
             result.append(f'{loc_text}')
         if hidden:
-            result.append(f'  {rust_msg} [type={err_type}]')
+            result.append(f'  {extra}{rust_msg} [type={err_type}]')
         else:
             result.append(
-                f'  {rust_msg} [type={err_type}, input_value={input_val}, input_type={input_type}]'
+                f'  {extra}{rust_msg} [type={err_type}, input_value={input_val}, input_type={input_type}]'
             )
 
     i = 1
@@ -969,8 +980,19 @@ def _format_rust_error(msg: str, model_name: str = '') -> str:
             i += 1
             continue
         if i + 1 < len(lines):
-            _render_message(lines[i + 1].strip(), loc_line)
-            i += 2
+            # A message that spans lines ends at the line carrying the
+            # [type=..., input_value=..., input_type=...] suffix; pairing just
+            # the next line turned each continuation line into a new entry.
+            j = i + 1
+            msg_block = [lines[j].strip()]
+            while (not (lines[j].rstrip().endswith(']')
+                        and _re.search(r'\[type=[A-Za-z_][A-Za-z0-9_]*(,|\])', lines[j]))
+                   and j + 1 < len(lines)
+                   and not lines[j + 1].strip().startswith('__PYDANTIC_ERRORS__')):
+                j += 1
+                msg_block.append(lines[j])
+            _render_message('\n'.join(msg_block), loc_line)
+            i = j + 1
             continue
         result.append(loc_line)
         i += 1
