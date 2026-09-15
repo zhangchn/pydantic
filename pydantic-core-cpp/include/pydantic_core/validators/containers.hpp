@@ -787,7 +787,7 @@ public:
         // next() that produced it rather than during validation.
         py::object source_iter = py::iter(py_in);
         std::string type_name = items_schema ? items_schema->effective_result_name() : "";
-        std::string schema_repr = items_schema ? items_schema->name() : "None";
+        std::string schema_repr = items_schema ? items_schema->debug_repr() : "None";
 
         // Create a C++ callable that validates a single item
         auto validator = items_schema;

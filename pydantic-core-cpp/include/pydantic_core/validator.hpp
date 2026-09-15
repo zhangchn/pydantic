@@ -106,6 +106,12 @@ public:
     // from name(), which drives result-to-Python dispatch in this port.
     virtual std::string display_name() const { return name(); }
 
+    // Rust prints a validator with its derived Debug formatter, which names the
+    // struct and every field it holds (a bool as true/false). Only the leaf
+    // validators whose fields this port carries can answer; the rest keep the
+    // schema-type name.
+    virtual std::string debug_repr() const { return name(); }
+
     // For root models: return the inner validator's name.
     // Default: not a root model.
     virtual std::string root_model_inner_name() const { return ""; }

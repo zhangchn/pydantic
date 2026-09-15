@@ -48,6 +48,7 @@ public:
     }
     
     std::string name() const override { return "none"; }
+    std::string debug_repr() const override { return "None(NoneValidator)"; }
 };
 
 // BoolValidator - validates boolean values
@@ -70,6 +71,7 @@ auto result = input.validate_bool(state.strict_or(strict));
     }
 
     std::string name() const override { return "bool"; }
+    std::string debug_repr() const override { return "Bool(BoolValidator { strict: " + std::string(strict ? "true" : "false") + " })"; }
 };
 
 // IntValidator - validates integer values
@@ -95,6 +97,7 @@ auto result = input.validate_int(state.strict_or(strict));
     }
 
     std::string name() const override { return "int"; }
+    std::string debug_repr() const override { return "Int(IntValidator { strict: " + std::string(strict ? "true" : "false") + " })"; }
 };
 
 // ConstrainedIntValidator - validates int with gt/lt/ge/le/multiple_of constraints
@@ -196,6 +199,7 @@ auto result = input.validate_float(state.strict_or(strict));
     }
     
     std::string name() const override { return "float"; }
+    std::string debug_repr() const override { return "Float(FloatValidator { strict: " + std::string(strict ? "true" : "false") + ", allow_inf_nan: " + std::string(allow_inf_nan ? "true" : "false") + " })"; }
 };
 
 // ConstrainedFloatValidator - validates float with gt/lt/ge/le/multiple_of constraints
@@ -378,6 +382,7 @@ auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str,
     }
     
     std::string name() const override { return "str"; }
+    std::string debug_repr() const override { return "Str(StrValidator { strict: " + std::string(strict ? "true" : "false") + ", coerce_numbers_to_str: " + std::string(coerce_numbers_to_str ? "true" : "false") + " })"; }
 };
 
 
