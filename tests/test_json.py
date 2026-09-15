@@ -586,3 +586,29 @@ def test_json_ensure_ascii() -> None:
         f: str
 
     assert Model(f='à').model_dump_json(ensure_ascii=True) == '{"f":"\\u00e0"}'
+
+
+def test_infer_json_known_types():
+    class Model(BaseModel):
+        x: Any
+
+    def dumped(value: Any) -> str:
+        return Model(x=value).model_dump_json()
+
+    class SubDatetime(datetime):
+        pass
+
+    assert dumped(datetime(2024, 1, 1, 15, 0, tzinfo=timezone.utc)) == '{"x":"2024-01-01T15:00:00Z"}'
+    assert dumped(SubDatetime(2024, 1, 1, 15, 0, tzinfo=timezone.utc)) == '{"x":"2024-01-01T15:00:00Z"}'
+    assert dumped(datetime(2024, 1, 1, 1, 2, 3)) == '{"x":"2024-01-01T01:02:03"}'
+    assert dumped(date(2024, 1, 1)) == '{"x":"2024-01-01"}'
+    assert dumped(time(1, 2, 3, 456789)) == '{"x":"01:02:03.456789"}'
+    assert dumped(timedelta(days=1, seconds=2)) == '{"x":"P1DT2S"}'
+    assert dumped(Decimal('1.5')) == '{"x":"1.5"}'
+    assert dumped(UUID('12345678-1234-5678-1234-567812345678')) == '{"x":"12345678-1234-5678-1234-567812345678"}'
+    assert dumped(Path('/tmp/a.txt')) == '{"x":"/tmp/a.txt"}'
+    assert dumped(IPv4Address('192.168.0.1')) == '{"x":"192.168.0.1"}'
+    assert dumped(re.compile('a+')) == '{"x":"a+"}'
+    assert dumped(bytearray(b'abc')) == '{"x":"abc"}'
+    assert dumped(frozenset([3])) == '{"x":[3]}'
+    assert dumped((i for i in range(3))) == '{"x":[0,1,2]}'

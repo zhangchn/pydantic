@@ -2325,6 +2325,33 @@ private:
         static py::object enum_cls = py::module_::import("enum").attr("Enum");
         return py::isinstance(v, enum_cls);
     }
+    // Rust ObType kinds whose JSON form is a str(): they have no __dict__ of
+    // interest, so they must be recognised before the repr fallback below.
+    static const std::vector<py::object>& str_known_classes() {
+        static std::vector<py::object> classes;
+        if (!classes.empty()) return classes;
+        try {
+            classes.push_back(py::module_::import("decimal").attr("Decimal"));
+            classes.push_back(py::module_::import("uuid").attr("UUID"));
+            classes.push_back(py::module_::import("pathlib").attr("Path"));
+            py::object ip = py::module_::import("ipaddress");
+            for (const char* name : {"IPv4Address", "IPv6Address", "IPv4Network", "IPv6Network",
+                                     "IPv4Interface", "IPv6Interface"}) {
+                classes.push_back(ip.attr(name));
+            }
+        } catch (...) {
+            PyErr_Clear();
+            classes.clear();
+        }
+        return classes;
+    }
+
+    // A leaf converter yields text, except for the temporal modes that ask for
+    // a number of (milli)seconds.
+    static std::string json_escape_converted(const py::object& converted, bool ensure_ascii) {
+        if (py::isinstance<py::float_>(converted)) return py::str(py::repr(converted)).cast<std::string>();
+        return json_escape(converted.cast<std::string>(), ensure_ascii);
+    }
 
     // Rust's infer_serialize classifies a fixed set of object kinds and has no
     // generic attribute walk: a plain object is ObType::Unknown and JSON
@@ -2404,6 +2431,47 @@ private:
                 enc += (i+2<b.size()) ? b64[n&0x3F] : '=';
             }
             return "\"" + enc + "\"";
+        }
+        // Rust infer_serialize_known classifies every ObType it recognises, so a
+        // datetime or UUID reaches its own serializer; without these branches an
+        // Any-typed value fell through to repr() and JSON got
+        // "datetime.datetime(2024, 1, 1)" instead of "2024-01-01T00:00:00".
+        if (py::isinstance<py::bytearray>(value)) {
+            // ObType::Bytearray goes through the same bytes mode as bytes.
+            if (PyObject* b = PyBytes_FromObject(value.ptr())) {
+                py::object conv;
+                bool ok = json_infer_leaf(py::reinterpret_steal<py::object>(b), conv);
+                if (ok) return json_escape_converted(conv, ensure_ascii);
+            } else {
+                PyErr_Clear();
+            }
+        }
+        {
+            py::object conv;
+            if (json_infer_leaf(value, conv)) return json_escape_converted(conv, ensure_ascii);
+        }
+        if (py::isinstance<py::set>(value) || py::isinstance<py::frozenset>(value) ||
+            PyIter_Check(value.ptr())) {  // ObType::Set/FrozenSet/Generator
+            std::string out = "[";
+            bool first = true;
+            for (auto item : py::reinterpret_borrow<py::iterable>(value)) {
+                if (!first) out += ",";
+                first = false;
+                out += infer_json(py::reinterpret_borrow<py::object>(item), ensure_ascii, -1);
+            }
+            out += "]";
+            return out;
+        }
+        // Rust ObType::Pattern serializes the pattern source, because str() of a
+        // compiled pattern is its repr on this Python.
+        try {
+            static py::object pattern_cls = py::module_::import("re").attr("Pattern");
+            if (py::isinstance(value, pattern_cls)) {
+                return json_escape(py::str(value.attr("pattern")).cast<std::string>(), ensure_ascii);
+            }
+        } catch (...) { PyErr_Clear(); }
+        for (const py::object& known : str_known_classes()) {
+            if (py::isinstance(value, known)) return json_escape(py::str(value).cast<std::string>(), ensure_ascii);
         }
         if (py::isinstance<py::list>(value) || py::isinstance<py::tuple>(value)) {
             std::string out = "[";
