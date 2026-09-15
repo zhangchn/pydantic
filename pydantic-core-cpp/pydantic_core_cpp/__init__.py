@@ -857,7 +857,12 @@ def _format_rust_error(msg: str, model_name: str = '') -> str:
         count = int(m.group(1))
 
     label = 'validation error' if count == 1 else 'validation errors'
-    name = model_name or 'Schema'
+    # The C++ header already names what was validated, which for an error
+    # raised after validation ended (a lazy iterator's item) is no model at all.
+    cpp_title = ''
+    if (m_title := re.match(r'\d+ validation error(?:\(s\))? for (.+)$', header)):
+        cpp_title = m_title.group(1).strip()
+    name = model_name or cpp_title or 'Schema'
 
     # Build the Rust-style header
     result = [f'{count} {label} for {name}']

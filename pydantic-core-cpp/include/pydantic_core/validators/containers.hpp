@@ -791,10 +791,10 @@ public:
 
         // Create a C++ callable that validates a single item
         auto validator = items_schema;
-        // The iterator is consumed after this call returns, so the enclosing
-        // error location (the field name, or the path to the field) has to
-        // travel with it: Rust's ValidatorIterator borrows the state's location.
-        Location base_loc = state.location();
+        // Rust's ValidatorIterator reports an item error at the index alone:
+        // the enclosing field name is attached to a line error only when the
+        // validator that owns it returns, and an iterator outlives that call.
+        Location base_loc;
         auto validate_fn = py::cpp_function(
             [validator, type_name, base_loc](const py::object& item, size_t index) -> py::object {
                 if (!validator) {
@@ -819,7 +819,9 @@ public:
                     // validator casts it back to these line errors, so a Python
                     // callable that consumes the iterator mid-validation keeps the
                     // item's error type and index instead of getting value_error.
-                    wrap_detail::stack().push_back(err);
+                    // The line errors are relative to where the iterator was built,
+                    // so the consuming validator re-anchors them on its own location;
+                    // parking them here as well would let a stale error outlive it.
                     ValidationError ve("ValidatorIterator", InputType::Python, err, py::object(item));
                     throw ve;
                 }
