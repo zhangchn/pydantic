@@ -61,6 +61,48 @@ inline std::vector<ValError>& stack() {
 // the inner error. The pending stack being non-empty is the signal that the
 // inner validation failed; we additionally require the exception to be a
 // ValidationError (not e.g. a TypeError raised by the wrap function itself).
+// A lazy iterator pushes its item error before raising it, so a Python caller
+// that swallows the exception leaves the entry on the process-global stack long
+// after its own validation ended. Comparing the line errors the caught exception
+// carries with the pending ones keeps an unrelated stale error from standing in
+// for the current validator's own failure. An exception whose errors cannot be
+// inspected still takes the pending error, as before.
+inline bool pending_matches(const ValError& pending, PyObject* exc_value) {
+    if (!exc_value || !pending.has_line_errors()) return false;
+    py::list listed;
+    try {
+        listed = py::reinterpret_borrow<py::object>(exc_value).attr("errors")(py::arg("include_url") = false);
+    } catch (...) {
+        PyErr_Clear();
+        return true;
+    }
+    size_t i = 0;
+    try {
+        for (py::handle item_h : listed) {
+            if (i >= pending.line_errors().size()) return false;
+            py::object item = py::reinterpret_borrow<py::object>(item_h);
+            if (!py::isinstance<py::dict>(item)) return true;
+            py::object loc = item["loc"];
+            if (loc.is_none()) return true;
+            std::string exc_loc;
+            if (PyTuple_Check(loc.ptr()) || PyList_Check(loc.ptr())) {
+                bool first = true;
+                for (py::handle part : py::reinterpret_borrow<py::sequence>(loc)) {
+                    if (!first) exc_loc += ".";
+                    first = false;
+                    exc_loc += py::str(part).cast<std::string>();
+                }
+            }
+            if (exc_loc != pending.line_errors()[i]->location.to_string()) return false;
+            ++i;
+        }
+    } catch (...) {
+        PyErr_Clear();
+        return true;
+    }
+    return i == pending.line_errors().size();
+}
+
 inline std::optional<ValError> take_pending(py::error_already_set& e) {
     auto& s = stack();
     if (s.empty()) return std::nullopt;
@@ -85,6 +127,7 @@ inline std::optional<ValError> take_pending(py::error_already_set& e) {
         is_inner = (msg == kMarker);
     }
     if (!is_inner) return std::nullopt;
+    if (!pending_matches(s.back(), e.value().ptr())) return std::nullopt;
     ValError out = std::move(s.back());
     s.pop_back();
     return out;
@@ -115,12 +158,94 @@ inline bool exception_is_use_default(PyObject* exc) {
     return false;
 }
 
+// Rust convert_err casts a raised ValidationError (validation_exception.rs) and
+// takes its own line errors, so a validator function that re-raises a nested
+// ValidationError keeps each inner type, location, message and rejected value
+// instead of collapsing them into one value_error.
+inline std::optional<ValError> validation_error_line_errors(py::error_already_set& e, ValidationState& state) {
+    py::object exc_obj = e.value();
+    if (exc_obj.ptr() == nullptr) return std::nullopt;
+    bool is_validation_error = false;
+    try {
+        py::object exc_type = py::reinterpret_borrow<py::object>(
+            reinterpret_cast<PyObject*>(Py_TYPE(exc_obj.ptr())));
+        for (py::handle klass : exc_type.attr("__mro__")) {
+            if (py::str(klass.attr("__name__")).cast<std::string>() == "ValidationError") {
+                is_validation_error = true;
+                break;
+            }
+        }
+    } catch (...) {
+        PyErr_Clear();
+        return std::nullopt;
+    }
+    if (!is_validation_error) return std::nullopt;
+
+    py::list err_list;
+    try {
+        err_list = exc_obj.attr("errors")(py::arg("include_url") = false);
+    } catch (...) {
+        PyErr_Clear();
+        return std::nullopt;
+    }
+
+    std::vector<std::shared_ptr<ValLineError>> lines;
+    try {
+        for (py::handle item_h : err_list) {
+            py::object item = py::reinterpret_borrow<py::object>(item_h);
+            if (!py::isinstance<py::dict>(item)) return std::nullopt;
+            py::dict d = item.cast<py::dict>();
+            if (!d.contains("type") || !py::isinstance<py::str>(d["type"])) return std::nullopt;
+            std::string type_str = py::str(d["type"]).cast<std::string>();
+            std::string msg;
+            if (d.contains("msg")) msg = py::str(d["msg"]).cast<std::string>();
+
+            ErrorType et = ErrorType::build_known_type(type_str);
+            // An unrecognised name carries no template, so the caller's own
+            // message is the message.
+            if (et.is_custom() && et.message().empty() && !msg.empty()) et = ErrorType(type_str, msg);
+            if (d.contains("ctx")) error_type_context_from_py(et, d["ctx"]);
+
+            // The nested errors carry their own location; the enclosing field
+            // location is already part of the state location.
+            Location loc = state.location();
+            py::object loc_obj = d.contains("loc") ? d["loc"] : py::tuple();
+            if (PyTuple_Check(loc_obj.ptr()) || PyList_Check(loc_obj.ptr())) {
+                for (py::handle part : loc_obj) {
+                    PyObject* p = part.ptr();
+                    if (PyLong_Check(p) && !PyBool_Check(p)) loc.push(py::cast<int64_t>(part));
+                    else loc.push(py::str(part).cast<std::string>());
+                }
+            }
+
+            py::object input_obj = d.contains("input") ? d["input"] : py::object(py::none());
+            std::string input_repr;
+            try {
+                input_repr = py::repr(input_obj).cast<std::string>();
+            } catch (...) {
+                PyErr_Clear();
+            }
+            lines.push_back(std::make_shared<ValLineError>(ValLineError{et, loc, input_repr, input_obj}));
+        }
+    } catch (...) {
+        PyErr_Clear();
+        return std::nullopt;
+    }
+    if (lines.empty()) return std::nullopt;
+    e.restore();
+    PyErr_Clear();
+    return ValError::line_errors(std::move(lines));
+}
+
 inline ValError function_error_from_exception(py::error_already_set& e, const Input& input, ValidationState& state) {
     // Rust convert_err casts a ValidationError raised by the callable back to
     // its own line errors instead of wrapping it in value_error, so an inner
     // validation failure keeps its type and location.
     if (auto inner = wrap_detail::take_pending(e)) {
         return std::move(*inner);
+    }
+    if (auto nested = validation_error_line_errors(e, state)) {
+        return std::move(*nested);
     }
     // Keep a reference to the exception object for ctx['error'] — value()
     // returns a new reference, so it stays valid after e.restore().
