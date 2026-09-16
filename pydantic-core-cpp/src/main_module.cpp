@@ -4383,6 +4383,33 @@ static py::object to_jsonable_fn(const py::object& value, std::optional<py::obje
     return infer_jsonable_python(value, bytes_mode, timedelta_mode, inf_nan_mode, serialize_unknown, by_alias);
 }
 
+// pybind11 binds a class without tp_traverse, so everything its C++ members
+// hold stays outside the cyclic collector's view.  Extract the bound object to
+// walk it: for a single-inheritance binding pybind11 keeps the value pointer in
+// the instance's simple layout.
+template <typename T>
+T* bound_cpp_object(PyObject* self) {
+    auto* inst = reinterpret_cast<py::detail::instance*>(self);
+    return inst->simple_layout ? static_cast<T*>(inst->simple_value_holder[0]) : nullptr;
+}
+
+extern "C" int visit_schema_validator(PyObject* self, visitproc traverse_fn, void* arg) {
+    if (auto* validator = bound_cpp_object<SchemaValidator>(self)) {
+        validator->visit_refs(traverse_fn, arg);
+    }
+    return 0;
+}
+
+// Opt a pybind11 type into the collector.  Call before any instance or Python
+// subclass exists: PyType_GenericAlloc pairs the GC header it then adds with
+// PyObject_GC_Del, and tp_free was inherited from object.
+void enable_gc_traversal(py::handle type, traverseproc traverse) {
+    PyTypeObject* ready = reinterpret_cast<PyTypeObject*>(type.ptr());
+    ready->tp_flags |= Py_TPFLAGS_HAVE_GC;
+    ready->tp_traverse = traverse;
+    ready->tp_free = &PyObject_GC_Del;
+}
+
 PYBIND11_MODULE(_pydantic_core_cpp, m) {
     m.doc() = "pydantic-core C++ implementation";
     m.attr("__version__") = get_version();
@@ -4929,6 +4956,8 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             py::object config_dict = self.config_json().empty() ? py::none() : json_mod.attr("loads")(self.config_json());
             return py::make_tuple(cls, py::make_tuple(schema_dict, config_dict));
         });
+
+    enable_gc_traversal(m.attr("SchemaValidator"), &visit_schema_validator);
 
     // SchemaSerializer
     py::class_<PySchemaSerializer>(m, "SchemaSerializer")

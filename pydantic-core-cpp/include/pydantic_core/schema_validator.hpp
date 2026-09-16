@@ -120,6 +120,15 @@ public:
     // Representation
     std::string repr() const;
 
+    // Report the validator tree to the cyclic collector; see Validator::visit_refs.
+    void visit_refs(RefVisitor visit, void* arg) const {
+        if (validator_) validator_->visit_refs(visit, arg);
+        visit_ref(visit, arg, init_snapshot_);
+#ifdef HAS_PYBIND11
+        visit_ref(visit, arg, config_.py_config);
+#endif
+    }
+
     // Get schema JSON (for pickle)
     const std::string& schema_json() const { return schema_json_; }
 

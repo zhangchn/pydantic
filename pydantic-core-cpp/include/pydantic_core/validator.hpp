@@ -81,6 +81,17 @@ struct Guard {
 }  // namespace display_name_detail
 
 // Validator base trait - matches Rust's Validator trait
+// The cyclic collector only follows references a type reports through
+// tp_traverse, so the Python objects a validator keeps in C++ members have to
+// be reported: without that, a schema and the classes and callables it names
+// form a cycle the collector walks past.  This is the hand-written counterpart
+// of the __traverse__ pyo3 generates.
+using RefVisitor = int (*)(PyObject*, void*);
+
+inline void visit_ref(RefVisitor visit, void* arg, const py::handle& held) {
+    if (held.ptr()) visit(held.ptr(), arg);
+}
+
 class Validator {
 public:
     virtual ~Validator() = default;
@@ -119,6 +130,14 @@ public:
     // The wrapped child validator, when this validator delegates to exactly
     // one inner schema (function-* wrappers, models).  nullptr otherwise.
     virtual std::shared_ptr<Validator> inner_validator() const { return nullptr; }
+
+    // Report the Python objects this validator holds to the cyclic collector.
+    // A validator that holds any has to override this; not overriding keeps
+    // those references invisible, exactly as they are today.
+    virtual void visit_refs(RefVisitor visit, void* arg) const {
+        (void)visit;
+        (void)arg;
+    }
 
     // Assignment validation for model schemas (Rust validate_assignment).
     // obj is the MODEL INSTANCE.  Default: unsupported.

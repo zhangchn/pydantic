@@ -490,6 +490,17 @@ public:
 
     // Accessors for testing and schema building
     const std::unordered_map<std::string, FieldInfo>& fields() const { return fields_; }
+
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        for (const auto& named : fields_) {
+            const FieldInfo& field = named.second;
+            visit_ref(visit, arg, field.default_factory);
+            visit_ref(visit, arg, field.default_py_obj);
+            if (field.schema) field.schema->visit_refs(visit, arg);
+        }
+        if (extras_validator_) extras_validator_->visit_refs(visit, arg);
+        if (extras_keys_validator_) extras_keys_validator_->visit_refs(visit, arg);
+    }
     ExtraBehavior extra_behavior() const { return extra_behavior_; }
     const std::string& model_name() const { return model_name_; }
 
@@ -1625,6 +1636,12 @@ public:
     }
 
     void set_fields_validator(std::shared_ptr<Validator> v) { fields_validator_ = std::move(v); }
+
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        visit_ref(visit, arg, class_);
+        visit_ref(visit, arg, generic_origin_);
+        if (fields_validator_) fields_validator_->visit_refs(visit, arg);
+    }
     void set_class_name(const std::string& name) { class_name_ = name; }
     void set_frozen(bool f) { frozen_ = f; }
     void set_revalidate(RevalidateInstances r) { revalidate_ = r; }
