@@ -492,6 +492,7 @@ public:
     const std::unordered_map<std::string, FieldInfo>& fields() const { return fields_; }
 
     void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
         for (const auto& named : fields_) {
             const FieldInfo& field = named.second;
             visit_ref(visit, arg, field.default_factory);
@@ -1638,6 +1639,7 @@ public:
     void set_fields_validator(std::shared_ptr<Validator> v) { fields_validator_ = std::move(v); }
 
     void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
         visit_ref(visit, arg, class_);
         visit_ref(visit, arg, generic_origin_);
         if (fields_validator_) fields_validator_->visit_refs(visit, arg);

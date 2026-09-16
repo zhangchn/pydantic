@@ -6,6 +6,7 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <variant>
 #include "types.hpp"
 #include "errors.hpp"
@@ -91,6 +92,30 @@ using RefVisitor = int (*)(PyObject*, void*);
 inline void visit_ref(RefVisitor visit, void* arg, const py::handle& held) {
     if (held.ptr()) visit(held.ptr(), arg);
 }
+
+namespace gc_detail {
+
+// Neither tree is guaranteed acyclic - two generic models that name each other
+// reach each other's nodes - so a walk has to stop at a node it has already
+// entered.  The set belongs to the traversal rather than to a node because the
+// collector wants every edge reported once per pass, not once per path.
+inline std::unordered_set<const void*>& walked_nodes() {
+    static thread_local std::unordered_set<const void*> seen;
+    return seen;
+}
+
+// Marks the bounds of one collector traversal.  The collector walks one object
+// at a time, so nothing outlives this scope legitimately.
+struct TraversalRoot {
+    TraversalRoot() { walked_nodes().clear(); }
+    ~TraversalRoot() { walked_nodes().clear(); }
+};
+
+inline bool enter_node(const void* node) {
+    return walked_nodes().insert(node).second;
+}
+
+}  // namespace gc_detail
 
 class Validator {
 public:

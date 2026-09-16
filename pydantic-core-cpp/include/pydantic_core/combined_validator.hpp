@@ -121,6 +121,7 @@ public:
 
     // The Rust Debug-style form of the validator (see Validator::debug_repr).
     void visit_refs(RefVisitor visit, void* arg) const {
+        if (!gc_detail::enter_node(this)) return;
         std::visit([visit, arg](const auto& held) {
             if (held) held->visit_refs(visit, arg);
         }, variant_);

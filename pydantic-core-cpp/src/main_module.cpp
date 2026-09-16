@@ -1205,6 +1205,37 @@ struct SerNode {
     // For datetime/date/time serialization: "iso8601" (default), "seconds", or "milliseconds"
     std::string ser_json_temporal = "iso8601";
 
+    // Report the Python objects this node and its subtree hold so the cyclic
+    // collector can see them (see Validator::visit_refs): a serializer names the
+    // class it serializes and the class keeps its serializer, so neither the
+    // pair nor anything it holds is reachable from a traversal the collector
+    // can do on its own.
+    void visit_refs(RefVisitor visit, void* arg) const {
+        if (!gc_detail::enter_node(this)) return;
+        for (const auto& child : children) {
+            if (child) child->visit_refs(visit, arg);
+        }
+        for (const auto& choice : tagged) {
+            if (choice.second) choice.second->visit_refs(visit, arg);
+        }
+        for (const auto& choice : tagged_left_to_right) {
+            if (choice) choice->visit_refs(visit, arg);
+        }
+        for (const auto& field : fields) {
+            if (field.second) field.second->visit_refs(visit, arg);
+        }
+        if (return_ser) return_ser->visit_refs(visit, arg);
+        if (extra_ser) extra_ser->visit_refs(visit, arg);
+        visit_ref(visit, arg, tagged_discriminator_callable);
+        for (const auto& excluded : field_exclude_if) {
+            visit_ref(visit, arg, excluded.second);
+        }
+        visit_ref(visit, arg, py_func);
+        visit_ref(visit, arg, default_val);
+        visit_ref(visit, arg, default_factory);
+        visit_ref(visit, arg, class_);
+    }
+
     // Copy content from another node into this one (preserves shared_ptr identity)
     void copy_from(const SerNode& other) {
         type = other.type;
@@ -4181,6 +4212,14 @@ public:
 
     const py::object& get_schema() const { return schema_; }
 
+    // See SerNode::visit_refs.  The schema is kept only to pickle the
+    // serializer, but it names every class and callable in the tree, so the
+    // collector has to be told about it as well.
+    void visit_refs(RefVisitor visit, void* arg) const {
+        visit_ref(visit, arg, schema_);
+        if (ser_) ser_->visit_refs(visit, arg);
+    }
+
 private:
     SerRef ser_;
     py::object schema_;  // Store schema for pickle support
@@ -4394,8 +4433,17 @@ T* bound_cpp_object(PyObject* self) {
 }
 
 extern "C" int visit_schema_validator(PyObject* self, visitproc traverse_fn, void* arg) {
+    const gc_detail::TraversalRoot root;
     if (auto* validator = bound_cpp_object<SchemaValidator>(self)) {
         validator->visit_refs(traverse_fn, arg);
+    }
+    return 0;
+}
+
+extern "C" int visit_schema_serializer(PyObject* self, visitproc traverse_fn, void* arg) {
+    const gc_detail::TraversalRoot root;
+    if (auto* serializer = bound_cpp_object<PySchemaSerializer>(self)) {
+        serializer->visit_refs(traverse_fn, arg);
     }
     return 0;
 }
@@ -4986,6 +5034,8 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             py::object cls = mod.attr("SchemaSerializer");
             return py::make_tuple(cls, py::make_tuple(self.get_schema(), py::none()));
         });
+
+    enable_gc_traversal(m.attr("SchemaSerializer"), &visit_schema_serializer);
 
     m.def("to_json", &to_json_fn,
           py::arg("value"), py::kw_only(), py::arg("indent") = py::none(), py::arg("ensure_ascii") = py::none(),
