@@ -194,8 +194,11 @@ TEST_SUITE("ModelFieldsValidator") {
         CHECK(output->fields.count("role"));
         // Default value should be present
         auto& role_fv = output->fields["role"];
-        auto role_val = std::static_pointer_cast<std::string>(role_fv.value);
-        CHECK(*role_val == "user");
+        // A default that was not re-validated is stored as the raw Python
+        // object, so it has to be read back as one rather than as a std::string.
+        CHECK(role_fv.type_name == "py_object");
+        auto role_val = std::static_pointer_cast<py::object>(role_fv.value);
+        CHECK(role_val->cast<std::string>() == "user");
     }
 
     TEST_CASE("Model-fields - extra fields with ignore (default)") {

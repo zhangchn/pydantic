@@ -778,8 +778,10 @@ static std::shared_ptr<Validator> build_from_element(
             if (!default_elem.error()) {
                 info.required = false;
                 if (default_elem.value().is_string()) {
-                    // Store raw string (no JSON quotes)
-                    info.default_value_str = std::string(default_elem.value().get_string().value());
+                    // This field is re-parsed as JSON when the default is applied, so it
+                    // has to keep the quotes the schema text carried: bare text fails to
+                    // parse (the default became None), and a "" default vanished.
+                    info.default_value_str = std::string(simdjson::to_string(default_elem.value()));
                 } else if (default_elem.value().is_int64()) {
                     info.default_value_str = std::to_string(default_elem.value().get_int64());
                 } else if (default_elem.value().is_uint64()) {
