@@ -68,14 +68,6 @@ TEST_CASE("PythonInput - rejects int for str strict") {
     CHECK(result.is_err());
 }
 
-TEST_CASE("PythonInput - coerces int to str lax") {
-    py::scoped_interpreter guard;
-    PythonInput input{py::int_(42)};
-    auto result = input.validate_str(false, false);
-    CHECK(result.is_ok());
-    CHECK(result.value().exactness() == Exactness::Lax);
-}
-
 TEST_CASE("PythonInput - validates int strict") {
     py::scoped_interpreter guard;
     PythonInput input{py::int_(42)};

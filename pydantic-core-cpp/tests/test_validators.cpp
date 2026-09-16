@@ -658,17 +658,19 @@ TEST_CASE("WithDefaultValidator") {
 }
 
 TEST_CASE("ChainValidator") {
+    // A chain hands each step's result to the next, so the steps have to
+    // compose: str does not accept a number, lax or not, unless
+    // coerce_numbers_to_str is set for it.
     std::vector<std::shared_ptr<Validator>> validators;
     validators.push_back(std::make_shared<IntValidator>());
-    validators.push_back(std::make_shared<StringValidator>());
-    
+    validators.push_back(std::make_shared<AnyValidator>());
+
     ChainValidator validator(validators);
     CHECK(validator.name() == "chain");
-    
-    // Test with integer (matches first)
+
     auto json_result = parse_json("42");
     CHECK(json_result.is_ok());
-    
+
     ValidationState state;
     auto result = validator.validate(*json_result.value(), state);
     CHECK(result.is_ok());
@@ -1068,33 +1070,6 @@ TEST_CASE("ChainValidator - passes result through chain") {
     }
 }
 
-TEST_CASE("ChainValidator - multiple steps with mixed types") {
-    // int → string → any: any input that passes int and then string will pass
-    std::vector<std::shared_ptr<Validator>> validators;
-    validators.push_back(std::make_shared<IntValidator>());
-    validators.push_back(std::make_shared<StringValidator>());
-    validators.push_back(std::make_shared<AnyValidator>());
-    ChainValidator validator(validators);
-
-    ValidationState state;
-
-    // 42 passes int, then passes string (lax coercion), then passes any
-    {
-        auto json_result = parse_json("42");
-        REQUIRE(json_result.is_ok());
-        auto result = validator.validate(*json_result.value(), state);
-        CHECK(result.is_ok());
-    }
-
-    // true passes int (lax: true→1), then passes string (lax: true→"true"), then any
-    {
-        auto json_result = parse_json("true");
-        REQUIRE(json_result.is_ok());
-        auto result = validator.validate(*json_result.value(), state);
-        CHECK(result.is_ok());
-    }
-}
-
 } // TEST_SUITE
 
 TEST_SUITE("Special Validators") {
@@ -1391,14 +1366,15 @@ TEST_CASE("FunctionWrapValidator - no inner validator returns default") {
     CHECK(result.is_ok());
 }
 
-TEST_CASE("JsonValidator - parses JSON into Python object") {
+TEST_CASE("JsonValidator - parses JSON text into a Python object") {
     JsonValidator validator;
     CHECK(validator.name() == "json");
 
     ValidationState state;
-    auto json_result = parse_json("\"hello\"");
-    REQUIRE(json_result.is_ok());
-    auto result = validator.validate(*json_result.value(), state);
+    // A json_schema field is handed the JSON text itself, so the input here is
+    // the quoted document "hello", not an already-decoded value.
+    PythonInput input{py::str("\"hello\"")};
+    auto result = validator.validate(input, state);
     REQUIRE(result.is_ok());
     auto py_val = std::static_pointer_cast<py::object>(result.value());
     REQUIRE(py::isinstance<py::str>(*py_val));
@@ -1409,13 +1385,24 @@ TEST_CASE("JsonValidator - with inner validator") {
     JsonValidator validator(std::make_shared<IntValidator>());
 
     ValidationState state;
-    // The parsed JSON value is fed to the inner validator as Python input.
-    auto json_result = parse_json("42");
+    // The decoded value goes to the inner validator as Python input, and the
+    // result is whatever that schema produced - so it is read back through it.
+    PythonInput input{py::str("42")};
+    auto result = validator.validate(input, state);
+    REQUIRE(result.is_ok());
+    auto py_out = value_to_python_with_type(result.value(), validator.effective_result_name());
+    CHECK(py_out.cast<int64_t>() == 42);
+}
+
+TEST_CASE("JsonValidator - rejects a JSON element that is not text") {
+    JsonValidator validator;
+    ValidationState state;
+    // A number element cannot be re-parsed: both cores answer json_type, so the
+    // input to a json_schema has to be string/bytes text.
+    auto json_result = parse_json("12");
     REQUIRE(json_result.is_ok());
     auto result = validator.validate(*json_result.value(), state);
-    REQUIRE(result.is_ok());
-    auto int_val = std::static_pointer_cast<int64_t>(result.value());
-    CHECK(*int_val == 42);
+    CHECK(result.is_err());
 }
 
 TEST_CASE("JsonOrPythonValidator - routes based on input type") {
