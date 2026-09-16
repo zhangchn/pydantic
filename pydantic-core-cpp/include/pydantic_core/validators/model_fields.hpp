@@ -1822,6 +1822,12 @@ public:
     void set_frozen(bool f) { frozen_ = f; }
     void set_extra_behavior(ExtraBehavior eb) { extra_behavior_ = eb; }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        for (const auto& field : fields_) {
+            if (field.schema) field.schema->visit_refs(visit, arg);
+        }
+    }
 private:
     std::vector<DataclassFieldInfo> fields_;
     std::string class_name_ = "Dataclass";

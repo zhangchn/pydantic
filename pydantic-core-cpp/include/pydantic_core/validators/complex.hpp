@@ -50,6 +50,10 @@ public:
         return out;
     }
     
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        if (inner_) inner_->visit_refs(visit, arg);
+    }
 private:
     std::shared_ptr<Validator> inner_;
     mutable std::optional<std::string> display_name_cache_;
@@ -225,6 +229,13 @@ public:
     // (schema, label) pairs) and uses it in place of the choice's schema name.
     void set_choice_labels(std::vector<std::string> labels) { labels_ = std::move(labels); }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        for (const auto& member : validators_) {
+            if (member) member->visit_refs(visit, arg);
+        }
+        visit_ref(visit, arg, custom_error_context_);
+    }
 private:
     // Rust uses the tag label when pydantic supplied one, else the validator's
     // own schema-shaped name.
@@ -348,6 +359,17 @@ public:
         return last_type_name_.empty() ? std::string("py_object") : last_type_name_;
     }
 
+    // A choice tag is a Python object (int, str or Enum member), so it goes to
+    // the collector along with the validator it selects.
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        for (const auto& choice : choices_) {
+            visit_ref(visit, arg, choice.tag);
+            if (choice.validator) choice.validator->visit_refs(visit, arg);
+        }
+        visit_ref(visit, arg, callable_);
+        visit_ref(visit, arg, custom_error_context_);
+    }
 private:
     std::vector<std::vector<std::string>> paths_;
     std::vector<Choice> choices_;

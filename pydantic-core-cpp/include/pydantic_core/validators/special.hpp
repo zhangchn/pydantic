@@ -138,6 +138,16 @@ public:
 
     const std::string& get_ref() const { return schema_ref_; }
 
+    // The reference reaches its schema through the shared definitions registry;
+    // reporting the resolved definition is what lets a recursive model be
+    // collected: the walk into the definition re-enters this node and stops.
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        if (definitions_) {
+            auto def = definitions_->get_definition(schema_ref_);
+            if (def) def->visit_refs(visit, arg);
+        }
+    }
 private:
     std::string schema_ref_;
     std::shared_ptr<DefinitionsRegistry> definitions_;
@@ -405,6 +415,12 @@ public:
 
     std::string name() const override { return "date"; }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        visit_ref(visit, arg, gt);
+        visit_ref(visit, arg, lt);
+        visit_ref(visit, arg, ge);
+        visit_ref(visit, arg, le);
+    }
 private:
     bool strict_ = false;
 };
@@ -447,6 +463,12 @@ public:
 
     std::string name() const override { return "time"; }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        visit_ref(visit, arg, gt);
+        visit_ref(visit, arg, lt);
+        visit_ref(visit, arg, ge);
+        visit_ref(visit, arg, le);
+    }
 private:
     bool strict_ = false;
 };
@@ -550,6 +572,12 @@ public:
 
     std::string name() const override { return "datetime"; }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        visit_ref(visit, arg, gt);
+        visit_ref(visit, arg, lt);
+        visit_ref(visit, arg, ge);
+        visit_ref(visit, arg, le);
+    }
 private:
     bool strict_ = false;
 };
@@ -1141,6 +1169,14 @@ public:
 
     std::string name() const override { return "decimal"; }
     std::string effective_result_name() const override { return "py_object"; }
+
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        visit_ref(visit, arg, multiple_of);
+        visit_ref(visit, arg, gt);
+        visit_ref(visit, arg, lt);
+        visit_ref(visit, arg, ge);
+        visit_ref(visit, arg, le);
+    }
 };
 
 // UuidValidator - validates UUID values
@@ -1423,6 +1459,10 @@ public:
 
     std::string name() const override { return "literal"; }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        for (const auto& expected : values_) visit_ref(visit, arg, expected);
+        visit_ref(visit, arg, expected_dict_);
+    }
 private:
     std::vector<py::object> values_;
     std::vector<size_t> bool_ids_;
@@ -1538,6 +1578,12 @@ public:
         return validate_legacy(input, state);
     }
 
+    // The enum class owns its members; _missing_ is whatever callable the
+    // schema was built with.
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        visit_ref(visit, arg, cls_);
+        visit_ref(visit, arg, missing_);
+    }
 private:
     static ValResult<std::shared_ptr<void>> member_result(const py::object& member) {
         return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(member));
@@ -1751,6 +1797,10 @@ public:
         return "custom-error";
     }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        if (inner_) inner_->visit_refs(visit, arg);
+    }
 private:
     std::shared_ptr<Validator> inner_;
     std::string msg_;

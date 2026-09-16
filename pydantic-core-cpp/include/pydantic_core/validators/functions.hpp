@@ -534,6 +534,11 @@ public:
 
     void set_py_func(py::object func) { py_func_ = std::move(func); }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        if (inner_) inner_->visit_refs(visit, arg);
+        visit_ref(visit, arg, py_func_);
+    }
 private:
     std::shared_ptr<Validator> inner_;
     py::object py_func_;
@@ -1054,6 +1059,11 @@ public:
 
     void set_py_func(py::object func) { py_func_ = std::move(func); }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        if (inner_) inner_->visit_refs(visit, arg);
+        visit_ref(visit, arg, py_func_);
+    }
 private:
     std::shared_ptr<Validator> inner_;
     py::object py_func_;
@@ -1135,6 +1145,9 @@ public:
     }
     void set_py_func(py::object func) { py_func_ = std::move(func); }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        visit_ref(visit, arg, py_func_);
+    }
 private:
     py::object py_func_;
     int info_arg_ = -1;
@@ -1258,6 +1271,11 @@ public:
 
     std::shared_ptr<Validator> inner_validator() const override { return inner_; }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        if (inner_) inner_->visit_refs(visit, arg);
+        visit_ref(visit, arg, py_func_);
+    }
 private:
     std::shared_ptr<Validator> inner_;
     py::object py_func_;
@@ -1441,6 +1459,12 @@ public:
     // Rust's OnError: "raise" (default), "omit" or "default".
     void set_on_error(const std::string& v) { on_error_ = v; }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        if (inner_) inner_->visit_refs(visit, arg);
+        visit_ref(visit, arg, default_factory_);
+        visit_ref(visit, arg, default_py_obj_);
+    }
 private:
     std::shared_ptr<Validator> inner_;
     std::shared_ptr<void> default_value_;
@@ -1541,6 +1565,12 @@ public:
         return "chain";
     }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        for (const auto& step : validators_) {
+            if (step) step->visit_refs(visit, arg);
+        }
+    }
 private:
     std::vector<std::shared_ptr<Validator>> validators_;
     mutable int last_used_ = -1;
@@ -1593,6 +1623,11 @@ public:
         return "lax-or-strict";
     }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        if (lax_) lax_->visit_refs(visit, arg);
+        if (strict_) strict_->visit_refs(visit, arg);
+    }
 private:
     std::shared_ptr<Validator> lax_;
     std::shared_ptr<Validator> strict_;
@@ -1662,6 +1697,11 @@ public:
         return "json-or-python";
     }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        if (json_) json_->visit_refs(visit, arg);
+        if (python_) python_->visit_refs(visit, arg);
+    }
 private:
     std::shared_ptr<Validator> json_;
     std::shared_ptr<Validator> python_;
@@ -1723,6 +1763,10 @@ public:
         return "py_object";
     }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        if (inner_) inner_->visit_refs(visit, arg);
+    }
 private:
     std::shared_ptr<Validator> inner_;
 };
@@ -2147,6 +2191,14 @@ public:
         );
     }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        for (const auto& param : parameters) {
+            if (param.validator) param.validator->visit_refs(visit, arg);
+        }
+        if (var_args_validator) var_args_validator->visit_refs(visit, arg);
+        if (var_kwargs_validator) var_kwargs_validator->visit_refs(visit, arg);
+    }
 private:
     static Location loc_of_name(const std::string& name) {
         Location loc;
@@ -2236,6 +2288,12 @@ public:
                                        extra_behavior);
     }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        for (const auto& param : parameters) {
+            if (param.validator) param.validator->visit_refs(visit, arg);
+        }
+    }
 private:
     // Rust LookupPathCollection::lookup_paths: the alias paths first while
     // looking up by alias, then the parameter name when no alias is declared or
@@ -2693,6 +2751,12 @@ public:
     void set_function(py::object f) { function_ = std::move(f); }
     void set_return_validator(std::shared_ptr<Validator> v) { return_validator_ = std::move(v); }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        if (arguments_validator_) arguments_validator_->visit_refs(visit, arg);
+        if (return_validator_) return_validator_->visit_refs(visit, arg);
+        visit_ref(visit, arg, function_);
+    }
 private:
     std::shared_ptr<Validator> arguments_validator_;
     py::object function_;
@@ -2855,6 +2919,11 @@ public:
     void set_field_names(std::vector<std::string> names) { field_names_ = std::move(names); }
     void set_revalidate(RevalidateInstances r) { revalidate_ = r; }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        if (args_validator_) args_validator_->visit_refs(visit, arg);
+        visit_ref(visit, arg, class_);
+    }
 private:
     std::shared_ptr<Validator> args_validator_;
     py::object class_ = py::none();

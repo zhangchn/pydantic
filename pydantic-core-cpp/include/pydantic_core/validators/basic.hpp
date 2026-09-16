@@ -525,6 +525,10 @@ auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str,
     }
     
     std::string name() const override { return "constrained-str"; }
+
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        visit_ref(visit, arg, pattern_re);
+    }
 };
 
 // BytesValidator - validates bytes values
@@ -723,6 +727,9 @@ public:
         return "is-instance[" + class_name_ + "]";
     }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        visit_ref(visit, arg, py_class_);
+    }
 private:
     std::string class_name_;
     py::object py_class_;
@@ -803,6 +810,9 @@ public:
         return "is-subclass[" + class_name_ + "]";
     }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        visit_ref(visit, arg, py_class_);
+    }
 private:
     std::string class_name_;
     py::object py_class_;

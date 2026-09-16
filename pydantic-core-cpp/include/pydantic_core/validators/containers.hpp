@@ -155,6 +155,11 @@ public:
         display_name_cache_ = "list[" + inner + "]";
         return *display_name_cache_;
     }
+
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        if (items_schema) items_schema->visit_refs(visit, arg);
+    }
 };
 
 // DictValidator - validates dict/object values
@@ -429,6 +434,12 @@ public:
         display_name_cache_ = "dict[" + k + "," + v + "]";
         return *display_name_cache_;
     }
+
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        if (keys_schema) keys_schema->visit_refs(visit, arg);
+        if (values_schema) values_schema->visit_refs(visit, arg);
+    }
 };
 
 // SetValidator - validates set values
@@ -520,6 +531,11 @@ public:
         std::string inner = items_schema ? items_schema->display_name() : std::string("any");
         display_name_cache_ = "set[" + inner + "]";
         return *display_name_cache_;
+    }
+
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        if (items_schema) items_schema->visit_refs(visit, arg);
     }
 };
 
@@ -656,6 +672,11 @@ public:
         display_name_cache_ = "frozenset[" + inner + "]";
         return *display_name_cache_;
     }
+
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        if (items_schema) items_schema->visit_refs(visit, arg);
+    }
 };
 
 // TupleValidator - validates tuple values with positional items
@@ -759,6 +780,13 @@ public:
         display_name_cache_ = "tuple[" + descr + "]";
         return *display_name_cache_;
     }
+
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        for (const auto& item : items) {
+            if (item) item->visit_refs(visit, arg);
+        }
+    }
 };
 
 // GeneratorValidator - validates generator/iterable values, returns list
@@ -841,6 +869,11 @@ public:
 
     std::string name() const override { return "generator"; }
     std::string effective_result_name() const override { return "py_object"; }
+
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        if (items_schema) items_schema->visit_refs(visit, arg);
+    }
 };
 
 } // namespace pydantic_core
