@@ -108,6 +108,9 @@ std::shared_ptr<Validator> ValidatorFactory::build(
     if (type == "frozenset") {
         return std::make_shared<FrozenSetValidator>();
     }
+    if (type == "deque") {
+        return std::make_shared<DequeValidator>();
+    }
     if (type == "tuple") {
         return std::make_shared<TupleValidator>();
     }

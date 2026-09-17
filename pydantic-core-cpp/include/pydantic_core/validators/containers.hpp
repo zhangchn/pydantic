@@ -679,6 +679,108 @@ public:
     }
 };
 
+// DequeValidator - validates collections.deque values
+class DequeValidator : public Validator {
+public:
+    std::shared_ptr<Validator> items_schema;
+    mutable std::optional<std::string> display_name_cache_;
+    std::optional<size_t> min_length;
+    std::optional<size_t> max_length;
+    bool fail_fast = false;
+    std::optional<bool> strict;
+
+    ValResult<std::shared_ptr<void>> validate(
+        const Input& input,
+        ValidationState& state
+    ) override {
+        auto seq_result = input.validate_deque(state.container_strict(strict));
+        if (seq_result.is_err()) {
+            return seq_result.error();
+        }
+        state.floor_exactness(seq_result.value().exactness());
+        auto& seq = seq_result.value().value();
+
+        // `maxlen` is preserved from the input deque (if any). The validated
+        // output can't have more items than the input, so the deque
+        // constructor will never truncate the items here.
+        std::optional<size_t> maxlen;
+        if (const auto* py_input = dynamic_cast<const PythonInput*>(&input)) {
+            maxlen = py_input->deque_maxlen();
+        }
+
+        // Rust watches max_length while items are appended and reports the
+        // length of the input, which is ahead of the output while items are
+        // still being validated; min_length only applies to the finished deque.
+        const size_t actual_length = seq->size();
+        py::list items;
+        std::vector<std::shared_ptr<ValLineError>> errors;
+        for (const auto& entry : seq->entries()) {
+            const py::object element = seq->get_item(entry.index);
+            py::object validated = element;
+            if (items_schema) {
+                state.location().push(entry.index);
+                PythonInput elem_input(element);
+                elem_input.set_current_location(state.location());
+                auto item_result = items_schema->validate(elem_input, state);
+                state.location().pop();
+                if (item_result.is_err()) {
+                    if (item_result.error().is_omit()) continue;
+                    if (item_result.error().has_line_errors()) {
+                        for (auto& le : item_result.error().line_errors()) {
+                            errors.push_back(le);
+                        }
+                        if (fail_fast) {
+                            return ValError::line_errors(std::move(errors));
+                        }
+                    } else {
+                        return item_result.error();
+                    }
+                    continue;
+                }
+                validated = value_to_python_with_type(item_result.value(),
+                                                      items_schema->effective_result_name());
+            }
+            items.append(validated);
+            if (max_length.has_value() && py::len(items) > max_length.value()) {
+                ErrorType err(ErrorType::Kind::SetTooLong);
+                err.context()["field_type"] = "Deque";
+                err.context()["max_length"] = std::to_string(max_length.value());
+                err.context()["actual_length"] = std::to_string(actual_length);
+                return ValError::line_error(
+                    std::move(err), state.location(), input.as_error_value().repr);
+            }
+        }
+        if (!errors.empty()) {
+            return ValError::line_errors(std::move(errors));
+        }
+        size_t length = py::len(items);
+        if (min_length.has_value() && length < min_length.value()) {
+            ErrorType err(ErrorType::Kind::SetTooShort);
+            err.context()["field_type"] = "Deque";
+            err.context()["min_length"] = std::to_string(min_length.value());
+            err.context()["actual_length"] = std::to_string(length);
+            return ValError::line_error(
+                std::move(err), state.location(), input.as_error_value().repr);
+        }
+        return ValResult<std::shared_ptr<void>>(
+            std::make_shared<py::object>(py_deque_new(items, maxlen)));
+    }
+
+    std::string name() const override { return "deque"; }
+
+    std::string display_name() const override {
+        if (display_name_cache_) return *display_name_cache_;
+        std::string inner = items_schema ? items_schema->display_name() : std::string("any");
+        display_name_cache_ = "deque[" + inner + "]";
+        return *display_name_cache_;
+    }
+
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        if (items_schema) items_schema->visit_refs(visit, arg);
+    }
+};
+
 // TupleValidator - validates tuple values with positional items
 class TupleValidator : public Validator {
 public:

@@ -60,8 +60,9 @@ std::string input_type_name(const py::object& obj) {
 // Python container names.
 std::string json_message_for(const std::string& type_name, const std::string& msg) {
     if (type_name == "none_required") return "Input should be null";
-    if (type_name == "list_type" || type_name == "tuple_type" ||
-        type_name == "iterable_type" || type_name == "set_type" ||
+    if (type_name == "list_type" || type_name == "deque_type" ||
+        type_name == "tuple_type" || type_name == "iterable_type" ||
+        type_name == "set_type" ||
         type_name == "frozenset_type") {
         return "Input should be a valid array";
     }

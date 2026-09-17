@@ -556,6 +556,12 @@ public:
     virtual ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_frozenset(bool strict) const {
         return validate_list(strict);
     }
+    // Rust's validate_deque reports deque_type; the input deque's maxlen
+    // travels separately (PythonInput::deque_maxlen), as nowhere in the
+    // sequence path can carry it.
+    virtual ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_deque(bool strict) const {
+        return validate_list(strict);
+    }
 
     // Arguments validation (ArgsKwargs or dict input).  Only implemented for
     // PythonInput; other input kinds report an arguments_type error.

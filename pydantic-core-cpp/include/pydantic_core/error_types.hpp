@@ -49,6 +49,7 @@ public:
         BytesType,
         DictType,
         ListType,
+        DequeType,
         TupleType,
         SetType,
         FrozenSetType,
@@ -314,6 +315,7 @@ public:
     static ErrorType bytes_type() { return ErrorType(ErrorType::Kind::BytesType); }
     static ErrorType dict_type() { return ErrorType(ErrorType::Kind::DictType); }
     static ErrorType list_type() { return ErrorType(ErrorType::Kind::ListType); }
+    static ErrorType deque_type() { return ErrorType(ErrorType::Kind::DequeType); }
     static ErrorType tuple_type() { return ErrorType(ErrorType::Kind::TupleType); }
     static ErrorType set_type() { return ErrorType(ErrorType::Kind::SetType); }
     static ErrorType frozenset_type() { return ErrorType(ErrorType::Kind::FrozenSetType); }

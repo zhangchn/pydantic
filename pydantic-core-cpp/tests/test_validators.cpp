@@ -529,6 +529,22 @@ TEST_CASE("FrozenSetValidator - array input validates as frozenset") {
     CHECK(result.is_ok());
 }
 
+TEST_CASE("DequeValidator - array input validates as deque") {
+    DequeValidator validator;
+    ValidationState state;
+
+    auto json_result = parse_json("[1, 2, 3]");
+    REQUIRE(json_result.is_ok());
+    auto result = validator.validate(*json_result.value(), state);
+    CHECK(result.is_ok());
+
+    // Non-array should fail
+    auto json_result2 = parse_json("42");
+    REQUIRE(json_result2.is_ok());
+    auto result2 = validator.validate(*json_result2.value(), state);
+    CHECK(result2.is_err());
+}
+
 TEST_CASE("SetValidator - non-array input fails") {
     SetValidator validator;
     ValidationState state;
@@ -1721,6 +1737,7 @@ TEST_CASE("Validator - name() returns expected strings") {
     CHECK(DictValidator().name() == "dict");
     CHECK(SetValidator().name() == "set");
     CHECK(FrozenSetValidator().name() == "frozenset");
+    CHECK(DequeValidator().name() == "deque");
     CHECK(TupleValidator().name() == "tuple");
 }
 

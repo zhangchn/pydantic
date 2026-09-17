@@ -100,6 +100,7 @@ static std::shared_ptr<Validator> build_from_flat_dict(
     if (type == "dict") return std::make_shared<DictValidator>();
     if (type == "set") return std::make_shared<SetValidator>();
     if (type == "frozenset") return std::make_shared<FrozenSetValidator>();
+    if (type == "deque") return std::make_shared<DequeValidator>();
     if (type == "tuple") return std::make_shared<TupleValidator>();
     if (type == "literal") return std::make_shared<LiteralValidator>();
     if (type == "enum") return std::make_shared<EnumValidator>();
@@ -337,6 +338,7 @@ static std::shared_ptr<Validator> build_from_element(
     }
     if (type == "set") return std::make_shared<SetValidator>();
     if (type == "frozenset") return std::make_shared<FrozenSetValidator>();
+    if (type == "deque") return std::make_shared<DequeValidator>();
 
     // Tuple with positional items
     if (type == "tuple") {
@@ -2129,6 +2131,23 @@ static std::shared_ptr<Validator> build_from_py_dict(
         if (schema.contains("items_schema") || schema.contains("items")) {
             auto items_key = schema.contains("items_schema") ? "items_schema" : "items";
             v->items_schema = build_from_py_dict(schema[items_key].cast<py::dict>(), config, definitions);
+        }
+        if (schema.contains("min_length")) {
+            v->min_length = schema["min_length"].cast<size_t>();
+        }
+        if (schema.contains("max_length")) {
+            v->max_length = schema["max_length"].cast<size_t>();
+        }
+        v->strict = strict_opt_py(schema, config);
+        v->fail_fast = py_bool(schema, "fail_fast");
+        return v;
+    }
+
+    // --- Deque ---
+    if (type == "deque" || type == "deque-constrained") {
+        auto v = std::make_shared<DequeValidator>();
+        if (schema.contains("items_schema")) {
+            v->items_schema = build_from_py_dict(schema["items_schema"].cast<py::dict>(), config, definitions);
         }
         if (schema.contains("min_length")) {
             v->min_length = schema["min_length"].cast<size_t>();

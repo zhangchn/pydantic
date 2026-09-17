@@ -188,6 +188,7 @@ public:
     ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> validate_tuple(bool strict) const override;
     ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_set(bool strict) const override;
     ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_frozenset(bool strict) const override;
+    ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_deque(bool strict) const override;
 
     // Arguments validation: accepts ArgsKwargs instances and plain dicts (kwargs-only)
     ValResult<ArgumentsInput> validate_args() const override;
@@ -216,6 +217,10 @@ public:
     bool is_tuple() const;
     bool is_set() const;
     bool is_frozenset() const;
+    bool is_deque() const;
+    // The `maxlen` an output deque should inherit, nullopt for an unbounded
+    // deque and for anything that is not a deque (Rust's deque_maxlen).
+    std::optional<size_t> deque_maxlen() const;
     bool is_sequence() const;
 
     // Special type detection (Python-specific)

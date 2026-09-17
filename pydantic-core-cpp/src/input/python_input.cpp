@@ -216,6 +216,14 @@ bool PythonInput::is_frozenset() const {
     return py::isinstance<py::frozenset>(obj_);
 }
 
+bool PythonInput::is_deque() const {
+    return py::isinstance(obj_, py_deque_type());
+}
+
+std::optional<size_t> PythonInput::deque_maxlen() const {
+    return py_deque_maxlen(obj_);
+}
+
 bool PythonInput::is_sequence() const {
     return is_list() || is_tuple() || py_hasattr(obj_, "__iter__");
 }
@@ -946,7 +954,8 @@ ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_sequence_like(
     // Rust casts to the concrete set type before the lax branch, so a set input
     // stays valid for a set field even in strict mode.
     if ((kind == ErrorType::Kind::SetType && input.is_set()) ||
-        (kind == ErrorType::Kind::FrozenSetType && input.is_frozenset())) {
+        (kind == ErrorType::Kind::FrozenSetType && input.is_frozenset()) ||
+        (kind == ErrorType::Kind::DequeType && input.is_deque())) {
         SequenceItems collected = collect_sequence_items(input.py_object());
         if (collected.iterable && collected.error.empty()) {
             return ValMatch<std::unique_ptr<ValidatedList>>::lax(
@@ -992,6 +1001,10 @@ ValResult<ValMatch<std::unique_ptr<ValidatedList>>> PythonInput::validate_set(bo
 
 ValResult<ValMatch<std::unique_ptr<ValidatedList>>> PythonInput::validate_frozenset(bool strict) const {
     return validate_sequence_like(*this, strict, ErrorType::Kind::FrozenSetType);
+}
+
+ValResult<ValMatch<std::unique_ptr<ValidatedList>>> PythonInput::validate_deque(bool strict) const {
+    return validate_sequence_like(*this, strict, ErrorType::Kind::DequeType);
 }
 
 ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> PythonInput::validate_tuple(bool strict) const {

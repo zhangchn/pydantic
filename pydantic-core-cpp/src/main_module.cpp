@@ -1052,7 +1052,8 @@ static std::string ser_variant_name(const std::string& t) {
         {"any", "Any"}, {"none", "None"}, {"bool", "Bool"}, {"int", "Int"}, {"float", "Float"},
         {"str", "Str"}, {"bytes", "Bytes"}, {"date", "Date"}, {"time", "Time"},
         {"datetime", "Datetime"}, {"timedelta", "Timedelta"}, {"list", "List"}, {"set", "Set"},
-        {"frozenset", "FrozenSet"}, {"tuple", "Tuple"}, {"generator", "Generator"}, {"dict", "Dict"},
+        {"frozenset", "FrozenSet"}, {"deque", "Deque"}, {"tuple", "Tuple"},
+        {"generator", "Generator"}, {"dict", "Dict"},
         {"nullable", "Nullable"}, {"nullable-union", "Union"}, {"union", "Union"},
         {"tagged-union", "TaggedUnion"}, {"default", "WithDefault"}, {"with-default", "WithDefault"},
         {"model", "Model"}, {"model-fields", "Fields"}, {"typed-dict", "TypedDict"},
@@ -1325,6 +1326,10 @@ struct SerNode {
         if (node_type == "list" || node_type == "generator") {
             if (Py_TYPE(v) == &PyList_Type) return 1;
             return PyList_Check(v) ? 0 : -1;
+        }
+        if (node_type == "deque") {
+            if (reinterpret_cast<PyObject*>(Py_TYPE(v)) == py_deque_type().ptr()) return 1;
+            return py::isinstance(v, py_deque_type()) ? 0 : -1;
         }
         if (node_type == "set") {
             if (Py_TYPE(v) == &PySet_Type) return 1;
@@ -1719,6 +1724,47 @@ struct SerNode {
                 }
             }
         }
+        // A deque is only accepted as-is: anything else warns and serializes
+        // by inference (Rust DequeSerializer::to_python). The output keeps the
+        // input's `maxlen`, and in JSON mode the items become an array.
+        if (type == "deque") {
+            if (!py::isinstance(value, py_deque_type())) {
+                std::string deque_name =
+                    "deque[" + (children.empty() ? std::string("any") : type_name_for_warning(children[0])) + "]";
+                ser_warn_unexpected_value("", deque_name, value);
+                return serialize_any_value(value, exc_none, round_trip, json_mode);
+            }
+            std::optional<size_t> maxlen = py_deque_maxlen(value);
+
+            py::iterable seq = py::reinterpret_borrow<py::iterable>(value);
+            py::ssize_t len = -1;
+            if (!include.is_none() || !exclude.is_none()) {
+                try {
+                    len = py::len(seq);
+                } catch (...) {
+                    PyErr_Clear();
+                }
+            }
+            py::object inc = (include.is_none() || len < 0) ? py::none() : map_negative_indices(include, len);
+            py::object exc = (exclude.is_none() || len < 0) ? py::none() : map_negative_indices(exclude, len);
+            py::list items;
+            py::ssize_t idx = 0;
+            for (auto item : seq) {
+                auto next = apply_ser_filter(py::int_(idx), inc, exc);
+                if (!next.omit) {
+                    py::object element = py::reinterpret_borrow<py::object>(item);
+                    items.append(children.empty()
+                        ? element
+                        : children[0]->to_python(check_item_type(children[0], element), json_mode, exc_none,
+                                                 round_trip, next.include, next.exclude, by_alias,
+                                                 exclude_unset, exclude_defaults, context));
+                }
+                idx++;
+            }
+            if (json_mode) return std::move(items);
+            return py_deque_new(items, maxlen);
+        }
+
         // For list/dict/tuple/containers, serialize children
         if ((type == "list" || type == "set" || type == "frozenset" || type == "generator") && !children.empty()) {
             py::iterable seq = py::reinterpret_borrow<py::iterable>(value);
@@ -2204,8 +2250,8 @@ struct SerNode {
             out += "]";
             return out;
         }
-        // set/frozenset/generator: serialize as JSON array
-        if (type == "set" || type == "frozenset" || type == "generator") {
+        // set/frozenset/deque/generator: serialize as JSON array
+        if (type == "set" || type == "frozenset" || type == "deque" || type == "generator") {
             std::string out = "[";
             bool first = true;
             for (auto item : py::reinterpret_borrow<py::iterable>(value)) {
@@ -3366,6 +3412,7 @@ std::string SerNode::type_name_for_warning(const SerRef& n) {
     if (t == "time") return "time";
     if (t == "list") return "list[" + child0() + "]";
     if (t == "set") return "set[" + child0() + "]";
+    if (t == "deque") return "deque[" + child0() + "]";
     if (t == "frozenset") return "frozenset[" + child0() + "]";
     if (t == "tuple") return "tuple[" + child0() + "]";
     if (t == "dict") {
@@ -3392,6 +3439,7 @@ bool SerNode::value_matches_type(const SerRef& n, const py::object& v) {
     if (t == "bytes") return py::isinstance<py::bytes>(v);
     if (t == "list") return py::isinstance<py::list>(v);
     if (t == "set") return py::isinstance<py::set>(v);
+    if (t == "deque") return py::isinstance(v, py_deque_type());
     if (t == "frozenset") return py::isinstance<py::frozenset>(v);
     if (t == "tuple") return py::isinstance<py::tuple>(v);
     if (t == "dict") return py::isinstance<py::dict>(v);
@@ -3619,7 +3667,7 @@ static SerRef build_ser_impl(const py::dict& schema,
     }
 
     // Types with items_schema key
-    if (type == "list" || type == "set" || type == "frozenset" || type == "generator") {
+    if (type == "list" || type == "set" || type == "frozenset" || type == "deque" || type == "generator") {
         try {
             auto c = build_ser_impl(schema["items_schema"].cast<py::dict>(), defs);
             if (c) node->children.push_back(c);
