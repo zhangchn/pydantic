@@ -107,7 +107,7 @@ def test_pydantic_value_error_invalid_type():
 
     v = SchemaValidator(core_schema.with_info_plain_validator_function(f))
 
-    with pytest.raises(TypeError, match="argument 'context': 'list' object is not an instance of 'dict'"):
+    with pytest.raises(TypeError, match="'list' object is not an instance of 'dict'"):
         v.validate_python(42)
 
 
@@ -268,6 +268,11 @@ all_errors = [
     ('dataclass_exact_type', 'Input should be an instance of Foobar', {'class_name': 'Foobar'}),
     ('dataclass_type', 'Input should be a dictionary or an instance of Foobar', {'class_name': 'Foobar'}),
     (
+        'named_tuple_type',
+        'Input should be a tuple, list, dictionary or an instance of Foobar',
+        {'class_name': 'Foobar'},
+    ),
+    (
         'default_factory_not_called',
         'The default factory uses validated data, but at least one validation error occurred',
         None,
@@ -298,7 +303,6 @@ all_errors = [
         {'field_type': 'Foobar', 'max_length': 42, 'actual_length': 50},
     ),
     ('string_type', 'Input should be a valid string', None),
-    ('string_sub_type', 'Input should be a string, not an instance of a subclass of str', None),
     ('string_unicode', 'Input should be a valid string, unable to parse raw data as a unicode string', None),
     ('string_pattern_mismatch', "String should match pattern 'foo'", {'pattern': 'foo'}),
     ('string_not_ascii', 'String should contain only ASCII characters', None),
@@ -307,10 +311,12 @@ all_errors = [
     ('string_too_long', 'String should have at most 42 characters', {'max_length': 42}),
     ('string_too_long', 'String should have at most 1 character', {'max_length': 1}),
     ('dict_type', 'Input should be a valid dictionary', None),
+    ('frozen_dict_type', 'Input should be a valid frozendict', None),
     ('mapping_type', 'Input should be a valid mapping, error: foobar', {'error': 'foobar'}),
     ('iterable_type', 'Input should be iterable', None),
     ('iteration_error', 'Error iterating over object, error: foobar', {'error': 'foobar'}),
     ('list_type', 'Input should be a valid list', None),
+    ('deque_type', 'Input should be a valid deque', None),
     ('tuple_type', 'Input should be a valid tuple', None),
     ('set_item_not_hashable', 'Set items should be hashable', None),
     ('set_type', 'Input should be a valid set', None),
@@ -347,6 +353,7 @@ all_errors = [
     ('literal_error', 'Input should be foo', {'expected': 'foo'}),
     ('literal_error', 'Input should be foo or bar', {'expected': 'foo or bar'}),
     ('missing_sentinel_error', "Input should be the 'MISSING' sentinel", None),
+    ('ellipsis_error', "Input should be the 'Ellipsis' literal", None),
     ('date_type', 'Input should be a valid date', None),
     ('date_parsing', 'Input should be a valid date in the format YYYY-MM-DD, foobar', {'error': 'foobar'}),
     ('date_from_datetime_parsing', 'Input should be a valid date or datetime, foobar', {'error': 'foobar'}),
@@ -394,6 +401,8 @@ all_errors = [
     ('uuid_version', 'UUID version 42 expected', {'expected_version': 42}),
     ('decimal_type', 'Decimal input should be an integer, float, string or Decimal object', None),
     ('decimal_parsing', 'Input should be a valid decimal', None),
+    ('fraction_type', 'Fraction input should be an integer, float, string or Fraction object', None),
+    ('fraction_parsing', 'Input is not a valid fraction', None),
     ('decimal_max_digits', 'Decimal input should have no more than 42 digits in total', {'max_digits': 42}),
     ('decimal_max_digits', 'Decimal input should have no more than 1 digit in total', {'max_digits': 1}),
     ('decimal_max_places', 'Decimal input should have no more than 42 decimal places', {'decimal_places': 42}),

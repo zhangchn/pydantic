@@ -18,7 +18,6 @@ See [`tests/benchmarks/`](./tests/benchmarks/) for details.
 ```py
 from pydantic_core import SchemaValidator, ValidationError
 
-
 v = SchemaValidator(
     {
         'type': 'typed-dict',
@@ -113,7 +112,7 @@ make all          # to run to run build-dev + format + lint + test
 
 ### Useful Resources
 
-* [`python/pydantic_core/_pydantic_core.pyi`](./python/pydantic_core/_pydantic_core.pyi) - Python API types
+* [`python/pydantic_core/_pydantic_core/`](./python/pydantic_core/_pydantic_core/) - Python API types (stubs)
 * [`python/pydantic_core/core_schema.py`](./python/pydantic_core/core_schema.py) - Core schema definitions
 * [`tests/`](./tests) - Comprehensive usage examples
 

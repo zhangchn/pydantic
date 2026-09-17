@@ -317,8 +317,80 @@ print(m.model_dump())
 """
 ```
 
-Self-referencing models are supported. For more details, see  the documentation related to
-[forward annotations](forward_annotations.md#self-referencing-or-recursive-models).
+### Cyclic references
+
+When working with self-referencing recursive models, it is possible that you might encounter cyclic references
+in validation inputs. For example, this can happen when validating ORM instances with back-references from
+attributes.
+
+Rather than raising a [`RecursionError`][] while attempting to validate data with cyclic references, Pydantic is able
+to detect the cyclic reference and raise an appropriate [`ValidationError`][pydantic_core.ValidationError]:
+
+=== "Python 3.10 and above"
+
+    ```python
+    from pydantic import BaseModel, ValidationError
+
+
+    class ModelA(BaseModel):
+        b: 'ModelB | None' = None  # (1)!
+
+
+    class ModelB(BaseModel):
+        a: ModelA | None = None
+
+
+    cyclic_data = {}
+    cyclic_data['a'] = {'b': cyclic_data}
+    print(cyclic_data)
+    #> {'a': {'b': {...}}}
+
+    try:
+        ModelB.model_validate(cyclic_data)
+    except ValidationError as exc:
+        print(exc)
+        """
+        1 validation error for ModelB
+        a.b
+          Recursion error - cyclic reference detected [type=recursion_loop, input_value={'a': {'b': {...}}}, input_type=dict]
+        """
+    ```
+
+    1. As `ModelB` is not yet defined, a [forward annotation](forward_annotations.md) needs to be used.
+
+=== "Python 3.14 and above"
+
+    ```python {requires="3.14" lint="skip"}
+    from pydantic import BaseModel, ValidationError
+
+
+    class ModelA(BaseModel):
+        b: ModelB | None = None
+
+
+    class ModelB(BaseModel):
+        a: ModelA | None = None
+
+
+    cyclic_data = {}
+    cyclic_data['a'] = {'b': cyclic_data}
+    print(cyclic_data)
+    #> {'a': {'b': {...}}}
+
+    try:
+        ModelB.model_validate(cyclic_data)
+    except ValidationError as exc:
+        print(exc)
+        """
+        1 validation error for ModelB
+        a.b
+          Recursion error - cyclic reference detected [type=recursion_loop, input_value={'a': {'b': {...}}}, input_type=dict]
+        """
+    ```
+
+See also: the [cyclic references example](../examples/cyclic_references.md), showing how to handle such
+cyclic references during validation and serialization, and the [cyclic imports](forward_annotations.md#cyclic-imports)
+section, for models referencing each other from separate modules.
 
 ## Rebuilding model schema
 
@@ -556,6 +628,11 @@ except ValidationError as e:
       Input should be a valid number, unable to parse string as a number [type=float_parsing, input_value='not a float', input_type=str]
     """
 ```
+
+In an example like this one, the offending `data` is right there in the code. A
+[`ValidationError`][pydantic_core.ValidationError] includes the value rejected at each failing
+location, but in a running application you may also need those details in their request or job
+context. [Logfire records failed validations](../errors/troubleshooting.md) with both.
 
 ## Arbitrary class instances
 
@@ -1426,30 +1503,6 @@ print(PetsByName.model_validate({'Otis': 'dog', 'Milo': 'cat'}))
 #> root={'Otis': 'dog', 'Milo': 'cat'}
 ```
 
-If you want to access items in the `root` field directly or to iterate over the items, you can implement
-custom `__iter__` and `__getitem__` functions, as shown in the following example.
-
-```python
-from pydantic import RootModel
-
-
-class Pets(RootModel):
-    root: list[str]
-
-    def __iter__(self):
-        return iter(self.root)
-
-    def __getitem__(self, item):
-        return self.root[item]
-
-
-pets = Pets.model_validate(['dog', 'cat'])
-print(pets[0])
-#> dog
-print([pet for pet in pets])
-#> ['dog', 'cat']
-```
-
 You can also create subclasses of the parametrized root model directly:
 
 ```python
@@ -1753,4 +1806,4 @@ print(f'{id(c1.arr) == id(c2.arr)=}')
 !!! note
     There are some situations where Pydantic does not copy attributes, such as when passing models &mdash; we use the
     model as is. You can override this behaviour by setting
-    [`model_config['revalidate_instances'] = 'always'`](../api/config.md#pydantic.config.ConfigDict).
+    [`model_config['revalidate_instances'] = 'always'`](../api/config.md#pydantic.config.ConfigDict.revalidate_instances).

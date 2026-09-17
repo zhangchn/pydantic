@@ -20,7 +20,7 @@
 namespace py = pybind11;
 using namespace pydantic_core;
 
-std::string get_version() { return "2.47.0"; }
+std::string get_version() { return "2.49.0"; }
 
 // Runtime polymorphic-serialization flag for the current top-level
 // to_python/to_json call (mirrors Rust SerializationExtra::polymorphic_serialization).

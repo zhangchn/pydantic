@@ -9,6 +9,7 @@ use crate::lookup_key::LookupPath;
 use crate::tools::safe_repr;
 use crate::validators::complex::string_to_complex;
 use crate::validators::decimal::create_decimal;
+use crate::validators::fraction::create_fraction;
 use crate::validators::{TemporalUnitMode, ValBytesMode};
 
 use super::datetime::{
@@ -157,6 +158,13 @@ impl<'py> Input<'py> for StringMapping<'py> {
         }
     }
 
+    fn validate_fraction(&self, _strict: bool, _py: Python<'py>) -> ValMatch<Bound<'py, PyAny>> {
+        match self {
+            Self::String(s) => create_fraction(s, self).map(ValidationMatch::strict),
+            Self::Mapping(_) => Err(ValError::new(ErrorTypeDefaults::FractionType, self)),
+        }
+    }
+
     type Dict<'a>
         = StringMappingDict<'py>
     where
@@ -169,6 +177,13 @@ impl<'py> Input<'py> for StringMapping<'py> {
         }
     }
 
+    fn strict_frozendict(&self) -> ValMatch<StringMappingDict<'py>> {
+        match self {
+            Self::String(_) => Err(ValError::new(ErrorTypeDefaults::FrozenDictType, self)),
+            Self::Mapping(d) => Ok(ValidationMatch::strict(StringMappingDict(d.clone()))),
+        }
+    }
+
     type List<'a>
         = Never
     where
@@ -176,6 +191,10 @@ impl<'py> Input<'py> for StringMapping<'py> {
 
     fn validate_list(&self, _strict: bool) -> ValMatch<Never> {
         Err(ValError::new(ErrorTypeDefaults::ListType, self))
+    }
+
+    fn validate_deque(&self, _strict: bool) -> ValMatch<(Never, Option<usize>)> {
+        Err(ValError::new(ErrorTypeDefaults::DequeType, self))
     }
 
     type Tuple<'a>

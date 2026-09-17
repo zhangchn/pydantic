@@ -17,9 +17,16 @@ from typing import Any
 import pytest
 from _pytest.assertion.rewrite import AssertionRewritingHook
 from _pytest.nodes import Item
+from typing_extensions import TypedDict
 
+from pydantic import BaseModel
 from pydantic._internal._generate_schema import GenerateSchema
 from pydantic.json_schema import GenerateJsonSchema
+
+try:
+    is_free_threaded = not sys._is_gil_enabled()
+except AttributeError:
+    is_free_threaded = False
 
 
 def pytest_addoption(parser: pytest.Parser):
@@ -187,6 +194,22 @@ def validate_json_schemas(monkeypatch: pytest.MonkeyPatch, request: pytest.Fixtu
             return json_schema
 
         monkeypatch.setattr(GenerateJsonSchema, 'generate', generate)
+
+
+class AutoDataclass:
+    def __init_subclass__(cls) -> None:
+        super().__init_subclass__()
+        dataclass()(cls)
+
+
+@pytest.fixture(params=['model', 'typed_dict', 'dataclass'])
+def container_class(request: pytest.FixtureRequest) -> type[Any]:
+    if request.param == 'model':
+        return BaseModel
+    elif request.param == 'typed_dict':
+        return TypedDict
+    else:
+        return AutoDataclass
 
 
 _thread_unsafe_fixtures = (
