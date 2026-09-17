@@ -606,7 +606,10 @@ def test_infer_json_known_types():
     assert dumped(timedelta(days=1, seconds=2)) == '{"x":"P1DT2S"}'
     assert dumped(Decimal('1.5')) == '{"x":"1.5"}'
     assert dumped(UUID('12345678-1234-5678-1234-567812345678')) == '{"x":"12345678-1234-5678-1234-567812345678"}'
-    assert dumped(Path('/tmp/a.txt')) == '{"x":"/tmp/a.txt"}'
+    # The serializer stringifies the path, so the separators and their JSON
+    # escaping follow the platform the test runs on.
+    path = Path('/tmp/a.txt')
+    assert dumped(path) == json.dumps({'x': str(path)}, separators=(',', ':'))
     assert dumped(IPv4Address('192.168.0.1')) == '{"x":"192.168.0.1"}'
     assert dumped(re.compile('a+')) == '{"x":"a+"}'
     assert dumped(bytearray(b'abc')) == '{"x":"abc"}'
