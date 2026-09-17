@@ -4429,13 +4429,31 @@ static py::object to_jsonable_fn(const py::object& value, std::optional<py::obje
 template <typename T>
 T* bound_cpp_object(PyObject* self) {
     auto* inst = reinterpret_cast<py::detail::instance*>(self);
-    return inst->simple_layout ? static_cast<T*>(inst->simple_value_holder[0]) : nullptr;
+    if (inst->simple_layout) return static_cast<T*>(inst->simple_value_holder[0]);
+    // A holder too large for the inline slot keeps [val*][holder] behind a pointer
+    // instead, which is where a py::cast(std::shared_ptr<T>) value ends up.
+    return static_cast<T*>(inst->nonsimple.values_and_holders[0]);
 }
 
 extern "C" int visit_schema_validator(PyObject* self, visitproc traverse_fn, void* arg) {
     const gc_detail::TraversalRoot root;
     if (auto* validator = bound_cpp_object<SchemaValidator>(self)) {
         validator->visit_refs(traverse_fn, arg);
+    }
+    return 0;
+}
+
+// The lazy Python-mode view of an iterator field outlives the model_dump() call
+// that made it, and it owns the iterator it walks: a caller that hangs on to it
+// closes a cycle the collector could not see.
+extern "C" int visit_serialization_iterator(PyObject* self, visitproc traverse_fn, void* arg) {
+    const gc_detail::TraversalRoot root;
+    if (auto* iter_obj = bound_cpp_object<SerializationIterator>(self)) {
+        if (iter_obj->child) iter_obj->child->visit_refs(traverse_fn, arg);
+        visit_ref(traverse_fn, arg, iter_obj->items);
+        visit_ref(traverse_fn, arg, iter_obj->include);
+        visit_ref(traverse_fn, arg, iter_obj->exclude);
+        visit_ref(traverse_fn, arg, iter_obj->context);
     }
     return 0;
 }
@@ -4638,6 +4656,16 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             return "ValidatorIterator(index=" + std::to_string(self.index) +
                    ", schema=Some(" + self.schema_repr + "))";
         });
+    // The validation-side twin holds the source iterator it pulls from, so it
+    // takes part in the same cycle.  (No visit_ function: the struct is local
+    // to this scope, so the callback has to be here too.)
+    enable_gc_traversal(m.attr("_LazyValidator"), +[](PyObject* obj, visitproc traverse_fn, void* arg) -> int {
+        if (auto* lazy = bound_cpp_object<LazyValidator>(obj)) {
+            visit_ref(traverse_fn, arg, lazy->source);
+            visit_ref(traverse_fn, arg, lazy->validate_fn);
+        }
+        return 0;
+    });
 
     // SerializationIterator — the lazy Python-mode view of an iterator field
     py::class_<SerializationIterator, std::shared_ptr<SerializationIterator>>(m, "SerializationIterator")
@@ -4666,6 +4694,8 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             return "SerializationIterator(index=" + std::to_string(self.index) +
                    ", iterator=" + py::repr(self.items).cast<std::string>() + ")";
         });
+
+    enable_gc_traversal(m.attr("SerializationIterator"), &visit_serialization_iterator);
 
     // SchemaValidator
     py::class_<SchemaValidator>(m, "SchemaValidator")
