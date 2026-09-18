@@ -82,6 +82,17 @@ inline pybind11::object py_deque_new(const pybind11::handle& items,
     return py_deque_type()(items);
 }
 
+// fractions.Fraction has no static type in the C-API either, so the type
+// object is imported once and kept for the lifetime of the process (Rust's
+// ObTypeLookup::fraction_object).
+inline const pybind11::object& py_fraction_type() {
+    // Leaked on purpose: destroying a cached pybind11 object during
+    // interpreter shutdown aborts the process.
+    static pybind11::object* fraction_type = new pybind11::object(
+        pybind11::module_::import("fractions").attr("Fraction"));
+    return *fraction_type;
+}
+
 // `frozendict` became a builtin on Python 3.15; below that there is no type
 // to validate against (Rust's common::frozendict::get_frozendict_type).
 inline bool py_has_frozendict() {

@@ -1763,6 +1763,8 @@ TEST_CASE("Validator - name() returns expected strings") {
     CHECK(TupleValidator().name() == "tuple");
     CHECK(NamedTupleValidator().name() == "named-tuple");
     CHECK(NamedTupleValidator().display_name() == "named-tuple");
+    CHECK(FractionValidator().name() == "fraction");
+    CHECK(FractionValidator().display_name() == "fraction");
 }
 
 TEST_CASE("ValidatorFactory - build nullable schema from JSON") {

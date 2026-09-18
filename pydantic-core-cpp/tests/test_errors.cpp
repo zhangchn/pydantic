@@ -63,6 +63,16 @@ TEST_CASE("PydanticKnownError shortcuts") {
     CHECK(nt.kind() == ErrorType::Kind::NamedTupleType);
     CHECK(nt.type_name() == "named_tuple_type");
     CHECK(nt.message() == "Input should be a tuple, list, dictionary or an instance of {class_name}");
+
+    auto frac = PydanticKnownError::fraction_type();
+    CHECK(frac.kind() == ErrorType::Kind::FractionType);
+    CHECK(frac.type_name() == "fraction_type");
+    CHECK(frac.message() == "Fraction input should be an integer, float, string or Fraction object");
+
+    auto frac_parse = PydanticKnownError::fraction_parsing();
+    CHECK(frac_parse.kind() == ErrorType::Kind::FractionParsing);
+    CHECK(frac_parse.type_name() == "fraction_parsing");
+    CHECK(frac_parse.message() == "Input is not a valid fraction");
 }
 
 TEST_CASE("ValError construction") {

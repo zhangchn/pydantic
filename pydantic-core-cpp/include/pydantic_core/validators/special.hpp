@@ -1179,6 +1179,135 @@ public:
     }
 };
 
+// FractionValidator - validates fraction values (mirrors Rust validators/fraction.rs)
+class FractionValidator : public Validator {
+public:
+    bool strict = false;
+    py::object gt = py::none();
+    py::object lt = py::none();
+    py::object ge = py::none();
+    py::object le = py::none();
+
+    // Rust: ValidationMatch::exact for the class itself, strict for a subclass
+    // (the value is kept as it is, not rebuilt), lax for a coerced value.
+    static ValResult<std::shared_ptr<void>> finished(const py::object& value) {
+        return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(value));
+    }
+
+    static ValResult<std::shared_ptr<void>> fraction_error(
+        const Input& input, ValidationState& state, bool parsing
+    ) {
+        return ValError::line_error(
+            ErrorType(parsing ? ErrorType::Kind::FractionParsing : ErrorType::Kind::FractionType),
+            state.location(),
+            input.as_error_value().repr
+        );
+    }
+
+    ValResult<std::shared_ptr<void>> validate(
+        const Input& input,
+        ValidationState& state
+    ) override {
+        const py::object& frac_cls = py_fraction_type();
+        py::object value = input.as_python_object();
+        const bool strict_required = state.strict_or(strict);
+        // Rust's JsonInput::validate_fraction ignores strict because JSON has no
+        // Fraction type, reads a float through its own display form, and refuses a
+        // JSON bool even though Python's Fraction(True) is happily 1.
+        const bool json_document = state.input_type() == InputType::Json;
+
+        // Rust checks the bounds after validate_fraction, so even a value that is
+        // already a Fraction has to pass them.
+        if (py::type::of(value).ptr() == frac_cls.ptr()) return check_constraints(value, input, state);
+        if (py::isinstance(value, frac_cls)) {
+            state.floor_exactness(Exactness::Strict);
+            return check_constraints(value, input, state);
+        }
+
+        if (!strict_required || json_document) {
+            py::object arg = value;
+            if (json_document) {
+                if (py::isinstance<py::bool_>(value)) return fraction_error(input, state, false);
+                if (py::isinstance<py::float_>(value)) arg = py::str(value);
+            }
+            py::object fraction;
+            try {
+                fraction = frac_cls(arg);
+            } catch (py::error_already_set& e) {
+                // Rust routes what Fraction(...) raises: a TypeError means the
+                // input was never fraction-shaped, ValueError/ZeroDivisionError/
+                // OverflowError means it was the wrong shape to parse, and
+                // anything else is left as the Python error it already is.
+                const bool type_err = e.matches(PyExc_TypeError);
+                const bool parsing = !type_err &&
+                    (e.matches(PyExc_ValueError) || e.matches(PyExc_ZeroDivisionError) ||
+                     e.matches(PyExc_OverflowError));
+                if (!type_err && !parsing) throw;
+                e.restore();
+                PyErr_Clear();
+                return fraction_error(input, state, parsing);
+            }
+            state.floor_exactness(Exactness::Lax);
+            return check_constraints(fraction, input, state);
+        }
+
+        return ValError::line_error(
+            ErrorType(ErrorType::Kind::IsInstanceType, "class", "Fraction"),
+            state.location(),
+            input.as_error_value().repr
+        );
+    }
+
+    // Constraint order matches Rust: le, lt, ge, gt.  Bound objects reach the
+    // context as both a string and the number itself, as Number::String does.
+    ValResult<std::shared_ptr<void>> check_constraints(
+        const py::object& fraction,
+        const Input& input,
+        ValidationState& state
+    ) {
+        auto satisfies = [](const py::object& a, const py::object& b, int op) {
+            PyObject* r = PyObject_RichCompare(a.ptr(), b.ptr(), op);
+            if (!r) {
+                PyErr_Clear();
+                return false;
+            }
+            bool out = PyObject_IsTrue(r) == 1;
+            Py_DECREF(r);
+            return out;
+        };
+        struct Bound {
+            const py::object& value;
+            ErrorType::Kind kind;
+            const char* key;
+        };
+        const Bound bounds[] = {
+            {le, ErrorType::Kind::LessThanEqual, "le"},
+            {lt, ErrorType::Kind::LessThan, "lt"},
+            {ge, ErrorType::Kind::GreaterThanEqual, "ge"},
+            {gt, ErrorType::Kind::GreaterThan, "gt"},
+        };
+        const int ops[] = {Py_LE, Py_LT, Py_GE, Py_GT};
+        for (size_t i = 0; i < 4; ++i) {
+            if (bounds[i].value.is_none()) continue;
+            if (satisfies(fraction, bounds[i].value, ops[i])) continue;
+            ErrorType err(bounds[i].kind);
+            err.set_ctx_object(bounds[i].key, py::str(bounds[i].value).cast<std::string>(), bounds[i].value);
+            return ValError::line_error(err, state.location(), input.as_error_value().repr);
+        }
+        return finished(fraction);
+    }
+
+    std::string name() const override { return "fraction"; }
+    std::string effective_result_name() const override { return "py_object"; }
+
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        visit_ref(visit, arg, gt);
+        visit_ref(visit, arg, lt);
+        visit_ref(visit, arg, ge);
+        visit_ref(visit, arg, le);
+    }
+};
+
 // UuidValidator - validates UUID values
 // Rust's uuid crate names the group that fails to parse, so a malformed
 // hyphenated UUID reports the group index (0-based), what was expected and what

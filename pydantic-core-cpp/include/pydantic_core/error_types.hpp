@@ -177,6 +177,10 @@ public:
         DecimalMaxPlaces,
         DecimalWholeDigits,
 
+        // Fraction errors
+        FractionType,
+        FractionParsing,
+
         // Type checking errors
         IsInstanceType,
         IsSubclassType,
@@ -325,6 +329,8 @@ public:
     static ErrorType model_type() { return ErrorType(ErrorType::Kind::ModelType); }
     static ErrorType dataclass_type() { return ErrorType(ErrorType::Kind::DataclassType); }
     static ErrorType named_tuple_type() { return ErrorType(ErrorType::Kind::NamedTupleType); }
+    static ErrorType fraction_type() { return ErrorType(ErrorType::Kind::FractionType); }
+    static ErrorType fraction_parsing() { return ErrorType(ErrorType::Kind::FractionParsing); }
     static ErrorType missing() { return ErrorType(ErrorType::Kind::Missing); }
     static ErrorType extra_forbidden() { return ErrorType(ErrorType::Kind::ExtraForbidden); }
     static ErrorType literal_mismatch() { return ErrorType(ErrorType::Kind::LiteralMismatch); }

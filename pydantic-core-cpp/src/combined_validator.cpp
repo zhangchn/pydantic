@@ -1706,6 +1706,34 @@ static std::shared_ptr<Validator> build_from_py_dict(
         return v;
     }
 
+    // --- Fraction ---
+    if (type == "fraction") {
+        auto v = std::make_shared<FractionValidator>();
+        v->strict = is_strict_py(schema, config);
+        // Rust's validate_as_fraction: each bound is run through the same
+        // coercion the validator uses, and a bound that will not coerce is a
+        // schema error naming the key.
+        auto get_fraction = [&](const char* key) -> py::object {
+            if (!schema.contains(key)) return py::none();
+            py::object val = schema[key];
+            if (val.is_none()) return py::none();
+            const py::object& frac_cls = py_fraction_type();
+            try {
+                if (py::isinstance(val, frac_cls)) return val;
+                return frac_cls(val);
+            } catch (py::error_already_set& e) {
+                e.restore();
+                PyErr_Clear();
+                throw SchemaError(std::string("'") + key + "' must be coercible to a Fraction instance");
+            }
+        };
+        v->le = get_fraction("le");
+        v->lt = get_fraction("lt");
+        v->ge = get_fraction("ge");
+        v->gt = get_fraction("gt");
+        return v;
+    }
+
     // --- Literal ---
     if (type == "literal") {
         std::string expected_repr;

@@ -1040,7 +1040,8 @@ static bool py_infer_known_type(const py::object& v) {
     if (py::isinstance<py::bool_>(v) || py::isinstance<py::int_>(v) || py::isinstance<py::float_>(v) ||
         py::isinstance<py::str>(v) || py::isinstance<py::bytes>(v) || py::isinstance<py::bytearray>(v) ||
         py_is_datetime_like(v.ptr()) || py::isinstance<py::dict>(v) || py::isinstance<py::list>(v) ||
-        py::isinstance<py::tuple>(v) || py::isinstance<py::set>(v) || py::isinstance<py::frozenset>(v)) {
+        py::isinstance<py::tuple>(v) || py::isinstance<py::set>(v) || py::isinstance<py::frozenset>(v) ||
+        py::isinstance(v, py_fraction_type())) {
         return true;
     }
     return py_hasattr(v, "__pydantic_serializer__");
@@ -1062,7 +1063,8 @@ static std::string ser_variant_name(const std::string& t) {
         {"url", "Url"}, {"json", "Json"}, {"definitions", "Definitions"},
         {"definition-ref", "DefinitionRef"}, {"is-instance", "Any"}, {"is-subclass", "Any"},
         {"lax-or-strict", "Any"}, {"json-or-python", "JsonOrPython"}, {"complex", "Complex"},
-        {"decimal", "Decimal"}, {"function-plain", "Function"}, {"function-after", "Function"},
+        {"decimal", "Decimal"}, {"fraction", "Fraction"}, {"function-plain", "Function"},
+        {"function-after", "Function"},
         {"function-before", "Function"}, {"function-wrap", "Function"},
     };
     auto it = names.find(t);
@@ -1335,6 +1337,10 @@ struct SerNode {
         if (node_type == "deque") {
             if (reinterpret_cast<PyObject*>(Py_TYPE(v)) == py_deque_type().ptr()) return 1;
             return py::isinstance(v, py_deque_type()) ? 0 : -1;
+        }
+        if (node_type == "fraction") {
+            if (reinterpret_cast<PyObject*>(Py_TYPE(v)) == py_fraction_type().ptr()) return 1;
+            return py::isinstance(v, py_fraction_type()) ? 0 : -1;
         }
         if (node_type == "set") {
             if (Py_TYPE(v) == &PySet_Type) return 1;
@@ -1976,6 +1982,16 @@ struct SerNode {
             }
             if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
         }
+        // Rust FractionSerializer::to_python: a Fraction is rendered with its
+        // display form ("1/3") in Python mode too, anything else warns and is
+        // serialized by inference.
+        if (type == "fraction") {
+            if (!py::isinstance(value, py_fraction_type())) {
+                ser_warn_unexpected_value("", type, value);
+                return serialize_any_value(value, exc_none, round_trip, json_mode);
+            }
+            return py::str(value);
+        }
         // In json mode, convert leaf values to their JSON-compatible form
         // (bytes→str, decimal/uuid→str, datetime→ISO string, timedelta→ISO
         // duration or float, etc.), mirroring Rust's mode="json" behavior.
@@ -2207,6 +2223,14 @@ struct SerNode {
             return json_escape(complex_to_str_rust(PyComplex_RealAsDouble(value.ptr()),
                                                    PyComplex_ImagAsDouble(value.ptr())),
                                 ensure_ascii);
+        }
+        // Rust FractionSerializer::serde_serialize: collect_str(str(value)).
+        if (type == "fraction") {
+            if (!py::isinstance(value, py_fraction_type())) {
+                ser_warn_unexpected_value("", type, value);
+                return infer_json(value, ensure_ascii, indent);
+            }
+            return json_escape(py::str(value).cast<std::string>(), ensure_ascii);
         }
         // Types that serialize as their str() representation
         if (type == "uuid" || type == "decimal" || type == "ipaddress" ||
@@ -2943,6 +2967,9 @@ private:
                 return deque_cls(temp);
             }
         } catch (const py::error_already_set&) { PyErr_Clear(); }
+        // Rust infer_to_python ObType::Fraction: the display string in both
+        // Python and JSON mode.
+        if (py::isinstance(v, py_fraction_type())) return py::str(v);
         // Rust infer_to_python ObType::Unknown: the caller's `fallback` callable
         // gets a turn (its result is re-inferred) before the value is passed
         // through untouched.
@@ -4552,6 +4579,7 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
         static py::object decimal_cls = py::module_::import("decimal").attr("Decimal");
         if (py::isinstance(v, decimal_cls)) return py::str(v);
     } catch (...) { PyErr_Clear(); }
+    if (py::isinstance(v, py_fraction_type())) return py::str(v);
     try {
         static py::object uuid_cls = py::module_::import("uuid").attr("UUID");
         if (py::isinstance(v, uuid_cls)) return py::str(v);

@@ -155,6 +155,10 @@ std::string ErrorType::type_name() const {
         {Kind::DecimalMaxPlaces, "decimal_max_places"},
         {Kind::DecimalWholeDigits, "decimal_whole_digits"},
 
+        // Fraction errors
+        {Kind::FractionType, "fraction_type"},
+        {Kind::FractionParsing, "fraction_parsing"},
+
         // Type checking errors
         {Kind::IsInstanceType, "is_instance_of"},
         {Kind::IsSubclassType, "is_subclass_of"},
@@ -353,6 +357,10 @@ std::string ErrorType::message_template() const {
         {Kind::DecimalMaxPlaces, "Decimal input should have no more than {decimal_places} decimal place{s}"},
         {Kind::DecimalWholeDigits, "Decimal input should have no more than {whole_digits} digit{s} before the decimal point"},
 
+        // Fraction errors (Rust messages)
+        {Kind::FractionType, "Fraction input should be an integer, float, string or Fraction object"},
+        {Kind::FractionParsing, "Input is not a valid fraction"},
+
         // Type checking errors
         {Kind::IsInstanceType, "Input should be an instance of {class}"},
         {Kind::IsSubclassType, "Input should be a subclass of {class}"},
@@ -458,6 +466,7 @@ ErrorType ErrorType::build_known_type(const std::string& type_str) {
         {"decimal_type", Kind::DecimalType},        {"decimal_parsing", Kind::DecimalParsing},
         {"decimal_max_digits", Kind::DecimalMaxDigits}, {"decimal_max_places", Kind::DecimalMaxPlaces},
         {"decimal_whole_digits", Kind::DecimalWholeDigits},
+        {"fraction_type", Kind::FractionType},   {"fraction_parsing", Kind::FractionParsing},
         {"is_instance_of", Kind::IsInstanceType},   {"is_subclass_of", Kind::IsSubclassType},
         {"callable_type", Kind::CallableType},      {"json_invalid", Kind::JsonInvalid},
         {"enum", Kind::EnumError},                  {"invalid_key", Kind::InvalidKey},
