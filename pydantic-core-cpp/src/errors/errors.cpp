@@ -71,6 +71,7 @@ std::string json_message_for(const std::string& type_name, const std::string& ms
         type_name == "dataclass_type") {
         return "Input should be an object";
     }
+    if (type_name == "named_tuple_type") return "Input should be an array or an object";
     if (type_name == "timedelta_type") return "Input should be a valid duration";
     if (type_name == "timedelta_parsing") {
         const std::string prefix = "Input should be a valid timedelta, ";

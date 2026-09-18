@@ -3644,6 +3644,112 @@ def dataclass_schema(
     )
 
 
+class NamedTupleField(TypedDict, total=False):
+    type: Required[Literal['named-tuple-field']]
+    name: Required[str]
+    schema: Required[CoreSchema]
+    validation_alias: str | list[str | int] | list[list[str | int]]
+    metadata: dict[str, Any]
+
+
+def named_tuple_field(
+    name: str,
+    schema: CoreSchema,
+    *,
+    validation_alias: str | list[str | int] | list[list[str | int]] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> NamedTupleField:
+    """
+    Returns a schema for a named tuple field, e.g.:
+
+    ```py
+    from pydantic_core import core_schema
+
+    field = core_schema.named_tuple_field(name='x', schema=core_schema.int_schema())
+    ```
+
+    Args:
+        name: The name of the field
+        schema: The schema to use for the field
+        validation_alias: The alias(es) to use to find the field in the validation data, only used
+            when validating from a dictionary or mapping
+        metadata: Any other information you want to include with the schema, not used by pydantic-core
+    """
+    return _dict_not_none(
+        type='named-tuple-field',
+        name=name,
+        schema=schema,
+        validation_alias=validation_alias,
+        metadata=metadata,
+    )
+
+
+class NamedTupleSchema(TypedDict, total=False):
+    type: Required[Literal['named-tuple']]
+    cls: Required[type[Any]]
+    fields: Required[list[NamedTupleField]]
+    cls_name: str
+    ref: str
+    metadata: dict[str, Any]
+    serialization: SerSchema
+
+
+def named_tuple_schema(
+    cls: type[Any],
+    fields: list[NamedTupleField],
+    *,
+    cls_name: str | None = None,
+    ref: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    serialization: SerSchema | None = None,
+) -> NamedTupleSchema:
+    """
+    Returns a schema for a named tuple, e.g.:
+
+    ```py
+    from typing import NamedTuple
+
+    from pydantic_core import SchemaValidator, core_schema
+
+    class Point(NamedTuple):
+        x: int
+        y: int
+
+    schema = core_schema.named_tuple_schema(
+        Point,
+        [
+            core_schema.named_tuple_field(name='x', schema=core_schema.int_schema()),
+            core_schema.named_tuple_field(name='y', schema=core_schema.int_schema()),
+        ],
+    )
+    v = SchemaValidator(schema)
+    assert v.validate_python((1, '2')) == Point(x=1, y=2)
+    ```
+
+    Fields are validated positionally when the input is a (named) tuple, list or JSON array,
+    and by name when the input is a dictionary, mapping or JSON object. Instances of `cls`
+    always revalidate. Strict mode is currently ignored, matching the behavior of the
+    `'call'` core schema previously used for named tuples.
+
+    Args:
+        cls: The named tuple class, used to construct instances and perform instance checks
+        fields: The fields to use for the named tuple, in order
+        cls_name: The name to use in error locs, etc; this is useful for generics (default: `cls.__name__`)
+        ref: optional unique identifier of the schema, used to reference the schema in other places
+        metadata: Any other information you want to include with the schema, not used by pydantic-core
+        serialization: Custom serialization schema
+    """
+    return _dict_not_none(
+        type='named-tuple',
+        cls=cls,
+        fields=fields,
+        cls_name=cls_name,
+        ref=ref,
+        metadata=metadata,
+        serialization=serialization,
+    )
+
+
 class ArgumentsParameter(TypedDict, total=False):
     name: Required[str]
     schema: Required[CoreSchema]
@@ -4302,6 +4408,7 @@ if not MYPY:
         | ModelSchema
         | DataclassArgsSchema
         | DataclassSchema
+        | NamedTupleSchema
         | ArgumentsSchema
         | ArgumentsV3Schema
         | CallSchema
@@ -4363,6 +4470,7 @@ CoreSchemaType: TypeAlias = Literal[
     'model',
     'dataclass-args',
     'dataclass',
+    'named-tuple',
     'arguments',
     'arguments-v3',
     'call',

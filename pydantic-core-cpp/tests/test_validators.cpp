@@ -1761,6 +1761,8 @@ TEST_CASE("Validator - name() returns expected strings") {
     CHECK(FrozenSetValidator().name() == "frozenset");
     CHECK(DequeValidator().name() == "deque");
     CHECK(TupleValidator().name() == "tuple");
+    CHECK(NamedTupleValidator().name() == "named-tuple");
+    CHECK(NamedTupleValidator().display_name() == "named-tuple");
 }
 
 TEST_CASE("ValidatorFactory - build nullable schema from JSON") {

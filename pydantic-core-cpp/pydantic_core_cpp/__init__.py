@@ -1978,7 +1978,11 @@ def _schema_copy_clean(schema):
         # An enum node needs ``cls`` so the C++ validator can call the Enum class
         # and emit is-instance errors the way Rust does.
         is_schema_node = "type" in schema
-        keep_cls = schema.get("type") in ("is-instance", "is-subclass", "model", "dataclass", "enum")
+        # A named tuple node needs ``cls`` to build instances and to check whether
+        # the input already is one.
+        keep_cls = schema.get("type") in (
+            "is-instance", "is-subclass", "model", "dataclass", "enum", "named-tuple"
+        )
         result = {}
         for k, v in schema.items():
             # As in _schema_clean_cls_keys: drop the class-level "cls" only from a

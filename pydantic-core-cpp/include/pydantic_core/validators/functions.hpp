@@ -1458,6 +1458,7 @@ public:
     void set_default_py_obj(py::object o) { default_py_obj_ = std::move(o); }
     // Rust's OnError: "raise" (default), "omit" or "default".
     void set_on_error(const std::string& v) { on_error_ = v; }
+    bool omit_on_error() const { return on_error_ == "omit"; }
 
     void visit_refs(RefVisitor visit, void* arg) const override {
         if (!gc_detail::enter_node(this)) return;

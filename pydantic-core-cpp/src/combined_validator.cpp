@@ -2206,6 +2206,60 @@ static std::shared_ptr<Validator> build_from_py_dict(
         return tv;
     }
 
+    // --- Named tuple ---
+    if (type == "named-tuple") {
+        auto v = std::make_shared<NamedTupleValidator>();
+        if (!schema.contains("cls") || schema["cls"].is_none()) {
+            throw SchemaError("named-tuple schema missing 'cls'");
+        }
+        v->cls = schema["cls"];
+        v->tuple_name = py_str(schema, "cls_name");
+        if (v->tuple_name.empty() && py_hasattr(v->cls, "__name__")) {
+            v->tuple_name = v->cls.attr("__name__").cast<std::string>();
+        }
+        if (!schema.contains("fields") || !py::isinstance<py::list>(schema["fields"])) {
+            throw SchemaError("named-tuple schema missing 'fields'");
+        }
+        for (auto item : schema["fields"].cast<py::list>()) {
+            auto field = item.cast<py::dict>();
+            NamedTupleValidator::Field f;
+            f.name = py_str(field, "name");
+            if (!field.contains("schema")) {
+                throw SchemaError("Field '" + f.name + "': 'schema' is required");
+            }
+            try {
+                f.validator = build_from_py_dict(field["schema"].cast<py::dict>(), config, definitions);
+            } catch (const SchemaError& e) {
+                throw SchemaError("Field '" + f.name + "':\n  " + std::string(e.what()));
+            }
+            auto* wd = dynamic_cast<WithDefaultValidator*>(f.validator.get());
+            if (wd && wd->omit_on_error()) {
+                throw SchemaError("Field '" + f.name +
+                                  "': 'on_error = omit' cannot be set for named tuple fields");
+            }
+            // An AliasPath or an AliasChoices narrows down to its first key:
+            // a named tuple field is read from one key in a mapping, never from
+            // a nested path.
+            if (field.contains("validation_alias") && !field["validation_alias"].is_none()) {
+                py::object alias = field["validation_alias"];
+                if (py::isinstance<py::str>(alias)) {
+                    f.alias = alias.cast<std::string>();
+                } else if (py::isinstance<py::list>(alias) && py::len(alias) > 0) {
+                    py::object first = alias.cast<py::list>()[0];
+                    if (py::isinstance<py::list>(first) && py::len(first) > 0) {
+                        first = first.cast<py::list>()[0];
+                    }
+                    if (py::isinstance<py::str>(first)) f.alias = first.cast<std::string>();
+                }
+            }
+            v->fields.push_back(std::move(f));
+        }
+        v->loc_by_alias = py_bool_opt(config, "loc_by_alias").value_or(true);
+        v->validate_by_alias = py_bool_opt(config, "validate_by_alias");
+        v->validate_by_name = py_bool_opt(config, "validate_by_name");
+        return v;
+    }
+
     // --- FrozenDict ---
     // No validator to build: the guard reports why, matching Rust's build-time check.
     if (type == "frozendict") {

@@ -8,6 +8,7 @@
 #include "pydantic_core/validators/functions.hpp"
 #include <memory>
 #include <optional>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -887,6 +888,346 @@ public:
         if (!gc_detail::enter_node(this)) return;
         for (const auto& item : items) {
             if (item) item->visit_refs(visit, arg);
+        }
+    }
+};
+
+// NamedTupleValidator - rebuilds an instance of a named tuple class from a
+// (named) tuple, list, dict, mapping or JSON array/object.  Rust: named_tuple.rs.
+class NamedTupleValidator : public Validator {
+public:
+    struct Field {
+        std::string name;
+        std::shared_ptr<Validator> validator;
+        std::string alias;  // validation_alias's lookup key; empty without an alias
+    };
+
+    py::object cls = py::none();
+    std::string tuple_name;
+    std::vector<Field> fields;
+    bool loc_by_alias = true;
+    std::optional<bool> validate_by_alias;
+    std::optional<bool> validate_by_name;
+
+    ValResult<std::shared_ptr<void>> validate(
+        const Input& input,
+        ValidationState& state
+    ) override {
+        // A named tuple is rebuilt as one instance, so a partially validated
+        // item could never be handed to the class (Rust disables this too).
+        state.set_allow_partial(PartialMode::Off);
+
+        if (is_named_tuple_instance(input)) {
+            auto tup = input.validate_tuple(false);
+            if (tup.is_err()) {
+                return tup.error();
+            }
+            auto items = validate_sequence(*tup.value().value(), input, state, true);
+            if (items.is_err()) {
+                return items.error();
+            }
+            // Exactness stays untouched: the nominal class has to remain the
+            // best match in a smart union.  Flooring with the tuple match would
+            // do exactly that here, since this port's input layer reports a
+            // plain tuple as a lax match where Rust reports an exact one.
+            return create_instance(items.value(), input, state);
+        }
+
+        // Strict mode is ignored, as for the 'call' schema named tuples used
+        // to be built from (Rust).
+        auto tup = input.validate_tuple(false);
+        if (tup.is_ok()) {
+            auto items = validate_sequence(*tup.value().value(), input, state, false);
+            if (items.is_err()) {
+                return items.error();
+            }
+            state.floor_exactness(Exactness::Strict);
+            return create_instance(items.value(), input, state);
+        }
+        if (!tup.error().has_line_errors()) {
+            return tup.error();
+        }
+
+        auto dict = input.validate_dict(false);
+        if (dict.is_ok()) {
+            auto items = validate_mapping(*dict.value(), input, state);
+            if (items.is_err()) {
+                return items.error();
+            }
+            state.floor_exactness(Exactness::Strict);
+            return create_instance(items.value(), input, state);
+        }
+        if (!dict.error().has_line_errors()) {
+            return dict.error();
+        }
+
+        // Both shapes were rejected, so the input is not something a named tuple
+        // can be built from; the two rejected shapes go unreported (Rust).
+        ErrorType err(ErrorType::Kind::NamedTupleType);
+        err.context()["class_name"] = tuple_name;
+        auto line = std::make_shared<ValLineError>(
+            ValLineError{err, state.location(), input.as_error_value().repr});
+        if (const auto* py_input = dynamic_cast<const PythonInput*>(&input)) {
+            line->raw_input_obj = py_input->py_object();
+        }
+        return ValError::line_errors({std::move(line)});
+    }
+
+    std::string name() const override { return "named-tuple"; }
+
+    std::string display_name() const override {
+        return tuple_name.empty() ? std::string("named-tuple") : tuple_name;
+    }
+
+    // The instance is a live Python object, like the generator validator's.
+    std::string effective_result_name() const override { return "py_object"; }
+
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        visit_ref(visit, arg, cls);
+        for (const auto& field : fields) {
+            if (field.validator) field.validator->visit_refs(visit, arg);
+        }
+    }
+
+private:
+    bool is_named_tuple_instance(const Input& input) const {
+        if (!cls.ptr() || cls.is_none()) return false;
+        const auto* py_input = dynamic_cast<const PythonInput*>(&input);
+        if (!py_input) return false;
+        try {
+            return py::isinstance(py_input->py_object(), cls);
+        } catch (py::error_already_set&) {
+            PyErr_Clear();
+            return false;
+        }
+    }
+
+    // Items of a tuple/list input, located by field name when the input was an
+    // instance of the class and by index otherwise.
+    ValResult<std::vector<py::object>> validate_sequence(
+        ValidatedTuple& coll,
+        const Input& input,
+        ValidationState& state,
+        bool name_locs
+    ) {
+        const size_t actual_length = coll.size();
+        std::vector<py::object> output;
+        std::vector<std::shared_ptr<ValLineError>> errors;
+
+        for (size_t i = 0; i < fields.size(); ++i) {
+            const Field& field = fields[i];
+            if (name_locs) state.push_loc(field.name);
+            else state.push_loc(static_cast<int64_t>(i));
+
+            if (i < actual_length) {
+                py::object element = coll.get_item(i);
+                PythonInput item_input(element);
+                item_input.set_current_location(state.location());
+                // Rust scoped_set_field_name: ValidationInfo.field_name is the named
+                // tuple field, not whatever the enclosing validator left behind.
+                auto outer_field_name = state.field_name();
+                state.set_field_name(field.name);
+                auto result = field.validator->validate(item_input, state);
+                state.set_field_name_opt(std::move(outer_field_name));
+                state.pop_loc();
+                if (result.is_ok()) {
+                    output.push_back(value_to_python_with_type(
+                        result.value(), field.validator->effective_result_name()));
+                    continue;
+                }
+                if (result.error().has_line_errors()) {
+                    for (auto& le : result.error().line_errors()) errors.push_back(le);
+                    continue;
+                }
+                return result.error();
+            }
+
+            // The input ran out: take the default, else report the field as
+            // missing where its item would have been.
+            auto def = field.validator->default_value(state);
+            if (def.is_ok()) {
+                py::object value = default_to_python(field.validator, def.value());
+                state.pop_loc();
+                output.push_back(std::move(value));
+                continue;
+            }
+            ValError def_error = def.error();
+            Location loc = state.location();
+            state.pop_loc();
+            if (!def_error.is_omit()) {
+                // A default exists but was rejected; that is reported instead
+                // of a missing-field error.
+                if (def_error.has_line_errors()) {
+                    for (auto& le : def_error.line_errors()) errors.push_back(le);
+                    continue;
+                }
+                return def_error;
+            }
+            errors.push_back(std::make_shared<ValLineError>(ValLineError{
+                PydanticKnownError::missing(), loc, input.as_error_value().repr}));
+        }
+
+        // Extra items collapse everything into one error for the whole input,
+        // dropping the per-item errors collected so far (Rust).
+        if (actual_length > fields.size()) {
+            ErrorType err(ErrorType::Kind::TooLong);
+            err.context()["field_type"] = "NamedTuple";
+            err.set_ctx_object("max_length", std::to_string(fields.size()),
+                               py::int_(static_cast<int>(fields.size())));
+            err.set_ctx_object("actual_length", std::to_string(actual_length),
+                               py::int_(static_cast<int>(actual_length)));
+            auto line = std::make_shared<ValLineError>(
+                ValLineError{err, state.location(), input.as_error_value().repr});
+            if (const auto* py_input = dynamic_cast<const PythonInput*>(&input)) {
+                line->raw_input_obj = py_input->py_object();
+            }
+            return ValError::line_errors({std::move(line)});
+        }
+
+        if (!errors.empty()) {
+            return ValError::line_errors(std::move(errors));
+        }
+        return ValResult<std::vector<py::object>>(std::move(output));
+    }
+
+    // Fields of a dict/mapping input, looked up by alias then name.
+    ValResult<std::vector<py::object>> validate_mapping(
+        ValidatedDict& dict,
+        const Input& input,
+        ValidationState& state
+    ) {
+        const bool by_alias = validate_by_alias.value_or(state.by_alias().value_or(true));
+        // Rust defaults to looking up by alias only; a field name is read from
+        // the mapping only when validate_by_name is turned on.
+        const bool by_name = validate_by_name.value_or(state.by_name().value_or(false));
+
+        std::vector<py::object> output;
+        std::vector<std::shared_ptr<ValLineError>> errors;
+        std::vector<std::string> used_keys;
+
+        for (const auto& field : fields) {
+            std::vector<std::string> lookup;
+            if (by_alias && !field.alias.empty()) lookup.push_back(field.alias);
+            if (by_name) lookup.push_back(field.name);
+            // A field whose only path was turned off still has to be read from
+            // somewhere, so fall back to that path rather than always missing.
+            if (lookup.empty()) lookup.push_back(field.alias.empty() ? field.name : field.alias);
+
+            std::optional<py::object> value;
+            std::string matched;
+            for (const auto& key : lookup) {
+                if (auto found = dict.get_value(key)) {
+                    value = found;
+                    matched = key;
+                    break;
+                }
+            }
+
+            // The alias names the location only when it is what the lookup
+            // actually used, and only while loc_by_alias is on (Rust).
+            std::string loc_key = field.name;
+            if (value && matched != field.name && loc_by_alias) loc_key = matched;
+
+            if (value) {
+                used_keys.push_back(matched);
+                state.push_loc(loc_key);
+                PythonInput item_input(*value);
+                item_input.set_current_location(state.location());
+                // Rust scoped_set_field_name: ValidationInfo.field_name is the named
+                // tuple field, not whatever the enclosing validator left behind.
+                auto outer_field_name = state.field_name();
+                state.set_field_name(field.name);
+                auto result = field.validator->validate(item_input, state);
+                state.set_field_name_opt(std::move(outer_field_name));
+                state.pop_loc();
+                if (result.is_ok()) {
+                    output.push_back(value_to_python_with_type(
+                        result.value(), field.validator->effective_result_name()));
+                    continue;
+                }
+                if (result.error().has_line_errors()) {
+                    for (auto& le : result.error().line_errors()) errors.push_back(le);
+                    continue;
+                }
+                return result.error();
+            }
+
+            std::string missing_key = (by_alias && loc_by_alias && !field.alias.empty())
+                ? field.alias : field.name;
+            state.push_loc(missing_key);
+            auto def = field.validator->default_value(state);
+            Location loc = state.location();
+            state.pop_loc();
+            if (def.is_ok()) {
+                output.push_back(default_to_python(field.validator, def.value()));
+                continue;
+            }
+            ValError def_error = def.error();
+            if (!def_error.is_omit()) {
+                if (def_error.has_line_errors()) {
+                    // A rejected default is located on the field name, even
+                    // when an alias named the field otherwise (Rust).
+                    for (auto& le : def_error.line_errors()) errors.push_back(le);
+                    continue;
+                }
+                return def_error;
+            }
+            errors.push_back(std::make_shared<ValLineError>(ValLineError{
+                PydanticKnownError::missing(), loc, input.as_error_value().repr}));
+        }
+
+        // A named tuple has nowhere to put extra keys, so they are always
+        // forbidden (Rust).
+        for (const auto& key : dict.keys()) {
+            if (std::find(used_keys.begin(), used_keys.end(), key) != used_keys.end()) {
+                continue;
+            }
+            py::object key_obj = dict.get_key(key).value_or(py::str(key));
+            if (!py::isinstance<py::str>(key_obj)) {
+                errors.push_back(object_line_error(ErrorType::Kind::InvalidKey,
+                                                   loc_with(state, key), key_obj));
+                continue;
+            }
+            std::optional<py::object> extra = dict.get_value(key);
+            if (!extra) continue;
+            errors.push_back(object_line_error(ErrorType::Kind::ExtraForbidden,
+                                               loc_with(state, key), *extra));
+        }
+
+        if (!errors.empty()) {
+            return ValError::line_errors(std::move(errors));
+        }
+        return ValResult<std::vector<py::object>>(std::move(output));
+    }
+
+    // An error that names the offending object itself as its input.
+    static std::shared_ptr<ValLineError> object_line_error(
+        ErrorType::Kind kind, const Location& loc, const py::object& obj) {
+        auto le = std::make_shared<ValLineError>(
+            ValLineError{ErrorType(kind), loc, py::repr(obj).cast<std::string>()});
+        le->raw_input_obj = obj;
+        return le;
+    }
+
+    static Location loc_with(const ValidationState& state, const std::string& key) {
+        Location loc = state.location();
+        loc.push(key);
+        return loc;
+    }
+
+    ValResult<std::shared_ptr<void>> create_instance(
+        std::vector<py::object>& items,
+        const Input& input,
+        ValidationState& state
+    ) {
+        try {
+            py::tuple args(items.size());
+            for (size_t i = 0; i < items.size(); ++i) args[i] = items[i];
+            py::object instance = cls(*args);
+            return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(std::move(instance)));
+        } catch (py::error_already_set& e) {
+            return function_error_from_exception(e, input, state);
         }
     }
 };

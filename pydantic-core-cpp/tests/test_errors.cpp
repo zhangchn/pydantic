@@ -58,6 +58,11 @@ TEST_CASE("PydanticKnownError shortcuts") {
     CHECK(frozen_dict.kind() == ErrorType::Kind::FrozenDictType);
     CHECK(frozen_dict.type_name() == "frozen_dict_type");
     CHECK(frozen_dict.message() == "Input should be a valid frozendict");
+
+    auto nt = PydanticKnownError::named_tuple_type();
+    CHECK(nt.kind() == ErrorType::Kind::NamedTupleType);
+    CHECK(nt.type_name() == "named_tuple_type");
+    CHECK(nt.message() == "Input should be a tuple, list, dictionary or an instance of {class_name}");
 }
 
 TEST_CASE("ValError construction") {

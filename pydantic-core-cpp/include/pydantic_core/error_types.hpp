@@ -192,6 +192,7 @@ public:
         GetAttributeError,
         NeedsPythonObject,
         DataclassExactType,
+        NamedTupleType,
         DefaultFactoryNotCalled,
 
         // Union discriminator errors
@@ -323,6 +324,7 @@ public:
     static ErrorType union_type() { return ErrorType(ErrorType::Kind::UnionType); }
     static ErrorType model_type() { return ErrorType(ErrorType::Kind::ModelType); }
     static ErrorType dataclass_type() { return ErrorType(ErrorType::Kind::DataclassType); }
+    static ErrorType named_tuple_type() { return ErrorType(ErrorType::Kind::NamedTupleType); }
     static ErrorType missing() { return ErrorType(ErrorType::Kind::Missing); }
     static ErrorType extra_forbidden() { return ErrorType(ErrorType::Kind::ExtraForbidden); }
     static ErrorType literal_mismatch() { return ErrorType(ErrorType::Kind::LiteralMismatch); }

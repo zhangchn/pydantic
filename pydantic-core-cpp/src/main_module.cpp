@@ -1052,7 +1052,7 @@ static std::string ser_variant_name(const std::string& t) {
         {"any", "Any"}, {"none", "None"}, {"bool", "Bool"}, {"int", "Int"}, {"float", "Float"},
         {"str", "Str"}, {"bytes", "Bytes"}, {"date", "Date"}, {"time", "Time"},
         {"datetime", "Datetime"}, {"timedelta", "Timedelta"}, {"list", "List"}, {"set", "Set"},
-        {"frozenset", "FrozenSet"}, {"deque", "Deque"}, {"tuple", "Tuple"},
+        {"frozenset", "FrozenSet"}, {"deque", "Deque"}, {"tuple", "Tuple"}, {"named-tuple", "NamedTuple"},
         {"generator", "Generator"}, {"dict", "Dict"},
         {"nullable", "Nullable"}, {"nullable-union", "Union"}, {"union", "Union"},
         {"tagged-union", "TaggedUnion"}, {"default", "WithDefault"}, {"with-default", "WithDefault"},
@@ -1091,6 +1091,8 @@ struct SerNode {
     static std::string type_name_for_warning(const SerRef& n);
     // Whether a Python value is compatible with this node's declared type.
     static bool value_matches_type(const SerRef& n, const py::object& v);
+    // Rust NamedTupleSerializer::json_key: per-item keys joined with ",".
+    static std::string named_tuple_json_key(const SerRef& n, const py::object& value, bool round_trip);
 
     // Rust leaf serializers warn once per container item whose runtime type
     // disagrees with the declared item serializer, then fall back to inference.
@@ -1187,6 +1189,8 @@ struct SerNode {
     bool root_model = false;
     // For model/dataclass serializers: expected Python class (union discrimination)
     py::object class_;
+    // Rust NamedTupleSerializer::name - the class named in a wrong-type warning.
+    std::string class_name;
     // Polymorphic serialization enabled via schema config (Rust enabled_from_config)
     bool polymorphic_from_config = false;
     // Rust ModelSerializer::has_extra - only a model whose own config sets
@@ -1261,6 +1265,7 @@ struct SerNode {
         return_ser = other.return_ser;
         root_model = other.root_model;
         class_ = other.class_;
+        class_name = other.class_name;
         polymorphic_from_config = other.polymorphic_from_config;
         extra_allowed = other.extra_allowed;
         typed_dict_allow_extra = other.typed_dict_allow_extra;
@@ -1353,6 +1358,13 @@ struct SerNode {
 
     bool ser_check_accepts(const py::object& value) const {
         if (g_ser_check == 0) return true;
+        if (type == "named-tuple") {
+            // Rust tuple_value: while a union checks its choices the value has to
+            // be an instance of the named tuple class itself; the lax round only
+            // requires that it can be cast to a tuple at all.
+            if (g_ser_check == 1) return class_ && py::isinstance(value, class_);
+            return py::isinstance<py::tuple>(value) || py::isinstance<py::list>(value);
+        }
         int match = ser_type_match(type, value);
         if (match != 0) return match > 0;
         // IsType::Subclass: SerCheck::Strict refuses it, SerCheck::Lax allows it.
@@ -1858,6 +1870,57 @@ struct SerNode {
             }
             return std::move(result);
         }
+        // named-tuple: Rust for_each_item_and_serializer pairs every item with the
+        // field serializer at the same index; the result keeps its tuple identity
+        // in Python mode and becomes an array in JSON mode.
+        if (type == "named-tuple") {
+            std::string nt_name = class_name.empty() ? std::string("named-tuple") : class_name;
+            if (!py::isinstance<py::tuple>(value) && !py::isinstance<py::list>(value)) {
+                // Rust tuple_value's cast::<PyTuple> fails: the value goes through
+                // inference, as an error while a union checks its choices.
+                if (g_ser_check != 0) {
+                    throw std::runtime_error("Unexpected value for serializer " + nt_name);
+                }
+                ser_warn_unexpected_value("", nt_name, value);
+                return serialize_any_value(value, exc_none, round_trip, json_mode);
+            }
+            auto seq = value.cast<py::sequence>();
+            size_t n_items = static_cast<size_t>(py::len(seq));
+            if (g_ser_check != 0 && n_items != children.size()) {
+                throw std::runtime_error("Expected " + std::to_string(children.size()) +
+                                         " items, but got " + std::to_string(n_items));
+            }
+            if (n_items < children.size()) {
+                ser_warn_register("PydanticSerializationUnexpectedValue(Unexpected too few items present in named tuple)");
+            }
+            py::object inc = include.is_none() ? py::none()
+                                               : map_negative_indices(include, static_cast<py::ssize_t>(n_items));
+            py::object exc = exclude.is_none() ? py::none()
+                                               : map_negative_indices(exclude, static_cast<py::ssize_t>(n_items));
+            py::list temp;
+            size_t i = 0;
+            for (auto item : seq) {
+                if (i >= children.size()) break;  // Rust drops the extras with a warning
+                auto next = apply_ser_filter(py::int_(static_cast<py::ssize_t>(i)), inc, exc);
+                if (!next.omit) {
+                    py::object v = py::reinterpret_borrow<py::object>(item);
+                    temp.append(children[i]->to_python(check_item_type(children[i], v), json_mode, exc_none,
+                                                       round_trip, next.include, next.exclude, by_alias,
+                                                       exclude_unset, exclude_defaults, context));
+                }
+                i++;
+            }
+            if (n_items > children.size()) {
+                ser_warn_register("PydanticSerializationUnexpectedValue(Unexpected extra items present in named tuple)");
+            }
+            // JSON has no tuple type: Rust emits an array.
+            if (json_mode) {
+                py::list out;
+                for (auto item : temp) out.append(item);
+                return std::move(out);
+            }
+            return py::tuple(temp);
+        }
         if (type == "tuple" && !children.empty()) {
             py::list temp;
             auto seq = py::reinterpret_borrow<py::sequence>(value);
@@ -2013,7 +2076,14 @@ struct SerNode {
                     : infer_json(v, ensure_ascii, -1);
                 if (!first) out += ",";
                 first = false;
-                out += json_escape(py::str(out_k).cast<std::string>(), ensure_ascii) + ":" + val_json;
+                std::string key_str = py::str(out_k).cast<std::string>();
+                if (children[0] && children[0]->type == "named-tuple") {
+                    // A named tuple key is the item keys joined with ","; Python's
+                    // own repr of the tuple would read "(1, 'a')".
+                    std::string joined = named_tuple_json_key(children[0], k, round_trip);
+                    if (!joined.empty()) key_str = joined;
+                }
+                out += json_escape(key_str, ensure_ascii) + ":" + val_json;
             }
             out += "}";
             return out;
@@ -2237,6 +2307,50 @@ struct SerNode {
         // this the node fell through to infer_json, which reads __dict__ and so
         // emitted a subclass's extra fields (and unserialized leaf values) in
         // place of the declared item type.
+        if (type == "named-tuple") {
+            std::string nt_name = class_name.empty() ? std::string("named-tuple") : class_name;
+            if (!py::isinstance<py::tuple>(value) && !py::isinstance<py::list>(value)) {
+                if (g_ser_check != 0) {
+                    throw std::runtime_error("Unexpected value for serializer " + nt_name);
+                }
+                ser_warn_unexpected_value("", nt_name, value);
+                return infer_json(value, ensure_ascii, indent);
+            }
+            auto seq = value.cast<py::sequence>();
+            size_t n_items = static_cast<size_t>(py::len(seq));
+            if (g_ser_check != 0 && n_items != children.size()) {
+                throw std::runtime_error("Expected " + std::to_string(children.size()) +
+                                         " items, but got " + std::to_string(n_items));
+            }
+            if (n_items < children.size()) {
+                ser_warn_register("PydanticSerializationUnexpectedValue(Unexpected too few items present in named tuple)");
+            }
+            py::object inc = include.is_none() ? py::none()
+                                               : map_negative_indices(include, static_cast<py::ssize_t>(n_items));
+            py::object exc = exclude.is_none() ? py::none()
+                                               : map_negative_indices(exclude, static_cast<py::ssize_t>(n_items));
+            std::string out = "[";
+            bool first = true;
+            size_t i = 0;
+            for (auto item : seq) {
+                if (i >= children.size()) break;  // Rust drops the extras with a warning
+                auto next = apply_ser_filter(py::int_(static_cast<py::ssize_t>(i)), inc, exc);
+                if (!next.omit) {
+                    py::object v = py::reinterpret_borrow<py::object>(item);
+                    if (!first) out += ",";
+                    first = false;
+                    out += children[i]->to_json(check_item_type(children[i], v), ensure_ascii, -1, round_trip,
+                                                next.include, next.exclude, by_alias, exclude_unset,
+                                                exclude_defaults, exc_none, context);
+                }
+                i++;
+            }
+            if (n_items > children.size()) {
+                ser_warn_register("PydanticSerializationUnexpectedValue(Unexpected extra items present in named tuple)");
+            }
+            out += "]";
+            return out;
+        }
         if (type == "list" && !children.empty()) {
             std::string out = "[";
             bool first = true;
@@ -3415,6 +3529,7 @@ std::string SerNode::type_name_for_warning(const SerRef& n) {
     if (t == "deque") return "deque[" + child0() + "]";
     if (t == "frozenset") return "frozenset[" + child0() + "]";
     if (t == "tuple") return "tuple[" + child0() + "]";
+    if (t == "named-tuple") return n->class_name.empty() ? std::string("named-tuple") : n->class_name;
     if (t == "dict") {
         std::string keyn = n->children.size() > 0 ? type_name_for_warning(n->children[0]) : "any";
         std::string valn = n->children.size() > 1 ? type_name_for_warning(n->children[1]) : "any";
@@ -3442,8 +3557,45 @@ bool SerNode::value_matches_type(const SerRef& n, const py::object& v) {
     if (t == "deque") return py::isinstance(v, py_deque_type());
     if (t == "frozenset") return py::isinstance<py::frozenset>(v);
     if (t == "tuple") return py::isinstance<py::tuple>(v);
+    // Rust ObTypeLookup::is_type for a named tuple is a plain PyTuple check: the
+    // class itself is only compared while a union checks its choices.
+    if (t == "named-tuple") return py::isinstance<py::tuple>(v);
     if (t == "dict") return py::isinstance<py::dict>(v);
     return true;
+}
+
+// Rust NamedTupleSerializer::json_key builds every item key with the field
+// serializer and joins the parts with ",".  An empty result means the value is
+// not a sequence and the caller keeps its own stringification.
+std::string SerNode::named_tuple_json_key(const SerRef& n, const py::object& value, bool round_trip) {
+    if (!n || (!py::isinstance<py::tuple>(value) && !py::isinstance<py::list>(value))) return std::string();
+    auto seq = value.cast<py::sequence>();
+    std::vector<std::string> parts;
+    size_t i = 0;
+    for (auto item : seq) {
+        if (i >= n->children.size()) break;
+        py::object v = py::reinterpret_borrow<py::object>(item);
+        const SerRef& child = n->children[i];
+        std::string part;
+        if (child && child->type == "named-tuple") {
+            part = named_tuple_json_key(child, v, round_trip);
+            if (part.empty()) part = py::str(v).cast<std::string>();
+        } else if (child) {
+            part = py::str(child->to_python(check_item_type(child, v), true, false, round_trip,
+                                            py::none(), py::none(), false, false, false,
+                                            py::none())).cast<std::string>();
+        } else {
+            part = py::str(v).cast<std::string>();
+        }
+        parts.push_back(part);
+        i++;
+    }
+    std::string out;
+    for (size_t j = 0; j < parts.size(); j++) {
+        if (j) out += ",";
+        out += parts[j];
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -3684,6 +3836,26 @@ static SerRef build_ser_impl(const py::dict& schema,
         node->children.push_back(val_ser);
     }
 
+    if (type == "named-tuple") {
+        // Rust NamedTupleSerializer::new keeps the class (union discrimination and
+        // the wrong-type warning) and one serializer per field, by position.
+        try { node->class_ = py::object(schema["cls"]); } catch (...) { PyErr_Clear(); }
+        try {
+            node->class_name = schema["cls_name"].cast<std::string>();
+        } catch (...) {
+            PyErr_Clear();
+            try { node->class_name = node->class_.attr("__name__").cast<std::string>(); }
+            catch (...) { PyErr_Clear(); }
+        }
+        try {
+            std::vector<SerRef> kids;
+            for (auto it : schema["fields"].cast<py::list>()) {
+                py::dict f = it.cast<py::dict>();
+                kids.push_back(build_ser(f["schema"].cast<py::dict>(), defs));
+            }
+            node->children = std::move(kids);
+        } catch (...) { PyErr_Clear(); }
+    }
     if (type == "tuple") {
         try {
             auto items = schema["items_schema"];
