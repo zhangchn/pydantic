@@ -69,7 +69,6 @@ public:
         ComplexStrParsing,
 
         // String/bytes encoding errors
-        StringSubType,
         StringUnicode,
         BytesInvalidEncoding,
         SetItemNotHashable,
