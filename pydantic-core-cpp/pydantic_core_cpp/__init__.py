@@ -1031,10 +1031,17 @@ def _extract_enum_classes(schema: dict) -> dict[str, type]:
     from enum import Enum as _Enum
 
     enum_classes: dict[str, type] = {}
+    walked: set[int] = set()
 
     def _walk(node):
         if not isinstance(node, dict):
             return
+        # A model used by several fields appears once in the schema with several
+        # references to it, so a schema is a DAG: without this guard the walk
+        # costs the number of paths through it rather than the number of nodes.
+        if id(node) in walked:
+            return
+        walked.add(id(node))
         if node.get('type') == 'enum':
             members = node.get('members')
             if isinstance(members, (list, tuple)):
@@ -1102,7 +1109,9 @@ def _convert_enum_members(schema: dict) -> None:
                     _convert_enum_members(item)
 
 
-def _find_function_after_callable(schema: dict, callables: list | None = None, seen: set | None = None) -> list:
+def _find_function_after_callable(
+    schema: dict, callables: list | None = None, seen: set | None = None, walked: set | None = None
+) -> list:
     """Recursively find all ``function-after`` schemas and extract their callables.
 
     Returns a list of unique callables (deduplicated by identity).
@@ -1110,8 +1119,15 @@ def _find_function_after_callable(schema: dict, callables: list | None = None, s
     if callables is None:
         callables = []
         seen = set()
+        walked = set()
     if not isinstance(schema, dict):
         return callables
+    # The schema is a DAG (see _extract_enum_classes), so each container is
+    # entered once; `seen` alone only deduplicates the callables themselves.
+    if walked is not None:
+        if id(schema) in walked:
+            return callables
+        walked.add(id(schema))
     if schema.get('type') == 'function-after':
         func_ref = schema.get('function', {})
         if isinstance(func_ref, dict):
@@ -1125,11 +1141,11 @@ def _find_function_after_callable(schema: dict, callables: list | None = None, s
         return callables
     for v in schema.values():
         if isinstance(v, dict):
-            _find_function_after_callable(v, callables, seen)
+            _find_function_after_callable(v, callables, seen, walked)
         elif isinstance(v, list):
             for item in v:
                 if isinstance(item, dict):
-                    _find_function_after_callable(item, callables, seen)
+                    _find_function_after_callable(item, callables, seen, walked)
     return callables
 
 
@@ -1199,9 +1215,15 @@ class SchemaValidator:
         classes = {}
         if not isinstance(schema, dict):
             return classes
+        walked: set[int] = set()
 
         def _collect(d):
             if isinstance(d, dict):
+                # The schema is a DAG (see _extract_enum_classes), so a shared
+                # node is only worth one visit.
+                if id(d) in walked:
+                    return
+                walked.add(id(d))
                 if d.get("type") == "model":
                     ref = d.get("ref")
                     cls = d.get("cls")
@@ -1965,7 +1987,7 @@ class SchemaValidator:
         return (SchemaValidator, (self._schema, self._config))
 
 
-def _schema_copy_clean(schema):
+def _schema_copy_clean(schema, _memo=None):
     """Recursively copy a schema structure, stripping ``cls`` keys.
 
     Replaces ``copy.deepcopy`` + ``_schema_clean_cls_keys``. deepcopy fails on
@@ -1973,7 +1995,13 @@ def _schema_copy_clean(schema):
     and is slower than a targeted structural copy. Non-container objects
     (enum members, the MISSING sentinel, callables, classes) are returned as-is
     — they are singletons or live references that C++ needs to keep.
+
+    ``_memo`` keeps deepcopy's by-identity memo: a schema is a DAG (see
+    _extract_enum_classes), so without it the copy costs the number of paths
+    through the schema and the copies stop sharing nodes.
     """
+    if _memo is None:
+        _memo = {}
     if isinstance(schema, dict):
         # An enum node needs ``cls`` so the C++ validator can call the Enum class
         # and emit is-instance errors the way Rust does.
@@ -1983,13 +2011,19 @@ def _schema_copy_clean(schema):
         keep_cls = schema.get("type") in (
             "is-instance", "is-subclass", "model", "dataclass", "enum", "named-tuple"
         )
+        cached = _memo.get(id(schema))
+        if cached is not None:
+            return cached
         result = {}
+        # Registered before the children are copied, so a self-referencing
+        # schema maps back to its own copy instead of recursing forever.
+        _memo[id(schema)] = result
         for k, v in schema.items():
             # As in _schema_clean_cls_keys: drop the class-level "cls" only from a
             # schema node, never from a field mapping that happens to name a field "cls".
             if k == "cls" and is_schema_node and not keep_cls:
                 continue
-            result[k] = _schema_copy_clean(v)
+            result[k] = _schema_copy_clean(v, _memo)
         if schema.get("type") == "typed-dict" and "cls_name" not in result:
             # Rust names a TypedDict validator after the TypedDict class itself, so a
             # composed error label reads list[User] instead of list[typed-dict]; the
@@ -2002,11 +2036,17 @@ def _schema_copy_clean(schema):
         # A list/tuple-valued Enum member is itself an instance of that container,
         # so it must bypass the container copies below to stay an Enum member.
         return schema
+    cached = _memo.get(id(schema))
+    if cached is not None:
+        return cached
     if isinstance(schema, list):
-        return [_schema_copy_clean(item) for item in schema]
-    if isinstance(schema, tuple):
-        return tuple(_schema_copy_clean(item) for item in schema)
-    return schema
+        result = [_schema_copy_clean(item, _memo) for item in schema]
+    elif isinstance(schema, tuple):
+        result = tuple(_schema_copy_clean(item, _memo) for item in schema)
+    else:
+        return schema
+    _memo[id(schema)] = result
+    return result
 
 
 def _new_model_instance(cls, data):
