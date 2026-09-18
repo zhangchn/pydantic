@@ -9,6 +9,7 @@
 #include <vector>
 #include <unordered_set>
 #include <unordered_map>
+#include <map>
 #include <pybind11/pybind11.h>
 #include <cstdio>
 #include <stdexcept>
@@ -51,9 +52,29 @@ public:
         return definitions_.find(ref) != definitions_.end();
     }
 
+    // Pydantic emits a model schema once and points at it from every field
+    // that uses it, so a core schema is a DAG: building a validator per
+    // reference costs the number of paths through the schema rather than its
+    // size. A validator is fixed once built and depends only on its node and
+    // the config it was built under, so shared nodes share one validator.
+    const ValidatorPtr* find_built(const void* schema, const void* config) const {
+        auto it = built_.find(std::make_pair(schema, config));
+        if (it == built_.end()) return nullptr;
+        return &it->second.second;
+    }
+
+    void add_built(const void* schema, const void* config, const py::object& node,
+                   ValidatorPtr validator) {
+        built_.emplace(std::make_pair(schema, config),
+                       std::make_pair(node, std::move(validator)));
+    }
+
 private:
     std::unordered_map<std::string, ValidatorPtr> definitions_;
     std::unordered_set<std::string> pending_;
+    // The node is kept alive so its address cannot be reused by a different
+    // schema while the validator built for it is still cached.
+    std::map<std::pair<const void*, const void*>, std::pair<py::object, ValidatorPtr>> built_;
 };
 
 // DefinitionRefValidator - resolves recursive schema references

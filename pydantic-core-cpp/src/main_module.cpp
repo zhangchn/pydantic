@@ -3628,23 +3628,43 @@ std::string SerNode::named_tuple_json_key(const SerRef& n, const py::object& val
 // ---------------------------------------------------------------------------
 // Build serializer from schema
 // ---------------------------------------------------------------------------
-static SerRef build_ser_impl(const py::dict& schema,
-                        std::unordered_map<std::string, SerRef>& defs);
-
-static SerRef build_ser(const py::dict& schema,
-                        std::unordered_map<std::string, SerRef>& defs) {
-    return build_ser_impl(schema, defs);
-}
+using SerMemo = std::unordered_map<const void*, SerRef>;
 
 static thread_local int _build_ser_depth = 0;
+static thread_local int _build_ser_truncated = 0;
 
 static SerRef build_ser_impl(const py::dict& schema,
-                        std::unordered_map<std::string, SerRef>& defs) {
+                        std::unordered_map<std::string, SerRef>& defs,
+                        SerMemo& memo);
+
+static SerRef build_ser(const py::dict& schema,
+                        std::unordered_map<std::string, SerRef>& defs,
+                        SerMemo& memo) {
+    // Pydantic emits a model schema once and points at it from every field
+    // that uses it, so a core schema is a DAG: building a serializer per
+    // reference costs the number of paths through the schema rather than its
+    // size. A serializer depends on nothing but the node it was built from, so
+    // shared nodes share one node.
+    auto cached = memo.find(schema.ptr());
+    if (cached != memo.end()) return cached->second;
+
+    int truncated = _build_ser_truncated;
+    auto ser = build_ser_impl(schema, defs, memo);
+    // A subtree the recursion guard cut short is not the node this schema
+    // describes, so it must not become the answer for that schema.
+    if (ser && _build_ser_truncated == truncated) memo[schema.ptr()] = ser;
+    return ser;
+}
+
+static SerRef build_ser_impl(const py::dict& schema,
+                        std::unordered_map<std::string, SerRef>& defs,
+                        SerMemo& memo) {
     _build_ser_depth++;
     if (_build_ser_depth > 200) {
         std::string t = "unknown";
         try { t = schema["type"].cast<std::string>(); } catch (...) {}
         fprintf(stderr, "ERROR: build_ser_impl recursion depth exceeded 200, type=%s\n", t.c_str());
+        _build_ser_truncated++;
         _build_ser_depth--;
         return std::make_shared<SerNode>();
     }
@@ -3699,7 +3719,7 @@ static SerRef build_ser_impl(const py::dict& schema,
     // Handle model-field wrapper: unwrap to inner schema
     if (type == "model-field") {
         try {
-            auto inner = build_ser_impl(schema["schema"].cast<py::dict>(), defs);
+            auto inner = build_ser_impl(schema["schema"].cast<py::dict>(), defs, memo);
             if (inner) {
                 node->copy_from(*inner);
                 return node;
@@ -3729,7 +3749,7 @@ static SerRef build_ser_impl(const py::dict& schema,
     } catch (...) {}
 
     auto sub = [&](const char* key = "schema") -> SerRef {
-        try { return build_ser(schema[key].cast<py::dict>(), defs); } catch (...) { return nullptr; }
+        try { return build_ser(schema[key].cast<py::dict>(), defs, memo); } catch (...) { return nullptr; }
     };
 
     if (type == "definitions") {
@@ -3761,12 +3781,12 @@ static SerRef build_ser_impl(const py::dict& schema,
                 bool keep_model_wrapper = def_type == "model" || def_type == "dataclass" ||
                                           def_type == "typed-dict";
                 if (d.contains("schema") && !def_has_ser && !keep_model_wrapper) {
-                    actual = build_ser_impl(d["schema"].cast<py::dict>(), defs);
+                    actual = build_ser_impl(d["schema"].cast<py::dict>(), defs, memo);
                 } else {
                     // Definitions without inner schema (e.g. enum), model-like
                     // definitions and those with their own serializer are built
                     // from the definition itself.
-                    actual = build_ser_impl(d, defs);
+                    actual = build_ser_impl(d, defs, memo);
                 }
                 // Copy actual content into the stub (preserves shared_ptr identity)
                 defs[ref]->copy_from(*actual);
@@ -3774,7 +3794,7 @@ static SerRef build_ser_impl(const py::dict& schema,
         } catch (const std::exception& e) {
             fprintf(stderr, "Error building definitions: %s\n", e.what());
         }
-        try { return build_ser_impl(schema["schema"].cast<py::dict>(), defs); } catch (...) {}
+        try { return build_ser_impl(schema["schema"].cast<py::dict>(), defs, memo); } catch (...) {}
         return node;
     }
     if (original_type == "definition-ref") {
@@ -3791,7 +3811,7 @@ static SerRef build_ser_impl(const py::dict& schema,
                         std::string st = ser_dict["type"].cast<std::string>();
                         if (st != "include-exclude-sequence" && st != "include-exclude-dict" &&
                             st != "base64" && st != "function-plain" && st != "function-wrap") {
-                            return build_ser_impl(ser_dict, defs);
+                            return build_ser_impl(ser_dict, defs, memo);
                         }
                     } catch (...) {}
                 }
@@ -3807,7 +3827,7 @@ static SerRef build_ser_impl(const py::dict& schema,
                     catch (...) { PyErr_Clear(); try { wrapped->func_name = py::str(ser_dict["function"].attr("__qualname__")).cast<std::string>(); } catch (...) { PyErr_Clear(); } }
                     try {
                         if (ser_dict.contains("return_schema")) {
-                            wrapped->return_ser = build_ser(ser_dict["return_schema"].cast<py::dict>(), defs);
+                            wrapped->return_ser = build_ser(ser_dict["return_schema"].cast<py::dict>(), defs, memo);
                         } else {
                             auto any = std::make_shared<SerNode>();
                             any->type = "any";
@@ -3831,8 +3851,8 @@ static SerRef build_ser_impl(const py::dict& schema,
 
     // lax-or-strict: parse both schemas, use lax for serialization
     if (type == "lax-or-strict") {
-        try { node->children.push_back(build_ser(schema["lax_schema"].cast<py::dict>(), defs)); } catch (...) {}
-        try { node->children.push_back(build_ser(schema["strict_schema"].cast<py::dict>(), defs)); } catch (...) {}
+        try { node->children.push_back(build_ser(schema["lax_schema"].cast<py::dict>(), defs, memo)); } catch (...) {}
+        try { node->children.push_back(build_ser(schema["strict_schema"].cast<py::dict>(), defs, memo)); } catch (...) {}
     }
 
     // is-instance: no-op for serialization (passthrough)
@@ -3848,13 +3868,13 @@ static SerRef build_ser_impl(const py::dict& schema,
     // Types with items_schema key
     if (type == "list" || type == "set" || type == "frozenset" || type == "deque" || type == "generator") {
         try {
-            auto c = build_ser_impl(schema["items_schema"].cast<py::dict>(), defs);
+            auto c = build_ser_impl(schema["items_schema"].cast<py::dict>(), defs, memo);
             if (c) node->children.push_back(c);
         } catch (...) {}
     }
 
     if (type == "dict") {
-        auto ks = [&](const char* k) -> SerRef { try { return build_ser(schema[k].cast<py::dict>(), defs); } catch (...) { return nullptr; } };
+        auto ks = [&](const char* k) -> SerRef { try { return build_ser(schema[k].cast<py::dict>(), defs, memo); } catch (...) { return nullptr; } };
         auto key_ser = ks("keys_schema");
         auto val_ser = ks("values_schema");
         if (!key_ser) { key_ser = std::make_shared<SerNode>(); key_ser->type = "str"; }
@@ -3878,7 +3898,7 @@ static SerRef build_ser_impl(const py::dict& schema,
             std::vector<SerRef> kids;
             for (auto it : schema["fields"].cast<py::list>()) {
                 py::dict f = it.cast<py::dict>();
-                kids.push_back(build_ser(f["schema"].cast<py::dict>(), defs));
+                kids.push_back(build_ser(f["schema"].cast<py::dict>(), defs, memo));
             }
             node->children = std::move(kids);
         } catch (...) { PyErr_Clear(); }
@@ -3888,8 +3908,8 @@ static SerRef build_ser_impl(const py::dict& schema,
             auto items = schema["items_schema"];
             if (py::isinstance<py::list>(items)) {
                 for (auto it : items.cast<py::list>())
-                    node->children.push_back(build_ser(it.cast<py::dict>(), defs));
-            } else node->children.push_back(build_ser(items.cast<py::dict>(), defs));
+                    node->children.push_back(build_ser(it.cast<py::dict>(), defs, memo));
+            } else node->children.push_back(build_ser(items.cast<py::dict>(), defs, memo));
         } catch (...) {}
     }
 
@@ -3898,8 +3918,8 @@ static SerRef build_ser_impl(const py::dict& schema,
             for (auto ch : schema["choices"].cast<py::list>()) {
                 if (py::isinstance<py::tuple>(ch)) {
                     auto t = ch.cast<py::tuple>();
-                    node->children.push_back(build_ser(t[0].cast<py::dict>(), defs));
-                } else node->children.push_back(build_ser(ch.cast<py::dict>(), defs));
+                    node->children.push_back(build_ser(t[0].cast<py::dict>(), defs, memo));
+                } else node->children.push_back(build_ser(ch.cast<py::dict>(), defs, memo));
             }
         } catch (...) {}
     }
@@ -3930,7 +3950,7 @@ static SerRef build_ser_impl(const py::dict& schema,
         try {
             for (auto item : schema["choices"].cast<py::dict>()) {
                 std::string tag = ser_tag_string(item.first);
-                auto choice = build_ser(item.second.cast<py::dict>(), defs);
+                auto choice = build_ser(item.second.cast<py::dict>(), defs, memo);
                 node->tagged[tag] = choice;
                 node->tagged_left_to_right.push_back(std::move(choice));
             }
@@ -4012,7 +4032,7 @@ static SerRef build_ser_impl(const py::dict& schema,
                 // Rust builds a serializer from the *serialization* schema, so a
                 // wrap serializer on a leaf that has no inner schema of its own
                 // (is-instance) still knows what to serialize underneath.
-                try { c = build_ser(ser_dict["schema"].cast<py::dict>(), defs); } catch (...) {}
+                try { c = build_ser(ser_dict["schema"].cast<py::dict>(), defs, memo); } catch (...) {}
             }
             // Rust builds the fallback serializer from the outer schema, so a
             // nullable schema whose serializer is overridden must still map
@@ -4027,7 +4047,7 @@ static SerRef build_ser_impl(const py::dict& schema,
         }
         try {
             if (has_ser_dict && ser_dict.contains("return_schema")) {
-                node->return_ser = build_ser(ser_dict["return_schema"].cast<py::dict>(), defs);
+                node->return_ser = build_ser(ser_dict["return_schema"].cast<py::dict>(), defs, memo);
             } else if (has_ser_dict) {
                 auto any = std::make_shared<SerNode>();
                 any->type = "any";
@@ -4093,7 +4113,7 @@ static SerRef build_ser_impl(const py::dict& schema,
                             node->field_excluded.insert(k);
                         }
                     }
-                    node->fields[k] = build_ser(field_schema, defs);
+                    node->fields[k] = build_ser(field_schema, defs, memo);
                     node->field_order.push_back(k);
                 }
             }
@@ -4113,7 +4133,7 @@ static SerRef build_ser_impl(const py::dict& schema,
             if (eb == "allow") {
                 node->typed_dict_allow_extra = true;
                 if (schema.contains("extras_schema") && !schema["extras_schema"].is_none()) {
-                    try { node->extra_ser = build_ser(schema["extras_schema"].cast<py::dict>(), defs); } catch (...) { PyErr_Clear(); }
+                    try { node->extra_ser = build_ser(schema["extras_schema"].cast<py::dict>(), defs, memo); } catch (...) { PyErr_Clear(); }
                 }
             }
         }
@@ -4138,12 +4158,12 @@ static SerRef build_ser_impl(const py::dict& schema,
                         }
                     }
                     try {
-                        node->fields[prop] = build_ser(cf["return_schema"].cast<py::dict>(), defs);
+                        node->fields[prop] = build_ser(cf["return_schema"].cast<py::dict>(), defs, memo);
                     } catch (...) {
                         // If no return_schema, fall back to any
                         py::dict any_schema;
                         any_schema["type"] = "any";
-                        node->fields[prop] = build_ser(any_schema, defs);
+                        node->fields[prop] = build_ser(any_schema, defs, memo);
                     }
                     node->field_order.push_back(prop);
                 }
@@ -4251,7 +4271,8 @@ public:
     explicit PySchemaSerializer(const py::dict& schema, const std::optional<py::dict>& cfg = std::nullopt)
         : schema_(schema) {
         std::unordered_map<std::string, SerRef> defs;
-        ser_ = build_ser(schema, defs);
+        SerMemo memo;
+        ser_ = build_ser(schema, defs, memo);
         if (cfg.has_value()) {
             try {
                 py::dict c = *cfg;
@@ -4294,7 +4315,8 @@ public:
     explicit PySchemaSerializer(const py::dict& schema, const std::optional<py::dict>& cfg, bool)
         : schema_(schema) {
         std::unordered_map<std::string, SerRef> defs;
-        ser_ = build_ser(schema, defs);
+        SerMemo memo;
+        ser_ = build_ser(schema, defs, memo);
         if (cfg.has_value()) {
             try {
                 py::dict c = *cfg;

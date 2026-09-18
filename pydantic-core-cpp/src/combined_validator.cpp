@@ -1320,7 +1320,7 @@ static std::shared_ptr<DefinitionsRegistry> build_definitions_from_py(
     return registry;
 }
 
-static std::shared_ptr<Validator> build_from_py_dict(
+static std::shared_ptr<Validator> build_from_py_dict_uncached(
     const py::dict& schema,
     const py::dict& config,
     std::shared_ptr<DefinitionsRegistry> definitions
@@ -3074,12 +3074,41 @@ static std::shared_ptr<Validator> build_from_py_dict(
     throw SchemaError("Unknown schema type: " + type);
 }
 
+static std::shared_ptr<Validator> build_from_py_dict(
+    const py::dict& schema,
+    const py::dict& config,
+    std::shared_ptr<DefinitionsRegistry> definitions
+) {
+    if (!definitions) return build_from_py_dict_uncached(schema, config, definitions);
+
+    // A model builds from the config it carries, not the one it is handed, so
+    // the config it was reached through is not part of what its validator
+    // depends on. Keying it by the parent's config would leave every reference
+    // to a model rebuilding the model from scratch.
+    const void* config_key = config.ptr();
+    if (py_str(schema, "type") == "model") {
+        config_key = nullptr;  // built with an empty config
+        if (schema.contains("config") && py::isinstance<py::dict>(schema["config"])) {
+            config_key = schema["config"].ptr();
+        }
+    }
+
+    if (auto built = definitions->find_built(schema.ptr(), config_key)) return *built;
+
+    auto validator = build_from_py_dict_uncached(schema, config, definitions);
+    definitions->add_built(schema.ptr(), config_key, py::reinterpret_borrow<py::object>(schema), validator);
+    return validator;
+}
+
 // SchemaBuilder::build_from_py — public entry point
 std::shared_ptr<CombinedValidator> SchemaBuilder::build_from_py(
     const py::dict& schema,
     const py::dict& config
 ) {
-    auto validator = build_from_py_dict(schema, config, nullptr);
+    // A registry is always present so the shared-node cache has somewhere to
+    // live; a nested `definitions` node starts its own, which is also where
+    // that subtree's cached validators stop being valid.
+    auto validator = build_from_py_dict(schema, config, std::make_shared<DefinitionsRegistry>());
     return std::make_shared<CombinedValidator>(validator);
 }
 
