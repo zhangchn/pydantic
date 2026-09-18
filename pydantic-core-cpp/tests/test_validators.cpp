@@ -11,6 +11,7 @@
 #include "pydantic_core/validators/special.hpp"
 #include "pydantic_core/json_input.hpp"
 #include "pydantic_core/string_input.hpp"
+#include "pydantic_core/py_compat.hpp"
 
 // Python interpreter for the lifetime of the process — the validators under
 // test convert values to/from Python objects (pybind11 needs a running
@@ -1262,6 +1263,27 @@ TEST_CASE("Unknown validator type throws") {
     schema["type"] = "unknown-type";
     
     CHECK_THROWS_AS(ValidatorFactory::build(schema, {}), SchemaError);
+}
+
+TEST_CASE("frozendict schema build reports why it cannot build") {
+    // The `frozendict` builtin is a Python 3.15 arrival. Rust's builder
+    // refuses to build without it; the port has no frozendict validator yet
+    // even with it, and says so rather than claiming an unknown schema type.
+    std::unordered_map<std::string, std::string> schema;
+    schema["type"] = "frozendict";
+
+    const std::string expected = py_has_frozendict()
+        ? "The `frozendict` type is not implemented in the C++ port yet"
+        : "The `frozendict` builtin type is only available on Python 3.15 and above";
+
+    bool threw = false;
+    try {
+        ValidatorFactory::build(schema, {});
+    } catch (const SchemaError& e) {
+        threw = true;
+        CHECK(std::string(e.what()) == expected);
+    }
+    CHECK(threw);
 }
 
 // ========================================================================

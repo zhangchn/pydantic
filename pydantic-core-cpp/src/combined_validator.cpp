@@ -98,6 +98,7 @@ static std::shared_ptr<Validator> build_from_flat_dict(
     if (type == "bytes") return std::make_shared<BytesValidator>();
     if (type == "list") return std::make_shared<ListValidator>();
     if (type == "dict") return std::make_shared<DictValidator>();
+    if (type == "frozendict") throw SchemaError(frozendict_build_blocker());
     if (type == "set") return std::make_shared<SetValidator>();
     if (type == "frozenset") return std::make_shared<FrozenSetValidator>();
     if (type == "deque") return std::make_shared<DequeValidator>();
@@ -339,6 +340,7 @@ static std::shared_ptr<Validator> build_from_element(
     if (type == "set") return std::make_shared<SetValidator>();
     if (type == "frozenset") return std::make_shared<FrozenSetValidator>();
     if (type == "deque") return std::make_shared<DequeValidator>();
+    if (type == "frozendict") throw SchemaError(frozendict_build_blocker());
 
     // Tuple with positional items
     if (type == "tuple") {
@@ -2202,6 +2204,12 @@ static std::shared_ptr<Validator> build_from_py_dict(
         tv->strict = strict_opt_py(schema, config);
         tv->fail_fast = py_bool(schema, "fail_fast");
         return tv;
+    }
+
+    // --- FrozenDict ---
+    // No validator to build: the guard reports why, matching Rust's build-time check.
+    if (type == "frozendict") {
+        throw SchemaError(frozendict_build_blocker());
     }
 
     // --- Dict ---

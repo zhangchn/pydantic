@@ -82,4 +82,29 @@ inline pybind11::object py_deque_new(const pybind11::handle& items,
     return py_deque_type()(items);
 }
 
+// `frozendict` became a builtin on Python 3.15; below that there is no type
+// to validate against (Rust's common::frozendict::get_frozendict_type).
+inline bool py_has_frozendict() {
+    static const bool present = [] {
+        try {
+            pybind11::getattr(pybind11::module_::import("builtins"), "frozendict");
+            return true;
+        } catch (const pybind11::error_already_set&) {
+            PyErr_Clear();
+            return false;
+        }
+    }();
+    return present;
+}
+
+// Why a `frozendict` schema fails to build. Rust's FrozenDictValidator::build
+// stops at get_frozendict_type; the port has no frozendict validator yet, so
+// even a 3.15 interpreter gets an error rather than a half-built type.
+inline const char* frozendict_build_blocker() {
+    if (!py_has_frozendict()) {
+        return "The `frozendict` builtin type is only available on Python 3.15 and above";
+    }
+    return "The `frozendict` type is not implemented in the C++ port yet";
+}
+
 }  // namespace pydantic_core

@@ -48,6 +48,7 @@ public:
         StringType,
         BytesType,
         DictType,
+        FrozenDictType,
         ListType,
         DequeType,
         TupleType,
@@ -314,6 +315,7 @@ public:
     static ErrorType string_type() { return ErrorType(ErrorType::Kind::StringType); }
     static ErrorType bytes_type() { return ErrorType(ErrorType::Kind::BytesType); }
     static ErrorType dict_type() { return ErrorType(ErrorType::Kind::DictType); }
+    static ErrorType frozen_dict_type() { return ErrorType(ErrorType::Kind::FrozenDictType); }
     static ErrorType list_type() { return ErrorType(ErrorType::Kind::ListType); }
     static ErrorType deque_type() { return ErrorType(ErrorType::Kind::DequeType); }
     static ErrorType tuple_type() { return ErrorType(ErrorType::Kind::TupleType); }

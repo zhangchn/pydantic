@@ -99,6 +99,9 @@ std::shared_ptr<Validator> ValidatorFactory::build(
     if (type == "list") {
         return std::make_shared<ListValidator>();
     }
+    if (type == "frozendict") {
+        throw SchemaError(frozendict_build_blocker());
+    }
     if (type == "dict") {
         return std::make_shared<DictValidator>();
     }

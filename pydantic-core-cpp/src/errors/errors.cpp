@@ -67,7 +67,8 @@ std::string json_message_for(const std::string& type_name, const std::string& ms
         return "Input should be a valid array";
     }
     if (type_name == "model_type" || type_name == "model_attributes_type" ||
-        type_name == "dict_type" || type_name == "dataclass_type") {
+        type_name == "dict_type" || type_name == "frozen_dict_type" ||
+        type_name == "dataclass_type") {
         return "Input should be an object";
     }
     if (type_name == "timedelta_type") return "Input should be a valid duration";

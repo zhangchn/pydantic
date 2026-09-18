@@ -53,6 +53,11 @@ TEST_CASE("PydanticKnownError shortcuts") {
     
     auto err4 = PydanticKnownError::string_type();
     CHECK(err4.kind() == ErrorType::Kind::StringType);
+
+    auto frozen_dict = PydanticKnownError::frozen_dict_type();
+    CHECK(frozen_dict.kind() == ErrorType::Kind::FrozenDictType);
+    CHECK(frozen_dict.type_name() == "frozen_dict_type");
+    CHECK(frozen_dict.message() == "Input should be a valid frozendict");
 }
 
 TEST_CASE("ValError construction") {
