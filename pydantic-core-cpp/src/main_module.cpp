@@ -1747,14 +1747,25 @@ struct SerNode {
                     return v;
                 }, py::arg("value"), py::arg("index_key") = py::none());
                 if (type == "function-wrap") {
-                    if (info_arg) {
-                        auto info = make_ser_info(round_trip, "", context, include, exclude);
-                        return apply_return_ser(py_func(value, handler, py::cast(info)), json_mode, exc_none, round_trip,
-                                                include, exclude, by_alias, exclude_unset, exclude_defaults, context);
-                    } else {
-                        return apply_return_ser(py_func(value, handler), json_mode, exc_none, round_trip,
-                                                include, exclude, by_alias, exclude_unset, exclude_defaults, context);
+                    py::object wrapped;
+                    try {
+                        if (info_arg) {
+                            auto info = make_ser_info(round_trip, "", context, include, exclude);
+                            wrapped = py_func(value, handler, py::cast(info));
+                        } else {
+                            wrapped = py_func(value, handler);
+                        }
+                    } catch (const py::error_already_set& e) {
+                        // Rust sends every wrap error through on_error, so
+                        // anything that is not an "unexpected value" -- including
+                        // the PydanticOmit the handler itself may raise -- comes
+                        // back as a PydanticSerializationError naming the
+                        // function rather than raw.
+                        if (!handle_ser_call_error(e, func_name)) throw;
+                        return SerNode::serialize_any_value(value, exc_none, round_trip, json_mode);
                     }
+                    return apply_return_ser(wrapped, json_mode, exc_none, round_trip, include, exclude,
+                                            by_alias, exclude_unset, exclude_defaults, context);
                 }
                 try {
                     if (info_arg) {
