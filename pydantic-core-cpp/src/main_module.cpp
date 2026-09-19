@@ -4132,7 +4132,21 @@ static SerRef build_ser_impl(const py::dict& schema,
         }
         // For function-plain with serialization override, build children from original schema for fallback
         if (type != "function-plain" || has_ser_dict) {
-            auto c = sub();
+            // Rust Function*Serializer::build takes the serializer underneath a
+            // function wrapper from the serialization override whenever that
+            // names a schema of its own, and falls back to the outer schema only
+            // then.  A ValidateAs field says "serialize the annotated type",
+            // which is not the collection the validator ran over: keeping the
+            // validator's inner schema handed the validated int to a list
+            // serializer.
+            SerRef c;
+            if (has_ser_dict) {
+                try {
+                    if (ser_dict.contains("schema") && !ser_dict["schema"].is_none())
+                        c = build_ser(ser_dict["schema"].cast<py::dict>(), defs, memo);
+                } catch (...) { PyErr_Clear(); }
+            }
+            if (!c) c = sub();
             if (!c && has_ser_dict) {
                 // Rust builds a serializer from the *serialization* schema, so a
                 // wrap serializer on a leaf that has no inner schema of its own
