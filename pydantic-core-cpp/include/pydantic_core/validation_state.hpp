@@ -153,6 +153,7 @@ public:
         s.self_instance_ = self_instance_;
         s.input_type_ = input_type_;
         s.exactness_ = exactness_;
+        s.fields_set_count_ = fields_set_count_;
         s.context_ = context_;
         s.coerce_strings_ = coerce_strings_;
         s.location_ = location_;
@@ -166,6 +167,19 @@ public:
     // Exactness tracking
     Exactness exactness() const { return exactness_; }
     void set_exactness(Exactness e) { exactness_ = e; }
+
+    // Rust's ValidationState::fields_set_count (validation_state.rs:165): the
+    // number of declared fields a model, typed dict or dataclass took from the
+    // input, which a smart union compares between its choices.  Rust notes it is
+    // not the length of `model_fields_set` -- that one counts extra fields under
+    // extra='allow', this tally does not.  None until such a validator reports a
+    // count, which is how a union tells "matched with fields" from "matched
+    // without any".
+    std::optional<int> fields_set_count() const { return fields_set_count_; }
+    void set_fields_set_count(std::optional<int> count) { fields_set_count_ = count; }
+    // Rust add_fields_set: `*self.fields_set_count.get_or_insert(0) += n`, so a
+    // second validator inside the same choice adds to the first one's tally.
+    void add_fields_set(int count) { fields_set_count_ = fields_set_count_.value_or(0) + count; }
 
     // Rust lowers exactness monotonically: a choice that already needed a
     // coercion stays lax, and a state outside a union (Unknown) is left alone.
@@ -261,6 +275,7 @@ public:
         child.self_instance_ = self_instance_;
         child.input_type_ = input_type_;
         child.exactness_ = exactness_;
+        child.fields_set_count_ = fields_set_count_;
         child.context_ = context_;
         child.coerce_strings_ = coerce_strings_;
 #ifdef HAS_PYBIND11
@@ -280,6 +295,7 @@ public:
         child.self_instance_ = self_instance_;
         child.input_type_ = input_type_;
         child.exactness_ = exactness_;
+        child.fields_set_count_ = fields_set_count_;
         child.context_ = context_;
         child.coerce_strings_ = coerce_strings_;
 #ifdef HAS_PYBIND11
@@ -299,6 +315,7 @@ private:
     const void* self_instance_ = nullptr;
     InputType input_type_ = InputType::Python;
     Exactness exactness_ = Exactness::Unknown;
+    std::optional<int> fields_set_count_;
     void* context_ = nullptr;
     bool coerce_strings_ = false;
 #ifdef HAS_PYBIND11

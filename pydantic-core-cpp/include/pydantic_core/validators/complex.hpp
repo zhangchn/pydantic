@@ -107,12 +107,17 @@ public:
             return 1;
         };
         const bool smart = !left_to_right_;
+        const std::optional<int> old_fields_set_count = state.fields_set_count();
         std::optional<std::shared_ptr<void>> best_value;
         std::optional<Exactness> best_exactness;
+        std::optional<int> best_fields_set_count;
         std::string best_type_name;
         for (size_t i = 0; i < validators_.size(); ++i) {
             auto& validator = validators_[i];
-            if (smart) state.set_exactness(Exactness::Exact);
+            if (smart) {
+                state.set_exactness(Exactness::Exact);
+                state.set_fields_set_count(std::nullopt);
+            }
             auto result = validator->validate(input, state);
             if (result.is_ok()) {
                 if (!smart) {
@@ -120,16 +125,32 @@ public:
                     return result;
                 }
                 const Exactness exactness = state.exactness();
-                if (exactness == Exactness::Exact) {
-                    // An exact choice wins outright, as Rust does.
+                const std::optional<int> fields_set_count = state.fields_set_count();
+                if (exactness == Exactness::Exact && !fields_set_count.has_value()) {
+                    // An exact choice that set no fields wins outright, as Rust
+                    // does.  A model that matched does not: it reported how many
+                    // fields the input carried, and a later choice may carry more.
                     state.set_exactness(old_exactness);
+                    state.set_fields_set_count(old_fields_set_count);
                     last_type_name_ = validator->effective_result_name();
                     return result;
                 }
-                if (!best_exactness.has_value() ||
-                    exactness_rank(exactness) > exactness_rank(*best_exactness)) {
+                bool better = !best_exactness.has_value();
+                if (!better) {
+                    // Rust (union.rs:145): a field tally beats exactness when both
+                    // choices have one and they differ, so the model whose fields the
+                    // input actually filled in wins; exactness decides otherwise.
+                    if (best_fields_set_count.has_value() && fields_set_count.has_value() &&
+                        *best_fields_set_count != *fields_set_count) {
+                        better = *best_fields_set_count < *fields_set_count;
+                    } else {
+                        better = exactness_rank(exactness) > exactness_rank(*best_exactness);
+                    }
+                }
+                if (better) {
                     best_value = result.value();
                     best_exactness = exactness;
+                    best_fields_set_count = fields_set_count;
                     best_type_name = validator->effective_result_name();
                 }
                 continue;
@@ -158,8 +179,12 @@ public:
             }
         }
         state.set_exactness(old_exactness);
+        state.set_fields_set_count(old_fields_set_count);
         if (best_value.has_value()) {
             state.floor_exactness(*best_exactness);
+            // Rust hands the winner's tally on to the enclosing choice, so a union
+            // inside a union is ranked on the fields its member set.
+            if (best_fields_set_count.has_value()) state.add_fields_set(*best_fields_set_count);
             last_type_name_ = best_type_name;
             return ValResult<std::shared_ptr<void>>(*best_value);
         }

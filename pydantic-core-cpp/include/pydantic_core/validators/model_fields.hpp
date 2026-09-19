@@ -355,6 +355,12 @@ public:
             } catch (...) {}
         };
 
+        // Rust's fields_set_count (model_fields.rs:314): the declared fields this
+        // input carried, which a smart union compares between choices.  Extra
+        // fields do not count, so a model with extra='allow' that swallowed keys
+        // it does not know about does not outscore the model they belong to.
+        int fields_set_count = 0;
+
         for (const auto& name : field_order_) {
             const auto& field = fields_.at(name);
             // Error location uses the alias when loc_by_alias (default true),
@@ -437,6 +443,7 @@ public:
 
                     output.fields[name] = std::move(fv);
                     output.fields_set.insert(name);
+                    ++fields_set_count;
                     output.field_order.push_back(name);
                     add_to_data(name, output.fields.at(name));
                 } else if (field_use_default) {
@@ -448,6 +455,7 @@ public:
                     if (fv.value) {
                         output.fields[name] = std::move(fv);
                         output.fields_set.insert(name);
+                        ++fields_set_count;
                         output.field_order.push_back(name);
                         add_to_data(name, output.fields.at(name));
                     }
@@ -495,6 +503,9 @@ public:
         if (combined_errors.has_line_errors() && !combined_errors.line_errors().empty()) {
             return combined_errors;
         }
+
+        // Rust reports the tally only for a model that validated (model_fields.rs:529).
+        state.add_fields_set(fields_set_count);
 
         return ValResult<std::shared_ptr<void>>(
             std::make_shared<ValidatedModelFieldsOutput>(std::move(output))
