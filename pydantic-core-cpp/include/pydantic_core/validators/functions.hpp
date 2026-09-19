@@ -158,6 +158,25 @@ inline bool exception_is_use_default(PyObject* exc) {
     return false;
 }
 
+// The omit signal travels the same way, matched by name along the MRO for the
+// same reason: user code raises whichever PydanticOmit it imported, and Rust
+// turns that one into the ValError::Omit signal rather than an error
+// (function.rs:517-518) so an enclosing container or default schema can catch
+// it -- and only answers with a SchemaError when nothing could.
+inline bool exception_is_omit(PyObject* exc) {
+    if (!exc) return false;
+    try {
+        py::object type = py::reinterpret_borrow<py::object>(
+            reinterpret_cast<PyObject*>(Py_TYPE(exc)));
+        for (py::handle klass : type.attr("__mro__")) {
+            if (py::str(klass.attr("__name__")).cast<std::string>() == "PydanticOmit") return true;
+        }
+    } catch (...) {
+        PyErr_Clear();
+    }
+    return false;
+}
+
 // Rust convert_err casts a raised ValidationError (validation_exception.rs) and
 // takes its own line errors, so a validator function that re-raises a nested
 // ValidationError keeps each inner type, location, message and rejected value
@@ -259,6 +278,11 @@ inline ValError function_error_from_exception(py::error_already_set& e, const In
     // Rust convert_err: a PydanticUseDefault raised by the function is not an
     // error at all but the ValError::UseDefault signal, which the enclosing
     // default schema turns into the field's default value.
+    if (exception_is_omit(exc_value.ptr())) {
+        e.restore();
+        PyErr_Clear();
+        return ValError::omit();
+    }
     if (exception_is_use_default(exc_value.ptr())) {
         e.restore();
         PyErr_Clear();
@@ -661,7 +685,7 @@ inline py::object materialize_model_instance(ModelValidator* model_validator,
 // must propagate rather than be mistaken for a signature mismatch.
 inline ValError propagate_function_error(py::error_already_set& e, const Input& input,
                                          ValidationState& state) {
-    if (exception_is_use_default(e.value().ptr())) {
+    if (exception_is_use_default(e.value().ptr()) || exception_is_omit(e.value().ptr())) {
         return function_error_from_exception(e, input, state);
     }
     if (e.matches(PyExc_ValueError) || e.matches(PyExc_AssertionError)) {
