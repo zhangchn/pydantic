@@ -347,4 +347,21 @@ private:
 };
 #endif
 
+// Rust's ValidationState::scoped_clear_field_error (validation_state.rs:111):
+// a container starts its own field loop with a clean flag, so a sibling that
+// already failed cannot make this container's data-aware default factory refuse
+// to run, and the outer answer is restored when the container returns.
+class ScopedClearFieldError {
+public:
+    explicit ScopedClearFieldError(ValidationState& state)
+        : state_(state), previous_(state.has_field_error) {
+        state_.has_field_error = false;
+    }
+    ~ScopedClearFieldError() { state_.has_field_error = previous_; }
+
+private:
+    ValidationState& state_;
+    bool previous_;
+};
+
 } // namespace pydantic_core

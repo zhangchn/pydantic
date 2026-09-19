@@ -386,11 +386,18 @@ def _parse_structured_errors(msg: str) -> list[dict] | None:
         # stored index-aligned, keyed by ctx name.
         ctx_objs = getattr(_main, '_last_error_ctx_objs', None)
         for i, err in enumerate(raw):
+            input_val = _parse_input(err['input'])
+            if err['type'] == 'default_factory_not_called':
+                # Rust builds this one error with the PydanticUndefined singleton
+                # as its input (with_default.rs:189); the C++ pipeline carries
+                # only the rendered form, so the object goes back in here. Gated
+                # on the type so an input that really is that string stays one.
+                input_val = PydanticUndefined
             d = {
                 'type': err['type'],
                 'loc': tuple(err['loc']),
                 'msg': _ERR_MSG_MAP.get(err['msg'], err['msg']),
-                'input': _parse_input(err['input']),
+                'input': input_val,
             }
             if err.get('ctx'):
                 def _parse_ctx_value(k, v):

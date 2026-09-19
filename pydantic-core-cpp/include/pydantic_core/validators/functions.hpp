@@ -1386,10 +1386,36 @@ public:
             raw = py::none();
             has_raw = true;
         } else if (!default_factory_.is_none()) {
+            // The flag is checked here rather than by whoever asks for the
+            // default, because Rust checks it inside WithDefaultValidator itself
+            // (with_default.rs:184). A dataclass field's default comes straight
+            // through here, so checking it only in the model-fields loop leaves
+            // that path running a factory whose data argument is incomplete.
+            if (default_factory_takes_data_ && state.has_field_error) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::DefaultFactoryNotCalled),
+                    state.location(),
+                    "PydanticUndefined"
+                );
+            }
             try {
-                raw = default_factory_();
+                // Rust passes state.data when the factory takes it and an empty
+                // dict when there is none (with_default.rs:55-62).
+                if (default_factory_takes_data_) {
+                    py::object data = state.data();
+                    raw = default_factory_(data.is_none() ? py::dict() : data);
+                } else {
+                    raw = default_factory_();
+                }
                 has_raw = true;
             } catch (py::error_already_set& e) {
+                if (default_factory_takes_data_) {
+                    // Rust lets a factory's own exception out of default_value
+                    // (`result?`) instead of turning it into custom_error, and a
+                    // data-aware factory failing on incomplete data is a
+                    // developer error the caller has to see.
+                    throw;
+                }
                 e.restore();
                 PyErr_Clear();
                 return ValError::line_error(
@@ -1451,6 +1477,7 @@ public:
     void set_default_is_none(bool v) { default_is_none_ = v; }
     bool has_none_default() const { return default_is_none_; }
     void set_default_factory(py::object f) { default_factory_ = std::move(f); }
+    void set_default_factory_takes_data(bool v) { default_factory_takes_data_ = v; }
     bool has_default_factory() const { return !default_factory_.is_none(); }
     void set_default_type(const std::string& t) { default_type_ = t; }
     void set_validate_default(bool v) { validate_default_ = v; }
@@ -1472,6 +1499,7 @@ private:
     std::string default_value_str_;
     std::string default_type_;
     bool default_is_none_ = false;
+    bool default_factory_takes_data_ = false;
     bool validate_default_ = false;
     std::string on_error_;
     py::object default_factory_ = py::none();
@@ -1917,6 +1945,11 @@ public:
         py::dict arg_data;
         ScopedValidationData data_scope(state,
             dataclass_mode ? py::object(arg_data) : py::object(py::none()));
+        // Rust opens the dataclass loop with scoped_clear_field_error right
+        // after scoping the data dict (dataclass.rs:160), so the params of this
+        // call answer to their own failures only.
+        std::optional<ScopedClearFieldError> clear_field_error;
+        if (dataclass_mode) clear_field_error.emplace(state);
         const std::optional<std::string> outer_field_name = state.field_name();
 
         for (size_t index = 0; index < parameters.size(); ++index) {
@@ -1986,6 +2019,7 @@ public:
                         // collecting it as a line error.
                         return ValResult<std::shared_ptr<void>>(result.error());
                     }
+                    if (dataclass_mode) state.has_field_error = true;
                     collect_line_errors(result.error(), line_errors);
                 }
             } else if (kw_value) {
@@ -2013,6 +2047,7 @@ public:
                         // collecting it as a line error.
                         return ValResult<std::shared_ptr<void>>(result.error());
                     }
+                    if (dataclass_mode) state.has_field_error = true;
                     collect_line_errors(result.error(), line_errors);
                 }
             } else {
@@ -2039,12 +2074,16 @@ public:
                     // A default exists but failed validation (e.g.
                     // validate_default=True) — report that error, not a
                     // missing-parameter error.
+                    if (dataclass_mode) state.has_field_error = true;
                     collect_line_errors(def.error(), line_errors);
                 } else if (!p.init) {
                     // Rust: init=false fields with no default are simply
                     // absent from the output (Err(Omit) => continue);
                     // __post_init__ may populate them afterwards.
                 } else if (dataclass_mode) {
+                    // Rust counts a param with no default at all as a field
+                    // error (dataclass.rs:267).
+                    state.has_field_error = true;
                     add_error(ErrorType(ErrorType::Kind::Missing),
                               param_loc(p), input.as_error_value().repr);
                 } else if (p.positional_only) {

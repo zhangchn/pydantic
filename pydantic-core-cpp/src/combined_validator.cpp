@@ -1909,6 +1909,10 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         }
         if (schema.contains("default_factory") && !schema["default_factory"].is_none()) {
             wd->set_default_factory(schema["default_factory"]);
+            if (schema.contains("default_factory_takes_data") &&
+                py::isinstance<py::bool_>(schema["default_factory_takes_data"])) {
+                wd->set_default_factory_takes_data(schema["default_factory_takes_data"].cast<bool>());
+            }
         }
         // validate_default comes from the schema or the top-level config
         bool validate_default = false;

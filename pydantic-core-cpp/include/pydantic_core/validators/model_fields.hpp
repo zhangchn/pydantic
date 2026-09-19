@@ -319,6 +319,12 @@ public:
         ValError combined_errors(ValError::Kind::LineErrors);
         std::set<std::string> used_keys;
         state.clear_hard_error();
+        // Rust opens every container validation with scoped_clear_field_error
+        // (model_fields.rs:331 and :565, typed_dict.rs:180), so the flag a
+        // sibling container already raised does not carry into this one -- a
+        // union member that failed must not make the next member's data-aware
+        // default factory refuse to run.
+        ScopedClearFieldError clear_field_error(state);
 
         // Partial mode: compute the last key of the input dict (Rust:
         // typed_dict.rs partial_last_key).  Only the field whose first lookup
@@ -454,6 +460,14 @@ public:
                         original_input.as_error_value().repr
                     );
                     combined_errors.merge(std::move(err));
+                    // Rust's Python path counts a field that has no default at
+                    // all as a field error (model_fields.rs:389), so a later
+                    // data-aware default factory is refused instead of reading
+                    // validated data that is missing a field. Its JSON path
+                    // (model_fields.rs:671) does not, so only a Python input does.
+                    if (dynamic_cast<const PythonInput*>(&original_input)) {
+                        state.has_field_error = true;
+                    }
                 } else {
                     ValidatedModelFieldsOutput::FieldValue fv;
                     resolve_field_default(field, output, state, fv, combined_errors);
@@ -569,8 +583,8 @@ public:
         // Rust skips a data-aware default factory once a field has already
         // failed: its data argument would be incomplete, so it reports
         // default_factory_not_called rather than running it (and raising an
-        // unhelpful KeyError/None for the caller). Note the flag is dedicated -
-        // a missing-field error alone must not suppress the factory.
+        // unhelpful KeyError for the caller). A required field that was simply
+        // absent counts as one of those failures, exactly like a failed field.
         if (field.default_factory_takes_data && state.has_field_error) {
             ErrorType et(ErrorType::Kind::DefaultFactoryNotCalled);
             combined_errors.merge(ValError::line_error(
@@ -1706,6 +1720,7 @@ public:
         ValidatedModelFieldsOutput output;
         std::set<std::string> fields_set;
         ValError combined_errors(ValError::Kind::LineErrors);
+        ScopedClearFieldError clear_field_error(state);
 
         auto* json_dict = dynamic_cast<const JsonValidatedDict*>(dict.get());
         std::set<std::string> used_keys;
