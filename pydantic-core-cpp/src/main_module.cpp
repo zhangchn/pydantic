@@ -556,6 +556,11 @@ static bool json_leaf_convert(const std::string& type, const py::object& value,
             long days = value.attr("days").cast<long>();
             long seconds = value.attr("seconds").cast<long>();
             long microseconds = value.attr("microseconds").cast<long>();
+            if (ser_json_timedelta == "milliseconds") {
+                long long micros = (long long)(days * 86400 + seconds) * 1000000LL + microseconds;
+                out = py::float_(micros / 1000.0);
+                return true;
+            }
             if (ser_json_timedelta == "float") {
                 double total = days * 86400.0 + seconds + microseconds / 1000000.0;
                 out = py::float_(total);
@@ -2282,11 +2287,14 @@ struct SerNode {
         // timedelta: ISO 8601 duration format or float
         if (type == "timedelta") {
             try {
-                if (ser_json_timedelta == "float") {
+                if (ser_json_timedelta == "float" || ser_json_timedelta == "milliseconds") {
                     long days = value.attr("days").cast<long>();
                     long seconds = value.attr("seconds").cast<long>();
                     long microseconds = value.attr("microseconds").cast<long>();
                     double total = days * 86400.0 + seconds + microseconds / 1000000.0;
+                    if (ser_json_timedelta == "milliseconds") {
+                        total = ((long long)(days * 86400 + seconds) * 1000000LL + microseconds) / 1000.0;
+                    }
                     // Format as number without trailing zeros
                     std::string s = std::to_string(total);
                     auto dot = s.find('.');
@@ -3652,6 +3660,24 @@ using SerMemo = std::unordered_map<const void*, SerRef>;
 static thread_local int _build_ser_depth = 0;
 static thread_local int _build_ser_truncated = 0;
 
+// Rust resolves a single temporal mode for every temporal type: an explicit
+// ser_json_temporal decides a timedelta's shape too -- even when it says
+// iso8601 -- and only when that key is absent does ser_json_timedelta get a
+// say.  The answer is given back in ser_json_timedelta's own vocabulary.
+static std::string timedelta_mode_from_config(const py::dict& config) {
+    if (config.contains("ser_json_temporal")) {
+        std::string temporal = config["ser_json_temporal"].cast<std::string>();
+        if (temporal == "seconds") return "float";
+        if (temporal == "milliseconds") return "milliseconds";
+        return "iso8601";
+    }
+    if (config.contains("ser_json_timedelta") &&
+        config["ser_json_timedelta"].cast<std::string>() == "float") {
+        return "float";
+    }
+    return "iso8601";
+}
+
 static SerRef build_ser_impl(const py::dict& schema,
                         std::unordered_map<std::string, SerRef>& defs,
                         SerMemo& memo);
@@ -4261,8 +4287,8 @@ static SerRef build_ser_impl(const py::dict& schema,
                 if (config.contains("ser_json_bytes")) {
                     n->ser_json_bytes = config["ser_json_bytes"].cast<std::string>();
                 }
-                if (config.contains("ser_json_timedelta")) {
-                    n->ser_json_timedelta = config["ser_json_timedelta"].cast<std::string>();
+                if (config.contains("ser_json_temporal") || config.contains("ser_json_timedelta")) {
+                    n->ser_json_timedelta = timedelta_mode_from_config(config);
                 }
                 if (config.contains("ser_json_temporal")) {
                     n->ser_json_temporal = config["ser_json_temporal"].cast<std::string>();
@@ -4314,8 +4340,8 @@ public:
                         n->ser_json_bytes = c["ser_json_bytes"].cast<std::string>();
                         ser_json_bytes_ = n->ser_json_bytes;
                     }
-                    if (c.contains("ser_json_timedelta")) {
-                        n->ser_json_timedelta = c["ser_json_timedelta"].cast<std::string>();
+                    if (c.contains("ser_json_temporal") || c.contains("ser_json_timedelta")) {
+                        n->ser_json_timedelta = timedelta_mode_from_config(c);
                         ser_json_timedelta_ = n->ser_json_timedelta;
                     }
                     if (c.contains("ser_json_temporal")) {
@@ -4358,8 +4384,8 @@ public:
                         n->ser_json_bytes = c["ser_json_bytes"].cast<std::string>();
                         ser_json_bytes_ = n->ser_json_bytes;
                     }
-                    if (c.contains("ser_json_timedelta")) {
-                        n->ser_json_timedelta = c["ser_json_timedelta"].cast<std::string>();
+                    if (c.contains("ser_json_temporal") || c.contains("ser_json_timedelta")) {
+                        n->ser_json_timedelta = timedelta_mode_from_config(c);
                         ser_json_timedelta_ = n->ser_json_timedelta;
                     }
                     if (c.contains("ser_json_temporal")) {
