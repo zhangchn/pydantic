@@ -1914,8 +1914,11 @@ public:
     std::string var_kwargs_mode = "uniform";          // "uniform" | "unpacked-typed-dict"
     std::shared_ptr<Validator> var_kwargs_validator;  // **kwargs
     ExtraBehavior extra = ExtraBehavior::Forbid;
-    bool validate_by_alias = true;
-    bool validate_by_name = false;
+    // Unset means the schema/config said nothing, which is not the same as a
+    // false (Rust holds Option<bool> and resolves it against the call's
+    // by_alias/by_name on top of it).
+    std::optional<bool> validate_by_alias;
+    std::optional<bool> validate_by_name;
     // Dataclass-args mode: missing parameters report the field-style
     // 'missing' error at the parameter-name location (Rust's
     // DataClassArgsValidator), not call-style missing_argument.
@@ -1979,6 +1982,12 @@ public:
         if (dataclass_mode) clear_field_error.emplace(state);
         const std::optional<std::string> outer_field_name = state.field_name();
 
+        // Rust resolves the lookup rules once per call: the call's own
+        // by_alias/by_name wins over what the config said, which in turn wins
+        // over the default (alias only).
+        const bool by_alias = state.by_alias().value_or(validate_by_alias.value_or(true));
+        const bool by_name = state.by_name().value_or(validate_by_name.value_or(false));
+
         for (size_t index = 0; index < parameters.size(); ++index) {
             const Parameter& p = parameters[index];
             state.set_field_name(p.name);
@@ -1999,12 +2008,12 @@ public:
             if (p.init && !p.positional_only) {
                 std::vector<std::string> lookup_keys;
                 bool has_alias = !p.validation_aliases.empty();
-                if (validate_by_alias) {
+                if (by_alias) {
                     for (const auto& a : p.validation_aliases) {
                         lookup_keys.push_back(a);
                     }
                 }
-                if (!has_alias || validate_by_name) {
+                if (!has_alias || by_name) {
                     lookup_keys.push_back(p.name);
                 }
                 std::unordered_set<std::string> seen_keys;
@@ -2020,7 +2029,7 @@ public:
 
             if (pos_value && kw_value) {
                 add_error(ErrorType(ErrorType::Kind::MultipleArgumentValues),
-                          param_loc(p), py::repr(*kw_value).cast<std::string>());
+                          param_loc(p, false), py::repr(*kw_value).cast<std::string>());
             } else if (pos_value) {
                 state.location().push(static_cast<int64_t>(index));
                 PythonInput py_in(*pos_value);
@@ -2125,16 +2134,16 @@ public:
                     // error (dataclass.rs:267).
                     state.has_field_error = true;
                     add_error(ErrorType(ErrorType::Kind::Missing),
-                              param_loc(p), input.as_error_value().repr);
+                              param_loc(p, by_alias), input.as_error_value().repr);
                 } else if (p.positional_only) {
                     add_error(ErrorType(ErrorType::Kind::MissingPositionalOnlyArgument),
                               loc_of_index(static_cast<int64_t>(index)), input.as_error_value().repr);
                 } else if (p.positional) {
                     add_error(ErrorType(ErrorType::Kind::MissingArgument),
-                              param_loc(p), input.as_error_value().repr);
+                              param_loc(p, by_alias), input.as_error_value().repr);
                 } else {
                     add_error(ErrorType(ErrorType::Kind::MissingKeywordOnlyArgument),
-                              param_loc(p), input.as_error_value().repr);
+                              param_loc(p, by_alias), input.as_error_value().repr);
                 }
             }
         }
@@ -2293,10 +2302,11 @@ private:
     }
 
     // Error location for keyword arguments: the first validation alias when
-    // present, otherwise the parameter name (matches Rust's error_loc with
-    // loc_by_alias).
-    static Location param_loc(const Parameter& p) {
-        if (!p.validation_aliases.empty()) {
+    // aliases are what gets looked up, otherwise the parameter name (matches
+    // Rust's error_loc, which only answers to the alias for LookupType::Alias
+    // and LookupType::Both).
+    static Location param_loc(const Parameter& p, bool by_alias = true) {
+        if (by_alias && !p.validation_aliases.empty()) {
             return loc_of_name(p.validation_aliases.front());
         }
         return loc_of_name(p.name);

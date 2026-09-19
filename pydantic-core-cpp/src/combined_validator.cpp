@@ -3108,6 +3108,15 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         v->extra = extra_behavior_from_string(extra_str);
         v->dataclass_mode = true;
         v->dataclass_name_ = py_str(schema, "dataclass_name", "");
+        // Rust reads the lookup rules from the config (dataclass.rs:130), so a
+        // dataclass that validates by field name only keeps its __init__
+        // signature working when every field carries an alias.
+        if (config.contains("validate_by_alias") && !config["validate_by_alias"].is_none()) {
+            try { v->validate_by_alias = config["validate_by_alias"].cast<bool>(); } catch (...) {}
+        }
+        if (config.contains("validate_by_name") && !config["validate_by_name"].is_none()) {
+            try { v->validate_by_name = config["validate_by_name"].cast<bool>(); } catch (...) {}
+        }
         if (schema.contains("collect_init_only") && py::isinstance<py::bool_>(schema["collect_init_only"])) {
             v->collect_init_only_ = schema["collect_init_only"].cast<bool>();
         }
