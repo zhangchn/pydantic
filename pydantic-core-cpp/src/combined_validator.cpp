@@ -14,6 +14,17 @@ namespace py = pybind11;
 
 namespace pydantic_core {
 
+// A timedelta constraint goes through the same lax coercion as an input, and the
+// schema is refused when the value is not a timedelta at all -- Rust does this
+// while building, so the validator only ever compares timedeltas (timedelta.rs:31-40).
+static py::object timedelta_constraint_from_schema(const py::object& value, const char* key) {
+    auto parsed = PythonInput(value).validate_timedelta(false);
+    if (parsed.is_err()) {
+        throw py::value_error(std::string("'") + key + "' must be coercible to a timedelta instance");
+    }
+    return py_timedelta_object(parsed.value().value().as_raw());
+}
+
 // Helper: convert string to ExtraBehavior
 static ExtraBehavior extra_behavior_from_string(const std::string& s) {
     if (s == "allow") return ExtraBehavior::Allow;
@@ -1616,7 +1627,19 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         }
         return v;
     }
-    if (type == "timedelta") return std::make_shared<TimedeltaValidator>(is_strict_py(schema, config));
+    if (type == "timedelta") {
+        auto v = std::make_shared<TimedeltaValidator>(is_strict_py(schema, config));
+        for (const char* k : {"gt", "lt", "ge", "le"}) {
+            if (schema.contains(k) && !schema[k].is_none()) {
+                py::object c = timedelta_constraint_from_schema(schema[k], k);
+                if (std::string(k) == "gt") v->gt = c;
+                else if (std::string(k) == "lt") v->lt = c;
+                else if (std::string(k) == "ge") v->ge = c;
+                else v->le = c;
+            }
+        }
+        return v;
+    }
 
     // --- URL validators ---
     if (type == "url") {

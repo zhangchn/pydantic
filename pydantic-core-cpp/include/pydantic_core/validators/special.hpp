@@ -603,10 +603,77 @@ private:
     bool strict_ = false;
 };
 
+inline py::object py_timedelta_object(const Timedelta& td) {
+    return py::module_::import("datetime").attr("timedelta")(
+        py::arg("days") = td.days,
+        py::arg("seconds") = td.seconds,
+        py::arg("microseconds") = td.microseconds);
+}
+
+// A timedelta constraint is spelled out rather than repr'd: "1 hour", "2 days
+// and 3 hours", "0 seconds" (Rust timedelta.rs:114-156).  The three fields are
+// the normalized ones datetime.timedelta keeps, so only days goes negative and
+// the hour/minute/second breakdown always reads forward.
+static std::string timedelta_human_readable(const py::object& td) {
+    auto part = [](long n, const char* unit) {
+        return std::to_string(n) + " " + unit + (n == 1 ? "" : "s");
+    };
+    long days = td.attr("days").cast<long>();
+    long seconds = td.attr("seconds").cast<long>();
+    long micros = td.attr("microseconds").cast<long>();
+    std::vector<std::string> parts;
+    if (days != 0) parts.push_back(part(days, "day"));
+    if (long hours = seconds / 3600) parts.push_back(part(hours, "hour"));
+    if (long minutes = (seconds % 3600) / 60) parts.push_back(part(minutes, "minute"));
+    if (long rest = seconds % 60) parts.push_back(part(rest, "second"));
+    if (micros != 0) parts.push_back(part(micros, "microsecond"));
+    if (parts.empty()) return "0 seconds";
+    std::string out;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i) out += " and ";
+        out += parts[i];
+    }
+    return out;
+}
+
+// Rust checks the four constraints in le/lt/ge/gt order against the timedelta it
+// just produced, and names that timedelta -- not the raw input -- as the input
+// of the error (timedelta.rs:80-104).
+static std::optional<ValError> apply_timedelta_constraints(
+    const py::object& py_td,
+    const py::object& gt, const py::object& lt,
+    const py::object& ge, const py::object& le,
+    ValidationState& state) {
+    auto py_cmp = [](const py::object& a, const py::object& b, int op) -> bool {
+        PyObject* r = PyObject_RichCompare(a.ptr(), b.ptr(), op);
+        if (!r) {
+            PyErr_Clear();
+            return false;
+        }
+        bool out = (r != Py_False);
+        Py_DECREF(r);
+        return out;
+    };
+    auto failed = [&](ErrorType::Kind kind, const char* key, const py::object& bound) {
+        ErrorType err(kind, key, timedelta_human_readable(bound));
+        return ValError::line_error(err, state.location(), py::repr(py_td).cast<std::string>(), py_td);
+    };
+    if (!le.is_none() && !py_cmp(py_td, le, Py_LE)) return failed(ErrorType::Kind::LessThanEqual, "le", le);
+    if (!lt.is_none() && !py_cmp(py_td, lt, Py_LT)) return failed(ErrorType::Kind::LessThan, "lt", lt);
+    if (!ge.is_none() && !py_cmp(py_td, ge, Py_GE)) return failed(ErrorType::Kind::GreaterThanEqual, "ge", ge);
+    if (!gt.is_none() && !py_cmp(py_td, gt, Py_GT)) return failed(ErrorType::Kind::GreaterThan, "gt", gt);
+    return std::nullopt;
+}
+
 // TimedeltaValidator - validates timedelta values
 class TimedeltaValidator : public Validator {
 public:
     explicit TimedeltaValidator(bool strict = false) : strict_(strict) {}
+
+    py::object gt = py::none();
+    py::object lt = py::none();
+    py::object ge = py::none();
+    py::object le = py::none();
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -618,6 +685,18 @@ public:
         }
         state.floor_exactness(result.value().exactness());
         auto match = std::move(result.value());
+
+        if (!gt.is_none() || !lt.is_none() || !ge.is_none() || !le.is_none()) {
+            try {
+                auto err = apply_timedelta_constraints(py_timedelta_object(match.value().as_raw()),
+                                                      gt, lt, ge, le, state);
+                if (err) return *err;
+            } catch (py::error_already_set& e) {
+                e.restore();
+                PyErr_Clear();
+            }
+        }
+
         return ValResult<std::shared_ptr<void>>(
             std::make_shared<EitherTimedelta>(std::move(match.value()))
         );
@@ -625,6 +704,12 @@ public:
 
     std::string name() const override { return "timedelta"; }
 
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        visit_ref(visit, arg, gt);
+        visit_ref(visit, arg, lt);
+        visit_ref(visit, arg, ge);
+        visit_ref(visit, arg, le);
+    }
 private:
     bool strict_ = false;
 };
