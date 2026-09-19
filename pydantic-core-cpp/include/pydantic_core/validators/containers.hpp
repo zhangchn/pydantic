@@ -1268,6 +1268,8 @@ private:
 class GeneratorValidator : public Validator {
 public:
     std::shared_ptr<Validator> items_schema;
+    std::optional<size_t> min_length;
+    std::optional<size_t> max_length;
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -1335,7 +1337,8 @@ public:
         // Create the Python-level lazy iterator
         py::module_ mod = py::module_::import("pydantic_core_cpp._pydantic_core_cpp");
         py::object LazyValidator = mod.attr("_LazyValidator");
-        py::object py_iter = LazyValidator(source_iter, validate_fn, schema_repr);
+        py::object py_iter =
+            LazyValidator(source_iter, validate_fn, schema_repr, min_length, max_length, py_in);
 
         return ValResult<std::shared_ptr<void>>(
             std::make_shared<py::object>(py_iter)

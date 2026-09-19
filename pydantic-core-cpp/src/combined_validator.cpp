@@ -2247,6 +2247,10 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         if (schema.contains("items_schema")) {
             v->items_schema = build_from_py_dict(schema["items_schema"].cast<py::dict>(), config, definitions);
         }
+        if (schema.contains("min_length"))
+            v->min_length = schema["min_length"].cast<size_t>();
+        if (schema.contains("max_length"))
+            v->max_length = schema["max_length"].cast<size_t>();
         return v;
     }
 

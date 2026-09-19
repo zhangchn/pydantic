@@ -4,6 +4,7 @@
 #include <datetime.h>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <unordered_set>
 #include <set>
@@ -4754,6 +4755,32 @@ void enable_gc_traversal(py::handle type, traverseproc traverse) {
     ready->tp_free = &PyObject_GC_Del;
 }
 
+// The length limits are measured on the whole iteration, so the error names the
+// iterable that was handed in, not the item that closed it (Rust generator.rs:128-152).
+static ValError iterator_length_error(ErrorType&& err, const py::object& input_obj) {
+    return ValError::line_error(std::move(err), Location(), py::repr(input_obj).cast<std::string>());
+}
+
+// An iterator error is raised from __next__, long after validate_python returned, so
+// nothing has seeded the module-level channel the wrapper reads ctx objects back
+// from -- the hand-off validate_python does before it throws has to happen here too.
+static void publish_error_ctx(const ValError& val_error) {
+    try {
+        py::module_ m = py::module_::import("__main__");
+        py::list err_ctx_objs;
+        if (val_error.has_line_errors()) {
+            for (const auto& le : val_error.line_errors()) {
+                py::dict ctx_d;
+                for (const auto& [k, v] : le->error_type.context_objects()) {
+                    ctx_d[py::str(k)] = v;
+                }
+                err_ctx_objs.append(std::move(ctx_d));
+            }
+        }
+        m.attr("_last_error_ctx_objs") = std::move(err_ctx_objs);
+    } catch (...) {}
+}
+
 PYBIND11_MODULE(_pydantic_core_cpp, m) {
     m.doc() = "pydantic-core C++ implementation";
     m.attr("__version__") = get_version();
@@ -4917,17 +4944,63 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
         py::function validate_fn;
         std::string schema_repr;
         size_t index = 0;
+        std::optional<size_t> min_length;
+        std::optional<size_t> max_length;
+        py::object input_obj;
     };
     py::class_<LazyValidator>(m, "_LazyValidator")
-        .def(py::init([](py::object source, py::function validate_fn, std::string schema_repr) {
-            return std::make_unique<LazyValidator>(LazyValidator{source, validate_fn, schema_repr, 0});
-        }))
+        .def(py::init([](py::object source, py::function validate_fn, std::string schema_repr,
+                         std::optional<size_t> min_length, std::optional<size_t> max_length,
+                         py::object input) {
+            auto self = std::make_unique<LazyValidator>();
+            self->source = std::move(source);
+            self->validate_fn = std::move(validate_fn);
+            self->schema_repr = std::move(schema_repr);
+            self->min_length = min_length;
+            self->max_length = max_length;
+            self->input_obj = std::move(input);
+            return self;
+        }),
+             py::arg("source"), py::arg("validate_fn"), py::arg("schema_repr"),
+             py::arg("min_length") = std::nullopt, py::arg("max_length") = std::nullopt,
+             py::arg("input") = py::none())
         .def("__iter__", [](LazyValidator& self) -> py::object {
             return py::cast(self);
         })
         .def("__next__", [](LazyValidator& self) -> py::object {
-            py::object item = py::module_::import("builtins").attr("next")(self.source);
+            py::object item;
+            try {
+                item = py::module_::import("builtins").attr("next")(self.source);
+            } catch (py::error_already_set& e) {
+                if (!e.matches(PyExc_StopIteration))
+                    throw;
+                // The source ran out: too few items to satisfy the lower bound.
+                if (self.min_length && self.index < *self.min_length) {
+                    ErrorType err(ErrorType::Kind::TooShort);
+                    err.context()["field_type"] = "Generator";
+                    err.set_ctx_object("min_length", std::to_string(*self.min_length),
+                                       py::int_(static_cast<int>(*self.min_length)));
+                    err.set_ctx_object("actual_length", std::to_string(self.index),
+                                       py::int_(static_cast<int>(self.index)));
+                    ValError val_error = iterator_length_error(std::move(err), self.input_obj);
+                    publish_error_ctx(val_error);
+                    throw ValidationError("ValidatorIterator", InputType::Python, val_error, self.input_obj);
+                }
+                throw;
+            }
             size_t idx = self.index++;
+            // Too many: the item was pulled but never validated, so the count that
+            // overshoots is reported as "more" rather than a number.
+            if (self.max_length && idx >= *self.max_length) {
+                ErrorType err(ErrorType::Kind::TooLong);
+                err.context()["field_type"] = "Generator";
+                err.set_ctx_object("max_length", std::to_string(*self.max_length),
+                                   py::int_(static_cast<int>(*self.max_length)));
+                err.set_ctx_object("actual_length", "more", py::none());
+                ValError val_error = iterator_length_error(std::move(err), self.input_obj);
+                publish_error_ctx(val_error);
+                throw ValidationError("ValidatorIterator", InputType::Python, val_error, self.input_obj);
+            }
             return self.validate_fn(item, idx);
         })
         .def("__repr__", [](LazyValidator& self) -> std::string {
@@ -4941,6 +5014,7 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
         if (auto* lazy = bound_cpp_object<LazyValidator>(obj)) {
             visit_ref(traverse_fn, arg, lazy->source);
             visit_ref(traverse_fn, arg, lazy->validate_fn);
+            visit_ref(traverse_fn, arg, lazy->input_obj);
         }
         return 0;
     });
