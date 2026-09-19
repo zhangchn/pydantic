@@ -3046,6 +3046,28 @@ private:
         return cur;
     }
 
+    // Rust SerFields::serialize turns a key the schema never declared into an
+    // "Unexpected field" mismatch while a union picks a member under strict
+    // checks, so the union moves on instead of quietly dropping the key.  Only a
+    // typed-dict that takes extras keeps unknown keys (Rust
+    // FieldsMode::TypedDictAllow), and the __pydantic_* bookkeeping the port
+    // carries in its own dict representation is not a field either.
+    void ser_reject_unexpected_fields(const py::dict& main) const {
+        if (g_ser_check != 1 || extra_allowed) return;
+        for (const auto& item : main) {
+            std::string key;
+            try { key = py::str(item.first).cast<std::string>(); } catch (...) { continue; }
+            if (fields.count(key) || computed_fields_.count(key)) continue;
+            if (key == "__pydantic_fields_set__" || key == "__pydantic_defaults__" ||
+                key == "__pydantic_extra__")
+                continue;
+            py::object exc_type =
+                py::module_::import("pydantic_core_cpp").attr("PydanticSerializationUnexpectedValue");
+            PyErr_SetString(exc_type.ptr(), ("Unexpected field `" + key + "`").c_str());
+            throw py::error_already_set();
+        }
+    }
+
     py::object serialize_fields(const py::object& value, bool exc_none, bool round_trip = false,
                                  const py::object& include = py::none(),
                                  const py::object& exclude = py::none(),
@@ -3059,6 +3081,7 @@ private:
         if (py::isinstance<py::dict>(value)) main = value.cast<py::dict>();
         else if (py_hasattr(value, "__dict__")) main = py::getattr(value, "__dict__").cast<py::dict>();
         py::object missing_obj = missing_sentinel_obj();
+        ser_reject_unexpected_fields(main);
 
         for (const auto& k : field_order) {
             const auto& ser = fields.at(k);
@@ -3318,6 +3341,7 @@ private:
         if (py::isinstance<py::dict>(value)) main = value.cast<py::dict>();
         else if (py_hasattr(value, "__dict__")) main = py::getattr(value, "__dict__").cast<py::dict>();
         py::object missing_obj = missing_sentinel_obj();
+        ser_reject_unexpected_fields(main);
 
         for (const auto& k : field_order) {
             const auto& ser = fields.at(k);
