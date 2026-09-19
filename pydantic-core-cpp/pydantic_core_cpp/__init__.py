@@ -138,7 +138,9 @@ def _errors_with_include_url(
         if result and not getattr(_main, '_last_assignment_error', False):
             raw_input = getattr(_main, '_last_raw_input', None)
             own_inputs = getattr(_main, '_last_error_input_objs', None)
-            if raw_input is not None:
+            # A line error that knows its own input does not need the top-level
+            # one to be around, so either channel is enough to start looking.
+            if raw_input is not None or own_inputs is not None:
                 for i, err in enumerate(result):
                     cur = err.get('input')
                     # Only restore the raw object when the C++ stored an
@@ -161,6 +163,8 @@ def _errors_with_include_url(
                             if matches:
                                 result[i]['input'] = own
                                 continue
+                    if raw_input is None:
+                        continue
                     loc = err.get('loc', ())
                     if isinstance(loc, tuple) and len(loc) > 0:
                         val = _lookup_value_by_loc(raw_input, loc)

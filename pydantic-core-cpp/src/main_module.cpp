@@ -4792,6 +4792,22 @@ static void publish_error_ctx(const ValError& val_error) {
     } catch (...) {}
 }
 
+// The json entry point throws from its own lambda, so the index-aligned input
+// objects validate_python publishes before throwing have to be seeded here too
+// -- a payload with no literal form (a bytearray) is otherwise lost.
+static void publish_error_inputs(const ValError& val_error) {
+    try {
+        py::module_ m = py::module_::import("__main__");
+        py::list err_input_objs;
+        if (val_error.has_line_errors()) {
+            for (const auto& le : val_error.line_errors()) {
+                err_input_objs.append(le->raw_input_obj.ptr() ? py::object(le->raw_input_obj) : py::none());
+            }
+        }
+        m.attr("_last_error_input_objs") = std::move(err_input_objs);
+    } catch (...) {}
+}
+
 PYBIND11_MODULE(_pydantic_core_cpp, m) {
     m.doc() = "pydantic-core C++ implementation";
     m.attr("__version__") = get_version();
@@ -5324,8 +5340,13 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                 std::string err_msg = diagnosis.value_or(py::str(e.value()).cast<std::string>());
                 ErrorType error_type(ErrorType::Kind::JsonInvalid, "error", err_msg);
                 Location location;
-                ValError val_error = ValError::line_error(error_type, location, js);
-                throw ValidationError(self.title(), InputType::Json, val_error, false);
+                // Rust hands the payload object itself to the error (map_json_err takes
+                // `input`), so what gets rendered has to be its repr: the undecoded text
+                // '[1,\n2,\n3,]' is read back through literal_eval as the list [1, 2, 3].
+                ValError val_error =
+                    ValError::line_error(error_type, location, py::repr(jd).cast<std::string>(), jd);
+                publish_error_inputs(val_error);
+                throw ValidationError(self.title(), InputType::Json, val_error, jd);
             }
             std::optional<ExtraBehavior> extra_opt;
             if (!extra.is_none()) {
