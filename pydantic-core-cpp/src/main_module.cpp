@@ -900,6 +900,25 @@ static py::object make_serialization_iterator(const py::object& value, const Ser
 
 // Apply call-time include/exclude to a key (or index).  Mirrors the Rust
 // FilterLogic::filter with default_filter = true (no schema-level filter).
+// Rust SerializationCallable::__call__ takes an index_key only as an int or a
+// str and refuses anything else with a TypeError before the include/exclude
+// filter is consulted.  Letting a nonsense key reach the filter made it read as
+// an omission, so a bare PydanticOmit came out of the serializer instead of the
+// type error the caller asked about.
+static void ser_check_index_key(const py::object& index_key) {
+    if (py::isinstance<py::str>(index_key) || py::isinstance<py::int_>(index_key)) return;
+    std::string repr;
+    try {
+        repr = py::repr(index_key).cast<std::string>();
+    } catch (const py::error_already_set&) {
+        PyErr_Clear();
+        repr = "<unknown>";
+    }
+    PyErr_SetString(PyExc_TypeError,
+                    ("'index_key' is expected to be an integer or a string, got '" + repr + "'").c_str());
+    throw py::error_already_set();
+}
+
 static SerFilterResult apply_ser_filter(const py::object& key, const py::object& include,
                                         const py::object& exclude) {
     SerFilterResult out;
@@ -1639,6 +1658,7 @@ struct SerNode {
                         py::object handler = py::cpp_function([child, root_val, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context](const py::object& v, py::object index_key) -> py::object {
                             py::object inc = include, exc = exclude;
                             if (!index_key.is_none()) {
+                                ser_check_index_key(index_key);
                                 auto f = apply_ser_filter(index_key, include, exclude);
                                 if (f.omit) throw PydanticOmit();
                                 inc = f.include;
@@ -1717,6 +1737,7 @@ struct SerNode {
                 py::object handler = py::cpp_function([this, value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context](const py::object& v, py::object index_key) -> py::object {
                     py::object inc = include, exc = exclude;
                     if (!index_key.is_none()) {
+                        ser_check_index_key(index_key);
                         auto f = apply_ser_filter(index_key, include, exclude);
                         if (f.omit) throw PydanticOmit();
                         inc = f.include;
@@ -2493,6 +2514,7 @@ struct SerNode {
                         py::object handler = py::cpp_function([child, root_val, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context](const py::object& v, py::object index_key) -> py::object {
                             py::object inc = include, exc = exclude;
                             if (!index_key.is_none()) {
+                                ser_check_index_key(index_key);
                                 auto f = apply_ser_filter(index_key, include, exclude);
                                 if (f.omit) throw PydanticOmit();
                                 inc = f.include;
@@ -3227,6 +3249,7 @@ private:
                         py::object handler = py::cpp_function([ser, fv, exc_none, round_trip, next, by_alias, exclude_unset, exclude_defaults, context](const py::object& v, py::object index_key) -> py::object {
                             py::object inc = next.include, exc = next.exclude;
                             if (!index_key.is_none()) {
+                                ser_check_index_key(index_key);
                                 auto f = apply_ser_filter(index_key, next.include, next.exclude);
                                 if (f.omit) throw PydanticOmit();
                                 inc = f.include;
@@ -3479,6 +3502,7 @@ private:
                         py::object handler = py::cpp_function([ser, fv, ensure_ascii, round_trip, next, by_alias, exclude_unset, exclude_defaults, exc_none, context](const py::object& v, py::object index_key) -> py::object {
                             py::object inc = next.include, exc = next.exclude;
                             if (!index_key.is_none()) {
+                                ser_check_index_key(index_key);
                                 auto f = apply_ser_filter(index_key, next.include, next.exclude);
                                 if (f.omit) throw PydanticOmit();
                                 inc = f.include;
