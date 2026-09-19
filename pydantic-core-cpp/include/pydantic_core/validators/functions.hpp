@@ -744,7 +744,10 @@ public:
                                 const auto& fv = mfo->fields.at(key);
                                 fields_out[py::str(key)] = value_to_python_with_type(fv.value, fv.type_name);
                             }
-                            py::object extra_obj = py::none();
+                            // extra='allow' hands on a dict even when it stayed empty,
+                            // which is what leaves __pydantic_extra__ a dict and not None.
+                            py::object extra_obj = mfo->extra_allowed
+                                                       ? py::object(py::dict()) : py::object(py::none());
                             if (!mfo->extra.empty()) {
                                 py::dict extra_dict;
                                 for (const auto& pair : mfo->extra) {

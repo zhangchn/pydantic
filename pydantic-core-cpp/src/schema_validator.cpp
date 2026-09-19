@@ -1085,7 +1085,7 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
                         fields_set.add(py::str(fname));
                     }
                     out[py::str("__pydantic_fields_set__")] = std::move(fields_set);
-                    if (!mfo->extra.empty()) {
+                    if (mfo->extra_allowed || !mfo->extra.empty()) {
                         py::dict extra_dict;
                         for (const auto& [key, fv] : mfo->extra) {
                             extra_dict[py::str(key)] = value_to_python_with_type(fv.value, fv.type_name);
@@ -1280,7 +1280,7 @@ py::object SchemaValidator::result_to_python(const std::shared_ptr<void>& result
                         fields_set.add(py::str(fname));
                     }
                     out[py::str("__pydantic_fields_set__")] = std::move(fields_set);
-                    if (!mfo->extra.empty()) {
+                    if (mfo->extra_allowed || !mfo->extra.empty()) {
                         py::dict extra_dict;
                         for (const auto& [key, fv] : mfo->extra) {
                             extra_dict[py::str(key)] = value_to_python_with_type(fv.value, fv.type_name);

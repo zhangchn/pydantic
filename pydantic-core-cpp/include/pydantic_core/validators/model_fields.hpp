@@ -94,6 +94,7 @@ struct ValidatedModelFieldsOutput : public TypedResult {
     std::vector<std::string> field_order;                // Fields in declaration order
     std::vector<std::pair<std::string, FieldValue>> extra; // Extra fields (if allow), insertion order
     std::set<std::string> fields_set;                    // Names of fields that were in input
+    bool extra_allowed = false;                          // extra='allow': __pydantic_extra__ is a dict even when empty
 
     const char* result_type() const override { return "model_fields"; }
 };
@@ -1005,6 +1006,10 @@ protected:
         if (behavior == ExtraBehavior::Ignore) {
             return;
         }
+        // extra='allow' keeps an extras dict even when nothing extra turned up, which
+        // is what makes __pydantic_extra__ a dict rather than None on a model that was
+        // given none (Rust model_fields.rs:184-187).
+        output.extra_allowed = (behavior == ExtraBehavior::Allow);
 
         // Try JsonValidatedDict path
         auto* json_dict = dynamic_cast<const JsonValidatedDict*>(&dict);
