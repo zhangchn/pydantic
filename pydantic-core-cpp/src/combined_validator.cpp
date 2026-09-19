@@ -4,6 +4,7 @@
 #include "pydantic_core/validators/model_fields.hpp"
 #include "pydantic_core/validators/special.hpp"
 #include "pydantic_core/validators/functions.hpp"
+#include <cmath>
 #include <memory>
 #include <pybind11/pybind11.h>
 #include <simdjson.h>
@@ -1352,10 +1353,50 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             auto v = std::make_shared<ConstrainedIntValidator>();
             v->strict = is_strict_py(schema, config);
             auto get_i64 = [&](const char* k) -> std::optional<int64_t> {
-                if (!schema.contains(k)) return std::nullopt;
+                if (!schema.contains(k) || schema[k].is_none()) return std::nullopt;
                 py::object val = schema[k];
                 if (py::isinstance<py::int_>(val)) return val.cast<int64_t>();
-                return std::nullopt;
+                // Rust hands a bound to the same lax int validation a value gets
+                // (int.rs:16-31), so an integral float, a Decimal or an integer
+                // string all give a bound and anything else fails the build. A
+                // bound that is merely not an int_ was dropped here, so
+                // `ge=0.0` on an int validated the values it was written to
+                // refuse -- and said nothing about it.
+                std::string message = std::string("'") + k + "' must be coercible to an integer";
+                if (py::isinstance<py::str>(val)) {
+                    // The lax string form also reads "1.0", but only where it is
+                    // still exactly an integer: "0.0" is 0, while "0.5" and "1e3"
+                    // are refused rather than truncated.
+                    if (py::cast<std::string>(val).find('.') != std::string::npos) {
+                        try {
+                            double d = py::cast<double>(py::float_(val));
+                            if (d > -9.2e18 && d < 9.2e18 && std::floor(d) == d) {
+                                return static_cast<int64_t>(d);
+                            }
+                        } catch (py::error_already_set&) {
+                            PyErr_Clear();
+                        }
+                    }
+                    try {
+                        return py::int_(val).cast<int64_t>();
+                    } catch (py::error_already_set&) {
+                        PyErr_Clear();
+                        throw py::value_error(message);
+                    }
+                }
+                py::object coerced;
+                try {
+                    coerced = py::int_(val);
+                } catch (py::error_already_set&) {
+                    PyErr_Clear();
+                    throw py::value_error(message);
+                }
+                // int() truncates and Rust's coercion does not: 0.5 is not a
+                // bound of 0, it is a schema error.
+                int exact = PyObject_RichCompareBool(val.ptr(), coerced.ptr(), Py_EQ);
+                if (exact < 0) PyErr_Clear();
+                if (exact != 1) throw py::value_error(message);
+                return coerced.cast<int64_t>();
             };
             v->gt = get_i64("gt");
             v->ge = get_i64("ge");
