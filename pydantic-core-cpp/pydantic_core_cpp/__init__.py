@@ -1264,6 +1264,13 @@ class SchemaValidator:
             inner = schema.get("schema", {})
             return self._dict_to_model(data, inner)
 
+        if schema.get("type") == "missing-sentinel":
+            # The sentinel itself is the value; anything else is whatever the
+            # inner schema validated, so the result converts like the inner type.
+            if data is MISSING:
+                return data
+            return self._dict_to_model(data, schema.get("schema", {}))
+
         if schema.get("type") == "json-or-python":
             # Validation already picked a branch, so the Python branch describes
             # the shape the value ended up with.

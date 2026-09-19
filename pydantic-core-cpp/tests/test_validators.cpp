@@ -1765,6 +1765,12 @@ TEST_CASE("Validator - name() returns expected strings") {
     CHECK(NamedTupleValidator().display_name() == "named-tuple");
     CHECK(FractionValidator().name() == "fraction");
     CHECK(FractionValidator().display_name() == "fraction");
+    // "py_object" is the result-dispatch token; the sentinel alone has no
+    // inner value type to report.
+    CHECK(MissingSentinelValidator().name() == "py_object");
+    CHECK(MissingSentinelValidator().display_name() == "missing-sentinel");
+    CHECK(MissingSentinelValidator(std::make_shared<IntValidator>()).name() == "int");
+    CHECK(MissingSentinelValidator(std::make_shared<IntValidator>()).display_name() == "missing-sentinel[int]");
 }
 
 TEST_CASE("ValidatorFactory - build nullable schema from JSON") {

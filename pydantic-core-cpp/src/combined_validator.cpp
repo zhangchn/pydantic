@@ -1333,7 +1333,13 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
     // --- Scalar validators ---
     if (type == "any") return std::make_shared<AnyValidator>();
     if (type == "none") return std::make_shared<NoneValidator>();
-    if (type == "missing-sentinel") return std::make_shared<MissingSentinelValidator>();
+    if (type == "missing-sentinel") {
+        std::shared_ptr<Validator> inner;
+        if (schema.contains("schema")) {
+            inner = build_from_py_dict(schema["schema"].cast<py::dict>(), config, definitions);
+        }
+        return std::make_shared<MissingSentinelValidator>(inner);
+    }
     if (type == "bool") {
         auto v = std::make_shared<BoolValidator>();
         v->strict = is_strict_py(schema, config);

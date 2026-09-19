@@ -845,28 +845,70 @@ public:
     std::string name() const override { return "callable"; }
 };
 
-// MissingSentinelValidator - validates that input is the MISSING sentinel
+// MissingSentinelValidator - validates the MISSING sentinel, and whatever the
+// inner schema accepts for every other input. `int | MISSING` becomes a
+// 'missing-sentinel' schema that wraps the `int` schema, so without the inner
+// validator every non-sentinel input is refused.
 class MissingSentinelValidator : public Validator {
 public:
+    MissingSentinelValidator() = default;
+    explicit MissingSentinelValidator(std::shared_ptr<Validator> inner)
+        : inner_(std::move(inner)) {}
+
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
     ) override {
+        // Result conversion dispatches on the reported type name, and the two
+        // branches below produce different pointee types: the sentinel is a live
+        // py::object, anything else is the inner validator's own value.
+        last_type_name_.clear();
+
         py::object input_py = input.as_python_object();
         py::object missing = py::module_::import("pydantic_core_cpp").attr("MISSING");
         if (input_py.is(missing)) {
+            last_type_name_ = "py_object";
             return ValResult<std::shared_ptr<void>>(
                 std::make_shared<py::object>(input_py)
             );
         }
-        return ValError::line_error(
-            ErrorType(ErrorType::Kind::MissingSentinelError),
-            state.location(),
-            input.as_error_value().repr
-        );
+        // Without an inner schema the sentinel is the only valid input.
+        if (!inner_) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::MissingSentinelError),
+                state.location(),
+                input.as_error_value().repr
+            );
+        }
+        auto r = inner_->validate(input, state);
+        if (r.is_ok()) last_type_name_ = inner_->effective_result_name();
+        return r;
     }
 
-    std::string name() const override { return "py_object"; }
+    // Structural name, kept marker-free like the other wrappers: result
+    // conversion adds exactly one "maybe_wrapper:" marker itself, and a name
+    // that already carries one matches no handler.
+    std::string name() const override {
+        return inner_ ? inner_->name() : "py_object";
+    }
+
+    std::string effective_result_name() const override {
+        if (!last_type_name_.empty()) return last_type_name_;
+        return inner_ ? inner_->effective_result_name() : "py_object";
+    }
+
+    std::string display_name() const override {
+        return inner_ ? "missing-sentinel[" + inner_->display_name() + "]" : "missing-sentinel";
+    }
+
+    void visit_refs(RefVisitor visit, void* arg) const override {
+        if (!gc_detail::enter_node(this)) return;
+        if (inner_) inner_->visit_refs(visit, arg);
+    }
+
+private:
+    std::shared_ptr<Validator> inner_;
+    std::string last_type_name_;
 };
 
 } // namespace pydantic_core

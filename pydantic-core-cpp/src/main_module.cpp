@@ -1430,6 +1430,7 @@ struct SerNode {
         if (type == "missing-sentinel") {
             py::object missing = missing_sentinel_obj();
             if (value.is(missing)) return value;
+            if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
             py::object exc_type = py::module_::import("pydantic_core_cpp").attr("PydanticSerializationUnexpectedValue");
             PyErr_SetString(exc_type.ptr(), "Expected 'MISSING' sentinel");
             throw py::error_already_set();
@@ -2199,6 +2200,14 @@ struct SerNode {
         if (type == "nullable" || type == "nullable-union") {
             if (value.is_none()) return "null";
             if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
+        }
+        if (type == "missing-sentinel") {
+            // Rust MissingSentinelSerializer::serde_serialize: only the inner
+            // serializer produces JSON, the sentinel has no JSON form of its own.
+            if (!value.is(missing_sentinel_obj()) && !children.empty()) {
+                return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
+            }
+            throw std::runtime_error("'MISSING' can\'t be serialized to JSON");
         }
         if (type == "default" || type == "with-default") {
             if (value.is_none() && has_default_val) {
@@ -3860,7 +3869,8 @@ static SerRef build_ser_impl(const py::dict& schema,
 
     // Types with inner schema (schema key)
     if (type == "nullable" || type == "nullable-union" || type == "default" || type == "with-default" ||
-        type == "json" || type == "format" || type == "to-string" || type == "enum") {
+        type == "json" || type == "format" || type == "to-string" || type == "enum" ||
+        type == "missing-sentinel") {
         auto c = sub();
         if (c) node->children.push_back(c);
     }
