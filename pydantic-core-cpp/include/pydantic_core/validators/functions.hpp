@@ -2053,10 +2053,23 @@ public:
                 state.location().push(p.name);
                 PythonInput py_in(*kw_value);
                 py_in.set_current_location(state.location());
-                auto result = p.validator->validate(py_in, state);
+                // validate_strings hands a mapping of text over.  A dataclass field
+                // value that is a string is parsed the way a JSON payload would be
+                // rather than judged as a Python str (Rust validate_dataclass_args
+                // borrows StringMapping::String items; plain call arguments are not
+                // supported there at all, hence the dataclass_mode gate).
+                std::unique_ptr<Input> text_input;
+                const Input* field_input = &py_in;
+                if (dataclass_mode && state.coerce_strings() && py::isinstance<py::str>(*kw_value)) {
+                    auto parsed = std::make_unique<StringInput>(py::str(*kw_value).cast<std::string>());
+                    parsed->set_current_location(state.location());
+                    text_input = std::move(parsed);
+                    field_input = text_input.get();
+                }
+                auto result = p.validator->validate(*field_input, state);
                 state.location().pop();
                 if (result.is_ok()) {
-                    py::object conv = param_value_to_python(p.validator, result.value(), &*kw_value, py_in, state);
+                    py::object conv = param_value_to_python(p.validator, result.value(), &*kw_value, *field_input, state);
                     if (dataclass_mode) {
                         try { arg_data[py::str(p.name)] = conv; } catch (...) {}
                         if (p.init_only) {
