@@ -3257,7 +3257,7 @@ private:
                 try {
                     if (ser->type == "function-wrap") {
                         // For wrap mode, create a handler function
-                        py::object handler = py::cpp_function([ser, fv, exc_none, round_trip, next, by_alias, exclude_unset, exclude_defaults, context](const py::object& v, py::object index_key) -> py::object {
+                        py::object handler = py::cpp_function([ser, fv, json_mode, exc_none, round_trip, next, by_alias, exclude_unset, exclude_defaults, context](const py::object& v, py::object index_key) -> py::object {
                             py::object inc = next.include, exc = next.exclude;
                             if (!index_key.is_none()) {
                                 ser_check_index_key(index_key);
@@ -3266,8 +3266,13 @@ private:
                                 inc = f.include;
                                 exc = f.exclude;
                             }
+                            // The handler Rust gives a wrap function carries the
+                            // call's own state (SerializationCallable, function.rs:386)
+                            // and serializes with it (:494), so in a json call the
+                            // function is handed the JSON form -- an ISO string for a
+                            // datetime -- and can branch on info.mode.
                             if (!ser->children.empty()) {
-                                return ser->children[0]->to_python(v, false, exc_none, round_trip, inc, exc, by_alias, exclude_unset, exclude_defaults, context);
+                                return ser->children[0]->to_python(v, json_mode, exc_none, round_trip, inc, exc, by_alias, exclude_unset, exclude_defaults, context);
                             }
                             return v;
                         }, py::arg("value"), py::arg("index_key") = py::none());
@@ -4146,13 +4151,34 @@ static SerRef build_ser_impl(const py::dict& schema,
                         c = build_ser(ser_dict["schema"].cast<py::dict>(), defs, memo);
                 } catch (...) { PyErr_Clear(); }
             }
-            if (!c) c = sub();
             if (!c && has_ser_dict) {
                 // Rust builds a serializer from the *serialization* schema, so a
                 // wrap serializer on a leaf that has no inner schema of its own
                 // (is-instance) still knows what to serialize underneath.
                 try { c = build_ser(ser_dict["schema"].cast<py::dict>(), defs, memo); } catch (...) {}
             }
+            bool wants_outer = type != "function-plain" || node->when_used != "always";
+            if (!c && has_ser_dict && wants_outer) {
+                // An override that names no schema of its own sits ON a schema that
+                // does, and Rust serializes that one underneath it: the core schema
+                // copied without `serialization` (so the copy does not build this
+                // same override again) and without `ref`, which the definitions
+                // already know (function.rs:357, copy_outer_schema at :293).  Without
+                // it a wrap serializer on a datetime has nothing to hand its handler.
+                // A plain serializer only wants it when when_used can skip the call
+                // entirely -- that is Rust's fallback_serializer (function.rs:124).
+                // The copy is thrown away as soon as it is built, and the memo keys a
+                // cached serializer by the schema dict's address, so this goes to
+                // build_ser_impl: caching the copy would let the next field's copy
+                // land on the same address and be handed this field's serializer.
+                try {
+                    py::dict outer = schema.attr("copy")().cast<py::dict>();
+                    outer.attr("pop")("serialization", py::none());
+                    outer.attr("pop")("ref", py::none());
+                    c = build_ser_impl(outer, defs, memo);
+                } catch (...) { PyErr_Clear(); }
+            }
+            if (!c) c = sub();
             // Rust builds the fallback serializer from the outer schema, so a
             // nullable schema whose serializer is overridden must still map
             // None to null rather than hand None to the inner serializer.
