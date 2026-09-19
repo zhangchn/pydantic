@@ -786,6 +786,8 @@ public:
 class TupleValidator : public Validator {
 public:
     std::optional<bool> strict;
+    std::optional<size_t> min_length;
+    std::optional<size_t> max_length;
     bool variadic = false;  // If true, last item_schema is repeated for remaining items
     // A schema with items_schema and no variadic_item_index fixes the length,
     // including the empty tuple.
@@ -814,9 +816,13 @@ public:
         // suppress the last-partial-key errors.
         std::vector<std::shared_ptr<ValLineError>> errors;
         py::tuple result_tuple(tuple_size);
+        // Rust measures max_length against what it has pushed into the output
+        // (tuple.rs:246-265), and an item that failed was never pushed.
+        size_t pushed = 0;
         auto entries = tuple->entries();
         for (size_t i = 0; i < entries.size(); i++) {
             py::object element = tuple->get_item(i);
+            bool pushed_item = true;
             if (!items.empty()) {
                 size_t schema_idx = (variadic && i >= items.size()) ? items.size() - 1 : i;
                 if (schema_idx < items.size() && items[schema_idx]) {
@@ -828,6 +834,7 @@ public:
                     if (item_result.is_ok()) {
                         element = value_to_python_with_type(item_result.value(), items[schema_idx]->effective_result_name());
                     } else {
+                        pushed_item = false;
                         if (item_result.error().has_line_errors()) {
                             for (auto& le : item_result.error().line_errors()) {
                                 errors.push_back(le);
@@ -840,6 +847,18 @@ public:
                 }
             }
             result_tuple[i] = element;
+            if (pushed_item) pushed += 1;
+            // The limit is checked as the item lands, and answers with this one
+            // error instead of validating what is left of the input.
+            if (max_length.has_value() && pushed > max_length.value()) {
+                ErrorType err(ErrorType::Kind::TooLong);
+                err.context()["field_type"] = "Tuple";
+                err.set_ctx_object("max_length", std::to_string(max_length.value()),
+                                   py::int_(static_cast<int>(max_length.value())));
+                err.set_ctx_object("actual_length", std::to_string(tuple_size),
+                                   py::int_(static_cast<int>(tuple_size)));
+                return ValError::line_error(std::move(err), state.location(), input.as_error_value().repr);
+            }
         }
 
         // Enforce fixed tuple length (Rust: tuple.rs pushes Missing for absent
@@ -863,6 +882,19 @@ public:
                     state.pop_loc();
                 }
             }
+        }
+
+        // Rust checks min_length on the finished output, and joins it to the
+        // item errors rather than replacing them (tuple.rs:292-305).
+        if (min_length.has_value() && pushed < min_length.value()) {
+            ErrorType err(ErrorType::Kind::TooShort);
+            err.context()["field_type"] = "Tuple";
+            err.set_ctx_object("min_length", std::to_string(min_length.value()),
+                               py::int_(static_cast<int>(min_length.value())));
+            err.set_ctx_object("actual_length", std::to_string(pushed),
+                               py::int_(static_cast<int>(pushed)));
+            errors.push_back(std::make_shared<ValLineError>(
+                ValLineError{std::move(err), state.location(), input.as_error_value().repr}));
         }
 
         if (!errors.empty()) {

@@ -2280,6 +2280,8 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             tv->variadic = true;
         }
         tv->fixed = schema.contains("items_schema") && !schema.contains("variadic_item_index");
+        if (schema.contains("min_length")) tv->min_length = schema["min_length"].cast<size_t>();
+        if (schema.contains("max_length")) tv->max_length = schema["max_length"].cast<size_t>();
         tv->strict = strict_opt_py(schema, config);
         tv->fail_fast = py_bool(schema, "fail_fast");
         return tv;
