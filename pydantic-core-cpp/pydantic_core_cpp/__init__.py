@@ -1251,6 +1251,67 @@ class SchemaValidator:
 
         return classes
 
+    def _structured_choice_fields(self, node):
+        """The field names of a member that produces a field dict, and whether
+        it takes extras.
+
+        Walks down the wrappers that do not change the shape of the result (a
+        model node to its fields, a reference to the definition it points at) so
+        a union member is recognised whatever shape pydantic emitted it in.
+        (None, False) means the member produces no field dict at all, so it
+        cannot be recognised from the keys of a result.
+        """
+        allows_extra = False
+        for _ in range(8):
+            if not isinstance(node, dict):
+                return None, False
+            node_type = node.get("type")
+            config = node.get("config")
+            if isinstance(config, dict) and config.get("extra_fields_behavior") == "allow":
+                allows_extra = True
+            if node_type in ("model-fields", "typed-dict", "dataclass") and isinstance(node.get("fields"), dict):
+                return set(node["fields"]), allows_extra
+            if node_type == "definition-ref":
+                ref = node.get("schema_ref")
+                node = next((d for d in self._schema.get("definitions", []) if d.get("ref") == ref), None)
+                continue
+            if node_type in ("model", "dataclass", "typed-dict", "definitions", "default", "nullable",
+                             "json", "missing-sentinel"):
+                node = node.get("schema")
+                continue
+            if node_type == "json-or-python":
+                node = node.get("python_schema") or node.get("json_schema")
+                continue
+            return None, False
+        return None, False
+
+    def _union_result_owner(self, data, choices):
+        """Which union member a validated result dict came out of.
+
+        The C++ union hands back the winning member's field dict without saying
+        who produced it, and only that member can own every key in it: a sibling
+        with no such field could only have taken it as an extra, which is kept
+        under __pydantic_extra__ instead of beside the fields. When more than one
+        member could own it, the one that accounts for the most keys wins, and
+        the first of those -- the leftmost, as an exactly tied union resolves.
+        """
+        if not isinstance(data, dict):
+            return None
+        keys = {key for key in data if not key.startswith("__pydantic_")}
+        if not keys:
+            return None
+        owner = None
+        owned = 0
+        for choice in choices:
+            fields, allows_extra = self._structured_choice_fields(choice)
+            if not fields:
+                continue
+            if not fields.issuperset(keys) and not allows_extra:
+                continue
+            if len(fields & keys) > owned:
+                owner, owned = choice, len(fields & keys)
+        return owner
+
     def _dict_to_model(self, data, schema=None, call_post_init=True):
         """Recursively convert dicts to model instances based on schema."""
         if schema is None:
@@ -1384,29 +1445,35 @@ class SchemaValidator:
             return data
 
         if schema.get("type") == "union":
-            for choice in schema.get("choices", []):
-                if isinstance(choice, dict):
-                    # Skip function-wrapper choices: the function (e.g.
-                    # attrgetter('value') for use_enum_values) has already
-                    # produced the final value during C++ validation, and
-                    # unwrapping to the inner schema would wrongly re-convert
-                    # it (e.g. turning an enum value back into a member).
-                    if choice.get("type") in ("function-after", "function-before", "function-wrap"):
-                        continue
-                    # If the C++ validator reused an existing instance (exact
-                    # union-class match), keep it as-is
-                    cls = choice.get("cls")
-                    if cls is not None:
-                        try:
-                            if isinstance(data, cls):
-                                return data
-                        except TypeError:
-                            # A TypedDict class refuses instance checks, so the
-                            # structural conversion below decides instead.
-                            pass
-                    result = self._dict_to_model(data, choice)
-                    if result != data:
-                        return result
+            choices = [
+                choice for choice in schema.get("choices", [])
+                if isinstance(choice, dict)
+                # Skip function-wrapper choices: the function (e.g.
+                # attrgetter('value') for use_enum_values) has already
+                # produced the final value during C++ validation, and
+                # unwrapping to the inner schema would wrongly re-convert
+                # it (e.g. turning an enum value back into a member).
+                and choice.get("type") not in ("function-after", "function-before", "function-wrap")
+            ]
+            for choice in choices:
+                # If the C++ validator reused an existing instance (exact
+                # union-class match), keep it as-is
+                cls = choice.get("cls")
+                if cls is not None:
+                    try:
+                        if isinstance(data, cls):
+                            return data
+                    except TypeError:
+                        # A TypedDict class refuses instance checks, so the
+                        # structural conversion below decides instead.
+                        pass
+            owner = self._union_result_owner(data, choices)
+            if owner is not None:
+                return self._dict_to_model(data, owner)
+            for choice in choices:
+                result = self._dict_to_model(data, choice)
+                if result != data:
+                    return result
             return data
 
         # Now that schema is unwrapped, check data types
