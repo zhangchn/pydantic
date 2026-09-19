@@ -1436,6 +1436,12 @@ struct SerNode {
             PyErr_SetString(exc_type.ptr(), "Expected 'MISSING' sentinel");
             throw py::error_already_set();
         }
+        if (type == "ellipsis") {
+            if (value.is(py::ellipsis())) return value;
+            py::object exc_type = py::module_::import("pydantic_core_cpp").attr("PydanticSerializationUnexpectedValue");
+            PyErr_SetString(exc_type.ptr(), "Expected 'Ellipsis' object");
+            throw py::error_already_set();
+        }
         if (type == "nullable" || type == "nullable-union") {
             if (value.is_none()) return py::none();
             if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
@@ -2212,6 +2218,11 @@ struct SerNode {
                 return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
             }
             throw std::runtime_error("'MISSING' can\'t be serialized to JSON");
+        }
+        if (type == "ellipsis") {
+            // Rust EllipsisSerializer::serde_serialize (ellipsis.rs:63-68): the
+            // literal has no JSON spelling to fall back on.
+            throw PydanticSerializationError("Error serializing to JSON: 'Ellipsis' can't be serialized to JSON");
         }
         if (type == "default" || type == "with-default") {
             if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);

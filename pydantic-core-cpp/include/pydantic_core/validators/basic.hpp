@@ -911,4 +911,32 @@ private:
     std::string last_type_name_;
 };
 
+// EllipsisValidator - validates the `...` literal itself. Rust compares the
+// input by identity with Ellipsis (ellipsis.rs:39-42), so a value that merely
+// equals Ellipsis in some other spelling -- and every JSON input, which has no
+// spelling for it at all -- is refused.
+class EllipsisValidator : public Validator {
+public:
+    ValResult<std::shared_ptr<void>> validate(
+        const Input& input,
+        ValidationState& state
+    ) override {
+        py::object input_py = input.as_python_object();
+        if (input_py.is(py::ellipsis())) {
+            return ValResult<std::shared_ptr<void>>(
+                std::make_shared<py::object>(input_py)
+            );
+        }
+        return ValError::line_error(
+            ErrorType(ErrorType::Kind::EllipsisError),
+            state.location(),
+            input.as_error_value().repr
+        );
+    }
+
+    std::string name() const override { return "py_object"; }
+    std::string display_name() const override { return "ellipsis"; }
+    std::string debug_repr() const override { return "Ellipsis(EllipsisValidator)"; }
+};
+
 } // namespace pydantic_core

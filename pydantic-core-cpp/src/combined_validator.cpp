@@ -82,6 +82,7 @@ static std::shared_ptr<Validator> build_from_flat_dict(
     if (type == "any") return std::make_shared<AnyValidator>();
     if (type == "none") return std::make_shared<NoneValidator>();
     if (type == "missing-sentinel") return std::make_shared<MissingSentinelValidator>();
+    if (type == "ellipsis") return std::make_shared<EllipsisValidator>();
     if (type == "bool") {
         auto v = std::make_shared<BoolValidator>();
         auto it = schema.find("strict");
@@ -191,6 +192,7 @@ static std::shared_ptr<Validator> build_from_element(
     if (type == "any") return std::make_shared<AnyValidator>();
     if (type == "none") return std::make_shared<NoneValidator>();
     if (type == "missing-sentinel") return std::make_shared<MissingSentinelValidator>();
+    if (type == "ellipsis") return std::make_shared<EllipsisValidator>();
     if (type == "bool") {
         auto v = std::make_shared<BoolValidator>();
         auto it = flat_schema.find("strict");
@@ -1341,6 +1343,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         }
         return std::make_shared<MissingSentinelValidator>(inner);
     }
+    if (type == "ellipsis") return std::make_shared<EllipsisValidator>();
     if (type == "bool") {
         auto v = std::make_shared<BoolValidator>();
         v->strict = is_strict_py(schema, config);

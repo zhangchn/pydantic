@@ -73,6 +73,7 @@ public:
         BytesInvalidEncoding,
         SetItemNotHashable,
         MissingSentinelError,
+        EllipsisError,
         JsonType,
         
         // Integer constraint errors
