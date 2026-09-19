@@ -196,9 +196,13 @@ def _discriminator_tags(data, discriminator):
     pydantic spells an aliased discriminator as ``[['field', 'alias']]``, so a
     validated dict (keyed by field name) and a raw input (keyed by alias) are
     both resolvable without guessing which spelling survived validation.
+
+    A key that is absent is reported as _LOC_NOT_FOUND rather than None: a
+    discriminator whose value really is None (`field: None`) is a tag that
+    matches a choice, so None cannot double as "not here".
     """
     if isinstance(discriminator, str):
-        return [data.get(discriminator)] if isinstance(data, dict) else []
+        return [data.get(discriminator, _LOC_NOT_FOUND)] if isinstance(data, dict) else []
     if isinstance(discriminator, list):
         tags = []
         for path in discriminator:
@@ -206,13 +210,16 @@ def _discriminator_tags(data, discriminator):
             current = data
             for key in keys:
                 if not isinstance(current, dict):
-                    current = None
+                    current = _LOC_NOT_FOUND
                     break
-                current = current.get(key)
+                current = current.get(key, _LOC_NOT_FOUND)
             tags.append(current)
         return tags
     if callable(discriminator):
-        return [discriminator(data)]
+        # Rust refuses a None out of a discriminator function, so that None has
+        # nothing to match -- unlike a None read from a key that holds it.
+        tag = discriminator(data)
+        return [] if tag is None else [tag]
     return []
 
 
@@ -1433,7 +1440,7 @@ class SchemaValidator:
                 # either a key, a list of alternative key paths (an aliased field
                 # appears as both spellings) or a callable.
                 for tag in _discriminator_tags(data, schema.get("discriminator")):
-                    if tag is None:
+                    if tag is _LOC_NOT_FOUND:
                         continue
                     for key, choice_schema in (choices.items() if isinstance(choices, dict) else ()):
                         if not isinstance(choice_schema, dict):
