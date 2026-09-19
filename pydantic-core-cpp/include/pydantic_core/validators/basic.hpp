@@ -298,62 +298,139 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
-        py::object input_py = input.as_python_object();
+        // Rust asks the input itself (input_python.rs:705, input_json.rs:387,
+        // input_string.rs:272), and the three answer differently enough that the
+        // error type depends on where the value came from: a Python object is
+        // handed to the complex() constructor and an object that refuses it is a
+        // value of the wrong TYPE, while a JSON or validate_strings string is
+        // expected to be a complex string and fails for not parsing.  The two
+        // signals below have to be read together: a validate_strings input is a
+        // StringInput of its own, while JSON is decoded into Python objects before
+        // it is validated (main_module.cpp:5471), so what marks a JSON value is the
+        // state it travels with, not the input class holding it.
+        const InputType kind = input.input_type() == InputType::String
+                                   ? InputType::String
+                                   : state.input_type();
         py::object complex_cls = py::module_::import("builtins").attr("complex");
+        py::object value = input.as_python_object();
+        auto rejected = [&](ErrorType et) {
+            return ValError::line_error(et, state.location(), input.as_error_value().repr);
+        };
 
-        // If already a complex object, accept it
-        if (py::isinstance(input_py, complex_cls)) {
-            return ValResult<std::shared_ptr<void>>(
-                std::make_shared<py::object>(std::move(input_py))
-            );
-        }
-
-        if (state.strict_or(strict)) {
-            return ValError::line_error(
-                ErrorType(ErrorType::Kind::ComplexType),
-                state.location(),
-                input.as_error_value().repr
-            );
-        }
-
-        // Lax mode: coerce from string, number, or (real, imag) pair
-        try {
-            py::object result;
-            if (py::isinstance<py::str>(input_py) || py::isinstance<py::int_>(input_py) ||
-                py::isinstance<py::float_>(input_py)) {
-                result = complex_cls(input_py);
-            } else if (py::isinstance<py::tuple>(input_py) || py::isinstance<py::list>(input_py)) {
-                auto seq = py::cast<py::sequence>(input_py);
-                if (seq.size() == 2) {
-                    result = complex_cls(seq[0], seq[1]);
-                } else {
-                    return ValError::line_error(
-                        ErrorType(ErrorType::Kind::ComplexType),
-                        state.location(),
-                        input.as_error_value().repr
-                    );
-                }
-            } else {
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::ComplexType),
-                    state.location(),
-                    input.as_error_value().repr
-                );
+        if (kind == InputType::Json) {
+            // simdjson has no complex, so a JSON value reaches this arm as the
+            // Python object the parser produced; a JSON `true` is a bool, not a
+            // number, and Rust answers it with complex_type.
+            if (py::isinstance<py::bool_>(value)) return rejected(ErrorType(ErrorType::Kind::ComplexType));
+            if (py::isinstance<py::str>(value)) {
+                // A JSON string is parsed in strict mode too: Rust ignores strict
+                // here and asks the string itself (input_json.rs:389).
+                return parse_complex_string(value, input, state, complex_cls,
+                                            ErrorType::Kind::ComplexStrParsing, false);
             }
-            return ValResult<std::shared_ptr<void>>(
-                std::make_shared<py::object>(std::move(result))
-            );
-        } catch (py::error_already_set& e) {
-            e.restore();
+            // complex.rs:56 hands the input the strict that was baked at build
+            // time (is_strict(schema, config)), never the call's, so a
+            // validate_python(..., strict=True) does not reach this validator.
+            if (py::isinstance<py::int_>(value)) {
+                // jiter turns a literal of at most 18 digits into an Int and keeps a
+                // longer one as a big decimal, which Rust's complex arm has no case
+                // for (input_json.rs:396) and calls complex_type.  The port decodes
+                // JSON integers exactly, so it draws the line at the same digits
+                // rather than handing the constructor a number it rounds to a float.
+                // Rust asks this of the value before it asks anything about strict,
+                // so an oversized literal is the wrong type even in a strict schema.
+                if (!within_fast_int(value)) {
+                    return rejected(ErrorType(ErrorType::Kind::ComplexType));
+                }
+                if (strict) return rejected(ErrorType(ErrorType::Kind::ComplexStrParsing));
+                return coerced(complex_cls(value), state);
+            }
+            if (py::isinstance<py::float_>(value)) {
+                if (strict) return rejected(ErrorType(ErrorType::Kind::ComplexStrParsing));
+                return coerced(complex_cls(value), state);
+            }
+            return rejected(ErrorType(ErrorType::Kind::ComplexType));
+        }
+
+        if (kind == InputType::String) {
+            // A validate_strings input is a string or a mapping; only the string
+            // can be a complex string, and it is not coerced -- a mapping is the
+            // wrong type (input_string.rs:272).
+            return parse_complex_string(value, input, state, complex_cls,
+                                        ErrorType::Kind::ComplexStrParsing, true);
+        }
+
+        if (py::isinstance(value, complex_cls)) {
+            // Already a complex: Rust counts that as a strict match.
+            state.floor_exactness(Exactness::Strict);
+            return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(std::move(value)));
+        }
+        if (strict) {
+            // Rust reports an is_instance_of against complex, not a complex_type
+            // (input_python.rs:708) -- strict says what type it wanted.
+            return rejected(ErrorType(ErrorType::Kind::IsInstanceType, "class", "complex"));
+        }
+        if (py::isinstance<py::str>(value)) {
+            // A Python string that does not parse is NOT reported as a string
+            // parsing error: Rust says "give any acceptable value" instead, since
+            // a caller that passed a string here may have meant another type
+            // entirely (input_python.rs:721).  A string is coerced laxly.
+            auto parsed = try_complex(value, complex_cls);
+            if (parsed) return coerced(*parsed, state);
+        }
+        // Anything else goes to the constructor, which is how a Decimal, a
+        // Fraction or any object with __complex__ gets in (input_python.rs:733).
+        auto made = try_complex(value, complex_cls);
+        if (made) return coerced(*made, state);
+        return rejected(ErrorType(ErrorType::Kind::ComplexType));
+    }
+
+private:
+    static bool within_fast_int(const py::object& value) {
+        std::string digits = py::str(value).cast<std::string>();
+        if (!digits.empty() && digits.front() == '-') digits.erase(digits.begin());
+        return digits.size() <= 18;
+    }
+
+    static std::optional<py::object> try_complex(const py::object& arg, const py::object& complex_cls) {
+        try {
+            return complex_cls(arg);
+        } catch (const py::error_already_set& e) {
             PyErr_Clear();
-            return ValError::line_error(
-                ErrorType(ErrorType::Kind::ComplexStrParsing),
-                state.location(),
-                input.as_error_value().repr
-            );
+            return std::nullopt;
         }
     }
 
+    ValResult<std::shared_ptr<void>> coerced(py::object value, ValidationState& state) const {
+        state.floor_exactness(Exactness::Lax);
+        return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(std::move(value)));
+    }
+
+    // A string that has to BE a complex string: strict match on success, and the
+    // given error type when it does not parse.  Rust keeps a mapping input of a
+    // validate_strings schema out of this path -- it is the wrong type.
+    ValResult<std::shared_ptr<void>> parse_complex_string(
+        const py::object& value,
+        const Input& input,
+        ValidationState& state,
+        const py::object& complex_cls,
+        ErrorType::Kind kind,
+        bool mapping_is_type_error
+    ) const {
+        if (mapping_is_type_error && !py::isinstance<py::str>(value)) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::ComplexType), state.location(), input.as_error_value().repr);
+        }
+        auto parsed = try_complex(value, complex_cls);
+        if (!parsed) {
+            return ValError::line_error(
+                ErrorType(kind), state.location(), input.as_error_value().repr);
+        }
+        state.floor_exactness(Exactness::Strict);
+        return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(std::move(*parsed)));
+    }
+
+public:
     std::string name() const override { return "complex"; }
     std::string effective_result_name() const override { return "py_object"; }
 };
