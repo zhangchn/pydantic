@@ -1524,7 +1524,10 @@ struct SerNode {
             }
         }
         if (type == "default" || type == "with-default") {
-            if (value.is_none() && has_default_val) return default_val;
+            // Rust WithDefaultSerializer::to_python forwards the value untouched:
+            // a None field with a non-None default serializes as null, not as the
+            // default.  Whether the field is emitted at all is decided by the
+            // field loop (exclude_unset/exclude_defaults), not here.
             if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
         }
         if (type == "json") {
@@ -2210,10 +2213,6 @@ struct SerNode {
             throw std::runtime_error("'MISSING' can\'t be serialized to JSON");
         }
         if (type == "default" || type == "with-default") {
-            if (value.is_none() && has_default_val) {
-                if (!children.empty()) return children[0]->to_json(default_val, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
-                return infer_json(default_val, ensure_ascii, indent);
-            }
             if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
         }
         if (type == "to-string") {
@@ -3009,7 +3008,6 @@ private:
         while (cur) {
             const std::string& t = cur->type;
             if (t == "default" || t == "with-default") {
-                if (v.is_none() && cur->has_default_val) return nullptr;
                 cur = cur->children.empty() ? nullptr : cur->children[0];
             } else if (t == "lax-or-strict" || t == "definitions" || t == "definition-ref") {
                 cur = cur->children.empty() ? nullptr : cur->children[0];
