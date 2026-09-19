@@ -1219,7 +1219,7 @@ class SchemaValidator:
         # non-picklable values (e.g. ListEnum.a = [123]) and is slower. The
         # copy also strips ``cls`` keys in one pass (see _schema_copy_clean).
         cpp_schema = _schema_copy_clean(schema)
-        self._base = _SchemaValidatorBase(cpp_schema, config_dict)
+        self._base = _SchemaValidatorBase(cpp_schema, config_dict, _use_prebuilt)
 
     @staticmethod
     def _extract_model_classes(schema):

@@ -26,9 +26,12 @@ public:
     SchemaValidator(const std::string& schema_json,
                    const std::string& config_json = "");
 
-    // Constructor from Python dicts directly (like Rust — no JSON round-trip)
+    // Constructor from Python dicts directly (like Rust — no JSON round-trip).
+    // use_prebuilt matches the `_use_prebuilt` pydantic passes: rebuilds refuse
+    // to reuse a validator that is about to be replaced.
     SchemaValidator(const py::dict& schema,
-                   const py::dict& config);
+                   const py::dict& config,
+                   bool use_prebuilt = true);
 
     // Validate Python object (JSON string input) - legacy
     std::string validate_python(const std::string& input_json,
@@ -116,6 +119,12 @@ public:
 
     // The post_init method name from the schema (e.g. "model_post_init"), or empty
     const std::string& post_init() const { return post_init_; }
+
+    // The root validator, for another validator's tree to reuse (Rust
+    // validators/prebuilt.rs reaches into the SchemaValidator it holds).
+    std::shared_ptr<Validator> root_validator() const {
+        return validator_ ? validator_->base_validator() : nullptr;
+    }
 
     // Representation
     std::string repr() const;

@@ -590,6 +590,8 @@ inline py::object materialize_into_fn() {
 inline std::shared_ptr<Validator> model_validator_through_wrappers(const std::shared_ptr<Validator>& inner) {
     std::shared_ptr<Validator> cur = inner;
     while (cur) {
+        // A reused validator IS the model, it is just not a ModelValidator node.
+        if (auto aliased = cur->aliased_validator()) cur = aliased;
         if (dynamic_cast<ModelValidator*>(cur.get())) break;
         std::string cn = cur->name();
         if (cn == "function-wrap" || cn == "function-before") {

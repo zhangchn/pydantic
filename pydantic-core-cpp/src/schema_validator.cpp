@@ -29,7 +29,8 @@ SchemaValidator::SchemaValidator(const std::string& schema_json,
 
 // NEW: Constructor from Python dict directly (like Rust — no JSON serialization)
 SchemaValidator::SchemaValidator(const py::dict& schema,
-                                const py::dict& config)
+                                const py::dict& config,
+                                bool use_prebuilt)
     : schema_json_(""), config_json_("") {
     // Extract title from schema
     if (schema.contains("title")) {
@@ -44,7 +45,7 @@ SchemaValidator::SchemaValidator(const py::dict& schema,
     }
 
     try {
-        validator_ = SchemaBuilder::build_from_py(schema, config);
+        validator_ = SchemaBuilder::build_from_py(schema, config, use_prebuilt);
     } catch (const std::exception& e) {
         throw SchemaError(std::string("Error building \"") +
                           (schema.contains("type") ? py::str(schema["type"]).cast<std::string>() : "?") +

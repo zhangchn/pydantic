@@ -502,6 +502,20 @@ public:
     }
 
     std::string name() const override { return "model-fields"; }
+    // Rust's Debug of a model names every field's validator, which is how a
+    // reused (Prebuilt) validator shows up in SchemaValidator.__repr__.
+    std::string debug_repr() const override {
+        std::string out = "ModelFields(ModelFieldsValidator { fields: [";
+        for (size_t i = 0; i < field_order_.size(); ++i) {
+            auto it = fields_.find(field_order_[i]);
+            if (it == fields_.end()) continue;
+            if (i) out += ", ";
+            out += "Field { name: \"" + it->second.name + "\", validator: ";
+            out += it->second.schema ? it->second.schema->debug_repr() : "None";
+            out += " }";
+        }
+        return out + "] })";
+    }
 
     // Accessors for testing and schema building
     const std::unordered_map<std::string, FieldInfo>& fields() const { return fields_; }
@@ -1634,6 +1648,17 @@ public:
     const std::string& class_name() const { return class_name_; }
     bool frozen() const { return frozen_; }
     bool root_model() const { return root_model_; }
+    std::string debug_repr() const override {
+        std::string revalidate = "Never";
+        switch (revalidate_) {
+            case RevalidateInstances::Always: revalidate = "Always"; break;
+            case RevalidateInstances::SubclassInstances: revalidate = "SubclassInstances"; break;
+            default: break;
+        }
+        std::string out = "Model(ModelValidator { revalidate: " + revalidate + ", validator: ";
+        out += fields_validator_ ? fields_validator_->debug_repr() : "None";
+        return out + " })";
+    }
 
     std::string root_model_inner_name() const override {
         // A root model reports its root value's type (e.g. "int"), which would

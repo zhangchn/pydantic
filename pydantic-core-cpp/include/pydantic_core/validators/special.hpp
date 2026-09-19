@@ -40,6 +40,19 @@ public:
 
     bool is_pending(const std::string& ref) const { return pending_.count(ref) != 0; }
 
+    // Rust's DefinitionsBuilder carries `use_prebuilt` so every nested build
+    // inherits the setting of the validator being built (validators/mod.rs:530).
+    void set_use_prebuilt(bool value) { use_prebuilt_ = value; }
+    bool use_prebuilt() const { return use_prebuilt_; }
+
+    // The class this validator is being built FOR.  That node must not reuse the
+    // class's existing validator: in a class-reconstruction path (cloudpickle
+    // reloading a model) the class already carries a validator that was built while
+    // the schema was still being put back together, and standing in for it would
+    // validate against fields that are no longer there.
+    void set_class_under_build(const py::object& cls) { class_under_build_ = cls; }
+    const py::object& class_under_build() const { return class_under_build_; }
+
     ValidatorPtr get_definition(const std::string& ref) const {
         auto it = definitions_.find(ref);
         if (it != definitions_.end()) {
@@ -72,6 +85,8 @@ public:
 private:
     std::unordered_map<std::string, ValidatorPtr> definitions_;
     std::unordered_set<std::string> pending_;
+    bool use_prebuilt_ = true;
+    py::object class_under_build_ = py::none();
     // The node is kept alive so its address cannot be reused by a different
     // schema while the validator built for it is still cached.
     std::map<std::pair<const void*, const void*>, std::pair<py::object, ValidatorPtr>> built_;

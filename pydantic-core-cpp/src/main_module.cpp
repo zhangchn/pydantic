@@ -5182,8 +5182,8 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             return std::make_unique<SchemaValidator>(schema, config);
         }), py::arg("schema"), py::arg("config") = py::none())
         // Legacy constructor with bool flag for backwards compat
-        .def(py::init([](const py::dict& schema, const py::dict& config, bool) {
-            return std::make_unique<SchemaValidator>(schema, config);
+        .def(py::init([](const py::dict& schema, const py::dict& config, bool use_prebuilt) {
+            return std::make_unique<SchemaValidator>(schema, config, use_prebuilt);
         }), py::arg("schema"), py::arg("config") = py::none(), py::arg("_use_prebuilt") = true)
         .def("validate_python", [](SchemaValidator& self, const py::object& input, py::object strict, py::object context, py::object self_instance,
                                     py::object extra, py::object from_attributes, py::object by_alias, py::object by_name,

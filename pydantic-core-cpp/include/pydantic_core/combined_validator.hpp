@@ -209,7 +209,8 @@ public:
     // Build validator directly from Python dict (like Rust — no JSON round-trip)
     static std::shared_ptr<CombinedValidator> build_from_py(
         const py::dict& schema,
-        const py::dict& config
+        const py::dict& config,
+        bool use_prebuilt = true
     );
 
 private:

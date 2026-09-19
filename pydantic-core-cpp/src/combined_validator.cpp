@@ -4,6 +4,7 @@
 #include "pydantic_core/validators/model_fields.hpp"
 #include "pydantic_core/validators/special.hpp"
 #include "pydantic_core/validators/functions.hpp"
+#include "pydantic_core/validators/prebuilt.hpp"
 #include <cmath>
 #include <memory>
 #include <pybind11/pybind11.h>
@@ -1334,6 +1335,107 @@ static std::shared_ptr<DefinitionsRegistry> build_definitions_from_py(
     return registry;
 }
 
+// Rust common/prebuilt.rs: `__dict__` of the class, never getattr, so a
+// validator inherited from a parent class is not picked up for the child.
+static py::object class_dict_get(const py::object& class_dict, const char* key) {
+    try {
+        return class_dict.attr("get")(py::str(key), py::none());
+    } catch (const std::exception&) {
+        PyErr_Clear();
+        return py::none();
+    }
+}
+
+// Unwrap to the extension's SchemaValidator: a `PluggableSchemaValidator`
+// (pydantic.plugin) hands out the validator it wraps through
+// `__pydantic_schema_validator__`, and this port's Python wrapper keeps the
+// extension object in `_base`.  `owner` ends up holding the py object that owns
+// the tree so the reused validator cannot die underneath it.
+static SchemaValidator* reused_schema_validator(py::object& owner, const py::object& candidate) {
+    py::object obj = candidate;
+    for (int step = 0; step < 3 && !obj.is_none(); ++step) {
+        if (py::isinstance<SchemaValidator>(obj)) {
+            owner = obj;
+            return &py::cast<SchemaValidator&>(obj);
+        }
+        py::object next = py::none();
+        try {
+            next = obj.attr("__pydantic_schema_validator__");
+        } catch (const std::exception&) {
+            PyErr_Clear();
+        }
+        if (next.is_none()) {
+            try {
+                next = obj.attr("_base");
+            } catch (const std::exception&) {
+                PyErr_Clear();
+            }
+        }
+        obj = next;
+    }
+    return nullptr;
+}
+
+// The class a whole build is for, found by following the `definitions` wrapper down
+// to the model node it wraps (pydantic wraps a self-referencing model's schema in
+// one, so the model is not always the outermost node).
+static py::object model_class_under_build(const py::dict& schema) {
+    py::object node = py::reinterpret_borrow<py::object>(schema);
+    for (int depth = 0; depth < 8 && py::isinstance<py::dict>(node); ++depth) {
+        py::dict d = node.cast<py::dict>();
+        std::string type = py_str(d, "type");
+        if (type == "model") return class_dict_get(d, "cls");
+        if (type != "definitions") return py::none();
+        node = class_dict_get(d, "schema");
+    }
+    return py::none();
+}
+
+// Rust validators/mod.rs:547 - a model whose class already owns a validator
+// validates through that one tree instead of a second copy built from the schema
+// that names the class.  Dataclasses are left out here: a dataclass validator in
+// this port does not say which class it belongs to, so the check below that the
+// reused validator is the right one has nothing to compare against.
+static std::shared_ptr<Validator> try_prebuilt_validator(const py::dict& schema) {
+    if (!schema.contains("cls") || schema["cls"].is_none()) return nullptr;
+
+    py::object class_dict;
+    try {
+        class_dict = schema["cls"].attr("__dict__");
+    } catch (const std::exception&) {
+        PyErr_Clear();
+        return nullptr;
+    }
+    // A class whose schema has not been resolved yet has no usable validator.
+    if (PyObject_IsTrue(class_dict_get(class_dict, "__pydantic_complete__").ptr()) != 1) return nullptr;
+    py::object candidate = class_dict_get(class_dict, "__pydantic_validator__");
+    if (candidate.is_none()) return nullptr;
+
+    py::object cls = schema["cls"];
+    py::object owner;
+    SchemaValidator* sv = reused_schema_validator(owner, candidate);
+    if (!sv) return nullptr;
+    std::shared_ptr<Validator> held = sv->root_validator();
+    Validator* reused = held.get();
+    if (!reused) return nullptr;
+
+    // Rust refuses a wrap/after root: the parent field already sits where that
+    // validator's output would have to be wrapped a second time (prebuilt.rs:29).
+    std::string reused_name = reused->name();
+    if (reused_name == "function-wrap" || reused_name == "function-after") return nullptr;
+    // A root model reports its value type from what the last validate() stored,
+    // so a tree two validators share could report the other one's run.
+    if (!reused->root_model_inner_name().empty()) return nullptr;
+    // The validator found in `cls.__dict__` has to be the one that was built for
+    // the class the schema names.  A class can be handed a validator that was
+    // built for some other class (a subclass that copied its parent into its own
+    // dict, a model rebuilt onto a generic origin), and standing in for that one
+    // would validate against fields this model never had.
+    if (!reused->expected_class().is(cls)) return nullptr;
+
+    return std::make_shared<PrebuiltValidator>(std::move(owner), reused);
+}
+
 static std::shared_ptr<Validator> build_from_py_dict_uncached(
     const py::dict& schema,
     const py::dict& config,
@@ -1342,6 +1444,12 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
     std::string type = py_str(schema, "type");
     if (type.empty()) {
         throw SchemaError("Schema missing 'type' field");
+    }
+
+    if (definitions && definitions->use_prebuilt() && type == "model" &&
+        !py::reinterpret_borrow<py::object>(schema).attr("get")("cls", py::none())
+             .is(definitions->class_under_build())) {
+        if (auto reused = try_prebuilt_validator(schema)) return reused;
     }
 
     // --- Scalar validators ---
@@ -2796,6 +2904,10 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
     // --- Definitions wrapper ---
     if (type == "definitions") {
         auto registry = std::make_shared<DefinitionsRegistry>();
+        if (definitions) {
+            registry->set_use_prebuilt(definitions->use_prebuilt());
+            registry->set_class_under_build(definitions->class_under_build());
+        }
         
         // Build all definitions first
         if (schema.contains("definitions")) {
@@ -3195,12 +3307,16 @@ static std::shared_ptr<Validator> build_from_py_dict(
 // SchemaBuilder::build_from_py — public entry point
 std::shared_ptr<CombinedValidator> SchemaBuilder::build_from_py(
     const py::dict& schema,
-    const py::dict& config
+    const py::dict& config,
+    bool use_prebuilt
 ) {
     // A registry is always present so the shared-node cache has somewhere to
     // live; a nested `definitions` node starts its own, which is also where
     // that subtree's cached validators stop being valid.
-    auto validator = build_from_py_dict(schema, config, std::make_shared<DefinitionsRegistry>());
+    auto registry = std::make_shared<DefinitionsRegistry>();
+    registry->set_use_prebuilt(use_prebuilt);
+    registry->set_class_under_build(model_class_under_build(schema));
+    auto validator = build_from_py_dict(schema, config, registry);
     return std::make_shared<CombinedValidator>(validator);
 }
 

@@ -156,6 +156,14 @@ public:
     // one inner schema (function-* wrappers, models).  nullptr otherwise.
     virtual std::shared_ptr<Validator> inner_validator() const { return nullptr; }
 
+    // The validator this node stands in for rather than being built for the
+    // schema (PrebuiltValidator); nullptr for every other node.  Model-specific
+    // handling looks through it to reach the model underneath.  The shared_ptr
+    // does not own the aliased tree: the node that borrows it keeps that tree
+    // alive the way Rust does, with a Python reference the collector sees, and
+    // an owning edge here would be invisible to the collector.
+    virtual std::shared_ptr<Validator> aliased_validator() const { return nullptr; }
+
     // Report the Python objects this validator holds to the cyclic collector.
     // A validator that holds any has to override this; not overriding keeps
     // those references invisible, exactly as they are today.
