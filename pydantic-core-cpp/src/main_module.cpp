@@ -81,6 +81,19 @@ struct SerCallExtra {
     std::string bytes_mode = "utf8";
     std::string timedelta_mode = "iso8601";
     std::string temporal_mode = "iso8601";
+    // A thread-local is destroyed when its thread ends, which for a thread that merely
+    // happened to run a serialization call is at some later, unrelated moment -- by then
+    // the interpreter has released it.  Handing a reference back from there is fatal:
+    // pybind11 asserts that the GIL is held, and throwing out of that destructor ends the
+    // process.  The references are simply not returnable at that point, so they are
+    // dropped on the floor rather than released; what is given up is the odd reference to
+    // None or to a fallback callable, per thread that ends outside a call.
+    ~SerCallExtra() {
+        if (!Py_IsInitialized() || !PyGILState_Check()) {
+            by_alias.release();
+            fallback.release();
+        }
+    }
 };
 static thread_local SerCallExtra g_ser_extra;
 
@@ -4850,10 +4863,33 @@ static py::bytes to_json_fn(const py::object& value, std::optional<size_t> inden
 // (mirrors Rust's infer_jsonable_python used by to_jsonable_python).
 // Raises pydantic_core::PydanticSerializationError (registered below as a
 // Python exception) for values that have no JSON-compatible form.
+// Rust's infer_to_python_known puts a recursion guard on every value it infers, not
+// just on containers (infer.rs:57, recursion_guard.rs:32-42): meeting a value that is
+// already on the way down is a reference cycle, and a walk that only gets absurdly deep
+// is stopped the same way.  Rust raises ValueError for both (extra.rs:93-94).  The
+// jsonable walk had neither, so it is also the only thing between a `fallback` that
+// hands its own argument back -- which pydantic's own tests do -- and unbounded
+// recursion that ends in a segfault rather than an error.
+static std::vector<const void*>& jsonable_rec_stack() {
+    static thread_local std::vector<const void*> stack;
+    return stack;
+}
+
 static py::object infer_jsonable_python(const py::object& v, const std::string& bytes_mode,
                                         const std::string& timedelta_mode,
                                         const std::string& inf_nan_mode,
                                         bool serialize_unknown, bool by_alias) {
+    std::vector<const void*>& st = jsonable_rec_stack();
+    const void* p = v.ptr();
+    for (const void* q : st) {
+        if (q == p) throw py::value_error("Circular reference detected (id repeated)");
+    }
+    if (st.size() >= 255) throw py::value_error("Circular reference detected (depth exceeded)");
+    st.push_back(p);
+    struct StackPop {
+        std::vector<const void*>& s;
+        ~StackPop() { s.pop_back(); }
+    } popper{st};
     if (v.is_none()) return py::none();
     if (py::isinstance<py::bool_>(v) || py::isinstance<py::int_>(v) || py::isinstance<py::str>(v)) return v;
     if (py::isinstance<py::float_>(v)) {
@@ -4946,20 +4982,35 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
         auto ser = py::getattr(v, "__pydantic_serializer__");
         return ser.attr("to_python")(v, py::arg("mode") = "json", py::arg("by_alias") = by_alias);
     }
-    // Plain instances with state: mirror infer_json's __dict__ handling.
-    // Note: functions/lambdas have an empty __dict__, so they fall through
-    // to the error below — matching Rust's refusal to serialize callables.
-    if (py_hasattr(v, "__dict__")) {
+    // A dataclass carries no serializer of its own, so its fields are inferred one by
+    // one (Rust ObType::Dataclass).  Nothing else is: a type object answers the same
+    // probes and is refused (ob_type.rs:421), and walking an arbitrary __dict__ both
+    // invented output for values Rust refuses -- a SimpleNamespace became its fields, a
+    // plain instance its attributes -- and could not stop.  A module's __dict__ holds
+    // sys.modules, which holds every module in the process; to_jsonable_python(sys)
+    // recursed through that until the stack gave out and took the interpreter with it.
+    if (py_hasattr(v, "__dict__") && !PyType_Check(v.ptr()) && SerNode::dict_inferable_object(v)) {
+        py::object fields;
         try {
-            py::dict d = py::getattr(v, "__dict__").cast<py::dict>();
-            if (!d.empty()) {
-                return infer_jsonable_python(py::reinterpret_borrow<py::object>(d), bytes_mode,
-                                             timedelta_mode, inf_nan_mode, serialize_unknown, by_alias);
-            }
+            fields = py::getattr(v, "__dict__");
+            if (!py::isinstance<py::dict>(fields)) fields = py::object();
         } catch (...) { PyErr_Clear(); }
+        if (fields.ptr())
+            return infer_jsonable_python(fields, bytes_mode, timedelta_mode,
+                                         inf_nan_mode, serialize_unknown, by_alias);
     }
-    if (serialize_unknown) return py::str(v);
-    throw PydanticSerializationError("Value is not JSON serializable");
+    // Rust infer_to_python ObType::Unknown (infer.rs:221-230), which is what
+    // to_jsonable_python runs -- it is to_python with SerMode::Json (mod.rs:275).  The
+    // run's fallback is asked first and its result re-inferred; serialize_unknown takes
+    // str(), or a placeholder when str() raises; otherwise the failure names the value's
+    // type.  The message here was this module's own invention: "Value is not JSON
+    // serializable" appears nowhere in pydantic-core, so a caller matching on Rust's
+    // wording got nothing.  A fallback that raises keeps its own error, unwrapped.
+    if (g_ser_extra.fallback.ptr() && !g_ser_extra.fallback.is_none())
+        return infer_jsonable_python(g_ser_extra.fallback(v), bytes_mode, timedelta_mode,
+                                     inf_nan_mode, serialize_unknown, by_alias);
+    if (serialize_unknown) return py::str(ser_serialize_unknown(v));
+    throw PydanticSerializationError("Unable to serialize unknown type: " + ser_safe_repr(py::type::of(v)));
 }
 
 static py::object to_jsonable_fn(const py::object& value, std::optional<py::object>, std::optional<py::object>,
@@ -4968,8 +5019,17 @@ static py::object to_jsonable_fn(const py::object& value, std::optional<py::obje
     std::optional<py::object> fallback, bool serialize_as_any, std::optional<bool>, std::optional<py::object>) {
     (void)round_trip;
     (void)temporal_mode;
-    (void)fallback;
     (void)serialize_as_any;
+    // Rust builds the same Extra for this entry that to_python(mode="json") gets, and
+    // `fallback` rides on it (mod.rs:293-307), so the values inferred below read it
+    // from there rather than from whatever the previous call left behind.
+    g_ser_extra = SerCallExtra{};
+    g_ser_extra.mode = "json";
+    g_ser_extra.by_alias = py::cast(by_alias);
+    g_ser_extra.serialize_unknown = serialize_unknown;
+    g_ser_extra.fallback = fallback && !fallback->is_none() ? *fallback : py::none();
+    g_ser_extra.bytes_mode = bytes_mode;
+    g_ser_extra.timedelta_mode = timedelta_mode;
     return infer_jsonable_python(value, bytes_mode, timedelta_mode, inf_nan_mode, serialize_unknown, by_alias);
 }
 
