@@ -74,12 +74,47 @@ struct SerCallExtra {
     bool exclude_none = false;
     bool exclude_computed_fields = false;
     bool serialize_as_any = false;
+    // Rust Extra::serialize_unknown: an unknown value becomes str(value) rather than
+    // raising (read by the ObType::Unknown arm, infer.rs:500).
+    bool serialize_unknown = false;
     py::object fallback = py::none();
     std::string bytes_mode = "utf8";
     std::string timedelta_mode = "iso8601";
     std::string temporal_mode = "iso8601";
 };
 static thread_local SerCallExtra g_ser_extra;
+
+// Rust tools::safe_repr (tools.rs:121): repr(v), and when repr itself raises the
+// message says the type could not be printed instead of leaking that failure.
+static std::string ser_safe_repr(const py::object& v) {
+    try {
+        return py::repr(v).cast<std::string>();
+    } catch (const py::error_already_set&) {
+        PyErr_Clear();
+    }
+    try {
+        return "<unprintable " + py::getattr(py::type::of(v), "__qualname__").cast<std::string>() + " object>";
+    } catch (const py::error_already_set&) {
+        PyErr_Clear();
+    }
+    return "<unprintable object>";
+}
+
+// Rust infer::serialize_unknown (infer.rs:520): str(value), or a placeholder when
+// str() itself raises.
+static std::string ser_serialize_unknown(const py::object& v) {
+    try {
+        return py::str(v).cast<std::string>();
+    } catch (const py::error_already_set&) {
+        PyErr_Clear();
+    }
+    try {
+        return "<Unserializable " + py::getattr(py::type::of(v), "__qualname__").cast<std::string>() + " object>";
+    } catch (const py::error_already_set&) {
+        PyErr_Clear();
+    }
+    return "<Unserializable object>";
+}
 
 // `include`/`exclude` are the filters in effect at this point in the tree, not
 // the top-level ones (Rust reads them from SerializationState, which descends).
@@ -2983,15 +3018,22 @@ private:
             return infer_json(as_py, ensure_ascii, indent);
         }
 
-        if (py_hasattr(value, "__dict__")) {
-            if (dict_inferable_object(value)) return infer_json(value.attr("__dict__"), ensure_ascii, indent);
-            std::string type_repr_str;
-            try { type_repr_str = py::repr(py::type::of(value)).cast<std::string>(); }
-            catch (...) { PyErr_Clear(); type_repr_str = "<unknown>"; }
-            throw PydanticSerializationError("Unable to serialize unknown type: " + type_repr_str);
-        }
+        // A class answers the field/dataclass probes too, and its __dict__ is the
+        // class's own namespace, so Rust refuses type objects here as well
+        // (ob_type.rs:421); walking it used to report the failure as a mappingproxy.
+        if (py_hasattr(value, "__dict__") && !PyType_Check(value.ptr()) && dict_inferable_object(value))
+            return infer_json(value.attr("__dict__"), ensure_ascii, indent);
 
-        return json_escape(py::repr(value).cast<std::string>(), ensure_ascii);
+        // Rust infer_serialize ObType::Unknown (infer.rs:495-508): the run's `fallback`
+        // is asked first and what it returns is re-inferred, because a fallback may hand
+        // back a model or another unknown of its own.  `serialize_unknown` stringifies.
+        // With neither, the failure names the value's *type* -- the value is by
+        // definition something this run cannot print usefully -- and a fallback that
+        // raises keeps its own error, which the serde boundary then names.
+        if (g_ser_extra.fallback.ptr() && !g_ser_extra.fallback.is_none())
+            return infer_json(g_ser_extra.fallback(value), ensure_ascii, indent);
+        if (g_ser_extra.serialize_unknown) return json_escape(ser_serialize_unknown(value), ensure_ascii);
+        throw PydanticSerializationError("Unable to serialize unknown type: " + ser_safe_repr(py::type::of(value)));
     }
 
     // Recursively serialize an arbitrary Python value for use in extra fields
@@ -4779,12 +4821,20 @@ static std::string json_pretty_print(const std::string& compact, int indent) {
 
 static py::bytes to_json_fn(const py::object& value, std::optional<size_t> indent, std::optional<bool> ea,
     std::optional<py::object>, std::optional<py::object>, bool, bool, bool round_trip,
-    std::string, std::string, std::string, std::string, bool,
-    std::optional<py::object>, bool, std::optional<bool>, std::optional<py::object>) {
+    std::string, std::string, std::string, std::string, bool serialize_unknown,
+    std::optional<py::object> fallback, bool, std::optional<bool>, std::optional<py::object>) {
     SerRef any = std::make_shared<SerNode>();
     any->type = "any";
     // Same naming as SchemaSerializer::to_json: this is a JSON-string run too.
     SerJsonRun run;
+    // Rust builds an Extra for every entry point (shared.rs), so this does too: the
+    // values inferred below have to be able to see this call's `fallback` and
+    // `serialize_unknown`, and leaving the previous call's extra in place would have
+    // handed them someone else's.  The mode kwargs are still dropped here, as before.
+    g_ser_extra = SerCallExtra{};
+    g_ser_extra.mode = "json";
+    g_ser_extra.serialize_unknown = serialize_unknown;
+    g_ser_extra.fallback = fallback && !fallback->is_none() ? *fallback : py::none();
     try {
         std::string json = any->to_json(value, ea.value_or(false), -1, round_trip, py::none(), py::none(), false, false, false, false);
         if (indent.has_value()) json = json_pretty_print(json, static_cast<int>(*indent));
