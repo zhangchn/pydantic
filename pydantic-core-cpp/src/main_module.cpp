@@ -1012,6 +1012,45 @@ static SerFilterResult apply_ser_filter(const py::object& key, const py::object&
 // (recursion_guard.rs): re-entering the same (object, definition node)
 // pair is a cycle; depth over the limit is too deep.  Both surface as
 // ValueError in Rust (serializers/extra.rs).
+
+// Rust decides what an escaping serialization failure is called in one place:
+// se_err_py_err (serializers/errors.rs:63) waits at the end of the JSON-string run
+// (to_json_bytes, shared.rs:602) and every failure that reached it through the serde
+// boundary is renamed `Error serializing to JSON: <what it said>`.  A failure that
+// came from Python says which it was -- `Error serializing to JSON: ValueError: xxx`
+// -- because the serde boundary stringifies a PyErr with its type name in front
+// (errors.rs:21).  The python-output run has no such wrapper, so what a site has to
+// know is whether it is inside a JSON run, not what its error looks like.
+static thread_local int g_ser_json_depth = 0;
+
+struct SerJsonRun {
+    SerJsonRun() { ++g_ser_json_depth; }
+    ~SerJsonRun() { --g_ser_json_depth; }
+    SerJsonRun(const SerJsonRun&) = delete;
+    SerJsonRun& operator=(const SerJsonRun&) = delete;
+};
+
+// The naming described above, for the failures that came from Python.  Returns false
+// when the error keeps its own identity instead: a run nested inside another one
+// (the polymorphic trampoline re-enters to_json as a Python call, so only the
+// outermost run gets to name) or an unexpected value, which Rust carries across the
+// boundary as a marker because it asks for another try rather than reporting.
+static bool ser_json_name_python_error(py::error_already_set& e, std::string* out) {
+    if (g_ser_json_depth != 1) return false;
+    try {
+        py::object unexpected = py::module_::import("pydantic_core_cpp").attr("PydanticSerializationUnexpectedValue");
+        int is = PyObject_IsInstance(e.value().ptr(), unexpected.ptr());
+        PyErr_Clear();
+        if (is == 1) return false;
+    } catch (...) { PyErr_Clear(); }
+    std::string type_name, detail;
+    try { type_name = py::str(e.type().attr("__name__")).cast<std::string>(); } catch (...) { PyErr_Clear(); }
+    try { detail = py::str(e.value()).cast<std::string>(); } catch (...) { PyErr_Clear(); }
+    PyErr_Clear();
+    *out = type_name + ": " + detail;
+    return true;
+}
+
 // Rust serializers::type_serializers::function::on_error. Returns true when the
 // error was a PydanticSerializationUnexpectedValue (the caller should fall back
 // to the inner schema); otherwise throws the wrapped PydanticSerializationError.
@@ -1038,7 +1077,12 @@ static bool handle_ser_call_error(const py::error_already_set& e, const std::str
     try { type_name = py::str(e.type().attr("__name__")).cast<std::string>(); } catch (...) { PyErr_Clear(); }
     std::string detail;
     try { detail = py::str(e.value()).cast<std::string>(); } catch (...) { PyErr_Clear(); }
-    throw PydanticSerializationError("Error calling function `" + function_name + "`: " + type_name + ": " + detail);
+    std::string inner = "Error calling function `" + function_name + "`: " + type_name + ": " + detail;
+    // This wording is pydantic's own, so a JSON run reports it the way the serde
+    // boundary reports any Python error: class name in front, behind the prefix.
+    if (g_ser_json_depth > 0)
+        throw PydanticSerializationError("Error serializing to JSON: PydanticSerializationError: " + inner);
+    throw PydanticSerializationError(inner);
 }
 
 // Rust serializers::type_serializers::format: when_used gating.
@@ -4558,7 +4602,29 @@ public:
         }
     }
 
+    // The JSON-string run: a failure that escapes it is renamed by Rust's
+    // se_err_py_err, so this is where one is turned into
+    // `Error serializing to JSON: ValueError: xxx`.  Errors the port raised itself
+    // already carry the wording Rust gives them, including the prefix where the
+    // serde boundary would have added one.
     py::bytes to_json(const py::object& value, std::optional<size_t> indent, std::optional<bool> ea,
+                      std::optional<py::object> include, std::optional<py::object> exclude,
+                      std::optional<bool> by_alias, bool exclude_unset, bool exclude_defaults, bool exc_none,
+                      bool exclude_computed_fields, bool round_trip, py::object warnings, std::optional<py::object> fallback,
+                      bool serialize_as_any, std::optional<bool> polymorphic, py::object context) const {
+        SerJsonRun run;
+        try {
+            return to_json_inner(value, indent, ea, include, exclude, by_alias, exclude_unset, exclude_defaults,
+                                 exc_none, exclude_computed_fields, round_trip, warnings, fallback, serialize_as_any,
+                                 polymorphic, context);
+        } catch (py::error_already_set& e) {
+            std::string named;
+            if (!ser_json_name_python_error(e, &named)) throw;
+            throw PydanticSerializationError("Error serializing to JSON: " + named);
+        }
+    }
+
+    py::bytes to_json_inner(const py::object& value, std::optional<size_t> indent, std::optional<bool> ea,
                       std::optional<py::object> include, std::optional<py::object> exclude,
                       std::optional<bool> by_alias, bool exclude_unset, bool exclude_defaults, bool exc_none,
                       bool exclude_computed_fields, bool round_trip, py::object warnings, std::optional<py::object> fallback,
@@ -4702,9 +4768,17 @@ static py::bytes to_json_fn(const py::object& value, std::optional<size_t> inden
     std::optional<py::object>, bool, std::optional<bool>, std::optional<py::object>) {
     SerRef any = std::make_shared<SerNode>();
     any->type = "any";
-    std::string json = any->to_json(value, ea.value_or(false), -1, round_trip, py::none(), py::none(), false, false, false, false);
-    if (indent.has_value()) json = json_pretty_print(json, static_cast<int>(*indent));
-    return py::bytes(std::move(json));
+    // Same naming as SchemaSerializer::to_json: this is a JSON-string run too.
+    SerJsonRun run;
+    try {
+        std::string json = any->to_json(value, ea.value_or(false), -1, round_trip, py::none(), py::none(), false, false, false, false);
+        if (indent.has_value()) json = json_pretty_print(json, static_cast<int>(*indent));
+        return py::bytes(std::move(json));
+    } catch (py::error_already_set& e) {
+        std::string named;
+        if (!ser_json_name_python_error(e, &named)) throw;
+        throw PydanticSerializationError("Error serializing to JSON: " + named);
+    }
 }
 
 // Convert an arbitrary Python value to its JSON-compatible Python form
