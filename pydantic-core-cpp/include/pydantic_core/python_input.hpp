@@ -7,6 +7,7 @@
 #include <optional>
 #include <vector>
 #include "input.hpp"
+#include "py_compat.hpp"
 
 namespace py = pybind11;
 
@@ -63,7 +64,9 @@ inline std::string py_caught_exception_string(const py::error_already_set& err) 
 // Rust reads a field container through the abstract Mapping protocol; text and
 // sequence types satisfy PyMapping_Check too, so only Mapping instances pass.
 inline bool py_is_mapping_instance(py::handle obj) {
-    static py::object mapping_abc = py::module_::import("collections.abc").attr("Mapping");
+    static const py::object& mapping_abc = held_python_object([] {
+        return py::module_::import("collections.abc").attr("Mapping");
+    });
     int result = PyObject_IsInstance(obj.ptr(), mapping_abc.ptr());
     if (result < 0) {
         PyErr_Clear();

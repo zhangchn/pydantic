@@ -2840,7 +2840,7 @@ private:
     }
 
     static bool is_enum_instance(const py::object& v) {
-        static py::object enum_cls = py::module_::import("enum").attr("Enum");
+        static const py::object& enum_cls = held_python_object([] { return py::module_::import("enum").attr("Enum"); });
         return py::isinstance(v, enum_cls);
     }
     // Rust ObType kinds whose JSON form is a str(): they have no __dict__ of
@@ -2983,7 +2983,7 @@ private:
         // Rust ObType::Pattern serializes the pattern source, because str() of a
         // compiled pattern is its repr on this Python.
         try {
-            static py::object pattern_cls = py::module_::import("re").attr("Pattern");
+            static const py::object& pattern_cls = held_python_object([] { return py::module_::import("re").attr("Pattern"); });
             if (py::isinstance(value, pattern_cls)) {
                 return json_escape(py::str(value.attr("pattern")).cast<std::string>(), ensure_ascii);
             }
@@ -4938,16 +4938,16 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
     }
     // Types that serialize as their str() representation
     try {
-        static py::object decimal_cls = py::module_::import("decimal").attr("Decimal");
+        static const py::object& decimal_cls = held_python_object([] { return py::module_::import("decimal").attr("Decimal"); });
         if (py::isinstance(v, decimal_cls)) return py::str(v);
     } catch (...) { PyErr_Clear(); }
     if (py::isinstance(v, py_fraction_type())) return py::str(v);
     try {
-        static py::object uuid_cls = py::module_::import("uuid").attr("UUID");
+        static const py::object& uuid_cls = held_python_object([] { return py::module_::import("uuid").attr("UUID"); });
         if (py::isinstance(v, uuid_cls)) return py::str(v);
     } catch (...) { PyErr_Clear(); }
     try {
-        static py::object purepath_cls = py::module_::import("pathlib").attr("PurePath");
+        static const py::object& purepath_cls = held_python_object([] { return py::module_::import("pathlib").attr("PurePath"); });
         if (py::isinstance(v, purepath_cls)) return py::str(v);
     } catch (...) { PyErr_Clear(); }
     try {

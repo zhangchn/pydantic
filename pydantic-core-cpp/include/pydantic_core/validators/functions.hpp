@@ -53,8 +53,12 @@ inline void error_type_context_from_py(ErrorType& et, const py::object& ctx) {
 namespace wrap_detail {
 inline constexpr const char* kMarker = "\x01PYC_WRAP_INNER_ERROR\x01";
 inline std::vector<ValError>& stack() {
-    static thread_local std::vector<ValError> s;
-    return s;
+    // Deliberately never destroyed: a ValLineError owns the input object and the caught
+    // exception, and a thread that ends with one still pending would hand those references
+    // back after the interpreter is gone (see held_python_object).  The vector is what took
+    // the process out at exit() with "Fatal Python error: PyThreadState_Get".
+    static thread_local std::vector<ValError>* s = new std::vector<ValError>();
+    return *s;
 }
 // If the caught Python exception is the inner ValidationError (raised by the
 // handler, possibly re-raised by the Python wrap function), pop and return
@@ -1315,16 +1319,15 @@ private:
 // Resolved lazily so it is never looked up while pydantic_core_cpp is still
 // importing; retried until it succeeds rather than caching a failed lookup.
 inline py::object pydantic_undefined_obj() {
-    static py::object undefined;
-    if (!undefined.ptr()) {
-        try {
-            undefined = py::module_::import("pydantic_core_cpp").attr("PydanticUndefined");
-        } catch (py::error_already_set&) {
-            PyErr_Clear();
-            return py::none();
-        }
+    try {
+        return held_python_object([] {
+            return py::module_::import("pydantic_core_cpp").attr("PydanticUndefined");
+        });
+    } catch (py::error_already_set&) {
+        // Still importing pydantic_core_cpp: nothing cached, so the next caller retries.
+        PyErr_Clear();
+        return py::none();
     }
-    return undefined;
 }
 
 class WithDefaultValidator : public Validator {

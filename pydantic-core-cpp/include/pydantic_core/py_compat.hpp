@@ -6,10 +6,30 @@
 
 #include <cstddef>
 #include <optional>
+#include <utility>
 
 #include <pybind11/pybind11.h>
 
 namespace pydantic_core {
+
+// A Python object the extension keeps for the rest of the process.
+//
+// A `static` that owns a Python reference cannot be destroyed on the way out.  Static and
+// thread-local destructors run after the interpreter has been finalized, and handing a
+// reference back from there either trips pybind11's assert that the GIL is held -- which
+// throws out of a destructor and ends in std::terminate -- or reaches a CPython API that
+// needs a thread state, which is a "Fatal Python error: PyThreadState_Get" after the
+// program already finished its work.  What such an object owns is therefore held on the
+// heap and deliberately never deleted: one reference given up per cache, against a crash
+// on every clean exit.
+//
+// Each call site passes its own maker, so each gets its own cache; a maker that throws
+// leaves the cache uninitialized and is retried by the next caller.
+template <typename Make>
+const pybind11::object& held_python_object(Make&& make) {
+    static const pybind11::object* cached = new pybind11::object(std::forward<Make>(make)());
+    return *cached;
+}
 
 // Attribute-existence check with Python hasattr() semantics.
 //
