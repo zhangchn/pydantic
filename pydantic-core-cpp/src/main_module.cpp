@@ -102,6 +102,21 @@ static PySerializationInfo make_ser_info(bool round_trip, const std::string& fie
 // Recursion guard for the polymorphism trampoline.
 static thread_local int g_trampoline_depth = 0;
 
+// Serialization that leaves the C++ stack to re-enter the module as a Python call: the
+// trampoline handing a subclass to its own serializer, or an inferred value handed to
+// its `__pydantic_serializer__`.  Rust stays inside one serde run for both -- the
+// trampoline is a serializer node (polymorphism_trampoline.rs) and infer.rs:662 only
+// swaps the config -- so exactly one boundary names the failure.  Nothing inside such a
+// call may add a JSON wrapper or a class name; that is the outermost run's job.
+static thread_local int g_ser_json_nested = 0;
+
+struct SerNestedCall {
+    SerNestedCall() { ++g_ser_json_nested; }
+    ~SerNestedCall() { --g_ser_json_nested; }
+    SerNestedCall(const SerNestedCall&) = delete;
+    SerNestedCall& operator=(const SerNestedCall&) = delete;
+};
+
 // Polymorphism trampoline (mirrors Rust's PolymorphismTrampoline): when
 // polymorphic serialization is enabled (runtime kwarg or schema config) and
 // `value` is a strict subclass of `cls` carrying its own
@@ -134,6 +149,7 @@ static bool try_polymorphic_trampoline(const py::object& value, const py::object
         if (g_polymorphic_serialization.has_value()) {
             kw["polymorphic_serialization"] = *g_polymorphic_serialization;
         }
+        SerNestedCall nested;
         py::object res;
         if (want_json) {
             kw["ensure_ascii"] = ensure_ascii;
@@ -1031,12 +1047,13 @@ struct SerJsonRun {
 };
 
 // The naming described above, for the failures that came from Python.  Returns false
-// when the error keeps its own identity instead: a run nested inside another one
-// (the polymorphic trampoline re-enters to_json as a Python call, so only the
-// outermost run gets to name) or an unexpected value, which Rust carries across the
-// boundary as a marker because it asks for another try rather than reporting.
+// when the error keeps its own identity instead: a run nested inside another one, or
+// anything inside a call that re-entered the module (both re-enter the entry point as
+// Python calls, so only the run that started the serialization gets to name), or an
+// unexpected value, which Rust carries across the boundary as a marker because it asks
+// for another try rather than reporting.
 static bool ser_json_name_python_error(py::error_already_set& e, std::string* out) {
-    if (g_ser_json_depth != 1) return false;
+    if (g_ser_json_depth != 1 || g_ser_json_nested != 0) return false;
     try {
         py::object unexpected = py::module_::import("pydantic_core_cpp").attr("PydanticSerializationUnexpectedValue");
         int is = PyObject_IsInstance(e.value().ptr(), unexpected.ptr());
@@ -1080,7 +1097,7 @@ static bool handle_ser_call_error(const py::error_already_set& e, const std::str
     std::string inner = "Error calling function `" + function_name + "`: " + type_name + ": " + detail;
     // This wording is pydantic's own, so a JSON run reports it the way the serde
     // boundary reports any Python error: class name in front, behind the prefix.
-    if (g_ser_json_depth > 0)
+    if (g_ser_json_depth > 0 && g_ser_json_nested == 0)
         throw PydanticSerializationError("Error serializing to JSON: PydanticSerializationError: " + inner);
     throw PydanticSerializationError(inner);
 }
@@ -2952,18 +2969,18 @@ private:
         } catch (...) {}
 
         // Rust infer_to_python serializes a pydantic model through its own
-        // __pydantic_serializer__; reading __dict__ directly would emit a
-        // subclass's extra fields and leave leaf values unserialized.
-        if (py_hasattr(value, "__pydantic_serializer__")) {
-            try {
-                auto ser = py::getattr(value, "__pydantic_serializer__");
-                py::object as_py = ser.attr("to_python")(
-                    value, py::arg("mode") = "json",
-                    py::arg("serialize_as_any") = g_ser_extra.serialize_as_any);
-                return infer_json(as_py, ensure_ascii, indent);
-            } catch (const py::error_already_set&) {
-                PyErr_Clear();
-            }
+        // __pydantic_serializer__ (infer.rs:649) and lets a failure from it escape, so
+        // this does too: catching it used to fall through to the __dict__ read below,
+        // which quietly emitted the very fields the annotated serializer had refused to
+        // produce, and would emit a subclass's extra fields besides.  A type object is
+        // not such a value even though it answers the attribute too (ob_type.rs:421).
+        if (py_hasattr(value, "__pydantic_serializer__") && !PyType_Check(value.ptr())) {
+            SerNestedCall nested;
+            auto ser = py::getattr(value, "__pydantic_serializer__");
+            py::object as_py = ser.attr("to_python")(
+                value, py::arg("mode") = "json",
+                py::arg("serialize_as_any") = g_ser_extra.serialize_as_any);
+            return infer_json(as_py, ensure_ascii, indent);
         }
 
         if (py_hasattr(value, "__dict__")) {
@@ -3008,18 +3025,16 @@ private:
     static py::object serialize_any_value_inner(const py::object& v, bool exc_none, bool round_trip, bool json_mode) {
         if (v.is_none()) return py::none();
         // Model / dataclass instances: use __pydantic_serializer__ if available
-        if (py_hasattr(v, "__pydantic_serializer__")) {
+        if (py_hasattr(v, "__pydantic_serializer__") && !PyType_Check(v.ptr())) {
             auto ser = py::getattr(v, "__pydantic_serializer__");
-            try {
-                // Rust call_pydantic_serializer keeps the current state, so a
-                // serialize_as_any dump stays inferred all the way down.
-                return ser.attr("to_python")(v, py::arg("mode") = (json_mode ? "json" : "python"),
-                    py::arg("exclude_none") = exc_none, py::arg("round_trip") = round_trip,
-                    py::arg("serialize_as_any") = g_ser_extra.serialize_as_any);
-            } catch (const py::error_already_set&) {
-                PyErr_Clear();
-                return v;
-            }
+            // Rust call_pydantic_serializer keeps the current state, so a
+            // serialize_as_any dump stays inferred all the way down.  Returning `v`
+            // when the call raised handed back a model instance that the caller had
+            // asked for in serialized form; Rust lets the error out, so it goes out here.
+            SerNestedCall nested;
+            return ser.attr("to_python")(v, py::arg("mode") = (json_mode ? "json" : "python"),
+                py::arg("exclude_none") = exc_none, py::arg("round_trip") = round_trip,
+                py::arg("serialize_as_any") = g_ser_extra.serialize_as_any);
         }
         if (py::isinstance<py::dict>(v)) {
             py::dict out;
@@ -4876,13 +4891,10 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
         return std::move(out);
     }
     // Model/dataclass instances: delegate to their serializer in json mode
-    if (py_hasattr(v, "__pydantic_serializer__")) {
-        try {
-            auto ser = py::getattr(v, "__pydantic_serializer__");
-            return ser.attr("to_python")(v, py::arg("mode") = "json", py::arg("by_alias") = by_alias);
-        } catch (const py::error_already_set&) {
-            PyErr_Clear();
-        }
+    if (py_hasattr(v, "__pydantic_serializer__") && !PyType_Check(v.ptr())) {
+        SerNestedCall nested;
+        auto ser = py::getattr(v, "__pydantic_serializer__");
+        return ser.attr("to_python")(v, py::arg("mode") = "json", py::arg("by_alias") = by_alias);
     }
     // Plain instances with state: mirror infer_json's __dict__ handling.
     // Note: functions/lambdas have an empty __dict__, so they fall through
