@@ -94,8 +94,28 @@ struct SerCallExtra {
             fallback.release();
         }
     }
+    SerCallExtra() = default;
+    SerCallExtra(const SerCallExtra&) = default;
+    SerCallExtra& operator=(const SerCallExtra&) = default;
 };
 static thread_local SerCallExtra g_ser_extra;
+
+// The constants of a serialization call live exactly as long as that call.  Rust builds
+// one Extra per top-level entry point and carries it down the whole run; the port cannot
+// simply do that, because a value that brings its own serializer is delegated through the
+// Python-level `to_python`/`to_json`, which rebuilds the constants from its own
+// arguments.  Written over the thread local with nothing put back, that rebuild went on
+// answering for the rest of the outer run after the nested call returned, and it kept
+// this run's `fallback` -- and anything else the constants held -- reachable, and alive,
+// until some later call replaced them.  Each entry point now saves what it found and puts
+// it back on the way out.
+struct SerCallExtraScope {
+    SerCallExtra saved;
+    SerCallExtraScope() : saved(g_ser_extra) { g_ser_extra = SerCallExtra{}; }
+    SerCallExtraScope(const SerCallExtraScope&) = delete;
+    SerCallExtraScope& operator=(const SerCallExtraScope&) = delete;
+    ~SerCallExtraScope() { g_ser_extra = saved; }
+};
 
 // Rust tools::safe_repr (tools.rs:121): repr(v), and when repr itself raises the
 // message says the type could not be printed instead of leaking that failure.
@@ -4622,7 +4642,7 @@ public:
         (void)serialize_as_any;
         g_exclude_computed_fields = exclude_computed_fields;
         g_polymorphic_serialization = polymorphic;  // reset per call (None -> nullopt)
-        g_ser_extra = SerCallExtra{};
+        SerCallExtraScope ser_scope;
         g_ser_extra.mode = mode.has_value() ? *mode : std::string("python");
         g_ser_extra.by_alias = by_alias ? py::cast(*by_alias) : py::none();
         g_ser_extra.exclude_unset = exclude_unset;
@@ -4702,7 +4722,7 @@ public:
         
         g_exclude_computed_fields = exclude_computed_fields;
         g_polymorphic_serialization = polymorphic;  // reset per call (None -> nullopt)
-        g_ser_extra = SerCallExtra{};
+        SerCallExtraScope ser_scope;
         g_ser_extra.mode = "json";
         g_ser_extra.by_alias = by_alias ? py::cast(*by_alias) : py::none();
         g_ser_extra.exclude_unset = exclude_unset;
@@ -4844,7 +4864,7 @@ static py::bytes to_json_fn(const py::object& value, std::optional<size_t> inden
     // values inferred below have to be able to see this call's `fallback` and
     // `serialize_unknown`, and leaving the previous call's extra in place would have
     // handed them someone else's.  The mode kwargs are still dropped here, as before.
-    g_ser_extra = SerCallExtra{};
+    SerCallExtraScope ser_scope;
     g_ser_extra.mode = "json";
     g_ser_extra.serialize_unknown = serialize_unknown;
     g_ser_extra.fallback = fallback && !fallback->is_none() ? *fallback : py::none();
@@ -5023,7 +5043,7 @@ static py::object to_jsonable_fn(const py::object& value, std::optional<py::obje
     // Rust builds the same Extra for this entry that to_python(mode="json") gets, and
     // `fallback` rides on it (mod.rs:293-307), so the values inferred below read it
     // from there rather than from whatever the previous call left behind.
-    g_ser_extra = SerCallExtra{};
+    SerCallExtraScope ser_scope;
     g_ser_extra.mode = "json";
     g_ser_extra.by_alias = py::cast(by_alias);
     g_ser_extra.serialize_unknown = serialize_unknown;
