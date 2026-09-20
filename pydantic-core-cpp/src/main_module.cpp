@@ -117,6 +117,28 @@ struct SerCallExtraScope {
     ~SerCallExtraScope() { g_ser_extra = saved; }
 };
 
+// The constants a value that brings its own serializer has to take with it.  Rust does
+// not start a new serialization process there: `call_pydantic_serializer` re-scopes only
+// the config (infer.rs:667) and hands the same Extra down, so every one of these is the
+// outer run's value inside the nested model.  The port leaves the run for a Python-level
+// `to_python`, which rebuilds the constants from its arguments, so they are passed on as
+// kwargs -- otherwise an `Any` field holding a model emitted fields the outer run had
+// been asked to leave out.  `by_alias` and `fallback` are only forwarded when set: Rust
+// keeps them optional and the nested serializer resolves each against its own config.
+// `include`/`exclude` are absent on purpose -- those are scoped to a point in the tree,
+// not to the run, and cannot be re-expressed as the root of a fresh call.
+static py::dict ser_extra_forwarded() {
+    py::dict kw;
+    if (!g_ser_extra.by_alias.is_none()) kw["by_alias"] = g_ser_extra.by_alias;
+    kw["exclude_unset"] = g_ser_extra.exclude_unset;
+    kw["exclude_defaults"] = g_ser_extra.exclude_defaults;
+    kw["exclude_none"] = g_ser_extra.exclude_none;
+    kw["exclude_computed_fields"] = g_ser_extra.exclude_computed_fields;
+    kw["serialize_as_any"] = g_ser_extra.serialize_as_any;
+    if (!g_ser_extra.fallback.is_none()) kw["fallback"] = g_ser_extra.fallback;
+    return kw;
+}
+
 // Rust tools::safe_repr (tools.rs:121): repr(v), and when repr itself raises the
 // message says the type could not be printed instead of leaking that failure.
 static std::string ser_safe_repr(const py::object& v) {
@@ -3045,9 +3067,8 @@ private:
         if (py_hasattr(value, "__pydantic_serializer__") && !PyType_Check(value.ptr())) {
             SerNestedCall nested;
             auto ser = py::getattr(value, "__pydantic_serializer__");
-            py::object as_py = ser.attr("to_python")(
-                value, py::arg("mode") = "json",
-                py::arg("serialize_as_any") = g_ser_extra.serialize_as_any);
+            py::dict kw = ser_extra_forwarded();
+            py::object as_py = ser.attr("to_python")(value, py::arg("mode") = "json", **kw);
             return infer_json(as_py, ensure_ascii, indent);
         }
 
@@ -3107,9 +3128,10 @@ private:
             // when the call raised handed back a model instance that the caller had
             // asked for in serialized form; Rust lets the error out, so it goes out here.
             SerNestedCall nested;
-            return ser.attr("to_python")(v, py::arg("mode") = (json_mode ? "json" : "python"),
-                py::arg("exclude_none") = exc_none, py::arg("round_trip") = round_trip,
-                py::arg("serialize_as_any") = g_ser_extra.serialize_as_any);
+            py::dict kw = ser_extra_forwarded();
+            kw["exclude_none"] = exc_none;
+            kw["round_trip"] = round_trip;
+            return ser.attr("to_python")(v, py::arg("mode") = (json_mode ? "json" : "python"), **kw);
         }
         if (py::isinstance<py::dict>(v)) {
             py::dict out;
@@ -5000,7 +5022,9 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
     if (py_hasattr(v, "__pydantic_serializer__") && !PyType_Check(v.ptr())) {
         SerNestedCall nested;
         auto ser = py::getattr(v, "__pydantic_serializer__");
-        return ser.attr("to_python")(v, py::arg("mode") = "json", py::arg("by_alias") = by_alias);
+        py::dict kw = ser_extra_forwarded();
+        kw["by_alias"] = by_alias;  // this entry point's own argument, not the thread local's
+        return ser.attr("to_python")(v, py::arg("mode") = "json", **kw);
     }
     // A dataclass carries no serializer of its own, so its fields are inferred one by
     // one (Rust ObType::Dataclass).  Nothing else is: a type object answers the same
