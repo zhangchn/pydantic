@@ -78,6 +78,10 @@ struct SerCallExtra {
     // raising (read by the ObType::Unknown arm, infer.rs:500).
     bool serialize_unknown = false;
     py::object fallback = py::none();
+    bool round_trip = false;
+    // Rust Extra::context -- the caller's object, handed to every custom serializer the
+    // run reaches, so it is a constant of the run and not of one field.
+    py::object context = py::none();
     std::string bytes_mode = "utf8";
     std::string timedelta_mode = "iso8601";
     std::string temporal_mode = "iso8601";
@@ -92,6 +96,7 @@ struct SerCallExtra {
         if (!Py_IsInitialized() || !PyGILState_Check()) {
             by_alias.release();
             fallback.release();
+            context.release();
         }
     }
     SerCallExtra() = default;
@@ -136,6 +141,16 @@ static py::dict ser_extra_forwarded() {
     kw["exclude_computed_fields"] = g_ser_extra.exclude_computed_fields;
     kw["serialize_as_any"] = g_ser_extra.serialize_as_any;
     if (!g_ser_extra.fallback.is_none()) kw["fallback"] = g_ser_extra.fallback;
+    kw["round_trip"] = g_ser_extra.round_trip;
+    // The caller's context and an explicit polymorphic flag belong to the run as much as
+    // the exclude flags do (polymorphism_trampoline.rs reads
+    // `state.extra.polymorphic_serialization` and only falls back to the node's config
+    // when it is None), so a custom serializer below a nested model saw `context=None`
+    // where Rust hands it the object the outer call was given.
+    if (!g_ser_extra.context.is_none()) kw["context"] = g_ser_extra.context;
+    if (g_polymorphic_serialization.has_value()) {
+        kw["polymorphic_serialization"] = *g_polymorphic_serialization;
+    }
     return kw;
 }
 
@@ -228,7 +243,7 @@ static bool try_polymorphic_trampoline(const py::object& value, const py::object
         ++g_trampoline_depth;
         struct DepthGuard { ~DepthGuard() { --g_trampoline_depth; } } guard;
         py::object sub_ser = py::getattr(value, "__pydantic_serializer__");
-        py::dict kw;
+        py::dict kw = ser_extra_forwarded();
         kw["include"] = include;
         kw["exclude"] = exclude;
         kw["by_alias"] = by_alias;
@@ -236,9 +251,6 @@ static bool try_polymorphic_trampoline(const py::object& value, const py::object
         kw["exclude_defaults"] = exclude_defaults;
         kw["exclude_none"] = exc_none;
         kw["round_trip"] = round_trip;
-        if (g_polymorphic_serialization.has_value()) {
-            kw["polymorphic_serialization"] = *g_polymorphic_serialization;
-        }
         SerNestedCall nested;
         py::object res;
         if (want_json) {
@@ -4666,6 +4678,8 @@ public:
         g_polymorphic_serialization = polymorphic;  // reset per call (None -> nullopt)
         SerCallExtraScope ser_scope;
         g_ser_extra.mode = mode.has_value() ? *mode : std::string("python");
+        g_ser_extra.round_trip = round_trip;
+        g_ser_extra.context = context.is_none() ? py::none() : context;
         g_ser_extra.by_alias = by_alias ? py::cast(*by_alias) : py::none();
         g_ser_extra.exclude_unset = exclude_unset;
         g_ser_extra.exclude_defaults = exclude_defaults;
@@ -4746,6 +4760,8 @@ public:
         g_polymorphic_serialization = polymorphic;  // reset per call (None -> nullopt)
         SerCallExtraScope ser_scope;
         g_ser_extra.mode = "json";
+        g_ser_extra.round_trip = round_trip;
+        g_ser_extra.context = context.is_none() ? py::none() : context;
         g_ser_extra.by_alias = by_alias ? py::cast(*by_alias) : py::none();
         g_ser_extra.exclude_unset = exclude_unset;
         g_ser_extra.exclude_defaults = exclude_defaults;
@@ -4877,7 +4893,7 @@ static std::string json_pretty_print(const std::string& compact, int indent) {
 static py::bytes to_json_fn(const py::object& value, std::optional<size_t> indent, std::optional<bool> ea,
     std::optional<py::object>, std::optional<py::object>, bool, bool, bool round_trip,
     std::string, std::string, std::string, std::string, bool serialize_unknown,
-    std::optional<py::object> fallback, bool, std::optional<bool>, std::optional<py::object>) {
+    std::optional<py::object> fallback, bool, std::optional<bool> polymorphic, std::optional<py::object> context) {
     SerRef any = std::make_shared<SerNode>();
     any->type = "any";
     // Same naming as SchemaSerializer::to_json: this is a JSON-string run too.
@@ -4890,6 +4906,11 @@ static py::bytes to_json_fn(const py::object& value, std::optional<size_t> inden
     g_ser_extra.mode = "json";
     g_ser_extra.serialize_unknown = serialize_unknown;
     g_ser_extra.fallback = fallback && !fallback->is_none() ? *fallback : py::none();
+    g_ser_extra.round_trip = round_trip;
+    g_ser_extra.context = context && !context->is_none() ? *context : py::none();
+    // Reset, not inherited: this entry's Extra carries its own polymorphic flag, and the
+    // thread local otherwise still answers for whoever ran last.
+    g_polymorphic_serialization = polymorphic;
     try {
         std::string json = any->to_json(value, ea.value_or(false), -1, round_trip, py::none(), py::none(), false, false, false, false);
         if (indent.has_value()) json = json_pretty_print(json, static_cast<int>(*indent));
@@ -5060,8 +5081,7 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
 static py::object to_jsonable_fn(const py::object& value, std::optional<py::object>, std::optional<py::object>,
     bool by_alias, bool, bool round_trip, std::string timedelta_mode, std::string temporal_mode, std::string bytes_mode,
     std::string inf_nan_mode, bool serialize_unknown,
-    std::optional<py::object> fallback, bool serialize_as_any, std::optional<bool>, std::optional<py::object>) {
-    (void)round_trip;
+    std::optional<py::object> fallback, bool serialize_as_any, std::optional<bool> polymorphic, std::optional<py::object> context) {
     (void)temporal_mode;
     (void)serialize_as_any;
     // Rust builds the same Extra for this entry that to_python(mode="json") gets, and
@@ -5074,6 +5094,9 @@ static py::object to_jsonable_fn(const py::object& value, std::optional<py::obje
     g_ser_extra.fallback = fallback && !fallback->is_none() ? *fallback : py::none();
     g_ser_extra.bytes_mode = bytes_mode;
     g_ser_extra.timedelta_mode = timedelta_mode;
+    g_ser_extra.round_trip = round_trip;  // mod.rs:302 hands it to the Extra
+    g_ser_extra.context = context && !context->is_none() ? *context : py::none();
+    g_polymorphic_serialization = polymorphic;
     return infer_jsonable_python(value, bytes_mode, timedelta_mode, inf_nan_mode, serialize_unknown, by_alias);
 }
 
