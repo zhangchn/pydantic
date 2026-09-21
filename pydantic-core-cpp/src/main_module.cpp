@@ -490,8 +490,12 @@ using SerRef = std::shared_ptr<SerNode>;
 // Shared JSON-mode conversion helpers
 // ---------------------------------------------------------------------------
 
+// The base64 Rust writes is URL_SAFE (config.rs:316 and :329) with canonical padding:
+// '-' and '_' in place of '+' and '/'.  A '+' in the table here is invisible until a
+// value happens to hit those two indexes -- b'\xfb\xff' is "-_8=" in Rust and was
+// "+/8=" here -- and base64 read back by a url_unsafe_b64n.pad decoder differs.
 static std::string b64_encode_string(const std::string& b) {
-    static const char* b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    static const char* b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     std::string enc;
     for (size_t i = 0; i < b.size(); i += 3) {
         uint32_t n = ((uint8_t)b[i] << 16);
@@ -502,6 +506,95 @@ static std::string b64_encode_string(const std::string& b) {
         enc += (i+2<b.size()) ? b64[n&0x3F] : '=';
     }
     return enc;
+}
+
+static std::string bytes_hex_encode(const std::string& b) {
+    static const char* hx = "0123456789abcdef";
+    std::string out;
+    for (unsigned char c : b) {
+        out += hx[c >> 4];
+        out += hx[c & 0x0F];
+    }
+    return out;
+}
+
+struct Utf8Bad {
+    size_t start;      // Rust's valid_up_to: where the byte string stops being valid
+    size_t end;        // one past the bytes the failure is reported over
+    bool incomplete;   // the buffer ran out mid-sequence, so there is no error_len
+};
+
+// Both of the utf8 failures Rust reports come off one walk, and CPython's decoder words
+// neither of them the same way, so the walk is done here: serialize_bytes shows std's
+// Display for a from_utf8 error (config.rs:323), "invalid utf-8 sequence of N bytes from
+// index I" -- N counting the bytes of the sequence that were still well formed -- or
+// "incomplete utf-8 byte sequence from index I" when the buffer stops halfway through
+// one; bytes_to_string hands the same pair to pyo3 (config.rs:314), which reports it as
+// a UnicodeDecodeError spanning [valid_up_to, valid_up_to+error_len), or the rest of the
+// buffer when the sequence was only truncated.  Before this the JSON writer emitted the
+// undecodable bytes as they stood, and JSON containing them is not JSON at all.
+static std::optional<Utf8Bad> utf8_bad(const std::string& b) {
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(b.data());
+    size_t n = b.size();
+    for (size_t i = 0; i < n; ) {
+        unsigned char c = p[i];
+        if (c < 0x80) {
+            i++;
+            continue;
+        }
+        // 0xC0/0xC1 can only be overlong and 0xF5.. cannot start anything, and a bare
+        // continuation byte is a one-byte error by itself.
+        if (c < 0xC2 || c > 0xF4) return Utf8Bad{i, i + 1, false};
+        size_t want = (c < 0xE0) ? 2 : (c < 0xF0) ? 3 : 4;
+        // 0xE0/0xED/0xF0/0xF4 narrow the range of the first continuation byte: overlong,
+        // surrogates, past U+10FFFF.
+        unsigned char lo = 0x80, hi = 0xBF;
+        if (c == 0xE0) lo = 0xA0;
+        else if (c == 0xED) hi = 0x9F;
+        else if (c == 0xF0) lo = 0x90;
+        else if (c == 0xF4) hi = 0x8F;
+        for (size_t k = 1; k < want; k++) {
+            if (i + k >= n) return Utf8Bad{i, n, true};
+            unsigned char d = p[i + k];
+            bool ok = (k == 1) ? (d >= lo && d <= hi) : (d >= 0x80 && d <= 0xBF);
+            if (!ok) return Utf8Bad{i, i + k, false};
+        }
+        i += want;
+    }
+    return std::nullopt;
+}
+
+static std::string rust_utf8_reason(const Utf8Bad& bad) {
+    if (bad.incomplete)
+        return "incomplete utf-8 byte sequence from index " + std::to_string(bad.start);
+    return "invalid utf-8 sequence of " + std::to_string(bad.end - bad.start) +
+           " bytes from index " + std::to_string(bad.start);
+}
+
+// pyo3's PyUnicodeDecodeError::new_utf8 (config.rs:336) always blames the fixed reason
+// "invalid utf-8"; CPython's own decoder names the case ("invalid start byte", "invalid
+// continuation byte", "unexpected end of data"), so letting its error escape would give
+// every one of these messages a different tail than Rust's.
+static void raise_rust_decode_error(const std::string& b, const Utf8Bad& bad) {
+    PyObject* err = PyUnicodeDecodeError_Create("utf-8", b.data(), (Py_ssize_t)b.size(),
+                                                (Py_ssize_t)bad.start, (Py_ssize_t)bad.end,
+                                                "invalid utf-8");
+    if (err) {
+        PyErr_SetObject(PyExc_UnicodeDecodeError, err);
+        Py_DECREF(err);
+    } else {
+        PyErr_Clear();
+        PyErr_SetString(PyExc_UnicodeDecodeError, "invalid utf-8");
+    }
+    throw py::error_already_set();
+}
+
+// BytesMode::from_str, called by every entry point that takes the kwarg.  The trailing
+// "or " is in Rust's message verbatim.
+static void check_bytes_mode(const std::string& mode) {
+    if (mode != "utf8" && mode != "base64" && mode != "hex")
+        throw SchemaError("Invalid BytesMode serialization mode: `" + mode +
+                          "`, expected utf8 or base64 or hex or ");
 }
 
 // Convert one typed leaf value for JSON-mode serialization (SchemaSerializer
@@ -2364,27 +2457,8 @@ struct SerNode {
         }
         if (type == "bytes") {
             std::string b = value.cast<std::string>();
-            if (ser_json_bytes == "base64") {
-                static const char* b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-                std::string enc;
-                for (size_t i = 0; i < b.size(); i += 3) {
-                    uint32_t n = ((uint8_t)b[i] << 16);
-                    if (i+1 < b.size()) n |= ((uint8_t)b[i+1] << 8);
-                    if (i+2 < b.size()) n |= (uint8_t)b[i+2];
-                    enc += b64[(n>>18)&0x3F]; enc += b64[(n>>12)&0x3F];
-                    enc += (i+1<b.size()) ? b64[(n>>6)&0x3F] : '=';
-                    enc += (i+2<b.size()) ? b64[n&0x3F] : '=';
-                }
-                return "\"" + enc + "\"";
-            } else if (ser_json_bytes == "hex") {
-                static const char* hex = "0123456789abcdef";
-                std::string enc;
-                for (unsigned char c : b) {
-                    enc += hex[c >> 4];
-                    enc += hex[c & 0x0F];
-                }
-                return "\"" + enc + "\"";
-            }
+            if (ser_json_bytes == "base64") return "\"" + b64_encode_string(b) + "\"";
+            if (ser_json_bytes == "hex") return "\"" + bytes_hex_encode(b) + "\"";
             // Default: UTF-8
             try {
                 return json_escape(b, ensure_ascii);
@@ -2961,28 +3035,14 @@ private:
                                 ensure_ascii);
         }
         if (py::isinstance<py::bytes>(value)) {
-            if (g_ser_extra.bytes_mode != "base64" && g_ser_extra.bytes_mode != "hex") {
-                try { return json_escape(value.cast<std::string>(), ensure_ascii); }
-                catch (...) { /* invalid utf-8 falls through to base64 */ }
-            }
             std::string b = value.cast<std::string>();
-            if (g_ser_extra.bytes_mode == "hex") {
-                static const char* hx = "0123456789abcdef";
-                std::string hexenc;
-                for (unsigned char c : b) { hexenc += hx[c >> 4]; hexenc += hx[c & 0x0F]; }
-                return json_escape(hexenc, ensure_ascii);
-            }
-            std::string enc;
-            static const char* b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-            for (size_t i = 0; i < b.size(); i += 3) {
-                uint32_t n = ((uint8_t)b[i] << 16);
-                if (i+1 < b.size()) n |= ((uint8_t)b[i+1] << 8);
-                if (i+2 < b.size()) n |= (uint8_t)b[i+2];
-                enc += b64[(n>>18)&0x3F]; enc += b64[(n>>12)&0x3F];
-                enc += (i+1<b.size()) ? b64[(n>>6)&0x3F] : '=';
-                enc += (i+2<b.size()) ? b64[n&0x3F] : '=';
-            }
-            return "\"" + enc + "\"";
+            if (g_ser_extra.bytes_mode == "hex") return json_escape(bytes_hex_encode(b), ensure_ascii);
+            if (g_ser_extra.bytes_mode == "base64") return json_escape(b64_encode_string(b), ensure_ascii);
+            // utf8 is a strict decode, not a best effort: bytes_to_string fails rather
+            // than let a byte string through that no reader could decode back.
+            if (auto bad = utf8_bad(b))
+                throw PydanticSerializationError("Error serializing to JSON: " + rust_utf8_reason(*bad));
+            return json_escape(b, ensure_ascii);
         }
         // Rust infer_serialize_known classifies every ObType it recognises, so a
         // datetime or UUID reaches its own serializer; without these branches an
@@ -3043,7 +3103,21 @@ private:
             for (auto item : d) {
                 if (!first) out += ",";
                 first = false;
-                out += json_escape(py::str(item.first).cast<std::string>(), ensure_ascii);
+                // A bytes key follows the run's bytes mode like a value does, and its
+                // utf8 failure is reported through bytes_to_string, so it arrives as a
+                // UnicodeDecodeError rather than the value arm's wording -- which the
+                // wrapper shows as "Error serializing to JSON: UnicodeDecodeError: ...".
+                // str() of the key, which is what this did for every type, turns b'ab'
+                // into the key "b'ab'".
+                if (py::isinstance<py::bytes>(item.first)) {
+                    std::string kb = item.first.cast<std::string>();
+                    if (g_ser_extra.bytes_mode == "hex") kb = bytes_hex_encode(kb);
+                    else if (g_ser_extra.bytes_mode == "base64") kb = b64_encode_string(kb);
+                    else if (auto bad = utf8_bad(kb)) raise_rust_decode_error(kb, *bad);
+                    out += json_escape(kb, ensure_ascii);
+                } else {
+                    out += json_escape(py::str(item.first).cast<std::string>(), ensure_ascii);
+                }
                 out += ":";
                 out += infer_json(py::reinterpret_borrow<py::object>(item.second), ensure_ascii, -1);
             }
@@ -4892,7 +4966,8 @@ static std::string json_pretty_print(const std::string& compact, int indent) {
 
 static py::bytes to_json_fn(const py::object& value, std::optional<size_t> indent, std::optional<bool> ea,
     std::optional<py::object>, std::optional<py::object>, bool, bool, bool round_trip,
-    std::string, std::string, std::string, std::string, bool serialize_unknown,
+    std::string timedelta_mode, std::string temporal_mode, std::string bytes_mode,
+    std::string inf_nan_mode, bool serialize_unknown,
     std::optional<py::object> fallback, bool, std::optional<bool> polymorphic, std::optional<py::object> context) {
     SerRef any = std::make_shared<SerNode>();
     any->type = "any";
@@ -4901,9 +4976,16 @@ static py::bytes to_json_fn(const py::object& value, std::optional<size_t> inden
     // Rust builds an Extra for every entry point (shared.rs), so this does too: the
     // values inferred below have to be able to see this call's `fallback` and
     // `serialize_unknown`, and leaving the previous call's extra in place would have
-    // handed them someone else's.  The mode kwargs are still dropped here, as before.
+    // handed them someone else's.
     SerCallExtraScope ser_scope;
+    (void)timedelta_mode;
+    (void)temporal_mode;
+    (void)inf_nan_mode;
+    check_bytes_mode(bytes_mode);
     g_ser_extra.mode = "json";
+    // ...which now includes the caller's bytes mode: it was dropped, so every byte
+    // string in the value was written as utf8 text however the caller asked for it.
+    g_ser_extra.bytes_mode = bytes_mode;
     g_ser_extra.serialize_unknown = serialize_unknown;
     g_ser_extra.fallback = fallback && !fallback->is_none() ? *fallback : py::none();
     g_ser_extra.round_trip = round_trip;
@@ -5005,12 +5087,12 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
             }
             return py::str(enc);
         }
-        try {
-            return py::str(v.cast<py::bytes>().operator std::string());  // utf8
-        } catch (...) {
-            PyErr_Clear();
-            throw PydanticSerializationError("Cannot serialize bytes: invalid utf-8");
-        }
+        // utf8 is a strict decode, and the UnicodeDecodeError that escapes this entry
+        // point is pyo3's, built from from_utf8's error (config.rs: bytes_to_string); the
+        // port wrapped it in a PydanticSerializationError of its own making before.
+        if (auto bad = utf8_bad(b)) raise_rust_decode_error(b, *bad);
+        return py::reinterpret_steal<py::object>(
+            PyUnicode_DecodeUTF8(b.data(), (Py_ssize_t)b.size(), nullptr));
     }
     // ObType::Bytes and ObType::Bytearray share one conversion (infer.rs:126-140): the
     // buffer is a byte string and follows the run's bytes mode.
@@ -5171,6 +5253,7 @@ static py::object to_jsonable_fn(const py::object& value, std::optional<py::obje
     std::optional<py::object> fallback, bool serialize_as_any, std::optional<bool> polymorphic, std::optional<py::object> context) {
     (void)temporal_mode;
     (void)serialize_as_any;
+    check_bytes_mode(bytes_mode);
     // Rust builds the same Extra for this entry that to_python(mode="json") gets, and
     // `fallback` rides on it (mod.rs:293-307), so the values inferred below read it
     // from there rather than from whatever the previous call left behind.
