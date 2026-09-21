@@ -4954,11 +4954,44 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
         ~StackPop() { s.pop_back(); }
     } popper{st};
     if (v.is_none()) return py::none();
-    if (py::isinstance<py::bool_>(v) || py::isinstance<py::int_>(v) || py::isinstance<py::str>(v)) return v;
-    if (py::isinstance<py::float_>(v)) {
+    // ObType::Enum is recognised by the metaclass of the value's own type being exactly
+    // type(enum.Enum) (ob_type.rs:283 and :315), and Rust tests it ahead of the numbers
+    // because its lookup matches exact type pointers, which an IntEnum member never
+    // satisfies.  Reaching the isinstance tests below instead hands back the member
+    // itself rather than the value it was built from, and a `_value_` attribute alone is
+    // not an enum: Rust has no such duck and reports that object as unknown.
+    bool enum_member = false;
+    try {
+        static const py::object& enum_metaclass = held_python_object(
+            [] { return py::module_::import("enum").attr("Enum").attr("__class__"); });
+        enum_member = Py_TYPE(Py_TYPE(v.ptr())) ==
+                        reinterpret_cast<PyTypeObject*>(enum_metaclass.ptr());
+    } catch (const py::error_already_set&) { PyErr_Clear(); }
+    if (enum_member)
+        return infer_jsonable_python(py::getattr(v, "value"), bytes_mode, timedelta_mode,
+                                     inf_nan_mode, serialize_unknown, by_alias);
+    if (PyBool_Check(v.ptr())) return v;
+    if (PyLong_Check(v.ptr())) {
+        // infer.rs:108 upcasts int subclasses -- "make sure subclasses of for example str
+        // are upcast" -- so an IntFlag member or a hand-rolled int subclass leaves here
+        // as the number it behaves like, not as an object that only serializes because
+        // json.dumps happens to follow the int protocol.
+        if (PyLong_CheckExact(v.ptr())) return v;
+        return py::reinterpret_steal<py::object>(PyNumber_Long(v.ptr()));
+    }
+    if (PyUnicode_Check(v.ptr())) {
+        if (PyUnicode_CheckExact(v.ptr())) return v;
+        // Same for str, and concat is how to copy the buffer without asking the subclass
+        // for __str__, which it is free to override.
+        static const py::object& empty_str =
+            held_python_object([] { return py::reinterpret_steal<py::object>(PyUnicode_FromString("")); });
+        return py::reinterpret_steal<py::object>(PyUnicode_Concat(empty_str.ptr(), v.ptr()));
+    }
+    if (PyFloat_Check(v.ptr())) {
         double d = v.cast<double>();
         if ((std::isnan(d) || std::isinf(d)) && inf_nan_mode == "null") return py::none();
-        return v;
+        if (PyFloat_CheckExact(v.ptr())) return v;
+        return py::float_(d);
     }
     if (py::isinstance<py::bytes>(v)) {
         std::string b = v.cast<std::string>();
@@ -4979,6 +5012,36 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
             throw PydanticSerializationError("Cannot serialize bytes: invalid utf-8");
         }
     }
+    // ObType::Bytes and ObType::Bytearray share one conversion (infer.rs:126-140): the
+    // buffer is a byte string and follows the run's bytes mode.
+    if (py::isinstance<py::bytearray>(v)) {
+        py::object as_bytes = py::reinterpret_steal<py::object>(
+            PyBytes_FromStringAndSize(PyByteArray_AS_STRING(v.ptr()), PyByteArray_GET_SIZE(v.ptr())));
+        return infer_jsonable_python(as_bytes, bytes_mode, timedelta_mode, inf_nan_mode,
+                                     serialize_unknown, by_alias);
+    }
+    // ObType::Complex is Rust's own spelling of the number, not Python's repr.
+    if (PyComplex_Check(v.ptr()))
+        return py::str(complex_to_str_rust(PyComplex_RealAsDouble(v.ptr()),
+                                           PyComplex_ImagAsDouble(v.ptr())));
+    // ObType::Ipv4Address/Ipv6Address/Ipv4Network/Ipv6Network serialize via str()
+    // (infer.rs:184-190); an IPv4Interface reaches the arm the way Rust does, by
+    // inheriting IPv4Address.  Anything else that only prints like an address stays
+    // unknown.
+    try {
+        static const py::object& ip_cls = held_python_object([] {
+            py::object m = py::module_::import("ipaddress");
+            return py::make_tuple(m.attr("IPv4Address"), m.attr("IPv6Address"),
+                                  m.attr("IPv4Network"), m.attr("IPv6Network"));
+        });
+        if (py::isinstance(v, ip_cls)) return py::str(v);
+    } catch (const py::error_already_set&) { PyErr_Clear(); }
+    // ObType::Pattern is the pattern text (infer.rs:675), not the repr of the object.
+    try {
+        static const py::object& pattern_cls =
+            held_python_object([] { return py::module_::import("re").attr("Pattern"); });
+        if (py::isinstance(v, pattern_cls)) return py::getattr(v, "pattern");
+    } catch (const py::error_already_set&) { PyErr_Clear(); }
     // Types that serialize as their str() representation
     try {
         static const py::object& decimal_cls = held_python_object([] { return py::module_::import("decimal").attr("Decimal"); });
@@ -4990,8 +5053,10 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
         if (py::isinstance(v, uuid_cls)) return py::str(v);
     } catch (...) { PyErr_Clear(); }
     try {
-        static const py::object& purepath_cls = held_python_object([] { return py::module_::import("pathlib").attr("PurePath"); });
-        if (py::isinstance(v, purepath_cls)) return py::str(v);
+        // ObType::Path is pathlib.Path, found by walking tp_base, so a PurePath -- or a
+        // PurePosixPath, whose bases never reach Path -- is unknown to Rust.
+        static const py::object& path_cls = held_python_object([] { return py::module_::import("pathlib").attr("Path"); });
+        if (py::isinstance(v, path_cls)) return py::str(v);
     } catch (...) { PyErr_Clear(); }
     try {
         py::object mod = py::module_::import("pydantic_core_cpp._pydantic_core_cpp");
@@ -5012,11 +5077,19 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
         py::object out;
         if (json_leaf_convert("timedelta", v, "utf8", timedelta_mode, "iso8601", out)) return out;
     }
-    // Enum members convert as their value
-    if (py_hasattr(v, "_value_")) {
-        return infer_jsonable_python(py::getattr(v, "_value_"), bytes_mode, timedelta_mode,
-                                     inf_nan_mode, serialize_unknown, by_alias);
-    }
+    // The exact-type walk above is only Rust's fast path: when it comes back empty,
+    // lookup_ob_type runs fallback_isinstance (ob_type.rs:338), which asks the real
+    // isinstance -- including isinstance(v, enum.Enum) at :390.  That is the pass that
+    // picks up an enum whose metaclass is a *subclass* of EnumMeta, whose member the
+    // metaclass-identity test above deliberately does not match, and it comes after the
+    // numbers, so an IntFlag member is still the int Rust reads it as.
+    try {
+        static const py::object& enum_cls =
+            held_python_object([] { return py::module_::import("enum").attr("Enum"); });
+        if (py::isinstance(v, enum_cls))
+            return infer_jsonable_python(py::getattr(v, "value"), bytes_mode, timedelta_mode,
+                                         inf_nan_mode, serialize_unknown, by_alias);
+    } catch (const py::error_already_set&) { PyErr_Clear(); }
     // Sets/tuples/lists/deques/iterators → arrays; dicts → objects (recursively).
     // Rust's table names its iterables (ObType::List/Tuple/Set/Frozenset/Deque, and
     // ObType::Generator for a value that is itself an iterator, ob_type.rs:294) and walks
