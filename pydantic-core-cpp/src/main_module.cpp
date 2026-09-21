@@ -5017,10 +5017,24 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
         return infer_jsonable_python(py::getattr(v, "_value_"), bytes_mode, timedelta_mode,
                                      inf_nan_mode, serialize_unknown, by_alias);
     }
-    // Sets/tuples/lists/sequences → arrays; dicts → objects (recursively)
+    // Sets/tuples/lists/deques/iterators → arrays; dicts → objects (recursively).
+    // Rust's table names its iterables (ObType::List/Tuple/Set/Frozenset/Deque, and
+    // ObType::Generator for a value that is itself an iterator, ob_type.rs:294) and walks
+    // tp_base to find them; it never asks an ABC.  Asking collections.abc.Sequence
+    // instead handed the walk to any value that only declares itself a sequence: range
+    // and array.array became arrays Rust reports as unknown, a memoryview became the ints
+    // of its bytes, and a network object iterated its own address space --
+    // to_jsonable_python(ipaddress.IPv6Network("::/64"), fallback=f) walks 2**64 hosts and
+    // never comes back, where Rust turns the value into "::/64".
+    bool deque_member = false;
+    try {
+        static const py::object& deque_cls =
+            held_python_object([] { return py::module_::import("collections").attr("deque"); });
+        deque_member = py::isinstance(v, deque_cls);
+    } catch (const py::error_already_set&) { PyErr_Clear(); }
     if (py::isinstance<py::set>(v) || py::isinstance<py::frozenset>(v)
         || py::isinstance<py::list>(v) || py::isinstance<py::tuple>(v)
-        || py::isinstance<py::sequence>(v)) {
+        || deque_member || PyIter_Check(v.ptr())) {
         py::list out;
         for (auto item : py::reinterpret_borrow<py::iterable>(v)) {
             out.append(infer_jsonable_python(py::reinterpret_borrow<py::object>(item), bytes_mode,
