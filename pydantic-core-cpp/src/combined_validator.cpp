@@ -1311,6 +1311,92 @@ static std::shared_ptr<Validator> build_from_py_dict(
     std::shared_ptr<DefinitionsRegistry> definitions
 );
 
+// pyo3 renders a PyErr as `{class}: {str(value)}`, and that rendering is what Rust nests
+// under the node or field that names itself (validators/mod.rs:673), so a build failure that
+// came out of Python has to be spelled the way Python would -- including the repr() a
+// KeyError puts around its own argument.
+static std::string python_error_render(PyObject* type, PyObject* value) {
+    PyObject* name = PyObject_GetAttrString(type, "__name__");
+    if (!name) {
+        PyErr_Clear();
+        return std::string("Exception: ");
+    }
+    std::string rendered = py::reinterpret_steal<py::str>(name).cast<std::string>() + ": ";
+    PyObject* text = PyObject_Str(value);
+    if (!text) {
+        PyErr_Clear();
+        return rendered;
+    }
+    rendered += py::reinterpret_steal<py::str>(text).cast<std::string>();
+    return rendered;
+}
+
+static std::string python_error_render(const py::error_already_set& err) {
+    return python_error_render(err.type().ptr(), err.value().ptr());
+}
+
+// pybind11's builtin_exception carries only a message, so the class it would have set is
+// read back by raising it and fetching the error again.
+static std::string python_error_render(const py::builtin_exception& err) {
+    err.set_error();
+    PyObject* type = nullptr;
+    PyObject* value = nullptr;
+    PyObject* trace = nullptr;
+    PyErr_Fetch(&type, &value, &trace);
+    PyErr_NormalizeException(&type, &value, &trace);
+    std::string rendered = type ? python_error_render(type, value) : std::string("Exception: ");
+    Py_XDECREF(type);
+    Py_XDECREF(value);
+    Py_XDECREF(trace);
+    return rendered;
+}
+
+// The two halves of one rule: a Rust SchemaError reaches Python as the SchemaError
+// exception, so a schema error reads as "SchemaError: ..." and anything else carries the
+// class name Python would print.
+static std::string build_error_render(const std::exception& err) {
+    if (auto* schema_err = dynamic_cast<const SchemaError*>(&err)) {
+        return std::string("SchemaError: ") + schema_err->what();
+    }
+    if (auto* py_err = dynamic_cast<const py::error_already_set*>(&err)) {
+        return python_error_render(*py_err);
+    }
+    if (auto* builtin = dynamic_cast<const py::builtin_exception*>(&err)) {
+        return python_error_render(*builtin);
+    }
+    return err.what();
+}
+
+// A build failure that pyo3 would raise as a Python error is thrown that way here too, so
+// the node above can name its class and Python still gets it when nothing catches it.
+static void throw_python_error(PyObject* type, const std::string& message) {
+    PyErr_SetString(type, message.c_str());
+    throw py::error_already_set();
+}
+
+// pyo3's DowncastError text -- what a failed cast::<PyString> hands to its caller.  None is
+// spelled without the "object" word.
+static std::string pyo3_downcast_text(const py::object& obj, const char* target) {
+    if (obj.is_none()) return std::string("'None' is not an instance of '") + target + "'";
+    return "'" + obj.get_type().attr("__name__").cast<std::string>()
+           + "' object is not an instance of '" + target + "'";
+}
+
+// A field's schema is named before the validator that holds it names itself
+// (model_fields.rs and typed_dict.rs both format "Field {name:?}:\n  {err}").
+static std::shared_ptr<Validator> build_field_schema_from_py(
+    const py::dict& field_schema,
+    const py::dict& config,
+    std::shared_ptr<DefinitionsRegistry> definitions,
+    const std::string& field_name
+) {
+    try {
+        return build_from_py_dict(field_schema, config, definitions);
+    } catch (const std::exception& e) {
+        throw SchemaError("Field \"" + field_name + "\":\n  " + build_error_render(e));
+    }
+}
+
 // Build a DefinitionsRegistry from a Python definitions list
 static std::shared_ptr<DefinitionsRegistry> build_definitions_from_py(
     const py::list& defs_list,
@@ -1442,10 +1528,9 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
     const py::dict& config,
     std::shared_ptr<DefinitionsRegistry> definitions
 ) {
+    // The funnel that calls this already read and checked the type, and it is the one that
+    // reports a type nothing builds from, so an empty one simply falls through.
     std::string type = py_str(schema, "type");
-    if (type.empty()) {
-        throw SchemaError("Schema missing 'type' field");
-    }
 
     if (definitions && definitions->use_prebuilt() && type == "model" &&
         !py::reinterpret_borrow<py::object>(schema).attr("get")("cls", py::none())
@@ -2455,8 +2540,8 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             }
             try {
                 f.validator = build_from_py_dict(field["schema"].cast<py::dict>(), config, definitions);
-            } catch (const SchemaError& e) {
-                throw SchemaError("Field '" + f.name + "':\n  " + std::string(e.what()));
+            } catch (const std::exception& e) {
+                throw SchemaError("Field '" + f.name + "':\n  " + build_error_render(e));
             }
             auto* wd = dynamic_cast<WithDefaultValidator*>(f.validator.get());
             if (wd && wd->omit_on_error()) {
@@ -2758,14 +2843,17 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
                             required = false;
                         }
                         if (keep_default_wrapper) {
-                            field_validator = build_from_py_dict(field_schema_dict, inner_config, definitions);
+                            field_validator = build_field_schema_from_py(
+                                field_schema_dict, inner_config, definitions, field_name);
                         } else if (field_schema_dict.contains("schema")) {
                             // Use the inner validator directly (skip the WithDefault wrapper)
-                            field_validator = build_from_py_dict(
-                                field_schema_dict["schema"].cast<py::dict>(), inner_config, definitions);
+                            field_validator = build_field_schema_from_py(
+                                field_schema_dict["schema"].cast<py::dict>(), inner_config, definitions,
+                                field_name);
                         }
                     } else {
-                        field_validator = build_from_py_dict(field_schema_dict, inner_config, definitions);
+                        field_validator = build_field_schema_from_py(
+                            field_schema_dict, inner_config, definitions, field_name);
                     }
                 }
 
@@ -3282,7 +3370,9 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         return v;
     }
 
-    throw SchemaError("Unknown schema type: " + type);
+    // nullptr means nothing claimed this type; the caller turns it into the error, outside
+    // the wrap it would otherwise get.
+    return nullptr;
 }
 
 static std::shared_ptr<Validator> build_from_py_dict(
@@ -3290,24 +3380,53 @@ static std::shared_ptr<Validator> build_from_py_dict(
     const py::dict& config,
     std::shared_ptr<DefinitionsRegistry> definitions
 ) {
-    if (!definitions) return build_from_py_dict_uncached(schema, config, definitions);
+    // Rust reads a node's type through a str downcast before any builder runs
+    // (validators/mod.rs:544), so a schema with no type -- or a type that is not a str --
+    // fails as the plain KeyError/TypeError pyo3 raises, naming no node at all.
+    if (!schema.contains("type")) throw_python_error(PyExc_KeyError, "type");
+    py::object type_obj = schema["type"];
+    if (!PyUnicode_Check(type_obj.ptr())) {
+        throw_python_error(PyExc_TypeError, pyo3_downcast_text(type_obj, "str"));
+    }
+    const std::string type = type_obj.cast<std::string>();
 
-    // A model builds from the config it carries, not the one it is handed, so
-    // the config it was reached through is not part of what its validator
-    // depends on. Keying it by the parent's config would leave every reference
-    // to a model rebuilding the model from scratch.
-    const void* config_key = config.ptr();
-    if (py_str(schema, "type") == "model") {
-        config_key = nullptr;  // built with an empty config
-        if (schema.contains("config") && py::isinstance<py::dict>(schema["config"])) {
-            config_key = schema["config"].ptr();
+    // Both of these return from the dispatch before the wrap below (mod.rs:560-561), so the
+    // node that found them never names itself -- the nodes above it still do.
+    if (type == "invalid") throw SchemaError("Cannot construct schema with `InvalidSchema` member.");
+
+    std::shared_ptr<Validator> validator;
+    try {
+        if (!definitions) {
+            validator = build_from_py_dict_uncached(schema, config, definitions);
+        } else {
+            // A model builds from the config it carries, not the one it is handed, so
+            // the config it was reached through is not part of what its validator
+            // depends on. Keying it by the parent's config would leave every reference
+            // to a model rebuilding the model from scratch.
+            const void* config_key = config.ptr();
+            if (type == "model") {
+                config_key = nullptr;  // built with an empty config
+                if (schema.contains("config") && py::isinstance<py::dict>(schema["config"])) {
+                    config_key = schema["config"].ptr();
+                }
+            }
+
+            if (auto built = definitions->find_built(schema.ptr(), config_key)) {
+                validator = *built;
+            } else {
+                validator = build_from_py_dict_uncached(schema, config, definitions);
+                definitions->add_built(
+                    schema.ptr(), config_key, py::reinterpret_borrow<py::object>(schema), validator);
+            }
         }
+    } catch (const std::exception& e) {
+        // One line per node between the failure and the caller (mod.rs:673
+        // failed_to_build_validator), so a schema that fails three levels down is named by
+        // all three of them.
+        throw SchemaError("Error building \"" + type + "\" validator:\n  " + build_error_render(e));
     }
 
-    if (auto built = definitions->find_built(schema.ptr(), config_key)) return *built;
-
-    auto validator = build_from_py_dict_uncached(schema, config, definitions);
-    definitions->add_built(schema.ptr(), config_key, py::reinterpret_borrow<py::object>(schema), validator);
+    if (!validator) throw SchemaError("Unknown schema type: \"" + type + "\"");
     return validator;
 }
 

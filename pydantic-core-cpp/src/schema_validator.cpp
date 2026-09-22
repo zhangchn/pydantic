@@ -44,13 +44,9 @@ SchemaValidator::SchemaValidator(const py::dict& schema,
         post_init_ = py::str(schema["post_init"]).cast<std::string>();
     }
 
-    try {
-        validator_ = SchemaBuilder::build_from_py(schema, config, use_prebuilt);
-    } catch (const std::exception& e) {
-        throw SchemaError(std::string("Error building \"") +
-                          (schema.contains("type") ? py::str(schema["type"]).cast<std::string>() : "?") +
-                          "\" validator:\n  " + e.what());
-    }
+    // The build names the node that failed, once per node between it and here, so the
+    // exception goes to Python exactly as the build left it.
+    validator_ = SchemaBuilder::build_from_py(schema, config, use_prebuilt);
 
     // Set up config defaults
     config_.strict = std::nullopt;
