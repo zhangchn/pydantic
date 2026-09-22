@@ -37,6 +37,8 @@ from ._pydantic_core_cpp import (
     Url,
     ValidationError,
     __version__,
+    _error_url_prefix as _native_error_url_prefix,
+    _include_url_env as _native_include_url_env,
     from_json as _native_from_json,
     to_json,
     to_jsonable_python,
@@ -695,7 +697,10 @@ def _from_exception_data(cls, title: str, line_errors: list[dict], input_type: s
             details = f'type={type_str}'
         else:
             details = f'type={type_str}, input_value={input_repr}, input_type={type(input_val).__name__}'
-        error_parts.append(f'{loc_str}\n  {msg} [{details}]')
+        line = f'{loc_str}\n  {msg} [{details}]'
+        if _include_url_env() and not custom:
+            line += f'\n    For further information visit {_error_url_prefix()}{type_str}'
+        error_parts.append(line)
 
         # Build error dict
         err_dict = {
@@ -705,7 +710,7 @@ def _from_exception_data(cls, title: str, line_errors: list[dict], input_type: s
             'input': input_val,
         }
         if not custom:
-            err_dict['url'] = f'https://errors.pydantic.dev/2.14/v/{type_str}'
+            err_dict['url'] = f'{_error_url_prefix()}{type_str}'
         if ctx:
             err_dict['ctx'] = ctx
         error_dicts.append(err_dict)
@@ -855,6 +860,45 @@ def _get_model_name(schema: dict | None) -> str:
     return ''
 
 
+# Rust renders the documentation link into str(ValidationError) as well as into
+# errors(): validation_exception.rs:237 derives the prefix from pydantic's own
+# version -- major and minor only, "latest" when pydantic cannot be asked -- and
+# :208 switches the link off on PYDANTIC_ERRORS_OMIT_URL (deprecated) or
+# PYDANTIC_ERRORS_INCLUDE_URL.  Both answers live in the extension, where Rust keeps
+# its OnceLocks, because re-importing pydantic re-executes this module: a gate kept
+# here would be handed a fresh answer, and a fresh deprecation warning, long after
+# Rust's had settled.  errors() takes its prefix from the same answer, so the text and
+# the url cannot disagree.
+
+
+def _error_url_prefix() -> str:
+    return _native_error_url_prefix()
+
+
+def _include_url_env() -> bool:
+    return _native_include_url_env()
+
+
+def _custom_error_flags(msg: str, count: int) -> list | None:
+    """Which of the message's errors Rust would call a custom error, in order.
+
+    errors() already declines the documentation link for those
+    (validation_exception.rs:553), but asking it costs more than the rendering
+    itself -- it builds every input back out of the message -- so the flags are read
+    from the structured section the C++ message carries for exactly that purpose.
+    """
+    marker = '__PYDANTIC_ERRORS__:'
+    if marker not in msg:
+        return None
+    try:
+        import json as _json
+        raw = _json.loads(msg.split(marker, 1)[1].strip())
+        flags = [bool(err.get('is_custom')) for err in raw]
+    except Exception:
+        return None
+    return flags if len(flags) == count else None
+
+
 def _format_rust_error(msg: str, model_name: str = '') -> str:
     """Reformat a C++ ValidationError message to Rust-compatible format."""
     lines = msg.strip().split('\n')
@@ -884,6 +928,15 @@ def _format_rust_error(msg: str, model_name: str = '') -> str:
 
     # Build the Rust-style header
     result = [f'{count} {label} for {name}']
+
+    # The link is one line per error, after that error's own line; flags that do not
+    # match the header's count would attach links to the wrong errors.
+    custom_flags = _custom_error_flags(msg, count) if _include_url_env() else []
+    if custom_flags is None:
+        # No usable structured section: render the errors but leave the links out,
+        # since guessing which of them are custom would print a link Rust omits.
+        custom_flags = []
+    rendered = [0]
 
     # Parse error entries: an optional loc line followed by the message line.
     def _truncate_input(repr_text: str) -> str:
@@ -983,6 +1036,12 @@ def _format_rust_error(msg: str, model_name: str = '') -> str:
             result.append(
                 f'  {extra}{rust_msg} [type={err_type}, input_value={input_val}, input_type={input_type}]'
             )
+        # Rust's pretty() writes the link for the error type it just printed, so the
+        # text and the url can never disagree; errors() only says whether this error
+        # is a custom one, which gets no link at all.
+        if rendered[0] < len(custom_flags) and not custom_flags[rendered[0]]:
+            result.append(f'    For further information visit {_error_url_prefix()}{err_type}')
+        rendered[0] += 1
 
     i = 1
     while i < len(lines):

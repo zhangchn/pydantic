@@ -9,6 +9,8 @@
 #include <unordered_set>
 #include <set>
 #include <cstdio>
+#include <cstdlib>
+#include <cctype>
 
 #include "pydantic_core/errors.hpp"
 #include "pydantic_core/py_compat.hpp"
@@ -5366,6 +5368,64 @@ static void publish_error_inputs(const ValError& val_error) {
     } catch (...) {}
 }
 
+// validation_exception.rs:237 keys the documentation link on the pydantic that asked,
+// major and minor only, and falls back to "latest" when pydantic cannot be asked.  Rust
+// settles that in a OnceLock the first time an error is rendered; settling it once here
+// too keeps errors() and str(ValidationError) on one prefix for the life of the process.
+static const std::string& error_url_prefix() {
+    static const std::string prefix = [] {
+        std::string version;
+        try {
+            version = py::module_::import("pydantic").attr("VERSION").cast<std::string>();
+        } catch (...) {
+            version.clear();
+        }
+        if (version.empty()) {
+            return std::string("https://errors.pydantic.dev/latest/v/");
+        }
+        const size_t first = version.find('.');
+        const size_t second = first == std::string::npos
+                                  ? std::string::npos
+                                  : version.find('.', first + 1);
+        return "https://errors.pydantic.dev/" + version.substr(0, second) + "/v/";
+    }();
+    return prefix;
+}
+
+// validation_exception.rs:208 answers the environment question once and keeps the
+// answer, together with the deprecation warning that comes from the legacy variable, in
+// a process-wide OnceLock.  The renderer asks instead of reading the environment
+// itself:  re-importing pydantic re-executes the Python module that renders the text,
+// and a gate kept there would be handed a fresh answer -- and a fresh warning -- long
+// after Rust's had settled.  The answer is settled the first time it is asked, which in
+// practice is the first error rendered, so the deprecation warning lands on that error's
+// own render rather than on loading the extension.
+static bool include_url_env_value() {
+    static const bool settled = [] {
+        // var_os rather than var: only whether the variable exists, and whether its value
+        // is empty, are asked.  A warning the caller turned into an error must not fail the
+        // rendering, so the raised state is dropped the way Rust drops the warning result.
+        if (const char* omitted = getenv("PYDANTIC_ERRORS_OMIT_URL")) {
+            if (PyErr_WarnEx(PyExc_DeprecationWarning,
+                             "PYDANTIC_ERRORS_OMIT_URL is deprecated, use "
+                             "PYDANTIC_ERRORS_INCLUDE_URL instead", 1) == -1) {
+                PyErr_Clear();
+            }
+            return omitted[0] == '\0';
+        }
+        const char* included = getenv("PYDANTIC_ERRORS_INCLUDE_URL");
+        if (included == nullptr) {
+            return true;
+        }
+        std::string value(included);
+        for (char& c : value) {
+            c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        }
+        return value == "1" || value == "true";
+    }();
+    return settled;
+}
+
 PYBIND11_MODULE(_pydantic_core_cpp, m) {
     m.doc() = "pydantic-core C++ implementation";
     m.attr("__version__") = get_version();
@@ -5505,7 +5565,7 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                         d["ctx"] = ctx;
                     }
                     if (include_url && !err.is_custom) {
-                        d["url"] = "https://errors.pydantic.dev/2.14/v/" + err.type;
+                        d["url"] = error_url_prefix() + err.type;
                     }
                     result.append(d);
                 }
@@ -5518,6 +5578,11 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
             }, py::is_method(ve_cls))
         );
     }
+    m.def("_include_url_env", []() { return include_url_env_value(); },
+        "Whether str(ValidationError) carries the documentation link");
+    m.def("_error_url_prefix", []() -> std::string { return error_url_prefix(); },
+        "Prefix of the documentation page for an error type");
+
     // Signal exceptions raised by custom serializers/schema code. These must
     // be real Python exception types so `except PydanticOmit:` works.
     py::register_exception<PydanticOmit>(m, "PydanticOmit");
