@@ -1,6 +1,7 @@
 #include "pydantic_core/string_input.hpp"
 #include "pydantic_core/error_types.hpp"
 #include "pydantic_core/result.hpp"
+#include "pydantic_core/bytes_mode.hpp"
 #include <algorithm>
 #include <memory>
 #include <sstream>
@@ -62,6 +63,24 @@ ValResult<ValMatch<EitherBytes>> StringInput::validate_bytes(bool strict) const 
         }
     }
     
+    return ValError::line_error(PydanticKnownError::bytes_type(),
+                               Location(), as_error_value().repr);
+}
+
+ValResult<ValMatch<EitherBytes>> StringInput::validate_bytes(bool strict,
+                                                             const std::string& val_json_bytes) const {
+    // Rust's StringInput::validate_bytes decodes the string and ignores strict,
+    // so a str under validate_strings is decoded even in strict mode.
+    (void)strict;
+    if (single_value_) {
+        auto decoded = val_bytes_deserialize(val_json_bytes, *single_value_);
+        if (!decoded.ok()) {
+            return ValError::line_error(bytes_invalid_encoding_error(decoded.error),
+                                       Location(), as_error_value().repr);
+        }
+        return ValMatch<EitherBytes>::strict(EitherBytes(decoded.bytes));
+    }
+
     return ValError::line_error(PydanticKnownError::bytes_type(),
                                Location(), as_error_value().repr);
 }

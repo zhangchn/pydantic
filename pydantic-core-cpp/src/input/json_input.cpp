@@ -1,6 +1,7 @@
 #include "pydantic_core/json_input.hpp"
 #include "pydantic_core/result.hpp"
 #include "pydantic_core/error_types.hpp"
+#include "pydantic_core/bytes_mode.hpp"
 #include <simdjson.h>
 #include <cstring>
 #include <memory>
@@ -135,6 +136,28 @@ ValResult<ValMatch<EitherBytes>> JsonInput::validate_bytes(bool strict) const {
         }
     }
     
+    return ValError::line_error(PydanticKnownError::bytes_type(),
+                               Location(), as_error_value().repr);
+}
+
+ValResult<ValMatch<EitherBytes>> JsonInput::validate_bytes(bool strict,
+                                                           const std::string& val_json_bytes) const {
+    // A JSON string is read as bytes whatever the strictness, and only a string:
+    // a JSON number or bool is not coerced the way a Python one is.
+    (void)strict;
+    if (element_.type() == simdjson::dom::element_type::STRING) {
+        auto str = element_.get_string().value_unsafe();
+        if (val_json_bytes == "utf8") {
+            return ValMatch<EitherBytes>::strict(EitherBytes(std::string_view(str)));
+        }
+        auto decoded = val_bytes_deserialize(val_json_bytes, std::string(str));
+        if (!decoded.ok()) {
+            return ValError::line_error(bytes_invalid_encoding_error(decoded.error),
+                                       Location(), as_error_value().repr);
+        }
+        return ValMatch<EitherBytes>::strict(EitherBytes(decoded.bytes));
+    }
+
     return ValError::line_error(PydanticKnownError::bytes_type(),
                                Location(), as_error_value().repr);
 }

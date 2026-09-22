@@ -1,6 +1,7 @@
 #include "pydantic_core/python_input.hpp"
 #include "pydantic_core/py_compat.hpp"
 #include "pydantic_core/errors.hpp"
+#include "pydantic_core/bytes_mode.hpp"
 #include <memory>
 #include <string>
 #include <vector>
@@ -429,6 +430,59 @@ ValResult<ValMatch<EitherBytes>> PythonInput::validate_bytes(bool strict) const 
     }
 
     return type_error(ErrorType::Kind::BytesType, *this, this->current_location());
+}
+
+namespace {
+// Rust reads a str through py_string_str (return_enums.rs:507), which fails as
+// string_unicode for a str with no UTF-8 form -- a lone surrogate -- where a
+// plain cast would let a RuntimeError out of validation instead.
+bool str_as_utf8_bytes(const py::object& obj, std::string* out) {
+    PyObject* encoded = PyUnicode_AsUTF8String(obj.ptr());
+    if (!encoded) {
+        PyErr_Clear();
+        return false;
+    }
+    char* buf = nullptr;
+    Py_ssize_t len = 0;
+    if (PyBytes_AsStringAndSize(encoded, &buf, &len) < 0) {
+        PyErr_Clear();
+        Py_DECREF(encoded);
+        return false;
+    }
+    out->assign(buf, static_cast<size_t>(len));
+    Py_DECREF(encoded);
+    return true;
+}
+}  // namespace
+
+ValResult<ValMatch<EitherBytes>> PythonInput::validate_bytes(bool strict,
+                                                             const std::string& val_json_bytes,
+                                                             bool json_document) const {
+    // A str is the payload wherever Rust decodes one: in lax mode here
+    // (input_python.rs:208), and whatever the strict for a value that came out
+    // of a JSON document (input_json.rs:135), where the decode is strict too.
+    if ((json_document || !strict) && is_str()) {
+        std::string s;
+        if (!str_as_utf8_bytes(obj_, &s)) {
+            return type_error(ErrorType::Kind::StringUnicode, *this, this->current_location());
+        }
+        std::vector<uint8_t> payload;
+        if (val_json_bytes == "utf8") {
+            payload.assign(s.begin(), s.end());
+        } else {
+            auto decoded = val_bytes_deserialize(val_json_bytes, s);
+            if (!decoded.ok()) {
+                return ValError::line_error(bytes_invalid_encoding_error(decoded.error),
+                                           this->current_location(), as_error_value().repr);
+            }
+            payload = std::move(decoded.bytes);
+        }
+        auto match = json_document ? ValMatch<EitherBytes>::strict(EitherBytes(std::move(payload)))
+                                  : ValMatch<EitherBytes>::lax(EitherBytes(std::move(payload)));
+        return match;
+    }
+
+    return validate_bytes(strict);
 }
 
 ValResult<ValMatch<bool>> PythonInput::validate_bool(bool strict) const {

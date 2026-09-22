@@ -34,6 +34,7 @@ public:
     // Type validation implementations
     ValResult<ValMatch<EitherString>> validate_str(bool strict, bool coerce_numbers = false, bool json_input = false) const override;
     ValResult<ValMatch<EitherBytes>> validate_bytes(bool strict) const override;
+    ValResult<ValMatch<EitherBytes>> validate_bytes(bool strict, const std::string& val_json_bytes) const override;
     ValResult<ValMatch<bool>> validate_bool(bool strict) const override;
     ValResult<ValMatch<EitherInt>> validate_int(bool strict) const override;
     ValResult<ValMatch<EitherFloat>> validate_float(bool strict) const override;

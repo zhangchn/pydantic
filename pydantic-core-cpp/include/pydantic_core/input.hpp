@@ -525,6 +525,22 @@ public:
     virtual ValResult<ValMatch<EitherString>> validate_str(bool strict, bool coerce_numbers = false,
                                                            bool json_input = false) const = 0;
     virtual ValResult<ValMatch<EitherBytes>> validate_bytes(bool strict) const = 0;
+    // Rust reads the schema's `val_json_bytes` inside the input, because that is
+    // where a str gets decoded (input_json.rs:135, input_python.rs:196).
+    virtual ValResult<ValMatch<EitherBytes>> validate_bytes(
+        bool strict, const std::string& val_json_bytes) const {
+        (void)val_json_bytes;
+        return validate_bytes(strict);
+    }
+    // `json_document` marks a value read out of a JSON document, where a str is
+    // always the encoded payload: strict does not gate the decode, and the
+    // result counts as strict because JSON has no str/bytes distinction to
+    // coerce across (input_json.rs:135).
+    virtual ValResult<ValMatch<EitherBytes>> validate_bytes(
+        bool strict, const std::string& val_json_bytes, bool json_document) const {
+        (void)json_document;
+        return validate_bytes(strict, val_json_bytes);
+    }
     virtual ValResult<ValMatch<bool>> validate_bool(bool strict) const = 0;
     virtual ValResult<ValMatch<EitherInt>> validate_int(bool strict) const = 0;
     virtual ValResult<ValMatch<EitherFloat>> validate_float(bool strict) const = 0;

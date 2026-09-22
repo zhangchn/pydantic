@@ -1,6 +1,7 @@
 #include "pydantic_core/combined_validator.hpp"
 #include "pydantic_core/py_compat.hpp"
 #include "pydantic_core/json_input.hpp"
+#include "pydantic_core/bytes_mode.hpp"
 #include "pydantic_core/validators/model_fields.hpp"
 #include "pydantic_core/validators/special.hpp"
 #include "pydantic_core/validators/functions.hpp"
@@ -1665,9 +1666,17 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
     }
 
     if (type == "bytes" || type == "bytes-constrained" || type == "constr-bytes") {
+        // ValBytesMode::from_config runs for both variants, so an unusable mode
+        // is a schema error rather than a mode that silently decodes nothing.
+        std::string val_json_bytes = "utf8";
+        if (config.contains("val_json_bytes")) {
+            val_json_bytes = config["val_json_bytes"].cast<std::string>();
+            check_val_bytes_mode(val_json_bytes);
+        }
         if (schema.contains("max_length") || schema.contains("min_length")) {
             auto v = std::make_shared<BytesConstrainedValidator>();
             v->strict = strict_opt_py(schema, config);
+            v->val_json_bytes = val_json_bytes;
             auto ps = [&](const char* k) -> std::optional<size_t> {
                 if (!schema.contains(k)) return std::nullopt;
                 py::object val = schema[k];
@@ -1683,9 +1692,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         }
         auto bv = std::make_shared<BytesValidator>();
         bv->strict = strict_opt_py(schema, config);
-        if (config.contains("val_json_bytes")) {
-            bv->val_json_bytes = config["val_json_bytes"].cast<std::string>();
-        }
+        bv->val_json_bytes = val_json_bytes;
         return bv;
     }
 
