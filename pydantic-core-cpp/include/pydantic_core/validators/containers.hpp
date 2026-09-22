@@ -194,6 +194,18 @@ public:
         if (name == "str" || name == "string" || name == "constr-str" || name == "str-constrained") {
             if (auto* s = static_cast<std::string*>(value.get())) return py::str(*s);
         }
+        if (name == "bytes" || name == "constrained-bytes" || name == "bytes-constrained" ||
+            name == "constr-bytes") {
+            // The payload of a decoded str lives in the variant's vector arm, so
+            // it is read through to_vector() rather than by casting the value: the
+            // utf8 paths hand over a string_view arm that such a cast misreads.  A
+            // bytes subclass is the input object itself in Rust, so it survives.
+            if (auto* eb = static_cast<EitherBytes*>(value.get())) {
+                if (eb->original.ptr()) return eb->original;
+                auto bytes = eb->to_vector();
+                return py::bytes(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+            }
+        }
         if (name == "list" || name == "list-constrained" || name == "constr-list") {
             if (auto* l = static_cast<py::list*>(value.get())) return *l;
         }
