@@ -653,10 +653,14 @@ static std::string rust_f64_display(double value) {
     if (std::isnan(value)) return "NaN";
     if (std::isinf(value)) return value < 0 ? "-inf" : "inf";
     std::string s = format_double(value);
-    size_t e = s.find('e');
-    if (e == std::string::npos) return s;
+    // The sign comes off before the exponent is looked for: "%g" writes the '-' ahead of
+    // the mantissa, so on a negative number the 'e' sits one place further along than the
+    // renormalising below assumes, and the 'e' itself ends up inside the digit string
+    // (-86400500 came out as "-864005e0", -1.5e-7 as "-15e00000").
     bool neg = !s.empty() && s[0] == '-';
     if (neg) s.erase(s.begin());
+    size_t e = s.find('e');
+    if (e == std::string::npos) return neg ? "-" + s : s;
     std::string mantissa = s.substr(0, e);
     int exp = std::stoi(s.substr(e + 1));
     std::string digits;

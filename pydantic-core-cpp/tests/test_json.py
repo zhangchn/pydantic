@@ -663,6 +663,18 @@ def test_json_key_fallback_termination():
         to_jsonable_python({Endless(): 1}, fallback=lambda v: Endless())
 
 
+def test_json_float_parts_keep_their_digits():
+    # A float is written in plain decimal notation, so an exponent form is not an answer
+    # Rust has: a complex number's parts stay "-86400500" and "-0.00000015" however the C
+    # library would abbreviate them.
+    assert to_jsonable_python(complex(-8.64005e7, 1)) == '-86400500+1j'
+    assert to_jsonable_python(complex(1, -8.64005e7)) == '1-86400500j'
+    assert to_jsonable_python(complex(0.0, -1.5e-7)) == '-0.00000015j'
+    assert to_jsonable_python(complex(-1e21, 2)) == '-1000000000000000000000+2j'
+    assert to_jsonable_python(complex(-1.5e-7, 3e21)) == '-0.00000015+3000000000000000000000j'
+    assert to_json(complex(-8.64005e7, 1)) == b'"-86400500+1j"'
+
+
 def test_inf_nan_allow():
     v = SchemaValidator(core_schema.float_schema(allow_inf_nan=True))
     assert v.validate_json('Infinity') == float('inf')
