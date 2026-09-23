@@ -2994,6 +2994,151 @@ private:
         return false;
     }
 
+    // The ObType::Unknown arm of a key (infer.rs:630-639).  The run's `fallback` is asked
+    // first and what it hands back is asked the same question again, because a fallback may
+    // return another unknown; `serialize_unknown` prints the value instead; with neither the
+    // failure names the key's type, since the key is by definition unprintable here.
+    static py::object unknown_json_key(const py::object& key, bool json_text) {
+        if (g_ser_extra.fallback.ptr() && !g_ser_extra.fallback.is_none())
+            return infer_json_key(g_ser_extra.fallback(key), json_text);
+        if (g_ser_extra.serialize_unknown) return py::str(ser_serialize_unknown(key));
+        // A key is always inside a map, so in JSON text mode the serde boundary names this
+        // run's failure before the message reaches the caller -- one wrap however deep the
+        // key sits, because the boundary is the entry point and not each collection.  The
+        // jsonable walk has no such boundary and reports the error as it stands.
+        std::string msg = "Unable to serialize unknown type: " + ser_safe_repr(py::type::of(key));
+        if (json_text) throw PydanticSerializationError("Error serializing to JSON: PydanticSerializationError: " + msg);
+        throw PydanticSerializationError(msg);
+    }
+
+    // Rust infer_json_key (infer.rs:530-641) asks a dict key what kind of thing it is rather
+    // than printing it.  Both walks ask it: the JSON text through the serde boundary, and the
+    // jsonable walk because it is to_python with SerMode::Json too (:275), where a map entry's
+    // key is turned with json_key (shared.rs:737-740) -- which is why a key leaves
+    // to_jsonable_python a str and `{1: "x"}` and `{'1': 'x'}` are one and the same run.
+    // Printing every key instead cost more than the shape of the output: an unknown key was
+    // rendered where Rust refuses it, the run's fallback was never asked about a key at all, a
+    // bool was named in Python's rather than JSON's words, and a collection was printed instead
+    // of refused.
+    static py::object infer_json_key(const py::object& key, bool json_text) {
+        // Rust bounds neither the fallback nor a self-referential key here, and the reference
+        // build dies at the bottom of that stack -- to_json({FH(): 1}, fallback=lambda v: FH())
+        // takes the wheel down with it.  The value walk's bound is what this leans on instead,
+        // so the run ends with the error that walk already reports.
+        std::vector<const void*>& st = json_rec_stack();
+        if (st.size() >= 255) {
+            if (json_text)
+                throw PydanticSerializationError("Error serializing to JSON: ValueError: Circular reference detected (depth exceeded)");
+            throw py::value_error("Circular reference detected (depth exceeded)");
+        }
+        st.push_back(key.ptr());
+        struct KeyStackPop {
+            std::vector<const void*>& s;
+            ~KeyStackPop() { if (!s.empty()) s.pop_back(); }
+        } popper{st};
+        // ObType::Enum is asked before the mixin types a member also satisfies, and asks its
+        // value the same question again (infer.rs:616-619).
+        if (is_enum_instance(key)) return infer_json_key(py::getattr(key, "value"), json_text);
+        if (key.is_none()) return py::str("None");
+        // ObType::Bool comes before Int, whose Python spelling would be "True".
+        if (py::isinstance<py::bool_>(key)) return py::str(key.ptr() == Py_True ? "true" : "false");
+        if (py::isinstance<py::int_>(key)) return py::str(key);
+        // A float key is str(key) too; only inf_nan_mode="null" would write "None" for a NaN or
+        // an infinite one, and this walk has no inf_nan_mode to ask (to_json drops its own).
+        if (py::isinstance<py::float_>(key)) return py::str(key);
+        if (py::isinstance<py::str>(key)) return key;
+        if (py::isinstance<py::bytes>(key) || py::isinstance<py::bytearray>(key)) {
+            // A key follows the run's bytes mode like a value does, and its utf8 failure is
+            // reported through bytes_to_string, so it arrives as a UnicodeDecodeError rather
+            // than the unknown-type wording -- str() of the key turned b'ab' into "b'ab'".
+            std::string kb;
+            if (py::isinstance<py::bytes>(key)) {
+                kb = key.cast<std::string>();
+            } else {
+                PyObject* b = PyBytes_FromObject(key.ptr());
+                if (!b) { PyErr_Clear(); return unknown_json_key(key, json_text); }
+                kb = py::reinterpret_steal<py::bytes>(b).cast<std::string>();
+            }
+            if (g_ser_extra.bytes_mode == "hex") kb = bytes_hex_encode(kb);
+            else if (g_ser_extra.bytes_mode == "base64") kb = b64_encode_string(kb);
+            else if (auto bad = utf8_bad(kb)) raise_rust_decode_error(kb, *bad);
+            return py::str(kb);
+        }
+        {
+            // The temporal kinds and a complex number each have a form of their own, and the
+            // run's temporal_mode picks which of them a datetime key gets -- the
+            // space-separated str(datetime) is not one of them.
+            py::object conv;
+            if (json_infer_leaf(key, conv)) return py::str(conv);
+        }
+        // ObType::Tuple asks every element and joins the answers with "," (tuple.rs:248);
+        // Python's own repr of the tuple would read "(1, 'a')".
+        if (py::isinstance<py::tuple>(key)) {
+            std::string joined;
+            bool first = true;
+            for (auto item : py::reinterpret_borrow<py::tuple>(key)) {
+                if (!first) joined += ",";
+                first = false;
+                joined += infer_json_key(py::reinterpret_borrow<py::object>(item), json_text).cast<std::string>();
+            }
+            return py::str(joined);
+        }
+        {
+            // A collection is refused outright (infer.rs:601-608), and the name in the message
+            // is Rust's snake_case ObType.  An unhashable one never reaches here -- Python
+            // keeps it out of a dict to begin with -- so this answers a hashable subclass.
+            const char* refused = nullptr;
+            if (py::isinstance<py::list>(key)) refused = "list";
+            else if (py::isinstance<py::set>(key)) refused = "set";
+            else if (py::isinstance<py::frozenset>(key)) refused = "frozenset";
+            else if (py::isinstance<py::dict>(key)) refused = "dict";
+            else if (PyIter_Check(key.ptr())) refused = "generator";
+            else {
+                try {
+                    static const py::object& deque_cls = held_python_object([] { return py::module_::import("collections").attr("deque"); });
+                    if (py::isinstance(key, deque_cls)) refused = "deque";
+                } catch (const py::error_already_set&) { PyErr_Clear(); }
+            }
+            if (refused) {
+                std::string msg = std::string("`") + refused + "` not valid as object key";
+                if (json_text) throw PydanticSerializationError("Error serializing to JSON: TypeError: " + msg);
+                throw py::type_error(msg);
+            }
+        }
+        // ObType::Pattern is its pattern source, because str() of a compiled pattern is its
+        // repr on this Python (infer.rs:624-629).
+        try {
+            static const py::object& pattern_cls = held_python_object([] { return py::module_::import("re").attr("Pattern"); });
+            if (py::isinstance(key, pattern_cls)) return py::str(key.attr("pattern"));
+        } catch (const py::error_already_set&) { PyErr_Clear(); }
+        // A dataclass or a pydantic model is named by str() (infer.rs:610-615), which Rust
+        // precedes by checking the key is hashable -- which it already is, having come out of a
+        // dict.  A type object answers the same probes and is refused (ob_type.rs:421).
+        if ((dict_inferable_object(key) || (py_hasattr(key, "__pydantic_serializer__") && !PyType_Check(key.ptr())))
+            && !PyType_Check(key.ptr()))
+            return py::str(key);
+        // Decimal, UUID, Path and the ipaddress types have no form but their own text
+        // (infer.rs:554, :576-593), so does a Fraction, and so does a URL.
+        for (const py::object& known : str_known_classes()) {
+            if (py::isinstance(key, known)) return py::str(key);
+        }
+        try {
+            static const py::object& fraction_cls = held_python_object([] { return py::module_::import("fractions").attr("Fraction"); });
+            if (py::isinstance(key, fraction_cls)) return py::str(key);
+        } catch (const py::error_already_set&) { PyErr_Clear(); }
+        try {
+            static const py::object& url_mod_holder = held_python_object([] { return py::module_::import("pydantic_core_cpp._pydantic_core_cpp"); });
+            py::object url_cls = url_mod_holder.attr("Url");
+            py::object murl_cls = url_mod_holder.attr("MultiHostUrl");
+            if (py::isinstance(key, url_cls) || py::isinstance(key, murl_cls)) return py::str(key);
+            if (py_hasattr(key, "_url")) {
+                auto inner = py::getattr(key, "_url");
+                if (py::isinstance(inner, url_cls) || py::isinstance(inner, murl_cls)) return py::str(key);
+            }
+        } catch (const py::error_already_set&) { PyErr_Clear(); }
+        return unknown_json_key(key, json_text);
+    }
+
     static std::string infer_json(const py::object& value, bool ensure_ascii, int indent) {
         std::vector<const void*>& st = json_rec_stack();
         const void* p = value.ptr();
@@ -3105,21 +3250,7 @@ private:
             for (auto item : d) {
                 if (!first) out += ",";
                 first = false;
-                // A bytes key follows the run's bytes mode like a value does, and its
-                // utf8 failure is reported through bytes_to_string, so it arrives as a
-                // UnicodeDecodeError rather than the value arm's wording -- which the
-                // wrapper shows as "Error serializing to JSON: UnicodeDecodeError: ...".
-                // str() of the key, which is what this did for every type, turns b'ab'
-                // into the key "b'ab'".
-                if (py::isinstance<py::bytes>(item.first)) {
-                    std::string kb = item.first.cast<std::string>();
-                    if (g_ser_extra.bytes_mode == "hex") kb = bytes_hex_encode(kb);
-                    else if (g_ser_extra.bytes_mode == "base64") kb = b64_encode_string(kb);
-                    else if (auto bad = utf8_bad(kb)) raise_rust_decode_error(kb, *bad);
-                    out += json_escape(kb, ensure_ascii);
-                } else {
-                    out += json_escape(py::str(item.first).cast<std::string>(), ensure_ascii);
-                }
+                out += json_escape(infer_json_key(py::reinterpret_borrow<py::object>(item.first), true).cast<std::string>(), ensure_ascii);
                 out += ":";
                 out += infer_json(py::reinterpret_borrow<py::object>(item.second), ensure_ascii, -1);
             }
@@ -5471,7 +5602,10 @@ static py::object infer_jsonable_python(const py::object& v, const JsonableRun& 
             // infer.rs:734 -- a dict is filtered by the key it holds, before that key is
             // converted into something JSON allows.
             if (!ser_any_filter(key, include, exclude, &next_include, &next_exclude)) continue;
-            auto k = infer_jsonable_python(key, run, next_include, next_exclude);
+            // The key is asked the JSON question even though the values are asked the python
+            // one, because this walk runs in json mode (shared.rs:737-740): an int key leaves
+            // as "1", not as 1.
+            auto k = SerNode::infer_json_key(key, false);
             auto val = infer_jsonable_python(py::reinterpret_borrow<py::object>(item.second), run,
                                              next_include, next_exclude);
             out[k] = val;

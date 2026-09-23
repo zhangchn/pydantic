@@ -593,6 +593,76 @@ def test_bad_repr():
     assert to_json(b, serialize_unknown=True) == b'"<Unserializable BadRepr object>"'
 
 
+def test_json_dict_keys_are_their_own_type():
+    # A key is dispatched on its type rather than printed (Rust's infer_json_key,
+    # infer.rs:530-641), and the jsonable walk asks the same question because it runs in json
+    # mode too -- so a key leaves to_jsonable_python a str exactly as it leaves to_json a JSON
+    # string, and `{1: "x"}` and `{'1': 'x'}` are the same run rather than two of them.
+    import datetime
+    import enum
+    import uuid
+
+    class Colour(enum.Enum):
+        RED = 'red'
+
+    assert to_json({1: 'v'}) == b'{"1":"v"}'
+    assert to_json({True: 'v'}) == b'{"true":"v"}'
+    assert to_json({False: 'v'}) == b'{"false":"v"}'
+    assert to_json({None: 'v'}) == b'{"None":"v"}'
+    assert to_json({1.5: 'v'}) == b'{"1.5":"v"}'
+    assert to_json({Colour.RED: 'v'}) == b'{"red":"v"}'
+    assert to_json({(1, 'a'): 'v'}) == b'{"1,a":"v"}'
+    assert to_json({(1, (2, 3)): 'v'}) == b'{"1,2,3":"v"}'
+    assert to_json({datetime.datetime(2024, 1, 2, 3, 4): 'v'}) == b'{"2024-01-02T03:04:00":"v"}'
+    assert to_json({datetime.date(2024, 1, 2): 'v'}) == b'{"2024-01-02":"v"}'
+    assert to_json({b'ab': 'v'}) == b'{"ab":"v"}'
+    assert to_json({b'ab': 'v'}, bytes_mode='hex') == b'{"6162":"v"}'
+    assert to_json({uuid.UUID('12345678-1234-5678-1234-567812345678'): 'v'}) == b'{"12345678-1234-5678-1234-567812345678":"v"}'
+
+    assert to_jsonable_python({1: 'v'}) == {'1': 'v'}
+    assert to_jsonable_python({True: 'v'}) == {'true': 'v'}
+    assert to_jsonable_python({None: 'v'}) == {'None': 'v'}
+    assert to_jsonable_python({Colour.RED: 'v'}) == {'red': 'v'}
+    assert to_jsonable_python({(1, 'a'): 'v'}) == {'1,a': 'v'}
+    assert to_jsonable_python({FoobarHash(): 'v'}, fallback=fallback_func) == {'fallback:FoobarHash': 'v'}
+
+    # An unknown key is refused rather than printed -- which is what str() of every key used
+    # to do -- and the run's fallback is asked about a key exactly as it is about a value.
+    with pytest.raises(PydanticSerializationError, match=r"Unable to serialize unknown type: <class '.*\.FoobarHash'>"):
+        to_json({FoobarHash(): 1})
+    with pytest.raises(PydanticSerializationError, match=r"Unable to serialize unknown type: <class '.*\.FoobarHash'>"):
+        to_jsonable_python({FoobarHash(): 1})
+    assert to_json({'a': {FoobarHash(): 1}}, fallback=fallback_func) == b'{"a":{"fallback:FoobarHash":1}}'
+    assert to_json({FoobarHash(): {1: FoobarHash()}}, fallback=fallback_func) == b'{"fallback:FoobarHash":{"1":"fallback:FoobarHash"}}'
+    assert to_json({FoobarHash(): 1}, serialize_unknown=True) == b'{"Foobar.__str__":1}'
+    assert to_json({BadRepr(): 1}, serialize_unknown=True) == b'{"<Unserializable BadRepr object>":1}'
+    assert to_json({BadRepr(): 1}, fallback=fallback_func) == b'{"fallback:BadRepr":1}'
+    with pytest.raises(PydanticSerializationError, match=r'^Unable to serialize unknown type: <unprintable BedReprMeta object>$'):
+        to_jsonable_python({BadRepr(): 1})
+
+    # A collection cannot name a key at all, so a hashable one of those gets this answer
+    # rather than Python's own "unhashable" complaint; an int key is what a filter is asked
+    # about, so the sequence filters still reach the elements they name.
+    with pytest.raises(TypeError, match=r'`frozenset` not valid as object key'):
+        to_jsonable_python({frozenset({1}): 1})
+    assert to_jsonable_python({0: 'a', 1: 'b'}, include={0}) == {'0': 'a'}
+    assert to_jsonable_python({0: 'a', 1: 'b'}, exclude={0}) == {'1': 'b'}
+
+
+def test_json_key_fallback_termination():
+    # Rust bounds nothing here -- a fallback that hands back another unknown recurses until
+    # the C stack gives out, and the reference build dies with it.  The port reuses the value
+    # walk's bound, so the run ends with that walk's own error instead of the interpreter.
+    class Endless:
+        def __hash__(self):
+            return 1
+
+    with pytest.raises(ValueError, match=r'Circular reference detected \(depth exceeded\)'):
+        to_json({Endless(): 1}, fallback=lambda v: Endless())
+    with pytest.raises(ValueError, match=r'Circular reference detected \(depth exceeded\)'):
+        to_jsonable_python({Endless(): 1}, fallback=lambda v: Endless())
+
+
 def test_inf_nan_allow():
     v = SchemaValidator(core_schema.float_schema(allow_inf_nan=True))
     assert v.validate_json('Infinity') == float('inf')
