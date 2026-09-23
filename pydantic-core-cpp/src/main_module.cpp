@@ -1535,8 +1535,16 @@ struct SerNode {
     // extras_schema says how to serialize them.
     bool typed_dict_allow_extra = false;
     SerRef extra_ser;
-    // For inf/nan serialization mode: "constants" (default) or "strings"
-    std::string inf_nan_mode = "constants";
+    // Rust's FloatSerializer bakes this at build time (float.rs:45-56) from the config
+    // pydantic handed the *serializer*, and a config that does not name it falls back to
+    // InfNanMode::default() -- the enum's first variant, Null (config.rs:141-147), not
+    // SerializationConfig::default()'s Constants.  Only the module entry points print
+    // constants by default, because their default is the string their binding reads.
+    std::string inf_nan_mode = "null";
+    // Whether the model (or dataclass) this node was built under has settled the mode for
+    // it.  Only that nearest enclosing model is asked (model.rs:117, dataclass.rs:103), so
+    // neither an ancestor's config nor the one the serializer was handed answers afterwards.
+    bool inf_nan_claimed = false;
     // For bytes serialization: "utf8" (default), "base64", or "hex"
     std::string ser_json_bytes = "utf8";
     // For timedelta serialization: "iso8601" (default) or "float"
@@ -3490,6 +3498,16 @@ private:
             if (is_enum_instance(v) && py_hasattr(v, "value")) {
                 return serialize_any_value(py::getattr(v, "value"), exc_none, round_trip, json_mode);
             }
+            // infer_to_python's json arm (infer.rs:115-121): a float that is neither finite
+            // nor a number is taken away by the mode that asks for it to be gone -- the mode
+            // of the serializer this run belongs to, which is no longer the entry point's
+            // once a value brought its own serializer.  A typed float leaf is not asked:
+            // `SchemaSerializer(float_schema()).to_python(nan, mode="json")` keeps nan.
+            if (PyFloat_Check(v.ptr())) {
+                double d = PyFloat_AsDouble(v.ptr());
+                if ((std::isnan(d) || std::isinf(d)) && g_ser_extra.inf_nan_mode == "null")
+                    return py::none();
+            }
             py::object converted;
             if (json_infer_leaf(v, converted)) return converted;
         }
@@ -4822,13 +4840,34 @@ static SerRef build_ser_impl(const py::dict& schema,
     if (schema.contains("config")) {
         try {
             py::dict config = schema["config"].cast<py::dict>();
+            // "models ignore the parent config and always use the config from this model"
+            // (model.rs:111-121, and dataclass.rs:103 likewise): a model rebuilds its whole
+            // subtree with the config its own schema carries, so the mode below a model is
+            // the one *that* model's config names -- and InfNanMode::default(), Null, when it
+            // names none.  Every other serializer is built with whatever its parent was
+            // handed (shared.rs:39, :62-73, :171-236) and is asked nothing of its own
+            // `config` but polymorphic_serialization (shared.rs:252), which is why
+            // `SchemaSerializer({'type':'float','config':{'ser_json_inf_nan':'constants'}}
+            // .to_json(nan)` is b'null' on the wheel: a float node's config is never read.
+            std::string inf_nan = "null";
+            if (original_type == "model" || original_type == "dataclass") {
+                try {
+                    if (config.contains("ser_json_inf_nan"))
+                        inf_nan = config["ser_json_inf_nan"].cast<std::string>();
+                } catch (...) { PyErr_Clear(); }
+            }
             std::unordered_set<SerRef> visited;
             std::function<void(SerRef)> set_config = [&](SerRef n) {
                 if (!n) return;
                 if (visited.count(n)) return;  // Cycle detection
                 visited.insert(n);
-                if (config.contains("ser_json_inf_nan")) {
-                    n->inf_nan_mode = config["ser_json_inf_nan"].cast<std::string>();
+                // Settled here or by a nearer model, never by a frame further up -- whose
+                // walk runs later, this subtree having been built inside the recursion.
+                if (original_type == "model" || original_type == "dataclass") {
+                    if (!n->inf_nan_claimed) {
+                        n->inf_nan_mode = inf_nan;
+                        n->inf_nan_claimed = true;
+                    }
                 }
                 if (config.contains("ser_json_bytes")) {
                     n->ser_json_bytes = config["ser_json_bytes"].cast<std::string>();
@@ -4871,6 +4910,9 @@ public:
                 if (c.contains("serialize_by_alias")) {
                     serialize_by_alias_ = c["serialize_by_alias"].cast<bool>();
                 }
+                if (c.contains("ser_json_inf_nan")) {
+                    inf_nan_mode_ = c["ser_json_inf_nan"].cast<std::string>();
+                }
                 // Propagate ser_json_* config to all serializer nodes (the config
                 // is not embedded in the schema when a TypeAdapter is created with
                 // an explicit config).
@@ -4879,7 +4921,7 @@ public:
                     if (!n) return;
                     if (visited.count(n)) return;
                     visited.insert(n);
-                    if (c.contains("ser_json_inf_nan")) {
+                    if (c.contains("ser_json_inf_nan") && !n->inf_nan_claimed) {
                         n->inf_nan_mode = c["ser_json_inf_nan"].cast<std::string>();
                     }
                     if (c.contains("ser_json_bytes")) {
@@ -4915,6 +4957,9 @@ public:
                 if (c.contains("serialize_by_alias")) {
                     serialize_by_alias_ = c["serialize_by_alias"].cast<bool>();
                 }
+                if (c.contains("ser_json_inf_nan")) {
+                    inf_nan_mode_ = c["ser_json_inf_nan"].cast<std::string>();
+                }
                 // Propagate ser_json_* config to all serializer nodes. The config
                 // is not embedded in the schema when a TypeAdapter is created with
                 // an explicit config, so build_ser's schema["config"] path misses it.
@@ -4923,7 +4968,7 @@ public:
                     if (!n) return;
                     if (visited.count(n)) return;
                     visited.insert(n);
-                    if (c.contains("ser_json_inf_nan")) {
+                    if (c.contains("ser_json_inf_nan") && !n->inf_nan_claimed) {
                         n->inf_nan_mode = c["ser_json_inf_nan"].cast<std::string>();
                     }
                     if (c.contains("ser_json_bytes")) {
@@ -4969,6 +5014,7 @@ public:
         g_ser_extra.bytes_mode = ser_json_bytes_;
         g_ser_extra.timedelta_mode = ser_json_timedelta_;
         g_ser_extra.temporal_mode = ser_json_temporal_;
+        g_ser_extra.inf_nan_mode = inf_nan_mode_;
         if (!ser_) throw std::runtime_error("Serializer not initialized");
 
         // Pass include/exclude through as-is (nested dict/set filters supported)
@@ -5051,6 +5097,7 @@ public:
         g_ser_extra.bytes_mode = ser_json_bytes_;
         g_ser_extra.timedelta_mode = ser_json_timedelta_;
         g_ser_extra.temporal_mode = ser_json_temporal_;
+        g_ser_extra.inf_nan_mode = inf_nan_mode_;
         if (!ser_) throw std::runtime_error("Serializer not initialized");
 
         // Pass include/exclude through as-is (nested dict/set filters supported)
@@ -5114,6 +5161,10 @@ private:
     std::string ser_json_bytes_ = "utf8";
     std::string ser_json_timedelta_ = "iso8601";
     std::string ser_json_temporal_ = "iso8601";
+    // SerializationConfig::from_config(config) for the config *this* serializer was built
+    // with (mod.rs:76) -- the unmerged constructor argument, so a schema that embeds the
+    // mode without the constructor naming it leaves the enum default, Null.
+    std::string inf_nan_mode_ = "null";
 };
 
 // ---------------------------------------------------------------------------

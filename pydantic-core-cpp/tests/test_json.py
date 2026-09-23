@@ -714,6 +714,109 @@ def test_to_json_inf_nan_mode():
     assert to_jsonable_python({nan: 'x'}, inf_nan_mode='null') == {'None': 'x'}
 
 
+def test_a_float_leaf_asks_the_serializer_it_belongs_to():
+    # A float that is neither finite nor a number is printed by the mode of the serializer
+    # the run belongs to, which is asked of that serializer's own config (float.rs:45-56) --
+    # and a config that does not name it falls back to InfNanMode::default(), the first
+    # variant, Null (config.rs:141-147).  Only the module entry points print constants by
+    # default, because there the default is the string their binding reads.
+    nan, inf = float('nan'), float('inf')
+    float_schema = core_schema.float_schema()
+    assert SchemaSerializer(float_schema).to_json(nan) == b'null'
+    assert SchemaSerializer(float_schema).to_json(inf) == b'null'
+    assert SchemaSerializer(float_schema).to_json(-inf) == b'null'
+    assert SchemaSerializer(float_schema).to_json(1.5) == b'1.5'
+    # The config a caller does hand over is kept, in every mode
+    for mode, expected in [('null', b'null'),
+                           ('constants', b'NaN'),
+                           ('strings', b'"NaN"')]:
+        cfg = {'ser_json_inf_nan': mode}
+        assert SchemaSerializer(float_schema, cfg).to_json(nan) == expected
+    assert SchemaSerializer(float_schema, {'ser_json_inf_nan': 'constants'}).to_json(inf) == b'Infinity'
+    assert SchemaSerializer(float_schema, {'ser_json_inf_nan': 'constants'}).to_json(-inf) == b'-Infinity'
+    assert SchemaSerializer(float_schema, {'ser_json_inf_nan': 'strings'}).to_json(inf) == b'"Infinity"'
+    assert SchemaSerializer(float_schema, {'ser_json_inf_nan': 'strings'}).to_json(-inf) == b'"-Infinity"'
+    # Below a typed node the mode is the same one, so a collection answers as one voice
+    assert SchemaSerializer(core_schema.list_schema(float_schema)).to_json([nan]) == b'[null]'
+    assert SchemaSerializer(core_schema.nullable_schema(float_schema)).to_json(nan) == b'null'
+    assert SchemaSerializer(core_schema.dict_schema(core_schema.str_schema(),
+                                                    float_schema)).to_json({'a': nan}) == b'{"a":null}'
+    assert SchemaSerializer(core_schema.list_schema(float_schema),
+                            {'ser_json_inf_nan': 'constants'}).to_json([nan]) == b'[NaN]'
+    # An untyped value is printed by the infer walk, which asks the run's config too
+    # (infer.rs:401), so it answers null where a typed leaf does.
+    assert SchemaSerializer(core_schema.any_schema()).to_json(nan) == b'null'
+    assert SchemaSerializer(core_schema.any_schema(),
+                            {'ser_json_inf_nan': 'constants'}).to_json(nan) == b'NaN'
+    assert SchemaSerializer(core_schema.list_schema(core_schema.any_schema()),
+                            {'ser_json_inf_nan': 'constants'}).to_json([nan]) == b'[NaN]'
+    # Only the config the serializer was constructed with is asked: a schema that embeds
+    # the mode in its own `config` is never read for this (shared.rs threads the
+    # constructor's config down unchanged and asks a schema's own `config` for nothing but
+    # polymorphic_serialization, shared.rs:252).
+    assert SchemaSerializer(dict(float_schema, config={'ser_json_inf_nan': 'constants'})).to_json(nan) == b'null'
+    assert SchemaSerializer(dict(float_schema, config={'ser_json_inf_nan': 'constants'}),
+                            {'ser_json_inf_nan': 'strings'}).to_json(nan) == b'"NaN"'
+    # The entry point is the one caller that keeps JSON's own spellings when told to
+    assert to_json([nan]) == b'[NaN]'
+    # A json-mode to_python run has JSON's rule for the values it hands back (infer.rs:115-121):
+    # the mode that takes a non-finite float away replaces it with None.  A typed float leaf
+    # is not asked, and a python-mode run has no JSON to be a null in.
+    assert SchemaSerializer(core_schema.any_schema()).to_python(nan, mode='json') is None
+    assert SchemaSerializer(core_schema.any_schema()).to_python([nan, inf, 1.5], mode='json') == [None, None, 1.5]
+    assert math.isnan(SchemaSerializer(core_schema.any_schema(),
+                                       {'ser_json_inf_nan': 'constants'}).to_python(nan, mode='json'))
+    assert SchemaSerializer(core_schema.any_schema(),
+                            {'ser_json_inf_nan': 'null'}).to_python(inf, mode='json') is None
+    assert math.isnan(SchemaSerializer(float_schema).to_python(nan, mode='json'))
+    assert math.isnan(SchemaSerializer(float_schema).to_python(nan))
+    assert math.isnan(SchemaSerializer(float_schema, {'ser_json_inf_nan': 'null'}).to_python(nan))
+    assert math.isnan(SchemaSerializer(core_schema.any_schema()).to_python(nan))
+    assert math.isnan(SchemaSerializer(core_schema.any_schema(),
+                                       {'ser_json_inf_nan': 'null'}).to_python(nan))
+
+
+def test_a_model_takes_its_own_config_for_non_finite_floats():
+    # "models ignore the parent config and always use the config from this model"
+    # (model.rs:111-121, and dataclass.rs:103 likewise): a model builds its whole subtree
+    # with the config its own schema carries, so what a float below it is worth is settled
+    # by the nearest model -- whether or not an ancestor named a mode, and whether or not
+    # the caller handed one to the serializer.
+    nan = float('nan')
+
+    class Inner:
+        def __init__(self):
+            self.f = nan
+
+    class Outer:
+        def __init__(self):
+            self.inner = Inner()
+
+    def fields_schema(**fields):
+        return {'type': 'model-fields', 'model': None,
+                'fields': {name: {'type': 'model-field', 'schema': schema}
+                           for name, schema in fields.items()}}
+
+    def model_of(cls, schema, config):
+        return {'type': 'model', 'cls': cls, 'schema': schema, 'config': config}
+
+    float_schema = core_schema.float_schema()
+    named = model_of(Inner, fields_schema(f=float_schema),
+                     {'ser_json_inf_nan': 'constants', 'extra_fields_behavior': 'ignore'})
+    bare = model_of(Inner, fields_schema(f=float_schema), {'extra_fields_behavior': 'ignore'})
+    assert SchemaSerializer(named).to_json(Inner()) == b'{"f":NaN}'
+    assert SchemaSerializer(named, {'ser_json_inf_nan': 'null'}).to_json(Inner()) == b'{"f":NaN}'
+    assert SchemaSerializer(bare).to_json(Inner()) == b'{"f":null}'
+    outer_strings = model_of(Outer, fields_schema(inner=bare),
+                             {'ser_json_inf_nan': 'strings', 'extra_fields_behavior': 'ignore'})
+    assert SchemaSerializer(outer_strings).to_json(Outer()) == b'{"inner":{"f":null}}'
+    assert SchemaSerializer(outer_strings,
+                            {'ser_json_inf_nan': 'strings'}).to_json(Outer()) == b'{"inner":{"f":null}}'
+    outer_bare = model_of(Outer, fields_schema(inner=named), {'extra_fields_behavior': 'ignore'})
+    assert SchemaSerializer(outer_bare).to_json(Outer()) == b'{"inner":{"f":NaN}}'
+    assert SchemaSerializer(outer_bare, {'ser_json_inf_nan': 'null'}).to_json(Outer()) == b'{"inner":{"f":NaN}}'
+
+
 def test_to_json_temporal_mode():
     dt = datetime.datetime(2024, 1, 2, 3, 4, 5)
     dtc = datetime.datetime(2024, 1, 2, 3, 4, 5, 123456,
