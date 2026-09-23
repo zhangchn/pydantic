@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import platform
 import re
@@ -401,6 +402,92 @@ def test_to_jsonable_python_schema_serializer():
     assert to_jsonable_python(instance, by_alias=False) == {'my_foo': 1, 'my_inners': [{'my_foo': 2, 'my_inners': []}]}
     assert to_json(instance, by_alias=True) == b'{"myFoo":1,"myInners":[{"myFoo":2,"myInners":[]}]}'
     assert to_json(instance, by_alias=False) == b'{"my_foo":1,"my_inners":[{"my_foo":2,"my_inners":[]}]}'
+
+
+def test_to_json_by_alias():
+    # A collection's members have no name of their own to argue about: the naming the run
+    # was asked for reaches them too, because Rust hands the member serializer the state
+    # it was handed itself (list.rs:105, deque.rs, generator.rs, set_frozenset.rs:100).
+    member = core_schema.typed_dict_schema(
+        {'my_foo': core_schema.typed_dict_field(core_schema.int_schema(), serialization_alias='myFoo')}
+    )
+
+    def holder(item):
+        return core_schema.typed_dict_schema(
+            {
+                'my_foo': core_schema.typed_dict_field(core_schema.int_schema(), serialization_alias='myFoo'),
+                'my_key': core_schema.typed_dict_field(item, serialization_alias='myKey'),
+            }
+        )
+
+    d = {'my_foo': 2}
+    ser = SchemaSerializer(holder(core_schema.list_schema(member)))
+    assert ser.to_json({'my_foo': 1, 'my_key': [d]}, by_alias=True) == b'{"myFoo":1,"myKey":[{"myFoo":2}]}'
+    assert ser.to_json({'my_foo': 1, 'my_key': [d]}, by_alias=False) == b'{"my_foo":1,"my_key":[{"my_foo":2}]}'
+    assert ser.to_python({'my_foo': 1, 'my_key': [d]}, mode='json', by_alias=True) == {'myFoo': 1, 'myKey': [{'myFoo': 2}]}
+    ser = SchemaSerializer(holder(core_schema.list_schema(core_schema.list_schema(member))))
+    assert ser.to_json({'my_foo': 1, 'my_key': [[d]]}, by_alias=True) == b'{"myFoo":1,"myKey":[[{"myFoo":2}]]}'
+    ser = SchemaSerializer(holder(core_schema.deque_schema(member)))
+    assert ser.to_json({'my_foo': 1, 'my_key': deque([d])}, by_alias=True) == b'{"myFoo":1,"myKey":[{"myFoo":2}]}'
+    # an iterator is read once, so each of these gets one of its own
+    ser = SchemaSerializer(holder(core_schema.generator_schema(member)))
+    assert ser.to_json({'my_foo': 1, 'my_key': iter([d])}, by_alias=True) == b'{"myFoo":1,"myKey":[{"myFoo":2}]}'
+    assert ser.to_json({'my_foo': 1, 'my_key': iter([d])}, by_alias=False) == b'{"my_foo":1,"my_key":[{"my_foo":2}]}'
+
+    @dataclasses.dataclass(frozen=True)
+    class Frozen:
+        my_foo: int = 2
+
+    frozen_member = core_schema.dataclass_schema(
+        Frozen,
+        core_schema.dataclass_args_schema(
+            'Frozen', [{'name': 'my_foo', 'schema': core_schema.int_schema(), 'serialization_alias': 'myFoo'}]
+        ),
+        ['my_foo'],
+    )
+    ser = SchemaSerializer(holder(core_schema.set_schema(frozen_member)))
+    assert ser.to_json({'my_foo': 1, 'my_key': {Frozen(2)}}, by_alias=True) == b'{"myFoo":1,"myKey":[{"myFoo":2}]}'
+
+
+def test_to_json_by_alias_entry_point():
+    class Foobar:
+        def __init__(self, my_foo: int, my_inners: list['Foobar']):
+            self.my_foo = my_foo
+            self.my_inners = my_inners
+
+    c = core_schema.definitions_schema(
+        core_schema.definition_reference_schema(schema_ref='foobar'),
+        [
+            core_schema.model_schema(
+                Foobar,
+                core_schema.typed_dict_schema(
+                    {
+                        'my_foo': core_schema.typed_dict_field(core_schema.int_schema(), serialization_alias='myFoo'),
+                        'my_inners': core_schema.typed_dict_field(
+                            core_schema.list_schema(core_schema.definition_reference_schema('foobar')),
+                            serialization_alias='myInners',
+                        ),
+                    }
+                ),
+                ref='foobar',
+            )
+        ],
+    )
+    ser = SchemaSerializer(c)
+    Foobar.__pydantic_serializer__ = ser
+    instance = Foobar(my_foo=1, my_inners=[Foobar(my_foo=2, my_inners=[Foobar(my_foo=3, my_inners=[])])])
+    aliased = b'{"myFoo":1,"myInners":[{"myFoo":2,"myInners":[{"myFoo":3,"myInners":[]}]}]}'
+    plain = b'{"my_foo":1,"my_inners":[{"my_foo":2,"my_inners":[{"my_foo":3,"my_inners":[]}]}]}'
+
+    # to_json's own `by_alias` defaults to True (mod.rs:216) and is a constant of the run,
+    # so it is the model below the walk that reads it; the serializer method leaves the
+    # choice unset, which is why the same value comes out named by field instead.
+    assert to_json(instance) == aliased
+    assert to_json(instance, by_alias=True) == aliased
+    assert to_json(instance, by_alias=False) == plain
+    assert ser.to_json(instance) == plain
+    assert ser.to_json(instance, by_alias=True) == aliased
+    assert ser.to_json(instance, by_alias=False) == plain
 
 
 def test_cycle_same():

@@ -2681,7 +2681,7 @@ struct SerNode {
                 if (!first) out += ",";
                 first = false;
                 out += children[0]->to_json(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), ensure_ascii, -1,
-                                            round_trip, py::none(), py::none(), false, false, false,
+                                            round_trip, py::none(), py::none(), by_alias, false, false,
                                             exc_none, context);
             }
             out += "]";
@@ -2696,7 +2696,7 @@ struct SerNode {
                 first = false;
                 py::object obj = py::reinterpret_borrow<py::object>(item);
                 if (!children.empty()) {
-                    out += children[0]->to_json(check_item_type(children[0], obj), ensure_ascii, -1, round_trip, py::none(), py::none(), false, false, false, exc_none, context);
+                    out += children[0]->to_json(check_item_type(children[0], obj), ensure_ascii, -1, round_trip, py::none(), py::none(), by_alias, false, false, exc_none, context);
                 } else {
                     out += infer_json(obj, ensure_ascii, -1);
                 }
@@ -4967,7 +4967,7 @@ static std::string json_pretty_print(const std::string& compact, int indent) {
 }
 
 static py::bytes to_json_fn(const py::object& value, std::optional<size_t> indent, std::optional<bool> ea,
-    std::optional<py::object>, std::optional<py::object>, bool, bool, bool round_trip,
+    std::optional<py::object>, std::optional<py::object>, bool by_alias, bool, bool round_trip,
     std::string timedelta_mode, std::string temporal_mode, std::string bytes_mode,
     std::string inf_nan_mode, bool serialize_unknown,
     std::optional<py::object> fallback, bool, std::optional<bool> polymorphic, std::optional<py::object> context) {
@@ -4988,6 +4988,10 @@ static py::bytes to_json_fn(const py::object& value, std::optional<size_t> inden
     // ...which now includes the caller's bytes mode: it was dropped, so every byte
     // string in the value was written as utf8 text however the caller asked for it.
     g_ser_extra.bytes_mode = bytes_mode;
+    // mod.rs:244 hands this entry's own `by_alias` to the Extra, so a value below the
+    // walk that brings its own serializer is asked for its aliases too -- naming the
+    // keys of the value itself is nothing this run has to say about.
+    g_ser_extra.by_alias = py::cast(by_alias);
     g_ser_extra.serialize_unknown = serialize_unknown;
     g_ser_extra.fallback = fallback && !fallback->is_none() ? *fallback : py::none();
     g_ser_extra.round_trip = round_trip;
@@ -4996,7 +5000,7 @@ static py::bytes to_json_fn(const py::object& value, std::optional<size_t> inden
     // thread local otherwise still answers for whoever ran last.
     g_polymorphic_serialization = polymorphic;
     try {
-        std::string json = any->to_json(value, ea.value_or(false), -1, round_trip, py::none(), py::none(), false, false, false, false);
+        std::string json = any->to_json(value, ea.value_or(false), -1, round_trip, py::none(), py::none(), by_alias, false, false, false);
         if (indent.has_value()) json = json_pretty_print(json, static_cast<int>(*indent));
         return py::bytes(std::move(json));
     } catch (py::error_already_set& e) {
