@@ -87,6 +87,9 @@ struct SerCallExtra {
     std::string bytes_mode = "utf8";
     std::string timedelta_mode = "iso8601";
     std::string temporal_mode = "iso8601";
+    // SerializationConfig::inf_nan_mode -- what a float that is neither finite nor a
+    // number becomes (config.rs:26, InfNanMode::from_args).
+    std::string inf_nan_mode = "constants";
     // A thread-local is destroyed when its thread ends, which for a thread that merely
     // happened to run a serialization call is at some later, unrelated moment -- by then
     // the interpreter has released it.  Handing a reference back from there is fatal:
@@ -597,6 +600,48 @@ static void check_bytes_mode(const std::string& mode) {
     if (mode != "utf8" && mode != "base64" && mode != "hex")
         throw SchemaError("Invalid BytesMode serialization mode: `" + mode +
                           "`, expected utf8 or base64 or hex or ");
+}
+
+// The other three modes an entry point takes, same macro and same trailing "or "
+// (config.rs:118-147).
+static void check_temporal_mode(const std::string& mode) {
+    if (mode != "iso8601" && mode != "seconds" && mode != "milliseconds")
+        throw SchemaError("Invalid TemporalMode serialization mode: `" + mode +
+                          "`, expected iso8601 or seconds or milliseconds or ");
+}
+
+static void check_timedelta_mode(const std::string& mode) {
+    if (mode != "iso8601" && mode != "float")
+        throw SchemaError("Invalid TimedeltaMode serialization mode: `" + mode +
+                          "`, expected iso8601 or float or ");
+}
+
+static void check_inf_nan_mode(const std::string& mode) {
+    if (mode != "null" && mode != "constants" && mode != "strings")
+        throw SchemaError("Invalid InfNanMode serialization mode: `" + mode +
+                          "`, expected null or constants or strings or ");
+}
+
+// SerializationConfig::from_args (config.rs:58-74).  One mode answers for every temporal
+// kind, so timedelta_mode="float" -- which has no milliseconds of its own to ask for --
+// becomes seconds for a datetime too, and is never even read when temporal_mode says
+// something else: with temporal_mode="seconds" a timedelta_mode="bogus" goes unanswered.
+static std::string resolve_temporal_mode(const std::string& timedelta_mode,
+                                         const std::string& temporal_mode) {
+    if (temporal_mode != "iso8601") {
+        check_temporal_mode(temporal_mode);
+        return temporal_mode;
+    }
+    check_timedelta_mode(timedelta_mode);
+    return timedelta_mode == "float" ? "seconds" : "iso8601";
+}
+
+// What a resolved temporal mode means for the one kind that has a second name for its
+// shape: seconds is "float" and milliseconds is "milliseconds" to the timedelta leaf.
+static std::string timedelta_shape_for(const std::string& temporal_mode) {
+    if (temporal_mode == "seconds") return "float";
+    if (temporal_mode == "milliseconds") return "milliseconds";
+    return "iso8601";
 }
 
 // Convert one typed leaf value for JSON-mode serialization (SchemaSerializer
@@ -3047,9 +3092,16 @@ private:
         // ObType::Bool comes before Int, whose Python spelling would be "True".
         if (py::isinstance<py::bool_>(key)) return py::str(key.ptr() == Py_True ? "true" : "false");
         if (py::isinstance<py::int_>(key)) return py::str(key);
-        // A float key is str(key) too; only inf_nan_mode="null" would write "None" for a NaN or
-        // an infinite one, and this walk has no inf_nan_mode to ask (to_json drops its own).
-        if (py::isinstance<py::float_>(key)) return py::str(key);
+        // A float key is str(key) -- Python's "nan"/"inf", not Rust's "NaN" -- except under
+        // inf_nan_mode="null", where it takes the same "None" the None arm writes
+        // (infer.rs:546-553).  "strings" is not here: it changes what a *value* is written
+        // as, and a key is already written as a string.
+        if (py::isinstance<py::float_>(key)) {
+            double kd = key.cast<double>();
+            if ((std::isnan(kd) || std::isinf(kd)) && g_ser_extra.inf_nan_mode == "null")
+                return py::str("None");
+            return py::str(key);
+        }
         if (py::isinstance<py::str>(key)) return key;
         if (py::isinstance<py::bytes>(key) || py::isinstance<py::bytearray>(key)) {
             // A key follows the run's bytes mode like a value does, and its utf8 failure is
@@ -3073,7 +3125,14 @@ private:
             // run's temporal_mode picks which of them a datetime key gets -- the
             // space-separated str(datetime) is not one of them.
             py::object conv;
-            if (json_infer_leaf(key, conv)) return py::str(conv);
+            if (json_infer_leaf(key, conv)) {
+                // A temporal key under seconds/milliseconds is Rust's own Display of the
+                // number (config.rs:205-247), which writes an integral one as
+                // "1704164645" -- Python's str() of the same float adds ".0".
+                if (py::isinstance<py::float_>(conv))
+                    return py::str(rust_f64_display(conv.cast<double>()));
+                return py::str(conv);
+            }
         }
         // ObType::Tuple asks every element and joins the answers with "," (tuple.rs:248);
         // Python's own repr of the tuple would read "(1, 'a')".
@@ -3174,7 +3233,16 @@ private:
         if (py::isinstance<py::bool_>(value)) return value.cast<bool>() ? "true" : "false";
         if (py::isinstance<py::int_>(value)) return py::str(py::repr(value)).cast<std::string>();
         if (py::isinstance<py::float_>(value)) {
+            // serialize_f64 (float.rs:59-75): only the modes that name a non-finite float
+            // differently change anything, and a finite float answers for itself either way.
             double d = value.cast<double>();
+            if (std::isnan(d) || std::isinf(d)) {
+                if (g_ser_extra.inf_nan_mode == "null") return "null";
+                if (g_ser_extra.inf_nan_mode == "strings") {
+                    if (std::isnan(d)) return "\"NaN\"";
+                    return d > 0 ? "\"Infinity\"" : "\"-Infinity\"";
+                }
+            }
             if (std::isnan(d)) return "NaN";
             if (std::isinf(d)) return d > 0 ? "Infinity" : "-Infinity";
             return py::str(py::repr(value)).cast<std::string>();
@@ -5115,11 +5183,16 @@ static py::bytes to_json_fn(const py::object& value, std::optional<size_t> inden
     // `serialize_unknown`, and leaving the previous call's extra in place would have
     // handed them someone else's.
     SerCallExtraScope ser_scope;
-    (void)timedelta_mode;
-    (void)temporal_mode;
-    (void)inf_nan_mode;
+    // SerializationConfig::from_args, asked in Rust's own order: the temporal mode (which
+    // may be the timedelta mode wearing its hat), then bytes, then inf_nan.  Whoever is
+    // wrong first is the only one named, so the order is part of what is reproduced.
+    std::string temporal = resolve_temporal_mode(timedelta_mode, temporal_mode);
     check_bytes_mode(bytes_mode);
+    check_inf_nan_mode(inf_nan_mode);
     g_ser_extra.mode = "json";
+    g_ser_extra.temporal_mode = temporal;
+    g_ser_extra.timedelta_mode = timedelta_shape_for(temporal);
+    g_ser_extra.inf_nan_mode = inf_nan_mode;
     // ...which now includes the caller's bytes mode: it was dropped, so every byte
     // string in the value was written as utf8 text however the caller asked for it.
     g_ser_extra.bytes_mode = bytes_mode;
@@ -5156,6 +5229,9 @@ static py::bytes to_json_fn(const py::object& value, std::optional<size_t> inden
 struct JsonableRun {
     std::string bytes_mode;
     std::string timedelta_mode;
+    // The entry point's one resolved temporal mode, in its own vocabulary
+    // (iso8601|seconds|milliseconds); timedelta_mode above is what it means for a delta.
+    std::string temporal_mode;
     std::string inf_nan_mode;
     bool serialize_unknown = false;
     bool by_alias = true;
@@ -5517,9 +5593,24 @@ static py::object infer_jsonable_python(const py::object& v, const JsonableRun& 
         py::object mod = py::module_::import("pydantic_core_cpp._pydantic_core_cpp");
         if (py::isinstance(v, mod.attr("Url")) || py::isinstance(v, mod.attr("MultiHostUrl"))) return py::str(v);
     } catch (...) { PyErr_Clear(); }
-    // datetime/date/time expose isoformat()
+    // datetime/date/time expose isoformat() -- unless the run asked for timestamps, in
+    // which case the same mode that moves a datetime moves a timedelta (infer.rs:169-182,
+    // config.rs:161-186).
     if (py_hasattr(v, "isoformat")) {
         try {
+            // The three checks below read through the datetime module's imported API
+            // pointer, which is null until ensure_datetime_api has asked for it -- on the
+            // first jsonable datetime a process ever serializes that is still this call.
+            ensure_datetime_api();
+            const char* t = PyDateTime_Check(v.ptr()) ? "datetime"
+                          : PyDate_Check(v.ptr()) ? "date"
+                          : PyTime_Check(v.ptr()) ? "time" : nullptr;
+            if (t && run.temporal_mode != "iso8601") {
+                py::object stamped;
+                if (json_leaf_convert(t, v, run.bytes_mode, run.timedelta_mode, run.temporal_mode,
+                                      stamped))
+                    return stamped;
+            }
             py::object iso = v.attr("isoformat")();
             std::string s = py::str(iso).cast<std::string>();
             if (s.size() >= 6 && s.substr(s.size() - 6) == "+00:00") s = s.substr(0, s.size() - 6) + "Z";
@@ -5662,8 +5753,11 @@ static py::object to_jsonable_fn(const py::object& value, std::optional<py::obje
     std::string timedelta_mode, std::string temporal_mode, std::string bytes_mode,
     std::string inf_nan_mode, bool serialize_unknown,
     std::optional<py::object> fallback, bool serialize_as_any, std::optional<bool> polymorphic, std::optional<py::object> context) {
-    (void)temporal_mode;
+    // The same from_args, in the same order, as the JSON entry point: nothing below is
+    // asked before the modes have been read, so a refused call mutates no run state.
+    std::string temporal = resolve_temporal_mode(timedelta_mode, temporal_mode);
     check_bytes_mode(bytes_mode);
+    check_inf_nan_mode(inf_nan_mode);
     // Rust builds the same Extra for this entry that to_python(mode="json") gets, and
     // `fallback` rides on it (mod.rs:293-307), so the values inferred below read it
     // from there rather than from whatever the previous call left behind.
@@ -5677,12 +5771,13 @@ static py::object to_jsonable_fn(const py::object& value, std::optional<py::obje
     g_ser_extra.serialize_unknown = serialize_unknown;
     g_ser_extra.fallback = fallback && !fallback->is_none() ? *fallback : py::none();
     g_ser_extra.bytes_mode = bytes_mode;
-    g_ser_extra.timedelta_mode = timedelta_mode;
+    g_ser_extra.temporal_mode = temporal;
+    g_ser_extra.timedelta_mode = timedelta_shape_for(temporal);
+    g_ser_extra.inf_nan_mode = inf_nan_mode;
     g_ser_extra.round_trip = round_trip;  // mod.rs:302 hands it to the Extra
     g_ser_extra.context = context && !context->is_none() ? *context : py::none();
     g_polymorphic_serialization = polymorphic;
-    JsonableRun run{std::move(bytes_mode), std::move(timedelta_mode), std::move(inf_nan_mode), serialize_unknown,
-                    by_alias};
+    JsonableRun run{bytes_mode, timedelta_shape_for(temporal), temporal, inf_nan_mode, serialize_unknown, by_alias};
     return infer_jsonable_python(value, run, include ? *include : py::none(), exclude ? *exclude : py::none());
 }
 

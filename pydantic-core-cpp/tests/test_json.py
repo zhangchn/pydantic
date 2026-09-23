@@ -1,7 +1,11 @@
 import dataclasses
+import datetime
 import json
+import math
 import platform
 import re
+import subprocess
+import sys
 from collections import deque
 
 import pytest
@@ -11,6 +15,7 @@ import pydantic_core_cpp
 from pydantic_core_cpp import (
     CoreConfig,
     PydanticSerializationError,
+    SchemaError,
     SchemaSerializer,
     SchemaValidator,
     ValidationError,
@@ -673,6 +678,132 @@ def test_json_float_parts_keep_their_digits():
     assert to_jsonable_python(complex(-1e21, 2)) == '-1000000000000000000000+2j'
     assert to_jsonable_python(complex(-1.5e-7, 3e21)) == '-0.00000015+3000000000000000000000j'
     assert to_json(complex(-8.64005e7, 1)) == b'"-86400500+1j"'
+
+
+def test_to_json_inf_nan_mode():
+    # serialize_f64 (float.rs:59-75) asks the run's mode what a non-finite float is worth:
+    # null takes the value away, strings writes its name as text, and constants -- the mode
+    # the entry point is given when it says nothing -- keeps JSON's own spellings.
+    nan, inf = float('nan'), float('inf')
+    assert to_json([nan]) == b'[NaN]'
+    assert to_json([nan], inf_nan_mode='null') == b'[null]'
+    assert to_json([nan], inf_nan_mode='strings') == b'["NaN"]'
+    assert to_json([nan], inf_nan_mode='constants') == b'[NaN]'
+    assert to_json(nan, inf_nan_mode='null') == b'null'
+    assert to_json(nan, inf_nan_mode='strings') == b'"NaN"'
+    assert to_json([inf], inf_nan_mode='strings') == b'["Infinity"]'
+    assert to_json([-inf], inf_nan_mode='strings') == b'["-Infinity"]'
+    assert to_json([inf], inf_nan_mode='null') == b'[null]'
+    assert to_json([inf], inf_nan_mode='constants') == b'[Infinity]'
+    # A finite float has nothing the mode could answer to
+    assert to_json([1.5], inf_nan_mode='null') == b'[1.5]'
+    # A key is written as a string whatever the mode says, so only the mode that takes the
+    # value away changes it -- to the same "None" a None key already got (infer.rs:546-553).
+    assert to_json({nan: 'x'}) == b'{"nan":"x"}'
+    assert to_json({nan: 'x'}, inf_nan_mode='null') == b'{"None":"x"}'
+    assert to_json({inf: 'x'}, inf_nan_mode='null') == b'{"None":"x"}'
+    assert to_json({-inf: 'x'}, inf_nan_mode='null') == b'{"None":"x"}'
+    assert to_json({nan: 1}, inf_nan_mode='strings') == b'{"nan":1}'
+    assert to_json({1.5: 'x'}, inf_nan_mode='null') == b'{"1.5":"x"}'
+    # The jsonable walk keeps the float itself -- there is no JSON to be a constant in --
+    # unless the mode asks for it to be gone.
+    assert to_jsonable_python([nan], inf_nan_mode='null') == [None]
+    assert math.isnan(to_jsonable_python([nan], inf_nan_mode='strings')[0])
+    assert to_jsonable_python([inf], inf_nan_mode='null') == [None]
+    assert math.isinf(to_jsonable_python([inf], inf_nan_mode='constants')[0])
+    assert to_jsonable_python({nan: 'x'}, inf_nan_mode='null') == {'None': 'x'}
+
+
+def test_to_json_temporal_mode():
+    dt = datetime.datetime(2024, 1, 2, 3, 4, 5)
+    dtc = datetime.datetime(2024, 1, 2, 3, 4, 5, 123456,
+                            tzinfo=datetime.timezone(datetime.timedelta(hours=2)))
+    d, t = datetime.date(2024, 1, 2), datetime.time(3, 4, 5)
+    td = datetime.timedelta(hours=1, seconds=30)
+    tdneg = datetime.timedelta(days=-1, microseconds=-500000)
+    assert to_json([dt]) == b'["2024-01-02T03:04:05"]'
+    assert to_json([dt], temporal_mode='seconds') == b'[1704164645.0]'
+    assert to_json([dt], temporal_mode='milliseconds') == b'[1704164645000.0]'
+    assert to_json([dtc], temporal_mode='seconds') == b'[1704157445.123456]'
+    # timedelta_mode="float" is the same switch with a delta's name on it: one mode answers
+    # for every temporal kind (config.rs:58-74), so a datetime goes to seconds with it too.
+    assert to_json([dt], timedelta_mode='float') == b'[1704164645.0]'
+    assert to_json([dt], timedelta_mode='float', temporal_mode='iso8601') == b'[1704164645.0]'
+    assert to_json([dt], temporal_mode='seconds', timedelta_mode='iso8601') == b'[1704164645.0]'
+    assert to_jsonable_python([dt], temporal_mode='seconds') == [1704164645.0]
+    assert to_jsonable_python([dt]) == ['2024-01-02T03:04:05']
+    # The mode does not stop at a datetime: a date, a time and a delta all follow it.
+    assert to_json([d], temporal_mode='seconds') == b'[1704153600.0]'
+    assert to_json([d], temporal_mode='milliseconds') == b'[1704153600000.0]'
+    assert to_jsonable_python([d]) == ['2024-01-02']
+    assert to_json([t], temporal_mode='seconds') == b'[11045.0]'
+    assert to_json([td]) == b'["PT1H30S"]'
+    assert to_json([td], temporal_mode='seconds') == b'[3630.0]'
+    assert to_json([td], temporal_mode='milliseconds') == b'[3630000.0]'
+    assert to_json([tdneg], temporal_mode='seconds') == b'[-86400.5]'
+    assert to_json([tdneg], temporal_mode='milliseconds') == b'[-86400500.0]'
+    assert to_jsonable_python([tdneg], temporal_mode='seconds') == [-86400.5]
+    # A key takes the same number in Rust's own Display of it, which writes an integral one
+    # as "1704164645" -- Python's str() of the float would add ".0".
+    assert to_json({dt: 'x'}, temporal_mode='seconds') == b'{"1704164645":"x"}'
+    assert to_json({dt: 'x'}, temporal_mode='milliseconds') == b'{"1704164645000":"x"}'
+    assert to_json({dtc: 'x'}, temporal_mode='seconds') == b'{"1704157445.123456":"x"}'
+    assert to_json({tdneg: 'x'}, temporal_mode='milliseconds') == b'{"-86400500":"x"}'
+    assert to_json({t: 'x'}, temporal_mode='seconds') == b'{"11045":"x"}'
+    assert to_json({td: 'x'}, temporal_mode='seconds') == b'{"3630":"x"}'
+    assert to_jsonable_python({dt: 'x'}, temporal_mode='seconds') == {'1704164645': 'x'}
+    assert to_json({d: 'x'}) == b'{"2024-01-02":"x"}'
+
+
+def test_jsonable_temporal_types_cold_to_a_process():
+    # Asking a temporal value what kind it is reads through the datetime module's imported
+    # API pointer, which is null until something has asked for it.  A process whose first
+    # serialization is a jsonable datetime therefore died on the null where every other
+    # shape of the same call -- a to_json, a list, a second call -- answered fine, so only a
+    # fresh interpreter can ask the question at all.
+    src = (
+        'import json, datetime\n'
+        'from pydantic_core_cpp import to_jsonable_python\n'
+        'print(json.dumps(['
+        'to_jsonable_python(datetime.datetime(2024, 1, 2, 3, 4)), '
+        'to_jsonable_python(datetime.date(2024, 1, 2)), '
+        'to_jsonable_python(datetime.time(3, 4)), '
+        "to_jsonable_python(datetime.datetime(2024, 1, 2, 3, 4), temporal_mode='seconds'), "
+        "to_jsonable_python(datetime.date(2024, 1, 2), temporal_mode='milliseconds')]))"
+    )
+    out = subprocess.run([sys.executable, '-c', src], capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout) == ['2024-01-02T03:04:00', '2024-01-02', '03:04:00',
+                                      1704164640.0, 1704153600000.0]
+
+
+def test_serialization_modes_are_validated_in_rusts_order():
+    # The modes an entry point takes are read in a fixed order (config.rs:58-74), and the
+    # first one that is wrong is the only one named -- so a call that gets three of them
+    # wrong is told about the temporal mode alone.  Each message carries Rust's trailing
+    # "or " because its from_str is generated by a macro that lists the variants that way.
+    def refused(msg, **kw):
+        with pytest.raises(SchemaError, match=re.escape(msg)):
+            to_json([1], **kw)
+        with pytest.raises(SchemaError, match=re.escape(msg)):
+            to_jsonable_python([1], **kw)
+
+    refused('Invalid TemporalMode serialization mode: `unix`, expected iso8601 or seconds or '
+            'milliseconds or ', temporal_mode='unix')
+    refused('Invalid TimedeltaMode serialization mode: `bogus`, expected iso8601 or float or ',
+            timedelta_mode='bogus')
+    refused('Invalid InfNanMode serialization mode: `bogus`, expected null or constants or '
+            'strings or ', inf_nan_mode='bogus')
+    refused('Invalid BytesMode serialization mode: `b`, expected utf8 or base64 or hex or ',
+            bytes_mode='b')
+    refused('Invalid TemporalMode serialization mode: `t`, expected iso8601 or seconds or '
+            'milliseconds or ', temporal_mode='t', timedelta_mode='b', bytes_mode='b',
+            inf_nan_mode='b')
+    refused('Invalid BytesMode serialization mode: `b`, expected utf8 or base64 or hex or ',
+            bytes_mode='b', inf_nan_mode='b')
+    # The timedelta mode is only asked when the temporal mode says nothing of its own, so a
+    # bogus one rides along unanswered once a temporal mode has been named.
+    assert to_json([1], timedelta_mode='bogus', temporal_mode='seconds') == b'[1]'
 
 
 def test_inf_nan_allow():
