@@ -5006,6 +5006,242 @@ static py::bytes to_json_fn(const py::object& value, std::optional<size_t> inden
     }
 }
 
+// The `include` and `exclude` arguments of the jsonable entry points decide, one element
+// at a time, whether the walk is shown that element at all -- Rust's AnyFilter
+// (serializers/filter.rs:153-234 as the walk asks it at :267-285).  A filter is either a
+// set of keys or a dict keyed by key whose values are filters again for what is below;
+// `...` -- or `True`, kept for pydantic V1's sake (filter.rs:320) -- means "this one, with
+// nothing below it filtered".  `__all__` is merged into whichever key is being asked about
+// (filter.rs:329), which is why a filter is consulted per element instead of once per
+// collection, and why an element that survives can still be filtered from underneath.
+struct JsonableRun {
+    std::string bytes_mode;
+    std::string timedelta_mode;
+    std::string inf_nan_mode;
+    bool serialize_unknown = false;
+    bool by_alias = true;
+};
+
+// filter.rs:320 -- both spellings of "no filter below here"
+static bool ser_is_ellipsis_like(PyObject* v) {
+    return v == Py_Ellipsis || (PyBool_Check(v) && v == Py_True);
+}
+
+static const py::object& ser_all_key() {
+    static const py::object& all = held_python_object([] { return py::str("__all__"); });
+    return all;
+}
+
+static const py::object& ser_ellipsis_obj() {
+    static const py::object& e = held_python_object([] { return py::ellipsis(); });
+    return e;
+}
+
+// filter.rs:352 -- a set is a dict that filters every one of its members; anything else is
+// refused by name
+static py::dict ser_as_dict(const py::object& v) {
+    if (PyDict_Check(v.ptr())) return py::reinterpret_steal<py::dict>(PyDict_Copy(v.ptr()));
+    if (PySet_Check(v.ptr())) {
+        py::dict out;
+        for (auto item : v.cast<py::set>())
+            out[py::reinterpret_borrow<py::object>(item)] = ser_ellipsis_obj();
+        return out;
+    }
+    throw py::type_error(
+        "`include` and `exclude` must be of type `dict[str | int, <recursive> | ...] | set[str | int | ...]`");
+}
+
+// filter.rs:369 -- fold an `__all__` value into the entry kept for one key.  A key the
+// entry already names wins where it says `...`; elsewhere the two are merged by recursing
+// into the entry's own filter, which is what lets `{'a': {'b': ...}}` and `{'b': ...}` in
+// `__all__` agree on dropping `b` from `a` and nothing else.
+static py::dict ser_merge_dicts(const py::dict& item_dict, const py::object& all_value) {
+    py::dict out = py::reinterpret_steal<py::dict>(PyDict_Copy(item_dict.ptr()));
+    if (PyDict_Check(all_value.ptr())) {
+        for (auto item : all_value.cast<py::dict>()) {
+            py::object key = py::reinterpret_borrow<py::object>(item.first);
+            py::object all = py::reinterpret_borrow<py::object>(item.second);
+            PyObject* found = PyDict_GetItemWithError(out.ptr(), key.ptr());
+            if (!found && PyErr_Occurred()) throw py::error_already_set();
+            if (!found) {
+                out[key] = all;
+                continue;
+            }
+            py::object kept = py::reinterpret_borrow<py::object>(found);
+            if (ser_is_ellipsis_like(kept.ptr())) continue;
+            // :377 asks what the entry is before it asks what `__all__` says, so an entry
+            // that is neither dict nor set is refused even when `__all__` is `...`
+            py::dict kept_dict = ser_as_dict(kept);
+            if (!ser_is_ellipsis_like(all.ptr())) out[key] = ser_merge_dicts(kept_dict, all);
+        }
+        return out;
+    }
+    if (PySet_Check(all_value.ptr())) {
+        for (auto item : all_value.cast<py::set>()) {
+            py::object key = py::reinterpret_borrow<py::object>(item);
+            if (PyDict_Contains(out.ptr(), key.ptr()) != 1) out[key] = ser_ellipsis_obj();
+        }
+        return out;
+    }
+    throw py::type_error(
+        "'__all__' key of `include` and `exclude` must be of type `dict[str | int, <recursive> | ...] | set[str | int | ...]`");
+}
+
+// filter.rs:329 -- the entry for one key, with the `__all__` entry folded in.  False is
+// only for a key neither entry names: a key whose entry says `None` is present, and what
+// it filters with is `None`, which is the difference between `{1: ...}` dropping element 1
+// and `{1: None}` keeping it.
+static bool ser_merge_all_value(const py::dict& d, const py::object& key, py::object* out) {
+    py::object item, all;
+    if (PyObject* found = PyDict_GetItemWithError(d.ptr(), key.ptr()))
+        item = py::reinterpret_borrow<py::object>(found);
+    else if (PyErr_Occurred())
+        throw py::error_already_set();
+    if (PyObject* found = PyDict_GetItemWithError(d.ptr(), ser_all_key().ptr()))
+        all = py::reinterpret_borrow<py::object>(found);
+    else if (PyErr_Occurred())
+        throw py::error_already_set();
+    if (item && all) {
+        if (ser_is_ellipsis_like(item.ptr()) || ser_is_ellipsis_like(all.ptr()))
+            *out = item;   // :338 either side spelling "everything" settles it as the entry
+        else
+            *out = ser_merge_dicts(ser_as_dict(item), all);
+        return true;
+    }
+    if (item) {
+        *out = item;
+        return true;
+    }
+    if (all) {
+        *out = all;
+        return true;
+    }
+    return false;
+}
+
+// filter.rs:290 -- ask anything that is neither dict nor set whether it holds the key, the
+// way a list or a str does.  False means there was no `__contains__` to ask, or asking
+// raised, which is how `exclude='abc'` lands on "`exclude` argument must be a set or
+// dict." rather than on the string's own TypeError.
+static bool ser_check_contains(const py::object& o, const py::object& key, bool* found) {
+    py::object contains;
+    try {
+        contains = py::getattr(o, "__contains__");
+    } catch (const py::error_already_set&) {
+        PyErr_Clear();
+        return false;
+    }
+    int holds = -1;
+    try {
+        holds = PyObject_IsTrue(contains(key).ptr());
+    } catch (const py::error_already_set&) {
+        PyErr_Clear();
+        return false;
+    }
+    if (holds < 0) throw py::error_already_set();
+    if (holds == 1) {
+        *found = true;
+        return true;
+    }
+    // :296 the second question is not forgiven for failing; the first one is
+    *found = PyObject_IsTrue(contains(ser_all_key()).ptr()) == 1;
+    return true;
+}
+
+// filter.rs:20 -- a negative index is the same place counted from the end, which only
+// means anything once the length is known.  Over an unsized iterable it is an error
+// instead, and only once the walk reaches an element to ask about (:282 maps per element),
+// so `to_jsonable_python(iter([]), exclude={-1})` never gets as far as complaining.
+static py::object ser_map_negative_index(const py::object& v, const py::object* len) {
+    if (len) {
+        try {
+            return v.attr("__mod__")(*len);
+        } catch (const py::error_already_set&) {
+            PyErr_Clear();   // :25 a key with no __mod__ is its own key
+        }
+        return v;
+    }
+    static const py::object& zero = held_python_object([] { return py::int_(0); });
+    int negative = PyObject_RichCompareBool(v.ptr(), zero.ptr(), Py_LT);
+    if (negative < 0)
+        PyErr_Clear();   // :28 a key that will not answer is not a negative index
+    else if (negative == 1)
+        throw py::value_error("Negative indices cannot be used to exclude items on unsized iterables");
+    return v;
+}
+
+// filter.rs:39 -- only a dict's keys or a set's members name positions, so only those are
+// remapped.  A frozenset is left alone too: PySet_Check does not cover it, and it reaches
+// the filter through `__contains__` instead, where a negative index simply matches nothing.
+static py::object ser_map_negative_indices(const py::object& v, const py::object* len) {
+    if (PyDict_Check(v.ptr())) {
+        py::dict out;
+        for (auto item : v.cast<py::dict>())
+            out[ser_map_negative_index(py::reinterpret_borrow<py::object>(item.first), len)] =
+                py::reinterpret_borrow<py::object>(item.second);
+        return std::move(out);
+    }
+    if (PySet_Check(v.ptr())) {
+        py::set out;
+        for (auto item : v.cast<py::set>())
+            out.add(ser_map_negative_index(py::reinterpret_borrow<py::object>(item), len));
+        return std::move(out);
+    }
+    return v;   // :57 left as it is, for the filter to refuse or to ask `__contains__`
+}
+
+// filter.rs:153 -- the decision for one element, as this walk asks it (:310 and :314: the
+// walk has no schema-level filter, so nothing is included or dropped by default and every
+// answer comes from the two arguments).  False drops the element; otherwise `next_*` carry
+// the filters its own contents are asked about, which are None unless a filter named
+// something below it.  An argument that is present but None is a no-op either way (:162
+// and :190), which is why "not passed" and "passed as None" need no distinction here.
+static bool ser_any_filter(const py::object& key, const py::object& include, const py::object& exclude,
+                           py::object* next_include, py::object* next_exclude) {
+    py::object child_exclude;
+    if (!exclude.is_none()) {
+        if (PyDict_Check(exclude.ptr())) {
+            py::object value;
+            if (ser_merge_all_value(exclude.cast<py::dict>(), key, &value)) {
+                if (ser_is_ellipsis_like(value.ptr())) return false;
+                child_exclude = std::move(value);
+            }
+        } else if (PySet_Check(exclude.ptr())) {
+            int holds = PySet_Contains(exclude.ptr(), key.ptr());
+            if (holds < 0) throw py::error_already_set();
+            if (holds == 1 || PySet_Contains(exclude.ptr(), ser_all_key().ptr()) == 1) return false;
+        } else {
+            bool holds = false;
+            if (!ser_check_contains(exclude, key, &holds))
+                throw py::type_error("`exclude` argument must be a set or dict.");
+            if (holds) return false;
+        }
+    }
+
+    py::object child_include;
+    if (!include.is_none()) {
+        if (PyDict_Check(include.ptr())) {
+            py::object value;
+            if (!ser_merge_all_value(include.cast<py::dict>(), key, &value))
+                return false;   // :202 an include that exists and does not name this key drops it
+            if (!ser_is_ellipsis_like(value.ptr())) child_include = std::move(value);
+        } else if (PySet_Check(include.ptr())) {
+            int holds = PySet_Contains(include.ptr(), key.ptr());
+            if (holds < 0) throw py::error_already_set();
+            if (holds != 1 && PySet_Contains(include.ptr(), ser_all_key().ptr()) != 1) return false;
+        } else {
+            bool holds = false;
+            if (!ser_check_contains(include, key, &holds))
+                throw py::type_error("`include` argument must be a set or dict.");
+            if (!holds) return false;
+        }
+    }
+
+    *next_include = child_include ? std::move(child_include) : py::none();
+    *next_exclude = child_exclude ? std::move(child_exclude) : py::none();
+    return true;
+}
+
 // Convert an arbitrary Python value to its JSON-compatible Python form
 // (mirrors Rust's infer_jsonable_python used by to_jsonable_python).
 // Raises pydantic_core::PydanticSerializationError (registered below as a
@@ -5022,10 +5258,8 @@ static std::vector<const void*>& jsonable_rec_stack() {
     return stack;
 }
 
-static py::object infer_jsonable_python(const py::object& v, const std::string& bytes_mode,
-                                        const std::string& timedelta_mode,
-                                        const std::string& inf_nan_mode,
-                                        bool serialize_unknown, bool by_alias) {
+static py::object infer_jsonable_python(const py::object& v, const JsonableRun& run,
+                                        const py::object& include, const py::object& exclude) {
     std::vector<const void*>& st = jsonable_rec_stack();
     const void* p = v.ptr();
     for (const void* q : st) {
@@ -5052,8 +5286,7 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
                         reinterpret_cast<PyTypeObject*>(enum_metaclass.ptr());
     } catch (const py::error_already_set&) { PyErr_Clear(); }
     if (enum_member)
-        return infer_jsonable_python(py::getattr(v, "value"), bytes_mode, timedelta_mode,
-                                     inf_nan_mode, serialize_unknown, by_alias);
+        return infer_jsonable_python(py::getattr(v, "value"), run, include, exclude);
     if (PyBool_Check(v.ptr())) return v;
     if (PyLong_Check(v.ptr())) {
         // infer.rs:108 upcasts int subclasses -- "make sure subclasses of for example str
@@ -5073,14 +5306,14 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
     }
     if (PyFloat_Check(v.ptr())) {
         double d = v.cast<double>();
-        if ((std::isnan(d) || std::isinf(d)) && inf_nan_mode == "null") return py::none();
+        if ((std::isnan(d) || std::isinf(d)) && run.inf_nan_mode == "null") return py::none();
         if (PyFloat_CheckExact(v.ptr())) return v;
         return py::float_(d);
     }
     if (py::isinstance<py::bytes>(v)) {
         std::string b = v.cast<std::string>();
-        if (bytes_mode == "base64") return py::str(b64_encode_string(b));
-        if (bytes_mode == "hex") {
+        if (run.bytes_mode == "base64") return py::str(b64_encode_string(b));
+        if (run.bytes_mode == "hex") {
             static const char* hex_chars = "0123456789abcdef";
             std::string enc;
             for (unsigned char c : b) {
@@ -5101,8 +5334,7 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
     if (py::isinstance<py::bytearray>(v)) {
         py::object as_bytes = py::reinterpret_steal<py::object>(
             PyBytes_FromStringAndSize(PyByteArray_AS_STRING(v.ptr()), PyByteArray_GET_SIZE(v.ptr())));
-        return infer_jsonable_python(as_bytes, bytes_mode, timedelta_mode, inf_nan_mode,
-                                     serialize_unknown, by_alias);
+        return infer_jsonable_python(as_bytes, run, include, exclude);
     }
     // ObType::Complex is Rust's own spelling of the number, not Python's repr.
     if (PyComplex_Check(v.ptr()))
@@ -5159,7 +5391,7 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
     if (py_hasattr(v, "days") && py_hasattr(v, "seconds") && py_hasattr(v, "microseconds")
         && !py_hasattr(v, "isoformat")) {
         py::object out;
-        if (json_leaf_convert("timedelta", v, "utf8", timedelta_mode, "iso8601", out)) return out;
+        if (json_leaf_convert("timedelta", v, "utf8", run.timedelta_mode, "iso8601", out)) return out;
     }
     // The exact-type walk above is only Rust's fast path: when it comes back empty,
     // lookup_ob_type runs fallback_isinstance (ob_type.rs:338), which asks the real
@@ -5171,8 +5403,7 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
         static const py::object& enum_cls =
             held_python_object([] { return py::module_::import("enum").attr("Enum"); });
         if (py::isinstance(v, enum_cls))
-            return infer_jsonable_python(py::getattr(v, "value"), bytes_mode, timedelta_mode,
-                                         inf_nan_mode, serialize_unknown, by_alias);
+            return infer_jsonable_python(py::getattr(v, "value"), run, include, exclude);
     } catch (const py::error_already_set&) { PyErr_Clear(); }
     // Sets/tuples/lists/deques/iterators → arrays; dicts → objects (recursively).
     // Rust's table names its iterables (ObType::List/Tuple/Set/Frozenset/Deque, and
@@ -5189,23 +5420,56 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
             held_python_object([] { return py::module_::import("collections").attr("deque"); });
         deque_member = py::isinstance(v, deque_cls);
     } catch (const py::error_already_set&) { PyErr_Clear(); }
-    if (py::isinstance<py::set>(v) || py::isinstance<py::frozenset>(v)
-        || py::isinstance<py::list>(v) || py::isinstance<py::tuple>(v)
-        || deque_member || PyIter_Check(v.ptr())) {
+    // A set is walked by Rust's serialize_seq! (infer.rs:148-155), which hands every member
+    // an empty filter: include/exclude do not reach inside a set, and its members are not
+    // numbered, where a dict keys by them and a list counts them.
+    if (py::isinstance<py::set>(v) || py::isinstance<py::frozenset>(v)) {
         py::list out;
         for (auto item : py::reinterpret_borrow<py::iterable>(v)) {
-            out.append(infer_jsonable_python(py::reinterpret_borrow<py::object>(item), bytes_mode,
-                                             timedelta_mode, inf_nan_mode, serialize_unknown, by_alias));
+            out.append(infer_jsonable_python(py::reinterpret_borrow<py::object>(item), run, py::none(), py::none()));
+        }
+        return std::move(out);
+    }
+    if (py::isinstance<py::list>(v) || py::isinstance<py::tuple>(v) || deque_member || PyIter_Check(v.ptr())) {
+        // A list, tuple or deque knows its length and an iterator does not (infer.rs:140-158
+        // against :201-213), and that is the difference between a negative index in a filter
+        // meaning the last element and meaning an error.
+        const bool sized = py::isinstance<py::list>(v) || py::isinstance<py::tuple>(v) || deque_member;
+        py::object length;
+        if (sized) {
+            Py_ssize_t n = PyObject_Length(v.ptr());
+            if (n < 0) throw py::error_already_set();
+            length = py::cast(n);
+        }
+        py::list out;
+        Py_ssize_t index = 0;
+        for (auto item : py::reinterpret_borrow<py::iterable>(v)) {
+            py::object next_include = py::none(), next_exclude = py::none();
+            if (!include.is_none() || !exclude.is_none()) {
+                const py::object* len = sized ? &length : nullptr;
+                py::object asked_include = include.is_none() ? py::none() : ser_map_negative_indices(include, len);
+                py::object asked_exclude = exclude.is_none() ? py::none() : ser_map_negative_indices(exclude, len);
+                if (!ser_any_filter(py::cast(index), asked_include, asked_exclude, &next_include, &next_exclude)) {
+                    ++index;
+                    continue;
+                }
+            }
+            out.append(infer_jsonable_python(py::reinterpret_borrow<py::object>(item), run, next_include, next_exclude));
+            ++index;
         }
         return std::move(out);
     }
     if (py::isinstance<py::dict>(v)) {
         py::dict out;
         for (auto item : v.cast<py::dict>()) {
-            auto k = infer_jsonable_python(py::reinterpret_borrow<py::object>(item.first), bytes_mode,
-                                           timedelta_mode, inf_nan_mode, serialize_unknown, by_alias);
-            auto val = infer_jsonable_python(py::reinterpret_borrow<py::object>(item.second), bytes_mode,
-                                             timedelta_mode, inf_nan_mode, serialize_unknown, by_alias);
+            py::object key = py::reinterpret_borrow<py::object>(item.first);
+            py::object next_include, next_exclude;
+            // infer.rs:734 -- a dict is filtered by the key it holds, before that key is
+            // converted into something JSON allows.
+            if (!ser_any_filter(key, include, exclude, &next_include, &next_exclude)) continue;
+            auto k = infer_jsonable_python(key, run, next_include, next_exclude);
+            auto val = infer_jsonable_python(py::reinterpret_borrow<py::object>(item.second), run,
+                                             next_include, next_exclude);
             out[k] = val;
         }
         return std::move(out);
@@ -5215,7 +5479,11 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
         SerNestedCall nested;
         auto ser = py::getattr(v, "__pydantic_serializer__");
         py::dict kw = ser_extra_forwarded();
-        kw["by_alias"] = by_alias;  // this entry point's own argument, not the thread local's
+        kw["by_alias"] = run.by_alias;  // this entry point's own argument, not the thread local's
+        // infer.rs:658-672 hands the model the state the walk is carrying, so the filters
+        // that got this far are the filters its fields are asked about too.
+        kw["include"] = include;
+        kw["exclude"] = exclude;
         return ser.attr("to_python")(v, py::arg("mode") = "json", **kw);
     }
     // A dataclass carries no serializer of its own, so its fields are inferred one by
@@ -5232,8 +5500,7 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
             if (!py::isinstance<py::dict>(fields)) fields = py::object();
         } catch (...) { PyErr_Clear(); }
         if (fields.ptr())
-            return infer_jsonable_python(fields, bytes_mode, timedelta_mode,
-                                         inf_nan_mode, serialize_unknown, by_alias);
+            return infer_jsonable_python(fields, run, include, exclude);
     }
     // Rust infer_to_python ObType::Unknown (infer.rs:221-230), which is what
     // to_jsonable_python runs -- it is to_python with SerMode::Json (mod.rs:275).  The
@@ -5243,18 +5510,17 @@ static py::object infer_jsonable_python(const py::object& v, const std::string& 
     // serializable" appears nowhere in pydantic-core, so a caller matching on Rust's
     // wording got nothing.  A fallback that raises keeps its own error, unwrapped.
     if (g_ser_extra.fallback.ptr() && !g_ser_extra.fallback.is_none())
-        return infer_jsonable_python(g_ser_extra.fallback(v), bytes_mode, timedelta_mode,
-                                     inf_nan_mode, serialize_unknown, by_alias);
-    if (serialize_unknown) return py::str(ser_serialize_unknown(v));
+        return infer_jsonable_python(g_ser_extra.fallback(v), run, include, exclude);
+    if (run.serialize_unknown) return py::str(ser_serialize_unknown(v));
     throw PydanticSerializationError("Unable to serialize unknown type: " + ser_safe_repr(py::type::of(v)));
 }
 
-static py::object to_jsonable_fn(const py::object& value, std::optional<py::object>, std::optional<py::object>,
-    bool by_alias, bool, bool round_trip, std::string timedelta_mode, std::string temporal_mode, std::string bytes_mode,
+static py::object to_jsonable_fn(const py::object& value, std::optional<py::object> include,
+    std::optional<py::object> exclude, bool by_alias, bool exclude_none, bool round_trip,
+    std::string timedelta_mode, std::string temporal_mode, std::string bytes_mode,
     std::string inf_nan_mode, bool serialize_unknown,
     std::optional<py::object> fallback, bool serialize_as_any, std::optional<bool> polymorphic, std::optional<py::object> context) {
     (void)temporal_mode;
-    (void)serialize_as_any;
     check_bytes_mode(bytes_mode);
     // Rust builds the same Extra for this entry that to_python(mode="json") gets, and
     // `fallback` rides on it (mod.rs:293-307), so the values inferred below read it
@@ -5262,6 +5528,10 @@ static py::object to_jsonable_fn(const py::object& value, std::optional<py::obje
     SerCallExtraScope ser_scope;
     g_ser_extra.mode = "json";
     g_ser_extra.by_alias = py::cast(by_alias);
+    // :300 and :305 put both on the Extra, so they are this run's options even though only
+    // a model below the walk is the one that reads them.
+    g_ser_extra.exclude_none = exclude_none;
+    g_ser_extra.serialize_as_any = serialize_as_any;
     g_ser_extra.serialize_unknown = serialize_unknown;
     g_ser_extra.fallback = fallback && !fallback->is_none() ? *fallback : py::none();
     g_ser_extra.bytes_mode = bytes_mode;
@@ -5269,7 +5539,9 @@ static py::object to_jsonable_fn(const py::object& value, std::optional<py::obje
     g_ser_extra.round_trip = round_trip;  // mod.rs:302 hands it to the Extra
     g_ser_extra.context = context && !context->is_none() ? *context : py::none();
     g_polymorphic_serialization = polymorphic;
-    return infer_jsonable_python(value, bytes_mode, timedelta_mode, inf_nan_mode, serialize_unknown, by_alias);
+    JsonableRun run{std::move(bytes_mode), std::move(timedelta_mode), std::move(inf_nan_mode), serialize_unknown,
+                    by_alias};
+    return infer_jsonable_python(value, run, include ? *include : py::none(), exclude ? *exclude : py::none());
 }
 
 // pybind11 binds a class without tp_traverse, so everything its C++ members

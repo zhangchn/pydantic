@@ -1,6 +1,7 @@
 import json
 import platform
 import re
+from collections import deque
 
 import pytest
 from dirty_equals import IsFloatNan, IsList
@@ -248,6 +249,110 @@ def test_to_jsonable_python():
     assert to_jsonable_python({1, 2}) == IsList(1, 2, check_order=False)
     assert to_jsonable_python([1, b'x']) == [1, 'x']
     assert to_jsonable_python([0, 1, 2, 3, 4], exclude={1, 3}) == [0, 2, 4]
+
+
+def test_to_jsonable_python_include_exclude():
+    seq = [0, 1, 2, 3, 4]
+    assert to_jsonable_python(seq, exclude={1, 3}) == [0, 2, 4]
+    assert to_jsonable_python(seq, include={0, 2, 4}) == [0, 2, 4]
+    assert to_jsonable_python((0, 1, 2), exclude={1}) == [0, 2]
+    # an index counted from the end only means anything once the length is known
+    assert to_jsonable_python(seq, exclude={-1}) == [0, 1, 2, 3]
+    assert to_jsonable_python(seq, include={-1}) == [4]
+    assert to_jsonable_python(['a', 'b', 'c'], include={-2}) == ['b']
+    # a filter's index is taken modulo the length, so 9 is the same position as -1 is
+    assert to_jsonable_python(seq, exclude={9}) == [0, 1, 2, 3]
+
+    # `__all__` names every element, and `...` or True both mean 'this one, nothing below it'
+    assert to_jsonable_python(seq, exclude={'__all__'}) == []
+    assert to_jsonable_python(seq, exclude={'__all__': ...}) == []
+    assert to_jsonable_python(seq, exclude={'__all__': None}) == seq
+    assert to_jsonable_python(seq, exclude={1: ...}) == [0, 2, 3, 4]
+    assert to_jsonable_python(seq, exclude={1: True}) == [0, 2, 3, 4]
+    # an entry which is neither of those is the filter for the element's own contents instead
+    assert to_jsonable_python(seq, exclude={1: None}) == seq
+    assert to_jsonable_python([[0, 1], [2, 3]], exclude={0: {0: ...}}) == [[1], [2, 3]]
+    assert to_jsonable_python([[0, 1], [2, 3]], include={0: {1: ...}}) == [[1]]
+    assert to_jsonable_python([{'a': 1, 'b': 2}, {'a': 3}], include={0: {'a': ...}}) == [{'a': 1}]
+    assert to_jsonable_python(seq, exclude={'__all__': ..., 1: None}) == [1]
+    # anything with a `__contains__` gets asked, which is how a list or a str works as a filter
+    assert to_jsonable_python(seq, exclude=[1]) == [0, 2, 3, 4]
+    assert to_jsonable_python(seq, include=[1]) == [1]
+    assert to_jsonable_python(seq, exclude=frozenset({1})) == [0, 2, 3, 4]
+    assert to_jsonable_python([b'x', b'y'], exclude={0}, bytes_mode='base64') == ['eQ==']
+    assert to_jsonable_python([(1, 2), (3, 4)], exclude={1}) == [[1, 2]]
+    # a set's members are keyed by nothing and numbered by nothing, so no filter reaches one
+    assert to_jsonable_python({5, 6, 7}, exclude={6}) == IsList(5, 6, 7, check_order=False)
+    assert to_jsonable_python([{1, 2}], exclude={0: {1: ...}}) == [[1, 2]]
+    assert to_jsonable_python([{1, 2}], include={0: {1: ...}}) == [[1, 2]]
+    # an iterator has no length, so it is filtered as it goes and refuses a backwards index
+    assert to_jsonable_python(iter(seq), exclude={0, 2}) == [1, 3, 4]
+    assert to_jsonable_python((i for i in range(5)), exclude={1}) == [0, 2, 3, 4]
+    assert to_jsonable_python(deque([1, 2, 3]), exclude={1}) == [1, 3]
+    assert to_jsonable_python(deque([1, 2, 3]), exclude={-1}) == [1, 2]
+
+    d = {'a': 1, 'b': 2}
+    nested = {'a': {'b': 1, 'c': 2}, 'd': {'e': 3}}
+    assert to_jsonable_python(d, exclude={'a'}) == {'b': 2}
+    assert to_jsonable_python(d, include={'a'}) == {'a': 1}
+    assert to_jsonable_python(d, exclude={'__all__'}) == {}
+    assert to_jsonable_python(d, include={'__all__'}) == {'a': 1, 'b': 2}
+    assert to_jsonable_python(d, exclude={'a': True}) == {'b': 2}
+    assert to_jsonable_python(d, exclude='a') == {'b': 2}
+    assert to_jsonable_python({'a': 1, 2: 'b'}, exclude={2}) == {'a': 1}
+    assert to_jsonable_python(nested, exclude={'a': {'b': ...}}) == {'a': {'c': 2}, 'd': {'e': 3}}
+    assert to_jsonable_python(nested, exclude={'a': {'b': None}}) == {'a': {'b': 1, 'c': 2}, 'd': {'e': 3}}
+    assert to_jsonable_python(nested, include={'a': {'b': ...}}) == {'a': {'b': 1}}
+    assert to_jsonable_python(nested, include={'a': ...}) == {'a': {'b': 1, 'c': 2}}
+    assert to_jsonable_python({'a': {'b': {'c': 1, 'd': 2}}}, exclude={'a': {'b': {'c': ...}}}) == {
+        'a': {'b': {'d': 2}}
+    }
+    # `__all__` is folded into whichever key is being asked about, dict or set either way
+    assert to_jsonable_python(nested, exclude={'__all__': {'b': ...}}) == {'a': {'c': 2}, 'd': {'e': 3}}
+    assert to_jsonable_python(nested, exclude={'__all__': {'b'}}) == {'a': {'c': 2}, 'd': {'e': 3}}
+    assert to_jsonable_python(nested, exclude={'a': {'b': ...}, '__all__': {'e': ...}}) == {'a': {'c': 2}, 'd': {}}
+    assert to_jsonable_python({'a': {'b': 1}}, exclude={'a': {'c': ...}, '__all__': {'b': ...}}) == {'a': {}}
+    # an entry which names nothing the value holds drops nothing, and a key no include names is
+    assert to_jsonable_python(d, exclude={'b': {'c': 1}}) == {'a': 1, 'b': 2}
+    assert to_jsonable_python(d, include={'b': {'c': ...}}) == {'b': 2}
+    assert to_jsonable_python(d, exclude={'__all__': 5}) == {'a': 1, 'b': 2}
+    assert to_jsonable_python({'a': {'b': 1}}, exclude={'__all__': 'x'}) == {'a': {'b': 1}}
+    # exclude_none is an option of a model's fields, not of an arbitrary dict
+    assert to_jsonable_python({'a': None, 'b': 1}, exclude_none=True) == {'a': None, 'b': 1}
+
+
+def test_to_jsonable_python_include_exclude_errors():
+    with pytest.raises(TypeError, match=re.escape('`exclude` argument must be a set or dict.')):
+        to_jsonable_python([0, 1], exclude='abc')
+
+    with pytest.raises(TypeError, match=re.escape('`exclude` argument must be a set or dict.')):
+        to_jsonable_python([0, 1], exclude=5)
+
+    with pytest.raises(TypeError, match=re.escape('`include` argument must be a set or dict.')):
+        to_jsonable_python([0, 1], include='ab')
+
+    with pytest.raises(
+        ValueError, match='Negative indices cannot be used to exclude items on unsized iterables'
+    ):
+        to_jsonable_python(iter([0, 1]), exclude={-1})
+
+    # the filter is only ever asked about an element the walk actually reaches
+    assert to_jsonable_python(iter([]), exclude={-1}) == []
+
+    with pytest.raises(
+        TypeError,
+        match=re.escape('`include` and `exclude` must be of type `dict[str | int, <recursive> | ...] | set[str | int | ...]`'),
+    ):
+        to_jsonable_python({'a': 1}, exclude={'a': 5, '__all__': 7})
+
+    with pytest.raises(
+        TypeError,
+        match=re.escape(
+            "'__all__' key of `include` and `exclude` must be of type "
+            '`dict[str | int, <recursive> | ...] | set[str | int | ...]`'
+        ),
+    ):
+        to_jsonable_python({'a': {'b': 1}}, exclude={'a': {'b': 1}, '__all__': 5})
 
 
 def test_to_jsonable_python_fallback():
