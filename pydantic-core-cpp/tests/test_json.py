@@ -236,6 +236,34 @@ def test_to_json():
         to_json([1, 2], 2)
 
 
+def test_entry_points_refuse_positional_arguments():
+    # Every argument but the value is keyword-only in Rust's signature, and pyo3 words the
+    # refusal its own way -- "arguments" whatever the count, where CPython would say
+    # "argument" for one -- so the text belongs to the entry point and not to the bindings.
+    cases = (('to_json', to_json, [1, 2]), ('to_jsonable_python', to_jsonable_python, [1, 2]), ('from_json', from_json, b'[1]'))
+    for name, fn, value in cases:
+        with pytest.raises(TypeError, match=re.escape(f'{name}() takes 1 positional arguments but 2 were given')):
+            fn(value, 2)
+        with pytest.raises(TypeError, match=re.escape(f'{name}() takes 1 positional arguments but 4 were given')):
+            fn(value, 2, 3, 4)
+        with pytest.raises(TypeError, match=re.escape(f'{name}() missing 1 required positional argument')):
+            fn()
+        with pytest.raises(TypeError, match=re.escape(f"{name}() got an unexpected keyword argument 'not_real'")):
+            fn(value, not_real=1)
+
+    # the value itself may be named rather than positional, and naming it twice is the
+    # signature's own complaint about an argument, not the bindings refusing the call
+    assert to_json(value=[1, 2]) == b'[1,2]'
+    assert to_jsonable_python(value=[1, 2]) == [1, 2]
+    assert from_json(data=b'[2]') == [2]
+    with pytest.raises(TypeError, match=re.escape("to_json() got multiple values for argument 'value'")):
+        to_json([1, 2], value=[3])
+    with pytest.raises(TypeError, match=re.escape("to_jsonable_python() got multiple values for argument 'value'")):
+        to_jsonable_python([1, 2], value=[3])
+    with pytest.raises(TypeError, match=re.escape("from_json() got multiple values for argument 'data'")):
+        from_json(b'[1]', data=b'[2]')
+
+
 def test_to_json_fallback():
     with pytest.raises(PydanticSerializationError, match=r'Unable to serialize unknown type: <.+\.Foobar'):
         to_json(Foobar())

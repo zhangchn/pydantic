@@ -40,8 +40,8 @@ from ._pydantic_core_cpp import (
     _error_url_prefix as _native_error_url_prefix,
     _include_url_env as _native_include_url_env,
     from_json as _native_from_json,
-    to_json,
-    to_jsonable_python,
+    to_json as _native_to_json,
+    to_jsonable_python as _native_to_jsonable_python,
 )
 
 from typing import TypedDict as _TypedDict
@@ -2451,13 +2451,106 @@ def __getattr__(name: str) -> _Any:
 # 4. Standalone functions (still from Rust until C++ implements them)
 # ============================================================================
 
+# pyo3's own refusal for a call that passes more positionals than the signature has.  It
+# says "arguments" whatever the count is, which is not the word CPython would choose for a
+# single one, so the text has to be written rather than left to the interpreter -- and the
+# interpreter is what would answer otherwise, since these bindings take `value` alone
+# positionally and refuse the rest as a block of pybind11's own text.
+def _too_many_positional(func_name: str, extra: int) -> TypeError:
+    return TypeError(f'{func_name}() takes 1 positional arguments but {extra + 1} were given')
+
+
+def to_json(
+    value: _Any,
+    *args: _Any,
+    indent: _Any = None,
+    ensure_ascii: bool = False,
+    include: _Any = None,
+    exclude: _Any = None,
+    by_alias: bool = True,
+    exclude_none: bool = False,
+    round_trip: bool = False,
+    timedelta_mode: str = 'iso8601',
+    temporal_mode: str = 'iso8601',
+    bytes_mode: str = 'utf8',
+    inf_nan_mode: str = 'constants',
+    serialize_unknown: bool = False,
+    fallback: _Any = None,
+    serialize_as_any: bool = False,
+    polymorphic_serialization: _Any = None,
+    context: _Any = None,
+) -> bytes:
+    if args:
+        raise _too_many_positional('to_json', len(args))
+    return _native_to_json(
+        value,
+        indent=indent,
+        ensure_ascii=ensure_ascii,
+        include=include,
+        exclude=exclude,
+        by_alias=by_alias,
+        exclude_none=exclude_none,
+        round_trip=round_trip,
+        timedelta_mode=timedelta_mode,
+        temporal_mode=temporal_mode,
+        bytes_mode=bytes_mode,
+        inf_nan_mode=inf_nan_mode,
+        serialize_unknown=serialize_unknown,
+        fallback=fallback,
+        serialize_as_any=serialize_as_any,
+        polymorphic_serialization=polymorphic_serialization,
+        context=context,
+    )
+
+
+def to_jsonable_python(
+    value: _Any,
+    *args: _Any,
+    include: _Any = None,
+    exclude: _Any = None,
+    by_alias: bool = True,
+    exclude_none: bool = False,
+    round_trip: bool = False,
+    timedelta_mode: str = 'iso8601',
+    temporal_mode: str = 'iso8601',
+    bytes_mode: str = 'utf8',
+    inf_nan_mode: str = 'constants',
+    serialize_unknown: bool = False,
+    fallback: _Any = None,
+    serialize_as_any: bool = False,
+    polymorphic_serialization: _Any = None,
+    context: _Any = None,
+) -> _Any:
+    if args:
+        raise _too_many_positional('to_jsonable_python', len(args))
+    return _native_to_jsonable_python(
+        value,
+        include=include,
+        exclude=exclude,
+        by_alias=by_alias,
+        exclude_none=exclude_none,
+        round_trip=round_trip,
+        timedelta_mode=timedelta_mode,
+        temporal_mode=temporal_mode,
+        bytes_mode=bytes_mode,
+        inf_nan_mode=inf_nan_mode,
+        serialize_unknown=serialize_unknown,
+        fallback=fallback,
+        serialize_as_any=serialize_as_any,
+        polymorphic_serialization=polymorphic_serialization,
+        context=context,
+    )
+
+
 def from_json(
     data: _Any,
-    *,
+    *args: _Any,
     allow_inf_nan: bool = True,
     cache_strings: _Any = 'all',
     allow_partial: _Any = False,
 ) -> _Any:
+    if args:
+        raise _too_many_positional('from_json', len(args))
     return _native_from_json(
         data,
         allow_inf_nan=allow_inf_nan,
