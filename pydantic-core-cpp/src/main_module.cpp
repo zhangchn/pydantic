@@ -1460,8 +1460,6 @@ struct SerNode {
     static std::string type_name_for_warning(const SerRef& n);
     // Whether a Python value is compatible with this node's declared type.
     static bool value_matches_type(const SerRef& n, const py::object& v);
-    // Rust NamedTupleSerializer::json_key: per-item keys joined with ",".
-    static std::string named_tuple_json_key(const SerRef& n, const py::object& value, bool round_trip);
 
     // Rust leaf serializers warn once per container item whose runtime type
     // disagrees with the declared item serializer, then fall back to inference.
@@ -2268,7 +2266,11 @@ struct SerNode {
                 auto v = py::reinterpret_borrow<py::object>(item.second);
                 auto next = apply_ser_filter(k, include, exclude);
                 if (next.omit) continue;
-                auto out_k = children[0]->to_python(check_item_type(children[0], k), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context);
+                // In json mode the key is asked for its text, not its serialized value
+                // (dict.rs:90-93), which is why a float key leaves the run as "1.5".
+                auto out_k = json_mode
+                    ? children[0]->to_json_key(check_item_type(children[0], k), exc_none, round_trip, by_alias, context)
+                    : children[0]->to_python(check_item_type(children[0], k), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context);
                 auto out_v = children.size() > 1 ? children[1]->to_python(check_item_type(children[1], v), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context) : v;
                 result[out_k] = out_v;
             }
@@ -2484,19 +2486,13 @@ struct SerNode {
                 auto v = py::reinterpret_borrow<py::object>(item.second);
                 auto next = apply_ser_filter(k, include, exclude);
                 if (next.omit) continue;
-                py::object out_k = children[0]->to_python(k, true, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context);
+                py::object out_k = children[0]->to_json_key(k, exc_none, round_trip, by_alias, context);
                 std::string val_json = children.size() > 1
                     ? children[1]->to_json(check_item_type(children[1], v), ensure_ascii, -1, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context)
                     : infer_json(v, ensure_ascii, -1);
                 if (!first) out += ",";
                 first = false;
-                std::string key_str = py::str(out_k).cast<std::string>();
-                if (children[0] && children[0]->type == "named-tuple") {
-                    // A named tuple key is the item keys joined with ","; Python's
-                    // own repr of the tuple would read "(1, 'a')".
-                    std::string joined = named_tuple_json_key(children[0], k, round_trip);
-                    if (!joined.empty()) key_str = joined;
-                }
+                std::string key_str = out_k.cast<std::string>();
                 out += json_escape(key_str, ensure_ascii) + ":" + val_json;
             }
             out += "}";
@@ -3245,6 +3241,130 @@ private:
         return unknown_json_key(key, json_text);
     }
 
+    // Rust TypeSerializer::json_key (shared.rs:416-435): in a json-mode run a dict key is
+    // asked for the *text* it is written as, not for its serialized value, and it is asked
+    // with the filters emptied (dict.rs:87-94).  A typed key answers with the form this node
+    // would print for a value of its own type -- from the config it was built with, the same
+    // one its values get -- and a key that is not that type is handed to the infer walk,
+    // whose mismatch the caller already reported.  A wrapper forwards, a tuple joins its
+    // items' keys with ",", and a collection rules out only None by name: every other value
+    // is inferred and refused there, in the infer walk's own words.
+    py::object to_json_key(const py::object& key, bool exc_none, bool round_trip, bool by_alias,
+                           const py::object& context) const {
+        const std::string& t = type;
+        // Inside a JSON-text run the infer walk reports through the serde boundary, exactly
+        // as it does when the same key is asked for its JSON text directly.
+        const bool json_text = g_ser_json_depth > 0;
+        auto inferred = [&] { return infer_json_key(key, json_text); };
+        // A wrapper has no key form of its own, so the inner serializer is asked
+        // (with_default.rs:46-50, definitions.rs:87-91, json_or_python.rs:52-58).
+        if (t == "with-default" || t == "default" || t == "lax-or-strict" || t == "definitions" ||
+            t == "definition-ref" || t == "json-or-python") {
+            if (children.empty()) return inferred();
+            return children[0]->to_json_key(key, exc_none, round_trip, by_alias, context);
+        }
+        // A nullable key that is None keeps the "None" the infer walk writes for it;
+        // anything else is the inner type's question again (nullable.rs:47-53).
+        if (t == "nullable" || t == "nullable-union") {
+            if (key.is_none()) return py::str("None");
+            if (children.empty()) return inferred();
+            return children[0]->to_json_key(key, exc_none, round_trip, by_alias, context);
+        }
+        // A union asks each choice until one answers, and infers when none of them will
+        // (union.rs:78-84, whose choices.serialize at :358-400 turns every mismatch into a
+        // warning before letting the key move on).
+        if (t == "union") {
+            for (const SerRef& c : children) {
+                if (!c) continue;
+                try {
+                    return c->to_json_key(key, exc_none, round_trip, by_alias, context);
+                } catch (...) {}
+            }
+            return inferred();
+        }
+        PyObject* p = key.ptr();
+        // A str key is the text already (string.rs:58-70).
+        if (t == "str" || t == "string" || t == "str-constrained")
+            return PyUnicode_Check(p) ? key : inferred();
+        // An int key is str(int), and a bool is one of those: the type lookup calls a bool a
+        // subclass of int, so it is spelled "True" here rather than the "true" a bool node
+        // writes for itself (simple.rs:145-151, :180-184, and :186-192 for a bool's own).
+        if (t == "int" || t == "int-constrained")
+            return PyLong_Check(p) ? py::str(key) : inferred();
+        if (t == "bool")
+            return PyBool_Check(p) ? py::str(p == Py_True ? "true" : "false") : inferred();
+        // A float key is str(float) -- "nan" and "inf" in Python's spelling, not the run's
+        // inf_nan form, because a key is text either way and that mode has nothing left to
+        // rewrite (float.rs:110-122).  An int answers str(int) as a subclass.
+        if (t == "float" || t == "float-constrained")
+            return (PyFloat_Check(p) || PyLong_Check(p)) ? py::str(key) : inferred();
+        if (t == "none")
+            return key.is_none() ? py::str("None") : inferred();
+        // An enum key is asked again by its value, through the enum's own value serializer
+        // (enum_.rs:74-88).
+        if (t == "enum") {
+            if (class_ && py::isinstance(key, class_)) {
+                try {
+                    py::object v = py::getattr(key, "value");
+                    if (children.empty()) return infer_json_key(v, json_text);
+                    return children[0]->to_json_key(v, exc_none, round_trip, by_alias, context);
+                } catch (const py::error_already_set&) { PyErr_Clear(); }
+            }
+            return inferred();
+        }
+        // A tuple key is its items' keys joined with "," -- Python's own repr of the tuple
+        // would read "(1, 'a')" -- and a named tuple does the same with its field
+        // serializers (tuple.rs:93-117, named_tuple.rs:99-118).  Past the last declared
+        // position the variadic serializer answers, as the value walk does.
+        if (t == "tuple" || t == "named-tuple") {
+            if (!PyTuple_Check(p) || children.empty()) return inferred();
+            std::string joined;
+            size_t i = 0;
+            for (auto item : py::reinterpret_borrow<py::sequence>(key)) {
+                py::object v = py::reinterpret_borrow<py::object>(item);
+                const SerRef& c = i < children.size() ? children[i] : children.back();
+                std::string part = (!children.empty() && c)
+                    ? c->to_json_key(check_item_type(c, v), exc_none, round_trip, by_alias, context).cast<std::string>()
+                    : infer_json_key(v, json_text).cast<std::string>();
+                if (i) joined += ",";
+                joined += part;
+                i++;
+            }
+            return py::str(joined);
+        }
+        // The typed leaves print a key in the form their values get.  A temporal key under
+        // seconds or milliseconds is Rust's own Display of the number, which writes an
+        // integral one without ".0".
+        py::object converted;
+        if (json_leaf_convert(t, key, ser_json_bytes, ser_json_timedelta, ser_json_temporal, converted)) {
+            if (py::isinstance<py::float_>(converted))
+                return py::str(rust_f64_display(converted.cast<double>()));
+            return converted;
+        }
+        // A to-string or format key is formatted like a value, and when its when_used skips
+        // this run it is written as "None" rather than passed to the inner schema
+        // (format.rs:123-133, :193-203).
+        if (t == "to-string" || (t == "format" && !format_str.empty())) {
+            if (!ser_when_used_skips(when_used, true, key)) {
+                if (t == "to-string") return py::str(key);
+                if (PyObject* r = PyObject_Format(p, py::str(format_str).ptr()))
+                    return py::reinterpret_steal<py::object>(r);
+                PyErr_Clear();
+            }
+            return py::str("None");
+        }
+        // A collection cannot be a key at all, and None is the only value the type itself
+        // rules out (shared.rs:422-435); anything else is inferred and refused there.
+        if (key.is_none() && (t == "list" || t == "set" || t == "frozenset" || t == "dict" ||
+                              t == "typed-dict" || t == "generator" || t == "deque" ||
+                              t == "complex" || t == "ellipsis")) {
+            std::string msg = "`" + t + "` not valid as object key";
+            if (json_text) throw PydanticSerializationError("Error serializing to JSON: TypeError: " + msg);
+            throw py::type_error(msg);
+        }
+        return inferred();
+    }
+
     static std::string infer_json(const py::object& value, bool ensure_ascii, int indent) {
         std::vector<const void*>& st = json_rec_stack();
         const void* p = value.ptr();
@@ -3485,6 +3605,11 @@ private:
             for (auto item : d) {
                 auto k = py::reinterpret_borrow<py::object>(item.first);
                 auto val = py::reinterpret_borrow<py::object>(item.second);
+                // This walk runs in SerMode::Json when json_mode is set, and a map key in
+                // that mode is turned with json_key (shared.rs:737-740), so an int key
+                // leaves as "1" and a tuple key as "1,2" while the values keep their
+                // Python forms.
+                if (json_mode) k = infer_json_key(k, false);
                 out[k] = serialize_any_value(val, exc_none, round_trip, json_mode);
             }
             return std::move(out);
@@ -4192,40 +4317,6 @@ bool SerNode::value_matches_type(const SerRef& n, const py::object& v) {
     if (t == "named-tuple") return py::isinstance<py::tuple>(v);
     if (t == "dict") return py::isinstance<py::dict>(v);
     return true;
-}
-
-// Rust NamedTupleSerializer::json_key builds every item key with the field
-// serializer and joins the parts with ",".  An empty result means the value is
-// not a sequence and the caller keeps its own stringification.
-std::string SerNode::named_tuple_json_key(const SerRef& n, const py::object& value, bool round_trip) {
-    if (!n || (!py::isinstance<py::tuple>(value) && !py::isinstance<py::list>(value))) return std::string();
-    auto seq = value.cast<py::sequence>();
-    std::vector<std::string> parts;
-    size_t i = 0;
-    for (auto item : seq) {
-        if (i >= n->children.size()) break;
-        py::object v = py::reinterpret_borrow<py::object>(item);
-        const SerRef& child = n->children[i];
-        std::string part;
-        if (child && child->type == "named-tuple") {
-            part = named_tuple_json_key(child, v, round_trip);
-            if (part.empty()) part = py::str(v).cast<std::string>();
-        } else if (child) {
-            part = py::str(child->to_python(check_item_type(child, v), true, false, round_trip,
-                                            py::none(), py::none(), false, false, false,
-                                            py::none())).cast<std::string>();
-        } else {
-            part = py::str(v).cast<std::string>();
-        }
-        parts.push_back(part);
-        i++;
-    }
-    std::string out;
-    for (size_t j = 0; j < parts.size(); j++) {
-        if (j) out += ",";
-        out += parts[j];
-    }
-    return out;
 }
 
 // ---------------------------------------------------------------------------

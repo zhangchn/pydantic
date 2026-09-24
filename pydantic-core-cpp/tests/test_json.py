@@ -1,11 +1,14 @@
 import dataclasses
 import datetime
+import decimal
 import json
 import math
+import pathlib
 import platform
 import re
 import subprocess
 import sys
+import uuid
 from collections import deque
 
 import pytest
@@ -901,6 +904,118 @@ def test_a_value_that_brings_its_own_serializer_is_printed_by_that_serializer():
     with pytest.raises(PydanticSerializationError) as exc_info:
         to_json(Unknown(), fallback=boom)
     assert str(exc_info.value) == 'Error serializing to JSON: ValueError: boom'
+
+
+def test_a_dict_key_in_a_json_run_is_asked_for_its_text():
+    # A map key is asked what it is written as, not what it serializes to: dict.rs:87-94
+    # calls json_key for it, and an inferred map does the same with the key it holds
+    # (shared.rs:737-740).  So a float key leaves a json run as "1.5" and a tuple key as
+    # "1,2", while the same serializer in python mode hands both back as they came.  An
+    # inferred key follows the run's modes and a typed key the mode of the serializer the
+    # schema named -- the same split the values of the same dict obey.
+    nan = float('nan')
+    D = datetime.date(2024, 1, 2)
+    DT = datetime.datetime(2024, 1, 2, 3, 4, 5)
+    TD = datetime.timedelta(hours=1, seconds=30)
+    UUID = uuid.UUID(int=1)
+    uuid_text = '00000000-0000-0000-0000-000000000001'
+    any_ser = SchemaSerializer(core_schema.any_schema())
+
+    assert any_ser.to_python({'a': 'v'}, mode='json') == {'a': 'v'}
+    assert any_ser.to_python({7: 'v'}, mode='json') == {'7': 'v'}
+    assert any_ser.to_python({1.5: 'v'}, mode='json') == {'1.5': 'v'}
+    assert any_ser.to_python({True: 'v'}, mode='json') == {'true': 'v'}
+    assert any_ser.to_python({None: 'v'}, mode='json') == {'None': 'v'}
+    assert any_ser.to_python({b'x': 'v'}, mode='json') == {'x': 'v'}
+    assert any_ser.to_python({(1, 2): 'v'}, mode='json') == {'1,2': 'v'}
+    assert any_ser.to_python({decimal.Decimal('1.5'): 'v'}, mode='json') == {'1.5': 'v'}
+    assert any_ser.to_python({UUID: 'v'}, mode='json') == {uuid_text: 'v'}
+    assert any_ser.to_python({D: 'v'}, mode='json') == {'2024-01-02': 'v'}
+    assert any_ser.to_python({DT: 'v'}, mode='json') == {'2024-01-02T03:04:05': 'v'}
+    assert any_ser.to_python({TD: 'v'}, mode='json') == {'PT1H30S': 'v'}
+    assert any_ser.to_python([{1.5: 'v'}], mode='json') == [{'1.5': 'v'}]
+    assert any_ser.to_python({'a': {(1, 2): 'v'}}, mode='json') == {'a': {'1,2': 'v'}}
+    # Python mode leaves a key as it came in, jsonable has always turned it, and the JSON
+    # text is written from the very same answers.
+    assert any_ser.to_python({7: 'v', (1, 2): 'v'}) == {7: 'v', (1, 2): 'v'}
+    assert to_jsonable_python({7: 'v', (1, 2): 'v'}) == {'7': 'v', '1,2': 'v'}
+    assert any_ser.to_json({1.5: 'v'}) == b'{"1.5":"v"}'
+    any_dict = SchemaSerializer(
+        core_schema.dict_schema(core_schema.any_schema(), core_schema.any_schema()))
+    assert any_dict.to_json({True: 'v'}) == b'{"true":"v"}'
+    assert any_dict.to_json({None: 'v'}) == b'{"None":"v"}'
+    assert any_dict.to_json({b'x': 'v'}) == b'{"x":"v"}'
+    assert any_dict.to_json({(1, 2): 'v'}) == b'{"1,2":"v"}'
+    # The modes of the run reach a key as they reach a value.
+    assert SchemaSerializer(core_schema.any_schema(),
+                            {'ser_json_inf_nan': 'null'}).to_python({nan: 'v'}, mode='json') == {'None': 'v'}
+    assert SchemaSerializer(core_schema.any_schema(),
+                            {'ser_json_inf_nan': 'constants'}).to_python({nan: 'v'}, mode='json') == {'nan': 'v'}
+    assert SchemaSerializer(core_schema.any_schema(),
+                            {'ser_json_bytes': 'base64'}).to_python({b'x': 'v'}, mode='json') == {'eA==': 'v'}
+    assert SchemaSerializer(core_schema.any_schema(),
+                            {'ser_json_bytes': 'hex'}).to_python({b'x': 'v'}, mode='json') == {'78': 'v'}
+    assert SchemaSerializer(core_schema.any_schema(),
+                            {'ser_json_temporal': 'seconds'}).to_python({D: 'v'}, mode='json') == {'1704153600': 'v'}
+    assert SchemaSerializer(core_schema.any_schema(),
+                            {'ser_json_temporal': 'milliseconds'}).to_python({D: 'v'}, mode='json') == {
+        '1704153600000': 'v'}
+    assert SchemaSerializer(core_schema.any_schema(),
+                            {'ser_json_timedelta': 'float'}).to_python({TD: 'v'}, mode='json') == {'3630': 'v'}
+
+    def typed(keys, value, config=None):
+        return SchemaSerializer(core_schema.dict_schema(keys, core_schema.str_schema()),
+                                config).to_python({value: 'v'}, mode='json')
+
+    assert typed(core_schema.int_schema(), 7) == {'7': 'v'}
+    # A bool is one of the ints as far as the type lookup is concerned, so it is spelled
+    # Python's way under an int schema and JSON's way under its own.
+    assert typed(core_schema.int_schema(), True) == {'True': 'v'}
+    assert typed(core_schema.bool_schema(), True) == {'true': 'v'}
+    assert typed(core_schema.bool_schema(), False) == {'false': 'v'}
+    assert typed(core_schema.str_schema(), 'a') == {'a': 'v'}
+    assert typed(core_schema.none_schema(), None) == {'None': 'v'}
+    # A float key is str(float): a key is text either way, so the run's inf_nan mode has
+    # nothing left to rewrite, and an int answers as a subclass of the type.
+    assert typed(core_schema.float_schema(), 1.5) == {'1.5': 'v'}
+    assert typed(core_schema.float_schema(), nan) == {'nan': 'v'}
+    assert typed(core_schema.float_schema(), 7) == {'7': 'v'}
+    assert typed(core_schema.date_schema(), D) == {'2024-01-02': 'v'}
+    # The number a temporal key takes under seconds or milliseconds is written without a
+    # trailing ".0", the way Rust's own Display of it is.
+    assert typed(core_schema.date_schema(), D, {'ser_json_temporal': 'seconds'}) == {'1704153600': 'v'}
+    assert typed(core_schema.datetime_schema(), DT,
+                 {'ser_json_temporal': 'milliseconds'}) == {'1704164645000': 'v'}
+    assert typed(core_schema.timedelta_schema(), TD) == {'PT1H30S': 'v'}
+    assert typed(core_schema.timedelta_schema(), TD, {'ser_json_timedelta': 'float'}) == {'3630': 'v'}
+    assert typed(core_schema.uuid_schema(), UUID) == {uuid_text: 'v'}
+    assert typed(core_schema.decimal_schema(), decimal.Decimal('1.5')) == {'1.5': 'v'}
+    # A tuple key is its items' keys joined with ",", a nullable key that is None is
+    # "None", and a union asks each choice until one of them answers.
+    two_any = [core_schema.any_schema(), core_schema.any_schema()]
+    assert typed(core_schema.tuple_schema(two_any), (1, 'a')) == {'1,a': 'v'}
+    assert typed(core_schema.tuple_schema(two_any), (True, None)) == {'true,None': 'v'}
+    assert typed(core_schema.nullable_schema(core_schema.int_schema()), None) == {'None': 'v'}
+    assert typed(core_schema.nullable_schema(core_schema.int_schema()), 7) == {'7': 'v'}
+    int_or_str = [core_schema.int_schema(), core_schema.str_schema()]
+    assert typed(core_schema.union_schema(int_or_str), 7) == {'7': 'v'}
+    assert typed(core_schema.union_schema(int_or_str), 'a') == {'a': 'v'}
+    # A collection is refused as a key by its own type, and by name only for None: any
+    # other value is handed to the infer walk, which refuses it in its own words.
+    int_list = core_schema.list_schema(core_schema.int_schema())
+    with pytest.raises(TypeError, match=re.escape('`list` not valid as object key')):
+        typed(int_list, None)
+    assert typed(int_list, 7) == {'7': 'v'}
+    with pytest.raises(PydanticSerializationError,
+                       match=re.escape('Error serializing to JSON: TypeError: `list` not valid as object key')):
+        SchemaSerializer(core_schema.dict_schema(int_list, core_schema.str_schema())).to_json({None: 'v'})
+    with pytest.raises(TypeError, match=re.escape('`frozenset` not valid as object key')):
+        any_ser.to_python({frozenset([1]): 'v'}, mode='json')
+    # A key this run cannot name at all fails the way a value would, and the json-mode run
+    # reports it bare: there is no serde boundary to name it first.
+    with pytest.raises(PydanticSerializationError) as exc_info:
+        any_ser.to_python({pathlib.PurePosixPath('a/b'): 'v'}, mode='json')
+    assert str(exc_info.value).startswith('Unable to serialize unknown type:')
 
 
 def test_to_json_temporal_mode():
