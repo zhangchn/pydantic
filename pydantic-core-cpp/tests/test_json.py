@@ -1213,3 +1213,92 @@ def test_json_bytes_hex_invalid():
             'input': wrong_input,
         }
     ]
+
+
+def test_a_value_a_json_run_cannot_serialize_is_refused_not_handed_back():
+    # infer's json arm ends at ObType::Unknown (infer.rs:221-231): the run's `fallback` has
+    # its turn, then `serialize_unknown` takes str() of the value -- a placeholder when str()
+    # itself raises -- and with neither the run refuses by naming the value's type.  A
+    # Python run asks none of that and hands the object straight back (:279-286), which is
+    # what lets a python dump hold a value a json dump of the same value refuses.  Only a
+    # value Rust's own type table does not name is asked at all (ob_type.rs:215-407): the
+    # table names pathlib.Path but not a PurePosixPath, and neither `range` nor a
+    # `memoryview`, however iterable or buffer-like they look; a dict or str subclass
+    # reaches the table through its base and is never asked.
+    class Unknown:
+        def __repr__(self):
+            return '<Unknown>'
+
+        def __str__(self):
+            return 'unknown-str'
+
+    class NoStr:
+        def __str__(self):
+            raise RuntimeError('str() always raises')
+
+    refused = 'Unable to serialize unknown type: '
+    value = Unknown()
+    any_ser = SchemaSerializer(core_schema.any_schema())
+
+    # A Python run keeps the object; a json run refuses it, in a plain call, nested in a
+    # container, or as the JSON text.
+    assert any_ser.to_python(value) is value
+    assert any_ser.to_python([value]) == [value]
+    with pytest.raises(PydanticSerializationError) as exc:
+        any_ser.to_python(value, mode='json')
+    assert str(exc.value).startswith(refused), str(exc.value)
+    assert 'Unknown' in str(exc.value), str(exc.value)
+    with pytest.raises(PydanticSerializationError) as exc:
+        any_ser.to_python([{'k': value}], mode='json')
+    assert str(exc.value).startswith(refused), str(exc.value)
+    with pytest.raises(PydanticSerializationError):
+        any_ser.to_json(value)
+    with pytest.raises(PydanticSerializationError):
+        any_ser.to_json([value])
+
+    # It is the run's mode that asks, not the node's type: every node that lets a value
+    # through to inference carries the same refusal.
+    for schema in [
+        core_schema.list_schema(core_schema.any_schema()),
+        core_schema.dict_schema(values_schema=core_schema.any_schema()),
+        core_schema.tuple_schema([core_schema.any_schema()]),
+        core_schema.nullable_schema(core_schema.any_schema()),
+        core_schema.with_default_schema(core_schema.any_schema(), default=1),
+        core_schema.typed_dict_schema({'a': core_schema.typed_dict_field(core_schema.any_schema())}),
+    ]:
+        ser = SchemaSerializer(schema)
+        held = {'a': value} if schema['type'] in ('dict', 'typed-dict') else [value]
+        with pytest.raises(PydanticSerializationError) as exc:
+            ser.to_python(held, mode='json')
+        assert str(exc.value).startswith(refused), (schema['type'], str(exc.value))
+
+    # `fallback` is asked first, and its answer goes through the same walk in the value's
+    # place, so a run that was given one refuses nothing.  A serializer binding takes no
+    # `serialize_unknown` at all -- only the jsonable entry points do -- and their own
+    # refusal of an unknown value is what it has always been.
+    assert any_ser.to_python(value, mode='json', fallback=lambda v: 'FB') == 'FB'
+    with pytest.raises(PydanticSerializationError) as exc:
+        to_jsonable_python(value)
+    assert str(exc.value).startswith(refused), str(exc.value)
+    assert to_jsonable_python(value, serialize_unknown=True) == 'unknown-str'
+    # The placeholder names the class the way Rust's type table does, by its qualified name.
+    assert to_jsonable_python(NoStr(), serialize_unknown=True) == f'<Unserializable {NoStr.__qualname__} object>'
+
+    # Unknown to Rust's table: a PurePosixPath (the table names pathlib.Path, whose bases a
+    # PurePosixPath never reaches), a range, a memoryview, and a plain object.
+    for unknown in [pathlib.PurePosixPath('a/b'), range(3), memoryview(b'x'), object()]:
+        with pytest.raises(PydanticSerializationError) as exc:
+            any_ser.to_python(unknown, mode='json')
+        assert str(exc.value).startswith(refused), (unknown, str(exc.value))
+    assert any_ser.to_python(range(3)) == range(3)
+    with pytest.raises(PydanticSerializationError) as exc:
+        to_jsonable_python(pathlib.PurePosixPath('a/b'))
+    assert str(exc.value).startswith(refused), str(exc.value)
+
+    # Known to that table: reached through a base type, so never asked.  (What each of them
+    # then *leaves* as is a different question -- see the notes on the json leaf forms.)
+    dict_subclass = type('D', (dict,), {})
+    str_subclass = type('S', (str,), {})
+    assert any_ser.to_python(dict_subclass({'a': 1}), mode='json') == {'a': 1}
+    assert any_ser.to_python(str_subclass('x'), mode='json') == 'x'
+    assert any_ser.to_python([1, {'a': (1, 2)}], mode='json') == [1, {'a': [1, 2]}]

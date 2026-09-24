@@ -1414,6 +1414,80 @@ static bool py_infer_known_type(const py::object& v) {
     return py_hasattr(v, "__pydantic_serializer__");
 }
 
+// Rust's infer layer consults its own type table before it calls a value unknown
+// (ob_type.rs:215-407): every exact type in that table, everything that reaches one of them
+// by walking tp_base, and then the isinstance list at :336-407 -- plus the two ducks tested
+// on the value itself, a `__pydantic_serializer__` (:421) and `__dataclass_fields__` (:410),
+// neither of which a type object is allowed to answer.  What this says unknown about has no
+// arm of infer's own to fall into, which is what a json run's refusal is keyed on
+// (infer.rs:221-231).  PurePosixPath is unknown on purpose: the table names pathlib.Path
+// (:296) and a PurePath's bases never reach it, and `range`/`array.array` are not in it
+// either -- both are refused by a json run however iterable they look.
+static bool ser_infer_known_ob_type(const py::object& v) {
+    PyObject* p = v.ptr();
+    if (v.is_none() || PyBool_Check(p) || PyLong_Check(p) || PyFloat_Check(p) ||
+        PyUnicode_Check(p) || PyBytes_Check(p) || PyByteArray_Check(p) || PyComplex_Check(p) ||
+        PyList_Check(p) || PyTuple_Check(p) || PyDict_Check(p) || PySet_Check(p) ||
+        PyFrozenSet_Check(p) || py_is_datetime_like(p))
+        return true;
+    // ob_type.rs:294 counts a value its own iterator as ObType::Generator, and pyo3 asks
+    // that as PyIter_Check -- the Py_TPFLAGS_HAVE_ITER flag, not tp_iternext, which every
+    // heap type carries as slot_tp_iternext whether or not the class defines __next__.
+    // Asking the pointer instead called a plain object an iterator and never refused it.
+    if (PyIter_Check(p)) return true;
+    if (py::isinstance(v, py_fraction_type())) return true;
+    try {
+        static const py::object& deque_cls =
+            held_python_object([] { return py::module_::import("collections").attr("deque"); });
+        if (py::isinstance(v, deque_cls)) return true;
+    } catch (const py::error_already_set&) { PyErr_Clear(); }
+    try {
+        static const py::object& enum_cls =
+            held_python_object([] { return py::module_::import("enum").attr("Enum"); });
+        if (py::isinstance(v, enum_cls)) return true;
+    } catch (const py::error_already_set&) { PyErr_Clear(); }
+    if (!PyType_Check(p)) {
+        if (py_hasattr(v, "__pydantic_serializer__")) return true;
+        if (py_hasattr(v, "__dataclass_fields__")) return true;
+    }
+    // The rest of the isinstance list, in ob_type.rs's own order.
+    try {
+        static const py::object& ip_cls = held_python_object([] {
+            py::object m = py::module_::import("ipaddress");
+            return py::make_tuple(m.attr("IPv4Address"), m.attr("IPv6Address"),
+                                  m.attr("IPv4Network"), m.attr("IPv6Network"));
+        });
+        if (py::isinstance(v, ip_cls)) return true;
+    } catch (const py::error_already_set&) { PyErr_Clear(); }
+    try {
+        static const py::object& pattern_cls =
+            held_python_object([] { return py::module_::import("re").attr("Pattern"); });
+        if (py::isinstance(v, pattern_cls)) return true;
+    } catch (const py::error_already_set&) { PyErr_Clear(); }
+    try {
+        static const py::object& decimal_cls =
+            held_python_object([] { return py::module_::import("decimal").attr("Decimal"); });
+        if (py::isinstance(v, decimal_cls)) return true;
+    } catch (const py::error_already_set&) { PyErr_Clear(); }
+    try {
+        static const py::object& uuid_cls =
+            held_python_object([] { return py::module_::import("uuid").attr("UUID"); });
+        if (py::isinstance(v, uuid_cls)) return true;
+    } catch (const py::error_already_set&) { PyErr_Clear(); }
+    try {
+        static const py::object& path_cls =
+            held_python_object([] { return py::module_::import("pathlib").attr("Path"); });
+        if (py::isinstance(v, path_cls)) return true;
+    } catch (const py::error_already_set&) { PyErr_Clear(); }
+    try {
+        static const py::object& url_mod = held_python_object(
+            [] { return py::module_::import("pydantic_core_cpp._pydantic_core_cpp"); });
+        if (py::isinstance(v, url_mod.attr("Url")) || py::isinstance(v, url_mod.attr("MultiHostUrl")))
+            return true;
+    } catch (const py::error_already_set&) { PyErr_Clear(); }
+    return false;
+}
+
 // Rust CombinedSerializer enum variant names, as they appear in SchemaSerializer.__repr__.
 static std::string ser_variant_name(const std::string& t) {
     static const std::unordered_map<std::string, std::string> names = {
@@ -3682,6 +3756,17 @@ private:
             }
             py::object converted;
             if (json_infer_leaf(v, converted)) return converted;
+            // The json arm ends at ObType::Unknown (infer.rs:221-231): after the `fallback`
+            // had its turn above, `serialize_unknown` takes str() of the value -- a
+            // placeholder when str() itself raises -- and with neither the run refuses by
+            // naming the value's type.  A Python-mode run asks none of this and hands the
+            // object straight back (:279-286), which is why model_dump() can hold a value
+            // that model_dump(mode='json') refuses.
+            if (!ser_infer_known_ob_type(v)) {
+                if (g_ser_extra.serialize_unknown) return py::str(ser_serialize_unknown(v));
+                throw PydanticSerializationError(
+                    "Unable to serialize unknown type: " + ser_safe_repr(py::type::of(v)));
+            }
         }
         return v;
     }
