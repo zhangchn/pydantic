@@ -5952,44 +5952,15 @@ static py::object infer_jsonable_python(const py::object& v, const JsonableRun& 
     if (PyComplex_Check(v.ptr()))
         return py::str(complex_to_str_rust(PyComplex_RealAsDouble(v.ptr()),
                                            PyComplex_ImagAsDouble(v.ptr())));
-    // ObType::Ipv4Address/Ipv6Address/Ipv4Network/Ipv6Network serialize via str()
-    // (infer.rs:184-190); an IPv4Interface reaches the arm the way Rust does, by
-    // inheriting IPv4Address.  Anything else that only prints like an address stays
-    // unknown.
-    try {
-        static const py::object& ip_cls = held_python_object([] {
-            py::object m = py::module_::import("ipaddress");
-            return py::make_tuple(m.attr("IPv4Address"), m.attr("IPv6Address"),
-                                  m.attr("IPv4Network"), m.attr("IPv6Network"));
-        });
-        if (py::isinstance(v, ip_cls)) return py::str(v);
-    } catch (const py::error_already_set&) { PyErr_Clear(); }
-    // ObType::Pattern is the pattern text (infer.rs:675), not the repr of the object.
-    try {
-        static const py::object& pattern_cls =
-            held_python_object([] { return py::module_::import("re").attr("Pattern"); });
-        if (py::isinstance(v, pattern_cls)) return py::getattr(v, "pattern");
-    } catch (const py::error_already_set&) { PyErr_Clear(); }
-    // Types that serialize as their str() representation
-    try {
-        static const py::object& decimal_cls = held_python_object([] { return py::module_::import("decimal").attr("Decimal"); });
-        if (py::isinstance(v, decimal_cls)) return py::str(v);
-    } catch (...) { PyErr_Clear(); }
-    if (py::isinstance(v, py_fraction_type())) return py::str(v);
-    try {
-        static const py::object& uuid_cls = held_python_object([] { return py::module_::import("uuid").attr("UUID"); });
-        if (py::isinstance(v, uuid_cls)) return py::str(v);
-    } catch (...) { PyErr_Clear(); }
-    try {
-        // ObType::Path is pathlib.Path, found by walking tp_base, so a PurePath -- or a
-        // PurePosixPath, whose bases never reach Path -- is unknown to Rust.
-        static const py::object& path_cls = held_python_object([] { return py::module_::import("pathlib").attr("Path"); });
-        if (py::isinstance(v, path_cls)) return py::str(v);
-    } catch (...) { PyErr_Clear(); }
-    try {
-        py::object mod = py::module_::import("pydantic_core_cpp._pydantic_core_cpp");
-        if (py::isinstance(v, mod.attr("Url")) || py::isinstance(v, mod.attr("MultiHostUrl"))) return py::str(v);
-    } catch (...) { PyErr_Clear(); }
+    // The same table the two other json walks consult (infer.rs:122, :184-190, :191-194,
+    // :220), and asked before the Unknown arm at the bottom of this function, which is where
+    // Rust leaves it: a Decimal goes through pyo3's display rather than plain str(), a UUID is
+    // rebuilt from its own int, and a Path or address whose str raises ends the run with the
+    // value's own error instead of having it cleared here and being passed on as unknown.
+    {
+        py::object str_form;
+        if (ser_infer_json_str(v, str_form)) return str_form;
+    }
     // datetime/date/time expose isoformat() -- unless the run asked for timestamps, in
     // which case the same mode that moves a datetime moves a timedelta (infer.rs:169-182,
     // config.rs:161-186).

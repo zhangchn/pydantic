@@ -1532,3 +1532,74 @@ def test_a_json_text_run_prints_the_leaf_forms_the_json_object_run_prints():
         with pytest.raises(PydanticSerializationError) as obj_exc:
             any_ser.to_python(value, mode='json')
         assert str(obj_exc.value) == str(exc.value), str(obj_exc.value)
+
+
+def test_the_jsonable_entry_point_prints_the_same_leaf_forms_as_the_other_json_runs():
+    # to_jsonable_python is to_python with SerMode::Json (mod.rs:275), so it prints what the
+    # other two json writers print.  It had its own copy of the leaf list -- plain str() of the
+    # classes it knew, no ipaddress interface beyond those four, no placeholder for a display
+    # that raises, and str() of a UUID rather than the bytes of its int.
+    class BoomDecimal(decimal.Decimal):
+        def __str__(self):
+            raise RuntimeError('no str')
+
+    class BoomFraction(fractions.Fraction):
+        def __str__(self):
+            raise RuntimeError('no str')
+
+    class BoomPath(pathlib.PosixPath):
+        def __str__(self):
+            raise RuntimeError('no str')
+
+    class BoomIP(ipaddress.IPv4Address):
+        def __str__(self):
+            raise RuntimeError('no str')
+
+    class BoomUUID(uuid.UUID):
+        def __str__(self):
+            raise RuntimeError('no str')
+
+    class LyingPath(pathlib.PosixPath):
+        def __str__(self):
+            return 'NOT-A-PATH'
+
+    any_ser = SchemaSerializer(core_schema.any_schema())
+
+    for value in [
+        decimal.Decimal('1.5'),
+        decimal.Decimal('sNaN'),
+        fractions.Fraction(1, 3),
+        uuid.UUID(int=7),
+        uuid.UUID('urn:uuid:12345678-1234-5678-1234-567812345678'),
+        pathlib.Path('a/b'),
+        LyingPath('a/b'),
+        ipaddress.IPv4Address('1.2.3.4'),
+        ipaddress.IPv6Network('::/64'),
+        ipaddress.IPv4Interface('1.2.3.4/24'),
+        pydantic_core_cpp.Url('https://example.com/x'),
+        re.compile('a+', re.IGNORECASE),
+        {'k': [decimal.Decimal('1.5'), uuid.UUID(int=0)]},
+    ]:
+        assert pydantic_core_cpp.to_jsonable_python(value) == any_ser.to_python(value, mode='json'), repr(value)
+
+    # A display that raises is still the placeholder, and a UUID is still its int -- neither is
+    # changed by serialize_unknown, which only speaks for values the table does not name.  A str
+    # that raises on a type that goes through serialize_via_str ends the run with the value's own
+    # error: this entry point has no serde boundary to rename it, so it arrives as it was raised.
+    jsonable = pydantic_core_cpp.to_jsonable_python
+    assert jsonable(BoomDecimal('1.5')) == '<unprintable BoomDecimal object>'
+    assert jsonable(BoomFraction(1, 2)) == '<unprintable BoomFraction object>'
+    assert jsonable(BoomUUID(int=3)) == '00000000-0000-0000-0000-000000000003'
+    assert jsonable(BoomUUID(int=3), serialize_unknown=True) == '00000000-0000-0000-0000-000000000003'
+    for boom in [BoomPath('a/b'), BoomIP('1.2.3.4')]:
+        with pytest.raises(RuntimeError, match='no str'):
+            jsonable(boom)
+        with pytest.raises(RuntimeError, match='no str'):
+            jsonable(boom, serialize_unknown=True)
+
+    # Only an unknown value is serialize_unknown's to answer for: it takes str() of the value,
+    # and a value whose str raises becomes the placeholder naming its qualified name.
+    with pytest.raises(PydanticSerializationError) as exc:
+        jsonable(pathlib.PurePosixPath('a/b'))
+    assert str(exc.value) == 'Unable to serialize unknown type: <class \'pathlib.PurePosixPath\'>', str(exc.value)
+    assert jsonable(pathlib.PurePosixPath('a/b'), serialize_unknown=True) == 'a/b'
