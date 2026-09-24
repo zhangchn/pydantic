@@ -1507,18 +1507,20 @@ static py::object ser_display(const py::object& v) {
 // infer.rs:191-194 hands a UUID to uuid_to_string (type_serializers/uuid.rs:16-21), which
 // reads the value's own `int` and prints it as sixteen big-endian bytes: a URN- or hex-built
 // UUID comes back in the hyphenated form, and a subclass whose __str__ lies is not believed.
-// The three refusals are CPython's own words for that extraction -- "int too big to convert",
-// "can't convert negative int to unsigned", "'X' object cannot be interpreted as an
-// integer" -- so int.to_bytes is asked unbound and the range error is left to propagate
-// rather than composed here.
+// The three refusals of that extraction are CPython's own words -- "'X' object cannot be
+// interpreted as an integer", "int too big to convert", "can't convert negative int to
+// unsigned" -- so the extraction is asked of CPython and its errors are left to propagate
+// rather than composed here.  They have to arrive as Python's own: an error the port raises
+// itself keeps its identity across a JSON run, while one that came from a call is renamed by
+// the serde boundary to `Error serializing to JSON: TypeError: ...`.
 static py::object ser_uuid_to_string(const py::object& v) {
     py::object i = v.attr("int");
-    if (!PyLong_Check(i.ptr()))
-        throw py::type_error(std::string("'") + Py_TYPE(i.ptr())->tp_name +
-                             "' object cannot be interpreted as an integer");
+    PyObject* indexed = PyNumber_Index(i.ptr());
+    if (!indexed) throw py::error_already_set();
+    py::object count = py::reinterpret_steal<py::object>(indexed);
     static const py::object& to_bytes = held_python_object(
         [] { return py::getattr(py::module_::import("builtins").attr("int"), "to_bytes"); });
-    std::string bytes = to_bytes(i, 16, "big").cast<py::bytes>().cast<std::string>();
+    std::string bytes = to_bytes(count, 16, "big").cast<py::bytes>().cast<std::string>();
     static const char* hexd = "0123456789abcdef";
     std::string hex;
     hex.reserve(36);
@@ -1531,31 +1533,43 @@ static py::object ser_uuid_to_string(const py::object& v) {
     return py::str(hex);
 }
 
-// The ObTypes whose json form (infer.rs:184-190, :220) is a string: Url, MultiHostUrl, Path
-// and the four named ipaddress types go through serialize_via_str, which is str() with the
-// error left standing -- unlike Decimal and Fraction, a Path whose __str__ raises does not
-// become a placeholder.  A pattern gives its `pattern` attribute, not its str(), because
-// str() of a compiled pattern is its repr.  IPv4Interface and IPv6Interface arrive through
-// their Address base, which is why they print with the prefix length.
+// The ObTypes whose json form is a string, shared by every json-running walk: Url,
+// MultiHostUrl, Path and the four named ipaddress types go through serialize_via_str
+// (infer.rs:184-190), which is str() with the error left standing -- unlike Decimal and
+// Fraction, a Path whose __str__ raises does not become a placeholder.  A pattern gives its
+// `pattern` attribute, not its str() (infer.rs:220, :675-678), because str() of a compiled
+// pattern is its repr.  IPv4Interface and IPv6Interface arrive through their Address base,
+// which is why they print with the prefix length.
 struct SerStrClasses {
     py::object decimal, uuid, path, ip, url, multihost_url, pattern;
-    bool ready = false;
 };
 
 static SerStrClasses make_ser_str_classes() {
     SerStrClasses classes;
+    // Filled a class at a time: one class that cannot be imported costs its own ObType, where
+    // a single try around the whole table would leave a walk with no str forms at all.
+    auto fill = [](py::object& slot, const char* module, const char* name) {
+        try {
+            slot = py::module_::import(module).attr(name);
+        } catch (const py::error_already_set&) {
+            PyErr_Clear();
+        }
+    };
+    fill(classes.decimal, "decimal", "Decimal");
+    fill(classes.uuid, "uuid", "UUID");
+    fill(classes.path, "pathlib", "Path");
+    fill(classes.pattern, "re", "Pattern");
     try {
-        classes.decimal = py::module_::import("decimal").attr("Decimal");
-        classes.uuid = py::module_::import("uuid").attr("UUID");
-        classes.path = py::module_::import("pathlib").attr("Path");
         py::object m = py::module_::import("ipaddress");
         classes.ip = py::make_tuple(m.attr("IPv4Address"), m.attr("IPv6Address"),
                                     m.attr("IPv4Network"), m.attr("IPv6Network"));
-        py::object url_mod = py::module_::import("pydantic_core_cpp._pydantic_core_cpp");
-        classes.url = url_mod.attr("Url");
-        classes.multihost_url = url_mod.attr("MultiHostUrl");
-        classes.pattern = py::module_::import("re").attr("Pattern");
-        classes.ready = true;
+    } catch (const py::error_already_set&) {
+        PyErr_Clear();
+    }
+    try {
+        py::object m = py::module_::import("pydantic_core_cpp._pydantic_core_cpp");
+        classes.url = m.attr("Url");
+        classes.multihost_url = m.attr("MultiHostUrl");
     } catch (const py::error_already_set&) {
         PyErr_Clear();
     }
@@ -1571,21 +1585,23 @@ static const SerStrClasses& ser_str_classes() {
 
 static bool ser_infer_json_str(const py::object& v, py::object& out) {
     const SerStrClasses& c = ser_str_classes();
-    if (!c.ready) return false;
-    if (py::isinstance(v, c.decimal)) {
+    // A class that is not in the table asks nothing, so its ObType is left to the walk's own
+    // answer rather than the whole table being skipped.
+    auto is_a = [&](const py::object& cls) { return cls.ptr() != nullptr && py::isinstance(v, cls); };
+    // infer.rs:122: Display, which is str() with a placeholder and so cannot fail.
+    if (is_a(c.decimal) || is_a(py_fraction_type())) {
         out = ser_display(v);
         return true;
     }
-    if (py::isinstance(v, c.uuid)) {
+    if (is_a(c.uuid)) {
         out = ser_uuid_to_string(v);
         return true;
     }
-    if (py::isinstance(v, c.path) || py::isinstance(v, c.ip) || py::isinstance(v, c.url) ||
-        py::isinstance(v, c.multihost_url)) {
+    if (is_a(c.path) || is_a(c.ip) || is_a(c.url) || is_a(c.multihost_url)) {
         out = py::str(v);
         return true;
     }
-    if (py::isinstance(v, c.pattern)) {
+    if (is_a(c.pattern)) {
         out = py::str(py::getattr(v, "pattern"));
         return true;
     }
@@ -3219,8 +3235,9 @@ private:
         static const py::object& enum_cls = held_python_object([] { return py::module_::import("enum").attr("Enum"); });
         return py::isinstance(v, enum_cls);
     }
-    // Rust ObType kinds whose JSON form is a str(): they have no __dict__ of
-    // interest, so they must be recognised before the repr fallback below.
+    // The key-side list: a map key is written as text whatever its value form is, and
+    // these kinds have no text but their own (infer.rs:554, :576-593).  Values go to
+    // ser_infer_json_str, which answers the same kinds with their own serializers.
     static const std::vector<py::object>& str_known_classes() {
         static std::vector<py::object> classes;
         if (!classes.empty()) return classes;
@@ -3634,16 +3651,14 @@ private:
             out += "]";
             return out;
         }
-        // Rust ObType::Pattern serializes the pattern source, because str() of a
-        // compiled pattern is its repr on this Python.
-        try {
-            static const py::object& pattern_cls = held_python_object([] { return py::module_::import("re").attr("Pattern"); });
-            if (py::isinstance(value, pattern_cls)) {
-                return json_escape(py::str(value.attr("pattern")).cast<std::string>(), ensure_ascii);
-            }
-        } catch (...) { PyErr_Clear(); }
-        for (const py::object& known : str_known_classes()) {
-            if (py::isinstance(value, known)) return json_escape(py::str(value).cast<std::string>(), ensure_ascii);
+        // The same table the json arm of the object walk consults, so that a value cannot be
+        // text in one json run and a refusal in another: Display for a Decimal or Fraction,
+        // the bytes of a UUID's own int for a UUID, str() with the error left standing for
+        // Url/Path/ipaddress, the pattern source for a compiled pattern.
+        {
+            py::object str_form;
+            if (ser_infer_json_str(value, str_form))
+                return json_escape(str_form.cast<std::string>(), ensure_ascii);
         }
         if (py::isinstance<py::list>(value) || py::isinstance<py::tuple>(value)) {
             std::string out = "[";

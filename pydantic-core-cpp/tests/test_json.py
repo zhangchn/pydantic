@@ -1398,3 +1398,137 @@ def test_a_json_run_takes_the_string_form_of_the_types_rust_names():
     # except that pyo3's display, which Decimal and Fraction go through, cannot fail at all.
     with pytest.raises(RuntimeError):
         json_form(BoomPath('a/b'))
+
+
+def test_a_json_text_run_prints_the_leaf_forms_the_json_object_run_prints():
+    # The JSON-text walk and the json arm of the object walk are two writers over one table
+    # (infer.rs:122, :184-190, :191-194, :220), so neither may refuse what the other prints nor
+    # print a different text for the same value.  The text walk had its own narrower list --
+    # plain str() of the classes it happened to know -- which left a Fraction refused outright,
+    # a UUID printed by its own __str__ rather than rebuilt from its int, and a Decimal whose
+    # __str__ raises ending the run instead of becoming pyo3's placeholder.
+    class FractionSub(fractions.Fraction):
+        pass
+
+    class DecimalSub(decimal.Decimal):
+        pass
+
+    class BoomDecimal(decimal.Decimal):
+        def __str__(self):
+            raise RuntimeError('no str')
+
+    class BoomFraction(fractions.Fraction):
+        def __str__(self):
+            raise RuntimeError('no str')
+
+    class BoomPath(pathlib.PosixPath):
+        def __str__(self):
+            raise RuntimeError('no str')
+
+    class BoomIP(ipaddress.IPv4Address):
+        def __str__(self):
+            raise RuntimeError('no str')
+
+    class BoomUUID(uuid.UUID):
+        def __str__(self):
+            raise RuntimeError('no str')
+
+    class LyingPath(pathlib.PosixPath):
+        def __str__(self):
+            return 'NOT-A-PATH'
+
+    class UuidSub(uuid.UUID):
+        pass
+
+    class BigUuid(uuid.UUID):
+        int = property(lambda self: 2**200)
+
+    class NegUuid(uuid.UUID):
+        int = property(lambda self: -1)
+
+    class NotIntUuid(uuid.UUID):
+        int = property(lambda self: 'x')
+
+    any_ser = SchemaSerializer(core_schema.any_schema())
+
+    # What the two writers say about one value.  The separators are spelled out because
+    # json.dumps puts a space after its commas and a serializer does not.
+    def both_writers_agree(value):
+        text = any_ser.to_json(value)
+        assert text == json.dumps(any_ser.to_python(value, mode='json'), separators=(',', ':')).encode(), repr(
+            (text, value)
+        )
+
+    for value in [
+        decimal.Decimal('1.5'),
+        decimal.Decimal('NaN'),
+        decimal.Decimal('sNaN'),
+        DecimalSub('2.5'),
+        fractions.Fraction(1, 3),
+        FractionSub(2, 3),
+        uuid.UUID(int=7),
+        uuid.UUID(int=0),
+        uuid.UUID('urn:uuid:12345678-1234-5678-1234-567812345678'),
+        uuid.UUID('12345678123456781234567812345678'),
+        UuidSub(int=9),
+        pathlib.Path('a/b'),
+        LyingPath('a/b'),
+        ipaddress.IPv4Address('1.2.3.4'),
+        ipaddress.IPv6Address('::1'),
+        ipaddress.IPv4Network('1.2.3.0/24'),
+        ipaddress.IPv6Network('::/64'),
+        ipaddress.IPv4Interface('1.2.3.4/24'),
+        ipaddress.IPv6Interface('::1/64'),
+        pydantic_core_cpp.Url('https://example.com/x'),
+        pydantic_core_cpp.MultiHostUrl('redis://host1:1/host2'),
+        re.compile('a+'),
+        re.compile('a+', re.IGNORECASE),
+        [decimal.Decimal('1.5'), {'k': uuid.UUID(int=7)}],
+        {'k': [ipaddress.IPv4Address('1.2.3.4')]},
+    ]:
+        both_writers_agree(value)
+
+    # Pinned against the reference rather than against each other, since agreeing with itself is
+    # worth nothing unless the form they agree on is the one Rust prints.
+    assert any_ser.to_json(fractions.Fraction(1, 3)) == b'"1/3"'
+    assert any_ser.to_json(DecimalSub('2.5')) == b'"2.5"'
+    assert any_ser.to_json(decimal.Decimal('sNaN')) == b'"sNaN"'
+    assert any_ser.to_json(uuid.UUID('urn:uuid:12345678-1234-5678-1234-567812345678')) == b'"12345678-1234-5678-1234-567812345678"'
+    assert any_ser.to_json(LyingPath('a/b')) == b'"NOT-A-PATH"'
+    assert any_ser.to_json(re.compile('a+', re.IGNORECASE)) == b'"a+"'
+    assert any_ser.to_json({'k': [ipaddress.IPv4Address('1.2.3.4')]}) == b'{"k":["1.2.3.4"]}'
+
+    # pyo3's display cannot fail, so a Decimal or Fraction whose __str__ raises is printed
+    # anyway, as the placeholder naming its own class, and a UUID is still rebuilt from the int
+    # its lying __str__ would have hidden.  The types that go through serialize_via_str end the
+    # run with the value's own error, which the serde boundary renames to name the error it
+    # wrapped (errors.rs:21, :63).
+    assert any_ser.to_json(BoomDecimal('1.5')) == b'"<unprintable BoomDecimal object>"'
+    assert any_ser.to_json(BoomFraction(1, 2)) == b'"<unprintable BoomFraction object>"'
+    assert any_ser.to_json(BoomUUID(int=3)) == b'"00000000-0000-0000-0000-000000000003"'
+    for boom in [BoomPath('a/b'), BoomIP('1.2.3.4')]:
+        with pytest.raises(PydanticSerializationError) as exc:
+            any_ser.to_json(boom)
+        assert str(exc.value) == 'Error serializing to JSON: RuntimeError: no str', str(exc.value)
+
+    # A UUID's int is extracted the way CPython extracts an unsigned integer, so the refusals of
+    # that extraction are CPython's own words arriving through the same boundary.  These are
+    # built past UUID.__init__ because UUID gives `int` a slot, which a subclass attribute would
+    # not shadow by assignment.
+    for cls, message in [
+        (BigUuid, 'Error serializing to JSON: OverflowError: int too big to convert'),
+        (NegUuid, "Error serializing to JSON: OverflowError: can't convert negative int to unsigned"),
+        (NotIntUuid, "Error serializing to JSON: TypeError: 'str' object cannot be interpreted as an integer"),
+    ]:
+        with pytest.raises(PydanticSerializationError) as exc:
+            any_ser.to_json(cls.__new__(cls))
+        assert str(exc.value) == message, str(exc.value)
+
+    # A value Rust's table does not name is refused by both writers, in the same words.
+    for value in [pathlib.PurePosixPath('a/b'), object()]:
+        with pytest.raises(PydanticSerializationError) as exc:
+            any_ser.to_json(value)
+        assert str(exc.value).startswith('Unable to serialize unknown type: '), str(exc.value)
+        with pytest.raises(PydanticSerializationError) as obj_exc:
+            any_ser.to_python(value, mode='json')
+        assert str(obj_exc.value) == str(exc.value), str(obj_exc.value)
