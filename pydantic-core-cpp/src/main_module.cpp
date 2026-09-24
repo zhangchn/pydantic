@@ -137,6 +137,19 @@ struct SerCallExtraScope {
 // keeps them optional and the nested serializer resolves each against its own config.
 // `include`/`exclude` are absent on purpose -- those are scoped to a point in the tree,
 // not to the run, and cannot be re-expressed as the root of a fresh call.
+// `serialize_unknown` belongs to the run as much as the exclude flags do -- Rust hands the
+// very same Extra down (infer.rs:668), so a model reached by inference still knows what the
+// caller asked for -- but neither binding's SchemaSerializer.to_json/to_python accepts it as
+// an argument (Rust's has no such keyword at all, and the port must refuse it too), so it
+// cannot ride along with the kwargs.  It goes beside the call instead, and whichever entry
+// point the call runs picks it up.
+static thread_local bool g_ser_delegate_pending = false;
+static thread_local bool g_ser_delegate_serialize_unknown = false;
+
+static void ser_apply_delegated_extra() {
+    if (g_ser_delegate_pending) g_ser_extra.serialize_unknown = g_ser_delegate_serialize_unknown;
+}
+
 static py::dict ser_extra_forwarded() {
     py::dict kw;
     if (!g_ser_extra.by_alias.is_none()) kw["by_alias"] = g_ser_extra.by_alias;
@@ -156,6 +169,8 @@ static py::dict ser_extra_forwarded() {
     if (g_polymorphic_serialization.has_value()) {
         kw["polymorphic_serialization"] = *g_polymorphic_serialization;
     }
+    g_ser_delegate_pending = true;
+    g_ser_delegate_serialize_unknown = g_ser_extra.serialize_unknown;
     return kw;
 }
 
@@ -221,8 +236,14 @@ static thread_local int g_trampoline_depth = 0;
 static thread_local int g_ser_json_nested = 0;
 
 struct SerNestedCall {
+    const bool saved_pending = g_ser_delegate_pending;
+    const bool saved_serialize_unknown = g_ser_delegate_serialize_unknown;
     SerNestedCall() { ++g_ser_json_nested; }
-    ~SerNestedCall() { --g_ser_json_nested; }
+    ~SerNestedCall() {
+        --g_ser_json_nested;
+        g_ser_delegate_pending = saved_pending;
+        g_ser_delegate_serialize_unknown = saved_serialize_unknown;
+    }
     SerNestedCall(const SerNestedCall&) = delete;
     SerNestedCall& operator=(const SerNestedCall&) = delete;
 };
@@ -1305,6 +1326,16 @@ static bool ser_json_name_python_error(py::error_already_set& e, std::string* ou
         int is = PyObject_IsInstance(e.value().ptr(), unexpected.ptr());
         PyErr_Clear();
         if (is == 1) return false;
+        // Nor is a failure that already names itself one renamed: a delegated model's run
+        // throws `Unable to serialize unknown type: ...` and reaches this boundary through a
+        // Python call, where serde would hand the very same PyErr on untouched
+        // (errors.rs:63 renames only serde's own SerializationError).  The unexpected-value
+        // subclass keeps the exemption above, which asks for another try rather than
+        // reporting.
+        py::object ser_err = py::module_::import("pydantic_core_cpp").attr("PydanticSerializationError");
+        int is_ser = PyObject_IsInstance(e.value().ptr(), ser_err.ptr());
+        PyErr_Clear();
+        if (is_ser == 1) return false;
     } catch (...) { PyErr_Clear(); }
     std::string type_name, detail;
     try { type_name = py::str(e.type().attr("__name__")).cast<std::string>(); } catch (...) { PyErr_Clear(); }
@@ -1342,8 +1373,12 @@ static bool handle_ser_call_error(const py::error_already_set& e, const std::str
     try { detail = py::str(e.value()).cast<std::string>(); } catch (...) { PyErr_Clear(); }
     std::string inner = "Error calling function `" + function_name + "`: " + type_name + ": " + detail;
     // This wording is pydantic's own, so a JSON run reports it the way the serde
-    // boundary reports any Python error: class name in front, behind the prefix.
-    if (g_ser_json_depth > 0 && g_ser_json_nested == 0)
+    // boundary reports any Python error: class name in front, behind the prefix.  The
+    // boundary itself no longer renames what already names itself a serialization failure
+    // (see ser_json_name_python_error), so a call that re-entered the module and failed
+    // here gets its prefix from this site too -- deferring it used to leave the outer run
+    // to add it, and `nested polym dump_json` came out without one.
+    if (g_ser_json_depth > 0)
         throw PydanticSerializationError("Error serializing to JSON: PydanticSerializationError: " + inner);
     throw PydanticSerializationError(inner);
 }
@@ -3367,8 +3402,20 @@ private:
             SerNestedCall nested;
             auto ser = py::getattr(value, "__pydantic_serializer__");
             py::dict kw = ser_extra_forwarded();
-            py::object as_py = ser.attr("to_python")(value, py::arg("mode") = "json", **kw);
-            return infer_json(as_py, ensure_ascii, indent);
+            // call_pydantic_serializer (infer.rs:662-673) swaps state.config for the delegated
+            // serializer's own and writes the value into *this* run's sink with it, so what the
+            // delegated value is worth -- the form a nan takes, bytes as utf8 or base64, a
+            // datetime as ISO or as seconds -- is settled by that serializer and never by the
+            // call that happened to reach it.  Taking to_python's objects back and printing them
+            // here gets every one of those that is still a Python object wrong, which is today
+            // only a non-finite float: `to_json(M())` printed NaN where the wheel prints null,
+            // and `to_json(M(), inf_nan_mode='null')` null where the wheel keeps a model that
+            // asked for constants at NaN.  Splicing the delegated serializer's JSON is the same
+            // boundary; the indent this run was asked for stays outside, since it is applied to
+            // the whole compact string at the end by json_pretty_print.
+            kw["ensure_ascii"] = ensure_ascii;
+            py::bytes as_json = ser.attr("to_json")(value, **kw);
+            return as_json.cast<std::string>();
         }
 
         // A class answers the field/dataclass probes too, and its __dict__ is the
@@ -5001,6 +5048,7 @@ public:
         g_exclude_computed_fields = exclude_computed_fields;
         g_polymorphic_serialization = polymorphic;  // reset per call (None -> nullopt)
         SerCallExtraScope ser_scope;
+        ser_apply_delegated_extra();
         g_ser_extra.mode = mode.has_value() ? *mode : std::string("python");
         g_ser_extra.round_trip = round_trip;
         g_ser_extra.context = context.is_none() ? py::none() : context;
@@ -5084,6 +5132,7 @@ public:
         g_exclude_computed_fields = exclude_computed_fields;
         g_polymorphic_serialization = polymorphic;  // reset per call (None -> nullopt)
         SerCallExtraScope ser_scope;
+        ser_apply_delegated_extra();
         g_ser_extra.mode = "json";
         g_ser_extra.round_trip = round_trip;
         g_ser_extra.context = context.is_none() ? py::none() : context;
@@ -5234,6 +5283,7 @@ static py::bytes to_json_fn(const py::object& value, std::optional<size_t> inden
     // `serialize_unknown`, and leaving the previous call's extra in place would have
     // handed them someone else's.
     SerCallExtraScope ser_scope;
+    ser_apply_delegated_extra();
     // SerializationConfig::from_args, asked in Rust's own order: the temporal mode (which
     // may be the timedelta mode wearing its hat), then bytes, then inf_nan.  Whoever is
     // wrong first is the only one named, so the order is part of what is reproduced.
@@ -5813,6 +5863,7 @@ static py::object to_jsonable_fn(const py::object& value, std::optional<py::obje
     // `fallback` rides on it (mod.rs:293-307), so the values inferred below read it
     // from there rather than from whatever the previous call left behind.
     SerCallExtraScope ser_scope;
+    ser_apply_delegated_extra();
     g_ser_extra.mode = "json";
     g_ser_extra.by_alias = py::cast(by_alias);
     // :300 and :305 put both on the Extra, so they are this run's options even though only

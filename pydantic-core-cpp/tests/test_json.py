@@ -817,6 +817,92 @@ def test_a_model_takes_its_own_config_for_non_finite_floats():
     assert SchemaSerializer(outer_bare, {'ser_json_inf_nan': 'null'}).to_json(Outer()) == b'{"inner":{"f":NaN}}'
 
 
+def test_a_value_that_brings_its_own_serializer_is_printed_by_that_serializer():
+    # infer hands a value that carries `__pydantic_serializer__` to that serializer
+    # (infer.rs:649), and call_pydantic_serializer (infer.rs:662-673) puts *its* config in
+    # place for the call and writes the result into this run's text.  So what the delegated
+    # value is worth is settled by the serializer it belongs to and never by the call that
+    # happened to reach it -- pydantic gives each model its own serializer; the two classes
+    # here are handed theirs the same way.
+    nan = float('nan')
+
+    def fields(**fs):
+        return {'type': 'model-fields', 'model': None,
+                'fields': {name: {'type': 'model-field', 'schema': schema}
+                           for name, schema in fs.items()}}
+
+    def model_of(cls, schema, config):
+        return {'type': 'model', 'cls': cls, 'schema': schema, 'config': config}
+
+    ignore = {'extra_fields_behavior': 'ignore'}
+
+    class Bare:
+        def __init__(self):
+            self.f = nan
+
+    class Named:
+        def __init__(self):
+            self.f = nan
+
+    Bare.__pydantic_serializer__ = SchemaSerializer(
+        model_of(Bare, fields(f=core_schema.float_schema()), ignore))
+    Named.__pydantic_serializer__ = SchemaSerializer(
+        model_of(Named, fields(f=core_schema.float_schema()),
+                 dict(ignore, ser_json_inf_nan='constants')))
+
+    assert to_json(Bare()) == b'{"f":null}'
+    assert to_json(Bare(), inf_nan_mode='strings') == b'{"f":null}'
+    assert to_json(Named()) == b'{"f":NaN}'
+    assert to_json(Named(), inf_nan_mode='null') == b'{"f":NaN}'
+    assert to_json(Named(), inf_nan_mode='strings') == b'{"f":NaN}'
+    # Where the value sits changes nothing, and the indent stays this run's -- it is applied
+    # to the whole text at the end -- while the value is the other serializer's.
+    assert to_json([Named()]) == b'[{"f":NaN}]'
+    assert to_json({'m': Bare()}) == b'{"m":{"f":null}}'
+    assert to_json(Bare(), indent=2) == b'{\n  "f": null\n}'
+    assert to_json({'m': Named()}, indent=4) == b'{\n    "m": {\n        "f": NaN\n    }\n}'
+    # Not only a float: bytes, and anything else the modes speak of, answer the same way.
+    class Bytes:
+        def __init__(self):
+            self.b = b'ab'
+
+    Bytes.__pydantic_serializer__ = SchemaSerializer(
+        model_of(Bytes, fields(b=core_schema.bytes_schema()), dict(ignore, ser_json_bytes='base64')))
+    assert to_json(Bytes()) == b'{"b":"YWI="}'
+    assert to_json(Bytes(), bytes_mode='utf8') == b'{"b":"YWI="}'
+    assert to_json(Bytes(), bytes_mode='hex') == b'{"b":"YWI="}'
+    # `serialize_unknown` and `fallback` are the run's own asking (Rust hands the same Extra
+    # down, infer.rs:668), so they reach a delegated value -- carried beside the call, since
+    # neither binding's to_json takes them as an argument.
+    class Unknown:
+        def __str__(self):
+            return 'unknown-str'
+
+    class Holder:
+        def __init__(self):
+            self.u = Unknown()
+
+    Holder.__pydantic_serializer__ = SchemaSerializer(
+        model_of(Holder, fields(u=core_schema.any_schema()), ignore))
+    assert to_json(Holder(), serialize_unknown=True) == b'{"u":"unknown-str"}'
+    assert to_json(Holder(), fallback=lambda v: 'FB') == b'{"u":"FB"}'
+    # A failure a serializer raised itself keeps the name it had; only an error that came in
+    # from Python is renamed by the boundary (errors.rs:63 renames serde's own errors).
+    with pytest.raises(PydanticSerializationError) as exc_info:
+        to_json(Holder())
+    assert str(exc_info.value).startswith('Unable to serialize unknown type:')
+
+    def boom(value):
+        raise ValueError('boom')
+
+    with pytest.raises(PydanticSerializationError) as exc_info:
+        to_json(Holder(), fallback=boom)
+    assert str(exc_info.value) == 'Error serializing to JSON: ValueError: boom'
+    with pytest.raises(PydanticSerializationError) as exc_info:
+        to_json(Unknown(), fallback=boom)
+    assert str(exc_info.value) == 'Error serializing to JSON: ValueError: boom'
+
+
 def test_to_json_temporal_mode():
     dt = datetime.datetime(2024, 1, 2, 3, 4, 5)
     dtc = datetime.datetime(2024, 1, 2, 3, 4, 5, 123456,
