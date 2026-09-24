@@ -1488,6 +1488,110 @@ static bool ser_infer_known_ob_type(const py::object& v) {
     return false;
 }
 
+// pyo3's Display for a Python object is str() with this placeholder when str() raises, and
+// infer.rs:122 takes Decimal and Fraction through it -- so a leaf whose __str__ explodes is
+// still serialized, as text, in a run that was never given a fallback.  The name is the
+// class's own, not its qualified name.
+static py::object ser_display(const py::object& v) {
+    try {
+        return py::str(v);
+    } catch (const py::error_already_set&) {
+        PyErr_Clear();
+        std::string name = "?";
+        try { name = py::getattr(py::type::of(v), "__name__").cast<std::string>(); }
+        catch (const py::error_already_set&) { PyErr_Clear(); }
+        return py::str("<unprintable " + name + " object>");
+    }
+}
+
+// infer.rs:191-194 hands a UUID to uuid_to_string (type_serializers/uuid.rs:16-21), which
+// reads the value's own `int` and prints it as sixteen big-endian bytes: a URN- or hex-built
+// UUID comes back in the hyphenated form, and a subclass whose __str__ lies is not believed.
+// The three refusals are CPython's own words for that extraction -- "int too big to convert",
+// "can't convert negative int to unsigned", "'X' object cannot be interpreted as an
+// integer" -- so int.to_bytes is asked unbound and the range error is left to propagate
+// rather than composed here.
+static py::object ser_uuid_to_string(const py::object& v) {
+    py::object i = v.attr("int");
+    if (!PyLong_Check(i.ptr()))
+        throw py::type_error(std::string("'") + Py_TYPE(i.ptr())->tp_name +
+                             "' object cannot be interpreted as an integer");
+    static const py::object& to_bytes = held_python_object(
+        [] { return py::getattr(py::module_::import("builtins").attr("int"), "to_bytes"); });
+    std::string bytes = to_bytes(i, 16, "big").cast<py::bytes>().cast<std::string>();
+    static const char* hexd = "0123456789abcdef";
+    std::string hex;
+    hex.reserve(36);
+    for (size_t n = 0; n < bytes.size(); ++n) {
+        unsigned char b = static_cast<unsigned char>(bytes[n]);
+        hex += hexd[b >> 4];
+        hex += hexd[b & 0xf];
+        if (n == 3 || n == 5 || n == 7 || n == 9) hex += '-';
+    }
+    return py::str(hex);
+}
+
+// The ObTypes whose json form (infer.rs:184-190, :220) is a string: Url, MultiHostUrl, Path
+// and the four named ipaddress types go through serialize_via_str, which is str() with the
+// error left standing -- unlike Decimal and Fraction, a Path whose __str__ raises does not
+// become a placeholder.  A pattern gives its `pattern` attribute, not its str(), because
+// str() of a compiled pattern is its repr.  IPv4Interface and IPv6Interface arrive through
+// their Address base, which is why they print with the prefix length.
+struct SerStrClasses {
+    py::object decimal, uuid, path, ip, url, multihost_url, pattern;
+    bool ready = false;
+};
+
+static SerStrClasses make_ser_str_classes() {
+    SerStrClasses classes;
+    try {
+        classes.decimal = py::module_::import("decimal").attr("Decimal");
+        classes.uuid = py::module_::import("uuid").attr("UUID");
+        classes.path = py::module_::import("pathlib").attr("Path");
+        py::object m = py::module_::import("ipaddress");
+        classes.ip = py::make_tuple(m.attr("IPv4Address"), m.attr("IPv6Address"),
+                                    m.attr("IPv4Network"), m.attr("IPv6Network"));
+        py::object url_mod = py::module_::import("pydantic_core_cpp._pydantic_core_cpp");
+        classes.url = url_mod.attr("Url");
+        classes.multihost_url = url_mod.attr("MultiHostUrl");
+        classes.pattern = py::module_::import("re").attr("Pattern");
+        classes.ready = true;
+    } catch (const py::error_already_set&) {
+        PyErr_Clear();
+    }
+    return classes;
+}
+
+// Given up to the heap and never deleted, for the reason held_python_object gives: a
+// py::object whose destructor runs after Py_Finalize takes the interpreter down with it.
+static const SerStrClasses& ser_str_classes() {
+    static const SerStrClasses* classes = new SerStrClasses(make_ser_str_classes());
+    return *classes;
+}
+
+static bool ser_infer_json_str(const py::object& v, py::object& out) {
+    const SerStrClasses& c = ser_str_classes();
+    if (!c.ready) return false;
+    if (py::isinstance(v, c.decimal)) {
+        out = ser_display(v);
+        return true;
+    }
+    if (py::isinstance(v, c.uuid)) {
+        out = ser_uuid_to_string(v);
+        return true;
+    }
+    if (py::isinstance(v, c.path) || py::isinstance(v, c.ip) || py::isinstance(v, c.url) ||
+        py::isinstance(v, c.multihost_url)) {
+        out = py::str(v);
+        return true;
+    }
+    if (py::isinstance(v, c.pattern)) {
+        out = py::str(py::getattr(v, "pattern"));
+        return true;
+    }
+    return false;
+}
+
 // Rust CombinedSerializer enum variant names, as they appear in SchemaSerializer.__repr__.
 static std::string ser_variant_name(const std::string& t) {
     static const std::unordered_map<std::string, std::string> names = {
@@ -3730,8 +3834,8 @@ private:
             }
         } catch (const py::error_already_set&) { PyErr_Clear(); }
         // Rust infer_to_python ObType::Fraction: the display string in both
-        // Python and JSON mode.
-        if (py::isinstance(v, py_fraction_type())) return py::str(v);
+        // Python and JSON mode, and a display that pyo3 makes safe to fail.
+        if (py::isinstance(v, py_fraction_type())) return ser_display(v);
         // Rust infer_to_python ObType::Unknown: the caller's `fallback` callable
         // gets a turn (its result is re-inferred) before the value is passed
         // through untouched.
@@ -3756,6 +3860,7 @@ private:
             }
             py::object converted;
             if (json_infer_leaf(v, converted)) return converted;
+            if (ser_infer_json_str(v, converted)) return converted;
             // The json arm ends at ObType::Unknown (infer.rs:221-231): after the `fallback`
             // had its turn above, `serialize_unknown` takes str() of the value -- a
             // placeholder when str() itself raises -- and with neither the run refuses by

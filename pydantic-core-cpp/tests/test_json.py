@@ -1,6 +1,8 @@
 import dataclasses
 import datetime
 import decimal
+import fractions
+import ipaddress
 import json
 import math
 import pathlib
@@ -1302,3 +1304,97 @@ def test_a_value_a_json_run_cannot_serialize_is_refused_not_handed_back():
     assert any_ser.to_python(dict_subclass({'a': 1}), mode='json') == {'a': 1}
     assert any_ser.to_python(str_subclass('x'), mode='json') == 'x'
     assert any_ser.to_python([1, {'a': (1, 2)}], mode='json') == [1, {'a': [1, 2]}]
+
+
+def test_a_json_run_takes_the_string_form_of_the_types_rust_names():
+    # infer's json arm converts the ObTypes whose JSON form is text (infer.rs:122, :184-190,
+    # :191-194, :220) and a Python run converts none of them but Fraction (:278).  Each of
+    # these is what a python dump holds while a json dump of the same value gives its text,
+    # and the port's own json leaf (bytes, the temporal types, complex) already worked this
+    # way -- these are the rest of that list.
+    class DecimalSub(decimal.Decimal):
+        pass
+
+    class PathStr(pathlib.PosixPath):
+        def __str__(self):
+            return 'NOT-A-PATH'
+
+    class UuidSub(uuid.UUID):
+        pass
+
+    class BoomDecimal(decimal.Decimal):
+        def __str__(self):
+            raise RuntimeError('no str')
+
+    class BoomPath(pathlib.PosixPath):
+        def __str__(self):
+            raise RuntimeError('no str')
+
+    class BoomFraction(fractions.Fraction):
+        def __str__(self):
+            raise RuntimeError('no str')
+
+    any_ser = SchemaSerializer(core_schema.any_schema())
+
+    def json_form(value):
+        return any_ser.to_python(value, mode='json')
+
+    # Decimal and Fraction are taken through pyo3's display, which cannot fail: a leaf whose
+    # __str__ explodes is still serialized, as this placeholder naming its own class.
+    assert json_form(decimal.Decimal('1.5')) == '1.5'
+    assert json_form(decimal.Decimal('NaN')) == 'NaN'
+    assert json_form(decimal.Decimal('sNaN')) == 'sNaN'
+    assert json_form(DecimalSub('2.5')) == '2.5'
+    assert json_form(fractions.Fraction(1, 3)) == '1/3'
+    assert json_form(fractions.Fraction(2, 3)) == '2/3'
+    assert any_ser.to_python(fractions.Fraction(1, 3)) == '1/3'
+    assert json_form(BoomDecimal('1.5')) == '<unprintable BoomDecimal object>'
+    assert json_form(BoomFraction(1, 2)) == '<unprintable BoomFraction object>'
+    # ... but only a Fraction is asked in a Python run, and a Decimal is left alone.
+    assert any_ser.to_python(decimal.Decimal('1.5')) == decimal.Decimal('1.5')
+
+    # A UUID is not str()ed: uuid_to_string reads the value's own int and prints sixteen
+    # big-endian bytes, so the form a UUID was built from is gone and a lying __str__ is not
+    # believed.
+    assert json_form(uuid.UUID(int=7)) == '00000000-0000-0000-0000-000000000007'
+    assert json_form(uuid.UUID(int=0)) == '00000000-0000-0000-0000-000000000000'
+    assert json_form(uuid.UUID('urn:uuid:12345678-1234-5678-1234-567812345678')) == '12345678-1234-5678-1234-567812345678'
+    assert json_form(uuid.UUID('12345678123456781234567812345678')) == '12345678-1234-5678-1234-567812345678'
+    assert json_form(UuidSub(int=9)) == '00000000-0000-0000-0000-000000000009'
+
+    # The rest go through str() with the error left standing.
+    assert json_form(pathlib.Path('a/b')) == 'a/b'
+    assert json_form(pathlib.PosixPath('a/b')) == 'a/b'
+    assert json_form(PathStr('a/b')) == 'NOT-A-PATH'
+    assert json_form(ipaddress.IPv4Address('1.2.3.4')) == '1.2.3.4'
+    assert json_form(ipaddress.IPv6Address('::1')) == '::1'
+    assert json_form(ipaddress.IPv4Network('1.2.3.0/24')) == '1.2.3.0/24'
+    assert json_form(ipaddress.IPv6Network('::/64')) == '::/64'
+    # An interface is an address subclass to Rust's table, which is why it keeps its prefix.
+    assert json_form(ipaddress.IPv4Interface('1.2.3.4/24')) == '1.2.3.4/24'
+    assert json_form(ipaddress.IPv6Interface('::1/64')) == '::1/64'
+    assert json_form(pydantic_core_cpp.Url('https://example.com/x')) == 'https://example.com/x'
+    assert json_form(pydantic_core_cpp.MultiHostUrl('redis://host1:1/host2')) == 'redis://host1:1/host2'
+    # A pattern gives its pattern attribute, because str() of one is its repr.
+    assert json_form(re.compile('a+')) == 'a+'
+    assert json_form(re.compile('a+', re.IGNORECASE)) == 'a+'
+
+    # A Python run asks for none of this.
+    for value in [decimal.Decimal('1.5'), uuid.UUID(int=7), pathlib.Path('a/b'),
+                  ipaddress.IPv4Address('1.2.3.4'), re.compile('a+')]:
+        assert any_ser.to_python(value) == value
+
+    # The refusal is unchanged for a value Rust's table does not name, and the containers
+    # reach the same leaf.
+    with pytest.raises(PydanticSerializationError) as exc:
+        json_form(pathlib.PurePosixPath('a/b'))
+    assert str(exc.value).startswith('Unable to serialize unknown type: '), str(exc.value)
+    assert json_form([decimal.Decimal('1.5'), {'k': uuid.UUID(int=7)}]) == [
+        '1.5',
+        {'k': '00000000-0000-0000-0000-000000000007'},
+    ]
+
+    # str() failing on one of these is the value's own error, not a serialization refusal --
+    # except that pyo3's display, which Decimal and Fraction go through, cannot fail at all.
+    with pytest.raises(RuntimeError):
+        json_form(BoomPath('a/b'))
