@@ -1603,3 +1603,91 @@ def test_the_jsonable_entry_point_prints_the_same_leaf_forms_as_the_other_json_r
         jsonable(pathlib.PurePosixPath('a/b'))
     assert str(exc.value) == 'Unable to serialize unknown type: <class \'pathlib.PurePosixPath\'>', str(exc.value)
     assert jsonable(pathlib.PurePosixPath('a/b'), serialize_unknown=True) == 'a/b'
+
+
+def test_a_value_that_rewrites_its_own_text_is_asked_for_it():
+    # A text form is asked of Python, not of the object's C type.  pybind's py::str is a checked
+    # cast: shown a str subclass it hands back the content and never runs __str__, while Python's
+    # str() -- and pyo3's .str(), which is what Rust calls here (infer.rs:188, :221, :613, :627) --
+    # do.  A compiled pattern is where that shows, since Rust gives its pattern source's text, and
+    # a pattern source is an ordinary Python object: a str subclass that rewrites its own text, or
+    # one whose __str__ refuses.  The other leaves cannot show it -- CPython refuses to lay out a
+    # class that is both a str and a UUID/Path/Decimal/IP -- so they are here only to say the
+    # answer did not move.
+    from typing import Any
+
+    from pydantic import BaseModel, ConfigDict, TypeAdapter
+
+    jsonable = pydantic_core_cpp.to_jsonable_python
+    ser = SchemaSerializer(core_schema.any_schema())
+    ta = TypeAdapter(Any)
+    dump_python = ta.dump_python
+    dump_json = ta.dump_json
+
+    class RewrittenSource(str):
+        def __str__(self):
+            return 'REWRITTEN'
+
+    class RefusingSource(str):
+        def __str__(self):
+            raise RuntimeError('no str')
+
+    plain = type('Plain', (str,), {})('orig')
+    rewritten = re.compile(RewrittenSource('b+'))
+    refusing = re.compile(RefusingSource('b+'))
+
+    assert ser.to_json(rewritten) == b'"REWRITTEN"'
+    assert jsonable(rewritten) == 'REWRITTEN'
+    assert dump_python({'k': [rewritten]}, mode='json') == {'k': ['REWRITTEN']}
+    assert dump_json({'k': [rewritten]}) == b'{"k":["REWRITTEN"]}'
+    # in a python run nothing is asked of the pattern at all
+    assert dump_python(rewritten) is rewritten
+
+    # The key path asks the same question, alone, inside a tuple key, and nested in a dict.
+    assert dump_json({rewritten: 1}) == b'{"REWRITTEN":1}'
+    assert ser.to_json({(rewritten,): 1}) == b'{"REWRITTEN":1}'
+    assert dump_json({'k': {rewritten: 1}}) == b'{"k":{"REWRITTEN":1}}'
+    assert jsonable({rewritten: 1}) == {'REWRITTEN': 1}
+    assert dump_python({rewritten: 1}, mode='json') == {'REWRITTEN': 1}
+
+    assert ta.dump_python(rewritten, mode='json') == 'REWRITTEN'
+    assert ta.dump_json(rewritten) == b'"REWRITTEN"'
+
+    class ModelWithPattern(BaseModel):
+        f: Any = None
+
+    assert ModelWithPattern(f=rewritten).model_dump(mode='json') == {'f': 'REWRITTEN'}
+    assert ModelWithPattern(f=rewritten).model_dump_json() == '{"f":"REWRITTEN"}'
+
+    class ModelWithExtra(BaseModel):
+        model_config = ConfigDict(extra='allow')
+
+    assert ModelWithExtra.model_validate({'x': rewritten}).model_dump(mode='json') == {'x': 'REWRITTEN'}
+
+    # A source that refuses to speak ends the run with its own error.  Only the json-*text* walk has
+    # a serde boundary to rename it with; the object-json walk and to_jsonable_python hand over the
+    # error as raised.  The key path is no exception, where the port used to swallow the refusal
+    # into an unknown-type refusal instead.
+    with pytest.raises(RuntimeError, match='no str'):
+        jsonable(refusing)
+    with pytest.raises(RuntimeError, match='no str'):
+        jsonable({refusing: 1})
+    # serialize_unknown only speaks for values no kind names, and a pattern is named
+    with pytest.raises(RuntimeError, match='no str'):
+        jsonable(refusing, serialize_unknown=True)
+    with pytest.raises(PydanticSerializationError) as text_exc:
+        dump_json(refusing)
+    assert str(text_exc.value) == 'Error serializing to JSON: RuntimeError: no str', str(text_exc.value)
+    with pytest.raises(PydanticSerializationError) as key_exc:
+        dump_json({refusing: 1})
+    assert str(key_exc.value) == str(text_exc.value), str(key_exc.value)
+    with pytest.raises(RuntimeError, match='no str'):
+        ser.to_python(refusing, mode='json')
+    with pytest.raises(RuntimeError, match='no str'):
+        ser.to_python({refusing: 1}, mode='json')
+
+    # A str that does not rewrite its text is asked for nothing: its content is its text, and the
+    # key path uses the content just as Rust's Str arm does.
+    assert ser.to_json(plain) == b'"orig"'
+    assert dump_json({plain: 1}) == b'{"orig":1}'
+    assert jsonable(plain) == 'orig'

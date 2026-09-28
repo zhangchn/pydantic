@@ -1488,13 +1488,28 @@ static bool ser_infer_known_ob_type(const py::object& v) {
     return false;
 }
 
+// A text form is asked of Python, not of the object's C type.  pybind's py::str is a checked cast:
+// shown a str subclass it hands back the object's content and never runs __str__, while Python's
+// str() -- and pyo3's .str(), which is what Rust calls for these kinds (infer.rs:188, :221, :613,
+// :627) -- do.  So a str subclass that rewrites its own text prints its own text, and one whose
+// __str__ refuses propagates the refusal instead of quietly printing what it was built from.
+static py::object ser_text_form(const py::object& v) {
+    PyObject* s = PyObject_Str(v.ptr());
+    if (!s) throw py::error_already_set();
+    return py::reinterpret_steal<py::object>(s);
+}
+
 // pyo3's Display for a Python object is str() with this placeholder when str() raises, and
 // infer.rs:122 takes Decimal and Fraction through it -- so a leaf whose __str__ explodes is
 // still serialized, as text, in a run that was never given a fallback.  The name is the
 // class's own, not its qualified name.
 static py::object ser_display(const py::object& v) {
     try {
-        return py::str(v);
+        // PyObject_Str rather than py::str, for the str-subclass reason above; the refusal still
+        // has to reach the catch below, which is where the placeholder lives
+        PyObject* s = PyObject_Str(v.ptr());
+        if (!s) throw py::error_already_set();
+        return py::reinterpret_steal<py::object>(s);
     } catch (const py::error_already_set&) {
         PyErr_Clear();
         std::string name = "?";
@@ -1598,11 +1613,11 @@ static bool ser_infer_json_str(const py::object& v, py::object& out) {
         return true;
     }
     if (is_a(c.path) || is_a(c.ip) || is_a(c.url) || is_a(c.multihost_url)) {
-        out = py::str(v);
+        out = ser_text_form(v);
         return true;
     }
     if (is_a(c.pattern)) {
-        out = py::str(py::getattr(v, "pattern"));
+        out = ser_text_form(py::getattr(v, "pattern"));
         return true;
     }
     return false;
@@ -3403,17 +3418,21 @@ private:
             }
         }
         // ObType::Pattern is its pattern source, because str() of a compiled pattern is its
-        // repr on this Python (infer.rs:624-629).
+        // repr on this Python (infer.rs:624-629).  Only the import is guarded: asking the source
+        // for its text can refuse (infer.rs:627 propagates that), and swallowing it here would
+        // leave the pattern to be refused as an unknown type instead.
+        bool is_pattern = false;
         try {
             static const py::object& pattern_cls = held_python_object([] { return py::module_::import("re").attr("Pattern"); });
-            if (py::isinstance(key, pattern_cls)) return py::str(key.attr("pattern"));
+            is_pattern = py::isinstance(key, pattern_cls);
         } catch (const py::error_already_set&) { PyErr_Clear(); }
+        if (is_pattern) return ser_text_form(py::getattr(key, "pattern"));
         // A dataclass or a pydantic model is named by str() (infer.rs:610-615), which Rust
         // precedes by checking the key is hashable -- which it already is, having come out of a
         // dict.  A type object answers the same probes and is refused (ob_type.rs:421).
         if ((dict_inferable_object(key) || (py_hasattr(key, "__pydantic_serializer__") && !PyType_Check(key.ptr())))
             && !PyType_Check(key.ptr()))
-            return py::str(key);
+            return ser_text_form(key);
         // Decimal, UUID, Path and the ipaddress types have no form but their own text
         // (infer.rs:554, :576-593), so does a Fraction, and so does a URL.
         for (const py::object& known : str_known_classes()) {
