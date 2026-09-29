@@ -2993,6 +2993,51 @@ struct SerNode {
             out += "]";
             return out;
         }
+        // tuple: every item goes through the serializer the schema declared for its
+        // position (the last declared one for the items past that), as in the python
+        // walk.  Rust pairs items and serializers in for_each_tuple_item_and_serializer
+        // (type_serializers/tuple.rs:168) once, and both output modes walk that pairing, so
+        // serializer function has to run here too: tuple[fn(int)] <- (1,) printed [1]
+        // through infer_json where the wheel prints the function's answer, and a
+        // wrong-typed item owed its warning in a python run and none in a json run.
+        // The index filter belongs to the same pairing (tuple.rs's index_filter), so
+        // include/exclude reach a json run as they reach a python one.
+        if (type == "tuple" && !children.empty()) {
+            std::string tn = type_name_for_warning();
+            if (!py::isinstance<py::tuple>(value)) {
+                // Rust's cast::<PyTuple> fails: while a union tries its choices the
+                // choice is refused; otherwise the node warns and inference answers.
+                if (g_ser_check != 0) {
+                    throw std::runtime_error("Unexpected value for serializer " + tn);
+                }
+                ser_warn_unexpected_value("", tn, value);
+                return infer_json(value, ensure_ascii, indent);
+            }
+            auto seq = py::reinterpret_borrow<py::sequence>(value);
+            py::ssize_t n_items = py::len(seq);
+            py::object inc = include.is_none() ? py::none()
+                                               : map_negative_indices(include, n_items);
+            py::object exc = exclude.is_none() ? py::none()
+                                               : map_negative_indices(exclude, n_items);
+            std::string out = "[";
+            bool first = true;
+            size_t i = 0;
+            for (auto item : seq) {
+                auto next = apply_ser_filter(py::int_(static_cast<py::ssize_t>(i)), inc, exc);
+                if (!next.omit) {
+                    py::object v = py::reinterpret_borrow<py::object>(item);
+                    const SerRef& child = i < children.size() ? children[i] : children.back();
+                    if (!first) out += ",";
+                    first = false;
+                    out += child->to_json(check_item_type(child, v), ensure_ascii, -1, round_trip,
+                                          next.include, next.exclude, by_alias, exclude_unset,
+                                          exclude_defaults, exc_none, context);
+                }
+                i++;
+            }
+            out += "]";
+            return out;
+        }
         if (type == "list" && !children.empty()) {
             std::string out = "[";
             bool first = true;

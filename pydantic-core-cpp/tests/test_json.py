@@ -1765,3 +1765,49 @@ def test_a_wrong_typed_value_is_warned_about_and_written_by_inference():
         int_ser.to_python(True)
         SchemaSerializer(core_schema.float_schema()).to_json(1)
     assert [str(w.message) for w in caught] == [], [str(w.message) for w in caught]
+
+
+def test_a_json_run_of_a_tuple_asks_its_items_declared_serializers():
+    import warnings
+
+    def upper(v):
+        return 'ZZZ'
+
+    plain = core_schema.int_schema(
+        serialization=core_schema.plain_serializer_function_ser_schema(upper, return_schema=core_schema.str_schema())
+    )
+    fn_ser = SchemaSerializer(core_schema.tuple_positional_schema([plain]))
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        # Inference has no idea a function was declared, so this used to print the input.
+        assert fn_ser.to_json((1,)) == b'["ZZZ"]'
+        assert fn_ser.to_python((1,)) == ('ZZZ',)
+
+        pos = SchemaSerializer(core_schema.tuple_positional_schema([core_schema.int_schema()]))
+        assert pos.to_json((1, 'a')) == b'[1,"a"]'
+        var = SchemaSerializer(core_schema.tuple_variable_schema(core_schema.int_schema()))
+        assert var.to_json((1, 'a')) == b'[1,"a"]'
+
+        # The index filter belongs to the same item/serializer pairing.
+        three = SchemaSerializer(
+            core_schema.tuple_positional_schema(
+                [core_schema.int_schema(), core_schema.str_schema(), core_schema.int_schema()]
+            )
+        )
+        assert three.to_json((1, 'a', 3), include=[0]) == b'[1]'
+        assert three.to_json((1, 'a', 3), include={0: True}) == b'[1]'
+        assert three.to_json((1, 'a', 3), exclude=[1]) == b'[1,3]'
+        assert three.to_json((1, 'a', 3), include=[-1]) == b'[]'
+        assert three.to_python((1, 'a', 3), include=[0]) == (1,)
+        assert var.to_json((1, 'a', 3), exclude=[0]) == b'["a",3]'
+
+        # A declared item serializer runs at any depth of the json walk.
+        nested = SchemaSerializer(
+            core_schema.list_schema(core_schema.tuple_positional_schema([plain]))
+        )
+        assert nested.to_json([(1,), (2,)]) == b'[["ZZZ"],["ZZZ"]]'
+
+    with pytest.warns(UserWarning, match='Expected `int` - serialized value may not be as expected'):
+        pos.to_json(('a',))
+    with pytest.warns(UserWarning, match='Expected `int` - serialized value may not be as expected'):
+        var.to_json((1, 'a'), include=[1])
