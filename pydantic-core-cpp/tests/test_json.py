@@ -1691,3 +1691,77 @@ def test_a_value_that_rewrites_its_own_text_is_asked_for_it():
     assert ser.to_json(plain) == b'"orig"'
     assert dump_json({plain: 1}) == b'{"orig":1}'
     assert jsonable(plain) == 'orig'
+
+
+def test_a_wrong_typed_value_is_warned_about_and_written_by_inference():
+    # Rust's typed serializers never print a value their input type refuses: OnErr::Warn
+    # (serializers/mod.rs) registers "Expected `int` - serialized value may not be as expected
+    # [input_value='x', input_type=str]" and the value is then serialized the way inference
+    # would print it.  The port wrote the value into the JSON buffer from str() instead, which
+    # is not JSON at all (b'x', b'[a,b]', b"['a']"), and pybind's checked cast raised
+    # "RuntimeError: Unable to cast Python instance of type <class 'str'> to C++ type 'double'"
+    # for a str shown to the float, bool, bytes and str writers, so those runs answered nothing
+    # at all.  A subclass is not a mismatch (IsType::Subclass), so bool at an int node, int at a
+    # float node and a str/dict subclass ask for no warning.
+    import warnings
+    from collections import deque
+    from typing import List
+
+    from pydantic import BaseModel, TypeAdapter
+
+    class StrSub(str):
+        pass
+
+    class DictSub(dict):
+        pass
+
+    int_ser = SchemaSerializer(core_schema.int_schema())
+    list_int = SchemaSerializer(core_schema.list_schema(core_schema.int_schema()))
+    dict_ser = SchemaSerializer(core_schema.dict_schema(core_schema.str_schema(), core_schema.int_schema()))
+
+    # Every answer here leaves a warning behind; the blocks below ask for them and for none.
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        assert int_ser.to_json('x') == b'"x"'
+        assert int_ser.to_python('x') == 'x'
+        assert SchemaSerializer(core_schema.float_schema()).to_json('x') == b'"x"'
+        assert SchemaSerializer(core_schema.bool_schema()).to_json('x') == b'"x"'
+        assert SchemaSerializer(core_schema.bytes_schema()).to_json(1) == b'1'
+        assert SchemaSerializer(core_schema.str_schema()).to_json(1) == b'1'
+
+        # A container handed the wrong collection is inferred as a whole, not iterated
+        # item-by-item through the declared item serializer.
+        assert list_int.to_json('ab') == b'"ab"'
+        assert list_int.to_python('ab') == 'ab'
+        assert list_int.to_json({'a': 1}) == b'{"a":1}'
+        assert list_int.to_json(deque([1])) == b'[1]'
+        assert SchemaSerializer(core_schema.set_schema(core_schema.int_schema())).to_python(['a']) == ['a']
+        assert dict_ser.to_json([1]) == b'[1]'
+        assert SchemaSerializer(core_schema.tuple_positional_schema([core_schema.int_schema()])).to_python(['a']) == ['a']
+
+        # Items of the right collection are each asked on their own.
+        assert list_int.to_json(['a', 'b']) == b'["a","b"]'
+        assert list_int.to_python(['a', 'b']) == ['a', 'b']
+
+        # pydantic reaches this without touching the core API only through a value that
+        # skipped validation: model_construct and model_copy(update=...).
+        class M(BaseModel):
+            v: int = 1
+            xs: List[int] = [1]
+
+        built = M.model_construct(v='x', xs=['a'])
+        assert json.loads(built.model_dump_json()) == {'v': 'x', 'xs': ['a']}
+        assert built.model_dump() == {'v': 'x', 'xs': ['a']}
+        assert TypeAdapter(List[int]).dump_json(['a']) == b'["a"]'
+        assert TypeAdapter(int).dump_json('x') == b'"x"'
+
+    with pytest.warns(UserWarning, match='Expected `int` - serialized value may not be as expected'):
+        int_ser.to_json('x')
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        SchemaSerializer(core_schema.str_schema()).to_json(StrSub('x'))
+        dict_ser.to_json(DictSub({'k': 1}))
+        int_ser.to_python(True)
+        SchemaSerializer(core_schema.float_schema()).to_json(1)
+    assert [str(w.message) for w in caught] == [], [str(w.message) for w in caught]

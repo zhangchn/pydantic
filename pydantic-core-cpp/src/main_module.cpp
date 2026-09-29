@@ -1669,9 +1669,15 @@ struct SerNode {
     static std::string type_name_for_warning(const SerRef& n);
     // Whether a Python value is compatible with this node's declared type.
     static bool value_matches_type(const SerRef& n, const py::object& v);
+    // The same two questions asked of this node itself, by the mismatch rule in
+    // the walks below.
+    std::string type_name_for_warning() const;
+    bool value_matches_type(const py::object& v) const;
 
     // Rust leaf serializers warn once per container item whose runtime type
-    // disagrees with the declared item serializer, then fall back to inference.
+    // disagrees with the declared item serializer, then fall back to inference.  The
+    // item's own node does both (see the rule in to_python/to_json); what is left here
+    // is the union's round, where a mismatch is the answer that ends this choice.
     static const py::object& check_item_type(const SerRef& child, const py::object& item) {
         if (child && !value_matches_type(child, item)) {
             // Rust CollectWarnings::on_fallback_py: while a union checks its
@@ -1680,7 +1686,6 @@ struct SerNode {
             if (g_ser_check != 0) {
                 throw std::runtime_error("Unexpected value for serializer " + type_name_for_warning(child));
             }
-            ser_warn_unexpected_value("", type_name_for_warning(child), item);
         }
         return item;
     }
@@ -1999,6 +2004,15 @@ struct SerNode {
                 ~GuardPop() { --g->depth; g->active.erase(pair); }
             } pop{&g, pair};
             return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
+        }
+        // Rust OnErr::Warn (serializers/mod.rs): a typed serializer whose input type
+        // refuses the value leaves "Expected `X` ..." behind and the value goes
+        // through inference, so it is never written in the node's own form.  While a
+        // union checks its choices the mismatch stays an error instead, so that arm
+        // keeps falling through to ser_check_accepts below.
+        if (g_ser_check == 0 && !value_matches_type(value)) {
+            ser_warn_unexpected_value("", type_name_for_warning(), value);
+            return serialize_any_value(value, exc_none, round_trip, json_mode);
         }
         if (!ser_check_accepts(value)) {
             throw std::runtime_error("Unexpected value for serializer " + type);
@@ -2655,6 +2669,14 @@ struct SerNode {
                 ~GuardPop() { --g->depth; g->active.erase(pair); }
             } pop{&g, pair};
             return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
+        }
+        // See the same rule in to_python: refuse the value, warn, write what
+        // inference makes of it.  Handing a str to the int writer used to print it
+        // unquoted, and a str to the float/bool/bytes writers raised pybind's cast
+        // error instead of answering at all.
+        if (g_ser_check == 0 && !value_matches_type(value)) {
+            ser_warn_unexpected_value("", type_name_for_warning(), value);
+            return infer_json(value, ensure_ascii, indent);
         }
         if (!ser_check_accepts(value)) {
             throw std::runtime_error("Unexpected value for serializer " + type);
@@ -3659,6 +3681,7 @@ private:
             if (json_infer_leaf(value, conv)) return json_escape_converted(conv, ensure_ascii);
         }
         if (py::isinstance<py::set>(value) || py::isinstance<py::frozenset>(value) ||
+            py::isinstance(value, py_deque_type()) ||  // ObType::Deque, a sequence like the set arms
             PyIter_Check(value.ptr())) {  // ObType::Set/FrozenSet/Generator
             std::string out = "[";
             bool first = true;
@@ -4491,9 +4514,13 @@ private:
 // Rust-style serializer display name used in "Expected `X`" warnings.
 std::string SerNode::type_name_for_warning(const SerRef& n) {
     if (!n) return "any";
-    const std::string& t = n->type;
+    return n->type_name_for_warning();
+}
+
+std::string SerNode::type_name_for_warning() const {
+    const std::string& t = type;
     auto child0 = [&]() -> std::string {
-        return n->children.empty() ? "any" : type_name_for_warning(n->children[0]);
+        return children.empty() ? "any" : type_name_for_warning(children[0]);
     };
     if (t == "int" || t == "int-constrained") return "int";
     if (t == "float" || t == "float-constrained") return "float";
@@ -4508,10 +4535,10 @@ std::string SerNode::type_name_for_warning(const SerRef& n) {
     if (t == "deque") return "deque[" + child0() + "]";
     if (t == "frozenset") return "frozenset[" + child0() + "]";
     if (t == "tuple") return "tuple[" + child0() + "]";
-    if (t == "named-tuple") return n->class_name.empty() ? std::string("named-tuple") : n->class_name;
+    if (t == "named-tuple") return class_name.empty() ? std::string("named-tuple") : class_name;
     if (t == "dict") {
-        std::string keyn = n->children.size() > 0 ? type_name_for_warning(n->children[0]) : "any";
-        std::string valn = n->children.size() > 1 ? type_name_for_warning(n->children[1]) : "any";
+        std::string keyn = children.size() > 0 ? type_name_for_warning(children[0]) : "any";
+        std::string valn = children.size() > 1 ? type_name_for_warning(children[1]) : "any";
         return "dict[" + keyn + ", " + valn + "]";
     }
     if (t == "none" || t == "is-none") return "None";
@@ -4523,8 +4550,13 @@ std::string SerNode::type_name_for_warning(const SerRef& n) {
 // Mirrors Rust's ObType::is_type / IsType::False -> warn fallback.  Unknown or
 // permissive node types always return true (no warning).
 bool SerNode::value_matches_type(const SerRef& n, const py::object& v) {
-    if (!n || v.is_none()) return true;
-    const std::string& t = n->type;
+    if (!n) return true;
+    return n->value_matches_type(v);
+}
+
+bool SerNode::value_matches_type(const py::object& v) const {
+    if (v.is_none()) return true;
+    const std::string& t = type;
     if (t == "any" || t == "is-instance" || t == "is-subclass") return true;
     if (t == "int" || t == "int-constrained") return py::isinstance<py::int_>(v);   // bool is an int subclass
     if (t == "float" || t == "float-constrained") return py::isinstance<py::float_>(v) || py::isinstance<py::int_>(v);
