@@ -1728,6 +1728,9 @@ struct SerNode {
     }
 
     std::vector<SerRef> children;
+    // A tuple schema's variadic_item_index: >=0 means one serializer answers every
+    // item, which is also why a variadic tuple never warns about the item count.
+    int tuple_variadic_index = -1;
     // For tagged-union: map from tag -> serializer
     std::unordered_map<std::string, SerRef> tagged;
     // For tagged-union: the discriminator lookup paths, and the choices in
@@ -2551,27 +2554,48 @@ struct SerNode {
             return py::tuple(temp);
         }
         if (type == "tuple" && !children.empty()) {
-            py::list temp;
             auto seq = py::reinterpret_borrow<py::sequence>(value);
-            py::ssize_t len = py::len(seq);
-            py::object inc;
-            if (include.is_none()) {
-                inc = py::none();
-            } else {
-                inc = map_negative_indices(include, len);
+            py::ssize_t n_items = py::len(seq);
+            // A variadic tuple answers every item with its one serializer, so its length
+            // is never a surprise; Rust takes that branch before the count checks
+            // (for_each_tuple_item_and_serializer, type_serializers/tuple.rs:198-235).
+            bool variadic = tuple_variadic_index >= 0;
+            if (!variadic && g_ser_check != 0 && static_cast<size_t>(n_items) != children.size()) {
+                throw std::runtime_error("Expected " + std::to_string(children.size()) +
+                                         " items, but got " + std::to_string(n_items));
             }
-            py::object exc;
-            if (exclude.is_none()) {
-                exc = py::none();
-            } else {
-                exc = map_negative_indices(exclude, len);
+            if (!variadic && static_cast<size_t>(n_items) < children.size()) {
+                ser_warn_register("PydanticSerializationUnexpectedValue(Unexpected too few items present in tuple)");
             }
+            py::object inc = include.is_none() ? py::none()
+                                               : map_negative_indices(include, n_items);
+            py::object exc = exclude.is_none() ? py::none()
+                                               : map_negative_indices(exclude, n_items);
+            py::list temp;
             size_t i = 0;
+            bool extra_warned = false;
             for (auto item : seq) {
+                if (!variadic && i >= children.size() && !extra_warned) {
+                    // Rust warns once for the leftovers, and warns whether or not the
+                    // filter keeps any of them.
+                    ser_warn_register("PydanticSerializationUnexpectedValue(Unexpected extra items present in tuple)");
+                    extra_warned = true;
+                }
                 auto next = apply_ser_filter(py::int_(static_cast<py::ssize_t>(i)), inc, exc);
                 if (!next.omit) {
                     auto v = py::reinterpret_borrow<py::object>(item);
-                    temp.append(i < children.size() ? children[i]->to_python(check_item_type(children[i], v), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context) : children.back()->to_python(check_item_type(children.back(), v), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context));
+                    const SerRef* child = variadic
+                        ? &children[i < static_cast<size_t>(tuple_variadic_index) ? i
+                                                                                  : tuple_variadic_index]
+                        : (i < children.size() ? &children[i] : nullptr);
+                    if (child) {
+                        temp.append((*child)->to_python(check_item_type(*child, v), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context));
+                    } else {
+                        // Past the declared items the leftover belongs to Any, not to the
+                        // last declared serializer: an extra str at a tuple[int] owes no
+                        // Expected `int` of its own.
+                        temp.append(serialize_any_value(v, exc_none, round_trip, json_mode));
+                    }
                 }
                 i++;
             }
@@ -3019,19 +3043,37 @@ struct SerNode {
                                                : map_negative_indices(include, n_items);
             py::object exc = exclude.is_none() ? py::none()
                                                : map_negative_indices(exclude, n_items);
+            bool variadic = tuple_variadic_index >= 0;
+            if (!variadic && g_ser_check != 0 && static_cast<size_t>(n_items) != children.size()) {
+                throw std::runtime_error("Expected " + std::to_string(children.size()) +
+                                         " items, but got " + std::to_string(n_items));
+            }
+            if (!variadic && static_cast<size_t>(n_items) < children.size()) {
+                ser_warn_register("PydanticSerializationUnexpectedValue(Unexpected too few items present in tuple)");
+            }
             std::string out = "[";
             bool first = true;
+            bool extra_warned = false;
             size_t i = 0;
             for (auto item : seq) {
+                if (!variadic && i >= children.size() && !extra_warned) {
+                    ser_warn_register("PydanticSerializationUnexpectedValue(Unexpected extra items present in tuple)");
+                    extra_warned = true;
+                }
                 auto next = apply_ser_filter(py::int_(static_cast<py::ssize_t>(i)), inc, exc);
                 if (!next.omit) {
                     py::object v = py::reinterpret_borrow<py::object>(item);
-                    const SerRef& child = i < children.size() ? children[i] : children.back();
+                    const SerRef* child = variadic
+                        ? &children[i < static_cast<size_t>(tuple_variadic_index) ? i
+                                                                                  : tuple_variadic_index]
+                        : (i < children.size() ? &children[i] : nullptr);
                     if (!first) out += ",";
                     first = false;
-                    out += child->to_json(check_item_type(child, v), ensure_ascii, -1, round_trip,
-                                          next.include, next.exclude, by_alias, exclude_unset,
-                                          exclude_defaults, exc_none, context);
+                    out += child
+                               ? (*child)->to_json(check_item_type(*child, v), ensure_ascii, -1,
+                                                   round_trip, next.include, next.exclude, by_alias,
+                                                   exclude_unset, exclude_defaults, exc_none, context)
+                               : infer_json(v, ensure_ascii, -1);
                 }
                 i++;
             }
@@ -4924,6 +4966,9 @@ static SerRef build_ser_impl(const py::dict& schema,
                 for (auto it : items.cast<py::list>())
                     node->children.push_back(build_ser(it.cast<py::dict>(), defs, memo));
             } else node->children.push_back(build_ser(items.cast<py::dict>(), defs, memo));
+            if (schema.contains("variadic_item_index")) {
+                node->tuple_variadic_index = schema["variadic_item_index"].cast<int>();
+            }
         } catch (...) {}
     }
 

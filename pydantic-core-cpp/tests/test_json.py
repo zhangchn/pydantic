@@ -1811,3 +1811,48 @@ def test_a_json_run_of_a_tuple_asks_its_items_declared_serializers():
         pos.to_json(('a',))
     with pytest.warns(UserWarning, match='Expected `int` - serialized value may not be as expected'):
         var.to_json((1, 'a'), include=[1])
+
+
+def test_a_tuples_item_count_is_checked_against_its_declaration():
+    import warnings
+
+    int_node = core_schema.int_schema()
+    two = SchemaSerializer(core_schema.tuple_positional_schema([int_node, core_schema.str_schema()]))
+    one = SchemaSerializer(core_schema.tuple_positional_schema([int_node]))
+    var = SchemaSerializer(core_schema.tuple_variable_schema(int_node))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        # A short tuple answers with what it has; an extra item is not forced through the
+        # last declared serializer, so nothing about it is expected to be an int.
+        assert two.to_json((1,)) == b'[1]'
+        assert two.to_python((1,)) == (1,)
+        assert two.to_json(()) == b'[]'
+        assert one.to_json((1, 2, 'x')) == b'[1,2,"x"]'
+        assert one.to_python((1, 2, 'x')) == (1, 2, 'x')
+        # A variadic tuple repeats its one serializer, at any length.
+        assert var.to_json((1, 2, 3, 'a')) == b'[1,2,3,"a"]'
+        # The count warning is about the declaration, not about what the filter kept.
+        assert one.to_json((1, 2, 3), include=[0]) == b'[1]'
+
+    with pytest.warns(UserWarning, match='Unexpected too few items present in tuple'):
+        two.to_json((1,))
+    with pytest.warns(UserWarning, match='Unexpected too few items present in tuple'):
+        two.to_python((1,))
+    with pytest.warns(UserWarning, match='Unexpected extra items present in tuple'):
+        one.to_json((1, 2, 'x'))
+
+    # Once, and only the count: the extra str owes no Expected `int` of its own.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        one.to_json((1, 2, 'x'))
+    assert [str(w.message) for w in caught] == [
+        "Pydantic serializer warnings:\n  PydanticSerializationUnexpectedValue(Unexpected extra items present in tuple)"
+    ], [str(w.message) for w in caught]
+
+    # A variadic tuple never mentions the count, whatever its length.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        var.to_json((1, 2, 3))
+        var.to_json(())
+    assert [str(w.message) for w in caught] == [], [str(w.message) for w in caught]
