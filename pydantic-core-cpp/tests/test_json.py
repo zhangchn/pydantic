@@ -3455,3 +3455,65 @@ def test_a_dataclass_under_the_json_walk_and_the_module_level_walk_is_asked_its_
                 match=r"Unable to serialize unknown type: <class 'type'>",
         ):
             refuse()
+
+
+def test_a_map_key_of_the_untyped_python_walk_is_inferred_like_its_value():
+    # serialize_pairs (infer.rs:723-741) hands an entry's key and its value to the same
+    # AnySerializer, so a key of an inferred mapping is inferred too -- in python mode as well,
+    # where the walk used to convert keys only for a json run and pass them through otherwise.
+    import enum
+    from typing import NamedTuple
+
+    class SerKeyColour(enum.IntEnum):
+        RED = 1
+
+    class SerKeyNT(NamedTuple):
+        a: int
+        b: object
+
+    class SerKeyFrish(fractions.Fraction):
+        pass
+
+    @dataclasses.dataclass(frozen=True)
+    class SerKeyDC:
+        x: int
+
+    ser = SchemaSerializer(core_schema.any_schema())
+
+    # the leaf rules a value obeys are the key's rules: the python half of infer.rs turns a
+    # Fraction into its string and has no such case for a Decimal, a date or an enum member
+    assert ser.to_python({fractions.Fraction(3, 2): 1}) == {'3/2': 1}
+    assert ser.to_python({SerKeyFrish(1, 4): 1}) == {'1/4': 1}
+    assert ser.to_python({decimal.Decimal('1.5'): 1}) == {decimal.Decimal('1.5'): 1}
+    assert ser.to_python({1: 'a'}) == {1: 'a'}
+    assert ser.to_python({datetime.date(2020, 1, 1): 1}) == {datetime.date(2020, 1, 1): 1}
+    enum_key = next(iter(ser.to_python({SerKeyColour.RED: 1})))
+    assert type(enum_key) is SerKeyColour
+
+    # a container key is rebuilt member by member and stays the container it is: the tuple stays
+    # a tuple, a namedtuple becomes the plain tuple Rust serializes it as, a frozenset is put back
+    # together from its re-inferred members
+    assert ser.to_python({(fractions.Fraction(3, 2), 1): 'a'}) == {('3/2', 1): 'a'}
+    assert ser.to_python({((fractions.Fraction(3, 2), 1),): 'a'}) == {(('3/2', 1),): 'a'}
+    assert ser.to_python({SerKeyNT(1, fractions.Fraction(3, 2)): 'a'}) == {(1, '3/2'): 'a'}
+    assert ser.to_python({frozenset({fractions.Fraction(3, 2)}): 'a'}) == {frozenset({'3/2'}): 'a'}
+    # a frozen dataclass key is rebuilt into a dict, which is no longer a key -- the refusal is
+    # the dict's own TypeError, not a serialization error
+    with pytest.raises(TypeError, match=r"unhashable type: 'dict'"):
+        ser.to_python({SerKeyDC(1): 'a'})
+
+    # the json-mode key path is untouched: the same keys asked the json question, with a
+    # Decimal -- which the json half does turn -- among them
+    assert ser.to_python({1: 'a'}, mode='json') == {'1': 'a'}
+    assert ser.to_python({(1, 2): 'a'}, mode='json') == {'1,2': 'a'}
+    assert ser.to_python({fractions.Fraction(3, 2): 1}, mode='json') == {'3/2': 1}
+    assert ser.to_python({decimal.Decimal('1.5'): 1}, mode='json') == {'1.5': 1}
+    assert ser.to_python({SerKeyNT(1, fractions.Fraction(3, 2)): 'a'}, mode='json') == {'1,3/2': 'a'}
+
+    # the filter is asked about the key as it is written, before it is inferred, and the pair that
+    # answer names is the pair the value is then walked under
+    both = {fractions.Fraction(3, 2): 1, 5: 2}
+    assert ser.to_python(both, include={fractions.Fraction(3, 2)}) == {'3/2': 1}
+    assert ser.to_python(both, exclude={fractions.Fraction(3, 2)}) == {5: 2}
+    assert ser.to_python(both, include={'3/2'}) == {}
+    assert ser.to_python({1: {2: 3}}, include={1: {2: True}}) == {1: {2: 3}}

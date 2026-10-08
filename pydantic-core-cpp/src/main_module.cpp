@@ -4405,11 +4405,21 @@ private:
                 // asked exactly as written -- it is the entry's *key* that is turned afterwards.
                 auto next = apply_ser_filter(k, include, exclude);
                 if (next.omit) continue;
-                // This walk runs in SerMode::Json when json_mode is set, and a map key in
-                // that mode is turned with json_key (shared.rs:737-740), so an int key
-                // leaves as "1" and a tuple key as "1,2" while the values keep their
-                // Python forms.
-                if (json_mode) k = infer_json_key(k, false);
+                // serialize_entry (infer.rs:734-741) hands the key and the value to the *same*
+                // any serializer, so a key is inferred too rather than passed through: in json
+                // mode that is the json_key question -- an int key leaves as "1" and a tuple key
+                // as "1,2" while the values keep their Python forms -- and in python mode it is
+                // the very same walk the value takes, which is what turns a Fraction key into
+                // '3/2', a namedtuple key into a plain tuple, and a frozenset key into a rebuilt
+                // frozenset, and rebuilds a frozen-dataclass key until the dict refuses it as
+                // unhashable.  A key the python walk would hand back unchanged -- a str, an int,
+                // a Decimal (the python arm of infer.rs has no Decimal case to stringify) --
+                // answers for itself either way, so only those forms change here.
+                if (json_mode)
+                    k = infer_json_key(k, false);
+                else
+                    k = serialize_any_value(k, exc_none, round_trip, json_mode,
+                                            next.include, next.exclude);
                 out[k] = serialize_any_value(val, exc_none, round_trip, json_mode, next.include, next.exclude);
             }
             return std::move(out);
