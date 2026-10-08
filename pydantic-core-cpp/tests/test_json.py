@@ -3564,3 +3564,104 @@ def test_a_dict_node_with_its_own_include_or_exclude_answers_for_every_entry():
         with pytest.raises(SchemaError, match=re.escape(
                 f"Error building `dict` serializer:\n  TypeError: '{tn}' object is not an instance of 'set'")):
             SchemaSerializer(core_schema.dict_schema(serialization={'include': bad}))
+
+
+def test_a_sequence_node_with_its_own_include_or_exclude_answers_for_its_own_positions():
+    # list.rs:44, deque.rs:45, generator.rs:45, tuple.rs:56 and named_tuple.rs:63 read the
+    # node's own include/exclude at build time and ask it about every position: the sets hold
+    # indices, not hashes (extract::<usize> -- True is the position 1, a float or a str is
+    # refused), a set is the only accepted shape, and the run's negative call-time indices
+    # are folded against the length before either set is asked.
+    I = core_schema.int_schema()
+    ints = [10, 20, 30]
+    inc0 = SchemaSerializer(core_schema.list_schema(I, serialization={'include': {0}}))
+    exc1 = SchemaSerializer(core_schema.list_schema(I, serialization={'exclude': {1}}))
+
+    assert inc0.to_python(ints) == [10]
+    assert inc0.to_json(ints) == b'[10]'
+    assert exc1.to_python(ints) == [10, 30]
+    assert exc1.to_json(ints) == b'[10,30]'
+    assert SchemaSerializer(core_schema.list_schema(
+        I, serialization={'include': {0, 1}, 'exclude': {1}})).to_python(ints) == [10]
+    assert SchemaSerializer(core_schema.list_schema(
+        I, serialization={'include': set()})).to_python(ints) == []
+    assert SchemaSerializer(core_schema.list_schema(
+        I, serialization={'include': None})).to_python(ints) == ints
+    assert SchemaSerializer(core_schema.list_schema(
+        I, serialization={'include': {5}})).to_python(ints) == []
+    assert SchemaSerializer(core_schema.list_schema(
+        I, serialization={'include': {True}})).to_python(ints) == [20]
+
+    # one decision with the call's pair: the call keeps what its include names, the node's
+    # include rescues what the call's include missed, and the call's exclude still refuses
+    assert inc0.to_python(ints, include={1}) == [10, 20]
+    assert inc0.to_python(ints, include={-1}) == [10, 30]
+    assert inc0.to_python(ints, exclude={0}) == []
+    assert exc1.to_python(ints, exclude={2}) == [10]
+    assert exc1.to_python(ints, include={0: True}) == [10]
+
+    # an untyped list node filters too, in the python and the json walk alike
+    lu = SchemaSerializer(core_schema.list_schema(serialization={'include': {1}}))
+    assert lu.to_python(ints) == [20]
+    assert lu.to_json(ints) == b'[20]'
+
+    # tuple and named-tuple nodes answer per position, a variadic tuple counted the same
+    # way, and the filtered walk still rebuilds the tuple
+    raw = {'type': 'int'}
+    tu = SchemaSerializer({'type': 'tuple', 'items_schema': [raw] * 3,
+                           'serialization': {'include': {1}}})
+    assert tu.to_python((10, 20, 30)) == (20,)
+    assert tu.to_json((10, 20, 30)) == b'[20]'
+    tvar = SchemaSerializer({'type': 'tuple', 'items_schema': [raw] * 3,
+                             'variadic_item_index': 1,
+                             'serialization': {'include': {2}}})
+    assert tvar.to_python((10, 20, 30, 40, 50)) == (30,)
+
+    import collections
+
+    class SerNT(collections.namedtuple('SerNT', 'a b')):
+        pass
+
+    nt = SchemaSerializer({'type': 'named-tuple', 'cls': SerNT, 'name': 'SerNT',
+                           'cls_name': 'SerNT',
+                           'fields': [{'name': 'a', 'schema': raw},
+                                      {'name': 'b', 'schema': raw}],
+                           'serialization': {'include': {1}}})
+    assert nt.to_python(SerNT(7, 8)) == (8,)
+    assert nt.to_json(SerNT(7, 8)) == b'[8]'
+
+    # a deque keeps its type through the filtered walk
+    dq = SchemaSerializer(core_schema.deque_schema(I, serialization={'include': {1}}))
+    assert dq.to_python(deque(ints)) == deque([20])
+    assert dq.to_json(deque(ints)) == b'[20]'
+
+    # the generator node hands back a lazy SerializationIterator of what its filter kept
+    gn = SchemaSerializer(core_schema.generator_schema(I, serialization={'include': {1}}))
+    lazy = gn.to_python(iter(ints))
+    assert type(lazy).__name__ == 'SerializationIterator'
+    assert list(lazy) == [20]
+    gne = SchemaSerializer(core_schema.generator_schema(I, serialization={'exclude': {0}}))
+    assert list(gne.to_python(iter(ints))) == [20, 30]
+
+    # the set and frozenset nodes have no schema filter in Rust -- theirs is ignored
+    st = SchemaSerializer(core_schema.set_schema(I, serialization={'include': {0}}))
+    assert st.to_python({10, 20, 30}) == {10, 20, 30}
+
+    # a wrong-type input falls back to the inferred walk, which drops the node's filter
+    assert inc0.to_python('abc') == 'abc'
+    assert inc0.to_json('abc') == b'"abc"'
+
+    # every sequence node answers for its own positions, whoever walked down to it
+    nest = SchemaSerializer(core_schema.list_schema(
+        core_schema.list_schema(I, serialization={'include': {0}})))
+    assert nest.to_python([[1, 2], [3, 4]]) == [[1], [3]]
+
+    for bad, msg in (({-1}, "OverflowError: can't convert negative int to unsigned"),
+                     ({1.0}, "TypeError: 'float' object cannot be interpreted as an integer"),
+                     ({2 ** 70}, 'OverflowError: int too big to convert'),
+                     ({'a'}, "TypeError: 'str' object cannot be interpreted as an integer"),
+                     (frozenset({0}), "TypeError: 'frozenset' object is not an instance of 'set'"),
+                     ([0], "TypeError: 'list' object is not an instance of 'set'")):
+        with pytest.raises(SchemaError, match=re.escape(
+                f"Error building `list` serializer:\n  {msg}")):
+            SchemaSerializer(core_schema.list_schema(I, serialization={'include': bad}))

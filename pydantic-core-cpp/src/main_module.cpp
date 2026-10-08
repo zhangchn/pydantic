@@ -1376,6 +1376,10 @@ struct SerIndexFilter {
     py::object folded_include = py::none();   // a sized iterable's, folded once
     py::object folded_exclude = py::none();
     bool unsized = false;
+    // The node's own index filter (SchemaFilter<usize>, list.rs:44 and friends), copied
+    // in by the arm so a lazy SerializationIterator outlives the serializer it came from.
+    std::optional<std::unordered_set<int64_t>> sch_include;
+    std::optional<std::unordered_set<int64_t>> sch_exclude;
 
     // `len < 0` is how these walks spell "no length"; a filter that was not passed stays None.
     void bind(const py::object& inc, const py::object& exc, py::ssize_t len) {
@@ -1431,11 +1435,15 @@ static py::object make_serialization_iterator(const py::object& value, const Ser
                                               bool exc_none, bool round_trip,
                                               const py::object& include, const py::object& exclude,
                                               bool by_alias, bool exclude_unset, bool exclude_defaults,
-                                              const py::object& context) {
+                                              const py::object& context,
+                                              const std::optional<std::unordered_set<int64_t>>* sch_inc = nullptr,
+                                              const std::optional<std::unordered_set<int64_t>>* sch_exc = nullptr) {
     auto out = std::make_shared<SerializationIterator>();
     out->items = py::iter(value);
     out->child = child;
     out->filter.bind(include, exclude, -1);
+    if (sch_inc) out->filter.sch_include = *sch_inc;
+    if (sch_exc) out->filter.sch_exclude = *sch_exc;
     out->context = context;
     out->exc_none = exc_none;
     out->round_trip = round_trip;
@@ -1507,7 +1515,8 @@ static void ser_filter_refusal(const char* argument) {
 static SerFilterResult apply_ser_filter(const py::object& key, const py::object& include,
                                         const py::object& exclude,
                                         const std::optional<std::unordered_set<int64_t>>* sch_inc = nullptr,
-                                        const std::optional<std::unordered_set<int64_t>>* sch_exc = nullptr) {
+                                        const std::optional<std::unordered_set<int64_t>>* sch_exc = nullptr,
+                                        const int64_t* index_key = nullptr) {
     SerFilterResult out;
     py::object next_exclude = py::none();
 
@@ -1518,6 +1527,7 @@ static SerFilterResult apply_ser_filter(const py::object& key, const py::object&
     int64_t key_hash = 0;
     bool hashed = false;
     auto hash_of = [&]() {
+        if (index_key) return *index_key;  // index_filter compares positions, not hashes
         if (!hashed) { key_hash = (int64_t)py::hash(key); hashed = true; }
         return key_hash;
     };
@@ -1621,12 +1631,15 @@ static SerFilterResult apply_ser_filter(const py::object& key, const py::object&
 
 SerFilterResult SerIndexFilter::ask(py::ssize_t index) const {
     py::object key = py::int_(static_cast<long long>(index));
-    if (!unsized) return apply_ser_filter(key, folded_include, folded_exclude);
+    int64_t idx64 = static_cast<int64_t>(index);
+    const std::optional<std::unordered_set<int64_t>>* si = sch_include ? &sch_include : nullptr;
+    const std::optional<std::unordered_set<int64_t>>* se = sch_exclude ? &sch_exclude : nullptr;
+    if (!unsized) return apply_ser_filter(key, folded_include, folded_exclude, si, se, &idx64);
     // No length to fold by: every key is asked about as it was written, and a negative one is
     // refused here -- once per element, only once an element exists to ask about.
     py::object inc = include.is_none() ? include : map_negative_indices(include, nullptr);
     py::object exc = exclude.is_none() ? exclude : map_negative_indices(exclude, nullptr);
-    return apply_ser_filter(key, inc, exc);
+    return apply_ser_filter(key, inc, exc, si, se, &idx64);
 }
 
 // Thread-local recursion guard mirroring Rust's RecursionState
@@ -2757,6 +2770,8 @@ struct SerNode {
             }
             SerIndexFilter filter;
             filter.bind(include, exclude, len);
+            filter.sch_include = ser_key_include;
+            filter.sch_exclude = ser_key_exclude;
             py::list items;
             py::ssize_t idx = 0;
             for (auto item : seq) {
@@ -2796,6 +2811,8 @@ struct SerNode {
             }
             SerIndexFilter filter;
             filter.bind(include, exclude, len);
+            filter.sch_include = ser_key_include;
+            filter.sch_exclude = ser_key_exclude;
             // A set node has no position to ask about (see below), and set_frozenset.rs hands its
             // items `state` untouched -- no filter of its own, and no key to have folded.  So the
             // items are built with the pair this node was handed exactly as written, folded by
@@ -2810,7 +2827,8 @@ struct SerNode {
             // ask about every key as it was written.
             if (type == "generator" && !json_mode && PyIter_Check(value.ptr())) {
                 return make_serialization_iterator(value, children[0], exc_none, round_trip, include, exclude,
-                                                   by_alias, exclude_unset, exclude_defaults, context);
+                                                   by_alias, exclude_unset, exclude_defaults, context,
+                                                   &ser_key_include, &ser_key_exclude);
             }
             py::ssize_t idx = 0;
             // A set node never consults include/exclude: set_frozenset.rs has no filter at all,
@@ -2910,7 +2928,10 @@ struct SerNode {
             size_t i = 0;
             for (auto item : seq) {
                 if (i >= children.size()) break;  // Rust drops the extras with a warning
-                auto next = apply_ser_filter(py::int_(static_cast<py::ssize_t>(i)), inc, exc);
+                int64_t idx64 = static_cast<int64_t>(i);
+                auto next = apply_ser_filter(py::int_(static_cast<py::ssize_t>(i)), inc, exc,
+                                             ser_key_include ? &ser_key_include : nullptr,
+                                             ser_key_exclude ? &ser_key_exclude : nullptr, &idx64);
                 if (!next.omit) {
                     py::object v = py::reinterpret_borrow<py::object>(item);
                     temp.append(children[i]->to_python(check_item_type(children[i], v), json_mode, exc_none,
@@ -2958,7 +2979,10 @@ struct SerNode {
                     ser_warn_register("PydanticSerializationUnexpectedValue(Unexpected extra items present in tuple)");
                     extra_warned = true;
                 }
-                auto next = apply_ser_filter(py::int_(static_cast<py::ssize_t>(i)), inc, exc);
+                int64_t idx64 = static_cast<int64_t>(i);
+                auto next = apply_ser_filter(py::int_(static_cast<py::ssize_t>(i)), inc, exc,
+                                             ser_key_include ? &ser_key_include : nullptr,
+                                             ser_key_exclude ? &ser_key_exclude : nullptr, &idx64);
                 if (!next.omit) {
                     auto v = py::reinterpret_borrow<py::object>(item);
                     const SerRef* child = variadic
@@ -3376,7 +3400,10 @@ struct SerNode {
             size_t i = 0;
             for (auto item : seq) {
                 if (i >= children.size()) break;  // Rust drops the extras with a warning
-                auto next = apply_ser_filter(py::int_(static_cast<py::ssize_t>(i)), inc, exc);
+                int64_t idx64 = static_cast<int64_t>(i);
+                auto next = apply_ser_filter(py::int_(static_cast<py::ssize_t>(i)), inc, exc,
+                                             ser_key_include ? &ser_key_include : nullptr,
+                                             ser_key_exclude ? &ser_key_exclude : nullptr, &idx64);
                 if (!next.omit) {
                     py::object v = py::reinterpret_borrow<py::object>(item);
                     if (!first) out += ",";
@@ -3436,7 +3463,10 @@ struct SerNode {
                     ser_warn_register("PydanticSerializationUnexpectedValue(Unexpected extra items present in tuple)");
                     extra_warned = true;
                 }
-                auto next = apply_ser_filter(py::int_(static_cast<py::ssize_t>(i)), inc, exc);
+                int64_t idx64 = static_cast<int64_t>(i);
+                auto next = apply_ser_filter(py::int_(static_cast<py::ssize_t>(i)), inc, exc,
+                                             ser_key_include ? &ser_key_include : nullptr,
+                                             ser_key_exclude ? &ser_key_exclude : nullptr, &idx64);
                 if (!next.omit) {
                     py::object v = py::reinterpret_borrow<py::object>(item);
                     const SerRef* child = variadic
@@ -3461,7 +3491,7 @@ struct SerNode {
         // and a deque have a length to fold an index key by; a generator's length is never taken
         // (`None` at generator.rs:68), which in Rust means "use the key exactly as written, and
         // refuse a negative one", not "skip the filter".
-        if ((type == "list" && !children.empty()) || type == "deque" || type == "generator") {
+        if (type == "list" || type == "deque" || type == "generator") {
             py::iterable seq = py::reinterpret_borrow<py::iterable>(value);
             py::ssize_t len = -1;
             if (type != "generator" && (!include.is_none() || !exclude.is_none())) {
@@ -3473,6 +3503,8 @@ struct SerNode {
             }
             SerIndexFilter filter;
             filter.bind(include, exclude, len);
+            filter.sch_include = ser_key_include;
+            filter.sch_exclude = ser_key_exclude;
             std::string out = "[";
             bool first = true;
             py::ssize_t idx = 0;
@@ -5376,6 +5408,56 @@ static SerRef build_ser(const py::dict& schema,
     return ser;
 }
 
+// filter.rs build_set_ints: a sequence node's own include/exclude must be a set of indices,
+// extracted the way pyo3 extracts usize -- PyNumber_Index's own message for a non-index item,
+// and pyo3's OverflowError wordings for a negative index or one past u64::MAX -- all wrapped
+// into the build error the way CombinedSerializer::build wraps a child's failure.
+static std::optional<std::unordered_set<int64_t>> ser_index_filter_set(const py::object& v,
+                                                                       const std::string& tname) {
+    static const std::string wrap = "` serializer:\n  ";
+    if (v.is_none()) return std::nullopt;
+    if (!py::isinstance<py::set>(v))
+        throw SchemaError("Error building `" + tname + wrap + "TypeError: '"
+                          + v.ptr()->ob_type->tp_name + "' object is not an instance of 'set'");
+    std::unordered_set<int64_t> out;
+    py::object zero = py::int_(0);
+    py::object cap = py::reinterpret_steal<py::object>(PyLong_FromString("18446744073709551615", nullptr, 10));
+    for (py::handle item : py::set(v)) {
+        PyObject* idx = PyNumber_Index(item.ptr());
+        if (!idx) {
+            PyObject *ty = nullptr, *val = nullptr, *tb = nullptr;
+            PyErr_Fetch(&ty, &val, &tb);
+            std::string tn = ty ? ((PyTypeObject*)ty)->tp_name : "TypeError";
+            const char* ms = val && PyUnicode_Check(val) ? PyUnicode_AsUTF8(val) : nullptr;
+            std::string msg = ms ? ms : "";
+            Py_XDECREF(ty); Py_XDECREF(val); Py_XDECREF(tb);
+            throw SchemaError("Error building `" + tname + wrap + tn + ": " + msg);
+        }
+        int neg = PyObject_RichCompareBool(idx, zero.ptr(), Py_LT);
+        int over = neg == 0 ? PyObject_RichCompareBool(idx, cap.ptr(), Py_GT) : 0;
+        if (neg < 0 || over < 0) PyErr_Clear();
+        if (neg == 1 || over == 1) {
+            Py_DECREF(idx);
+            throw SchemaError("Error building `" + tname + wrap + "OverflowError: "
+                              + (neg == 1 ? "can't convert negative int to unsigned"
+                                           : "int too big to convert"));
+        }
+        unsigned long long u = PyLong_AsUnsignedLongLong(idx);
+        Py_DECREF(idx);
+        if (u == (unsigned long long)-1 && PyErr_Occurred()) {
+            PyObject *ty = nullptr, *val = nullptr, *tb = nullptr;
+            PyErr_Fetch(&ty, &val, &tb);
+            std::string tn = ty ? ((PyTypeObject*)ty)->tp_name : "OverflowError";
+            const char* ms = val && PyUnicode_Check(val) ? PyUnicode_AsUTF8(val) : nullptr;
+            std::string msg = ms ? ms : "";
+            Py_XDECREF(ty); Py_XDECREF(val); Py_XDECREF(tb);
+            throw SchemaError("Error building `" + tname + wrap + tn + ": " + msg);
+        }
+        out.insert((int64_t)u);
+    }
+    return out;
+}
+
 static SerRef build_ser_impl(const py::dict& schema,
                         std::unordered_map<std::string, SerRef>& defs,
                         SerMemo& memo) {
@@ -5592,6 +5674,15 @@ static SerRef build_ser_impl(const py::dict& schema,
             auto c = build_ser_impl(schema["items_schema"].cast<py::dict>(), defs, memo);
             if (c) node->children.push_back(c);
         } catch (...) {}
+        // list.rs:44, deque.rs:45 and generator.rs:45 build SchemaFilter<usize> from the
+        // node's own serialization pair; set_frozenset.rs builds none, so a set node keeps
+        // a filter it was handed as nothing at all.
+        if ((type == "list" || type == "deque" || type == "generator") && has_ser_dict) {
+            if (ser_dict.contains("include"))
+                node->ser_key_include = ser_index_filter_set(ser_dict["include"].cast<py::object>(), type);
+            if (ser_dict.contains("exclude"))
+                node->ser_key_exclude = ser_index_filter_set(ser_dict["exclude"].cast<py::object>(), type);
+        }
     }
 
     if (type == "dict") {
@@ -5651,6 +5742,12 @@ static SerRef build_ser_impl(const py::dict& schema,
             }
             node->children = std::move(kids);
         } catch (...) { PyErr_Clear(); }
+        if (has_ser_dict) {
+            if (ser_dict.contains("include"))
+                node->ser_key_include = ser_index_filter_set(ser_dict["include"].cast<py::object>(), type);
+            if (ser_dict.contains("exclude"))
+                node->ser_key_exclude = ser_index_filter_set(ser_dict["exclude"].cast<py::object>(), type);
+        }
     }
     if (type == "tuple") {
         try {
@@ -5663,6 +5760,12 @@ static SerRef build_ser_impl(const py::dict& schema,
                 node->tuple_variadic_index = schema["variadic_item_index"].cast<int>();
             }
         } catch (...) {}
+        if (has_ser_dict) {
+            if (ser_dict.contains("include"))
+                node->ser_key_include = ser_index_filter_set(ser_dict["include"].cast<py::object>(), type);
+            if (ser_dict.contains("exclude"))
+                node->ser_key_exclude = ser_index_filter_set(ser_dict["exclude"].cast<py::object>(), type);
+        }
     }
 
     if (type == "union") {
