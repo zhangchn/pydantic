@@ -2600,26 +2600,21 @@ struct SerNode {
                                                    by_alias, exclude_unset, exclude_defaults, context);
             }
             py::ssize_t idx = 0;
+            // A set node never consults include/exclude: set_frozenset.rs has no filter at all,
+            // so its items are serialized with the filter the set itself was handed, untouched
+            // (`item_serializer.to_python(&element, state)`).  There is no index to ask about.
             if (type == "set") {
                 if (json_mode) {
                     // JSON has no set type: serialize as an array
                     py::list jresult;
                     for (auto item : seq) {
-                        auto next = apply_ser_filter(py::int_(idx), inc, exc);
-                        if (!next.omit) {
-                            jresult.append(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context));
-                        }
-                        idx++;
+                        jresult.append(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, inc, exc, by_alias, exclude_unset, exclude_defaults, context));
                     }
                     return std::move(jresult);
                 }
                 py::set result;
                 for (auto item : seq) {
-                    auto next = apply_ser_filter(py::int_(idx), inc, exc);
-                    if (!next.omit) {
-                        result.add(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context));
-                    }
-                    idx++;
+                    result.add(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, inc, exc, by_alias, exclude_unset, exclude_defaults, context));
                 }
                 return std::move(result);
             } else if (type == "frozenset") {
@@ -2627,21 +2622,13 @@ struct SerNode {
                     // JSON has no frozenset type: serialize as an array
                     py::list jtemp;
                     for (auto item : seq) {
-                        auto next = apply_ser_filter(py::int_(idx), inc, exc);
-                        if (!next.omit) {
-                            jtemp.append(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context));
-                        }
-                        idx++;
+                        jtemp.append(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, inc, exc, by_alias, exclude_unset, exclude_defaults, context));
                     }
                     return std::move(jtemp);
                 }
                 py::set temp;
                 for (auto item : seq) {
-                    auto next = apply_ser_filter(py::int_(idx), inc, exc);
-                    if (!next.omit) {
-                        temp.add(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context));
-                    }
-                    idx++;
+                    temp.add(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, inc, exc, by_alias, exclude_unset, exclude_defaults, context));
                 }
                 return py::frozenset(temp);
             } else {

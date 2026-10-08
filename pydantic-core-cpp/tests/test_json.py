@@ -2410,3 +2410,24 @@ def test_an_index_key_is_folded_by_the_length_of_what_it_filters():
 
     tup = SchemaSerializer(core_schema.tuple_variable_schema(core_schema.int_schema()))
     assert tup.to_python((10, 20, 30), include={7: True}) == (20,)
+
+
+def test_a_set_node_never_consults_the_filter_it_is_handed():
+    # A set has no position to ask about, so a set node never looks at include/exclude:
+    # set_frozenset.rs has no filter at all and serializes its items with the state it was
+    # given.  Nothing is dropped and no TypeError is raised, whatever the filter looks like.
+    for schema, source, expected in (
+        (core_schema.set_schema(core_schema.int_schema()), {10, 20, 30}, {10, 20, 30}),
+        (core_schema.frozenset_schema(core_schema.int_schema()), frozenset({10, 20, 30}),
+         frozenset({10, 20, 30})),
+    ):
+        ser = SchemaSerializer(schema)
+        for include in ({0: True}, set(), {-1: True}, {'__all__'}, True):
+            assert ser.to_python(source, include=include) == expected, include
+            assert ser.to_python(source, include=include, mode='json') == [10, 20, 30], include
+            assert ser.to_json(source, include=include) == b'[10,20,30]', include
+
+        for exclude in ({0: True}, set(), {-1: True}, True):
+            assert ser.to_python(source, exclude=exclude) == expected, exclude
+            assert ser.to_python(source, exclude=exclude, mode='json') == [10, 20, 30], exclude
+            assert ser.to_json(source, exclude=exclude) == b'[10,20,30]', exclude
