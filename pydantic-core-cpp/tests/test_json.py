@@ -2876,3 +2876,151 @@ def test_a_node_that_refuses_its_value_reports_the_refusal_in_every_walk():
         assert str_keys.to_json({None: 'v'}) == b'{"None":"v"}'
         assert str_keys.to_python({None: 'v'}) == {None: 'v'}
         assert [str(w.message) for w in caught] == []
+
+
+def test_the_infer_walk_honours_the_include_and_exclude_of_the_run():
+    # An any node asks the run's filter about every position and key it walks, exactly as a
+    # typed container node does (infer.rs:81-100 serialize_seq_filter!, :729-741 serialize_pairs):
+    # a position is folded against the container's length, so -1 is the last item and 7 the second
+    # of three, and a filter that is neither a set nor a dict is refused unless it can answer
+    # `__contains__` for the key it is asked about.
+    sa = SchemaSerializer(core_schema.any_schema())
+    items = [10, 20, 30]
+    for include, expected in (
+        ({0: True}, [10]),
+        ({-1: True}, [30]),
+        ({7: True}, [20]),
+        (set(), []),
+        ({'__all__'}, items),
+        ([1], [20]),
+        (None, items),
+    ):
+        assert sa.to_python(items, include=include) == expected, include
+        assert sa.to_python(tuple(items), include=include) == tuple(expected), include
+        assert sa.to_python(deque(items), include=include) == deque(expected), include
+    for exclude, expected in (({1: False}, items), ({'a'}, items), (set(), items), ([0], [20, 30])):
+        assert sa.to_python(items, exclude=exclude) == expected, exclude
+
+    for include in (True, 's', iter([0])):
+        with pytest.raises(TypeError, match='`include` argument must be a set or dict.'):
+            sa.to_python(items, include=include)
+        with pytest.raises(TypeError, match='`exclude` argument must be a set or dict.'):
+            sa.to_python(items, exclude=True)
+
+    # A mapping is filtered by its keys, asked exactly as written.  A str filter can answer for
+    # text keys, so both keys are refused rather than the run refused.
+    pairs = {'a': 1, 'b': 2}
+    assert sa.to_python(pairs, include={'a'}) == {'a': 1}
+    assert sa.to_python(pairs, exclude={'a'}) == {'b': 2}
+    assert sa.to_python(pairs, include={'__all__'}) == pairs
+    assert sa.to_python(pairs, include='s') == {}
+    assert sa.to_python({0: 'a', 1: 'b'}, include={0: True}) == {0: 'a'}
+
+    # A set has no position to ask about, and it is the one container that hands its items an
+    # empty pair on the way down -- so the tuple a filtered run asked for is kept whole.
+    assert sa.to_python(frozenset(items), include={0: True}) == frozenset(items)
+    assert sa.to_python(frozenset([tuple(items)]), include={0: True}) == frozenset([tuple(items)])
+
+    # What an item is asked about is the sub-filter its own position named, and `True` names
+    # none of it (is_ellipsis_like, filter.rs:320-327) while an exclude `True` refuses the item.
+    nested = [tuple(items)]
+    assert sa.to_python(nested, include={0: {1: True}}) == [(20,)]
+    assert sa.to_python([items], include={0: True}) == [items]
+    assert sa.to_python([items], exclude={0: True}) == []
+    assert sa.to_python({'a': items}, include={'a'}) == {'a': items}
+    assert sa.to_python({'a': items}, include={'a': {1: True}}) == {'a': [20]}
+    # A rebuilt deque is given back the maxlen it was built with.
+    assert sa.to_python(deque(items, maxlen=5), include={0: True}) == deque([10], maxlen=5)
+
+    # The same answers in a JSON run, whether the objects come back or the text does.
+    assert sa.to_python(items, mode='json', include={0: True}) == [10]
+    assert sa.to_json(items, include={0: True}) == b'[10]'
+    assert sa.to_json(items, include=set()) == b'[]'
+    assert sa.to_json(tuple(items), include={0: {1: True}}) == b'[10]'
+    assert sa.to_json(pairs, include={'a'}) == b'{"a":1}'
+    assert sa.to_python(pairs, mode='json', include={'a': None}) == {'a': 1}
+    assert sa.to_json({'a': items}, include={'a': {1: True}}) == b'{"a":[20]}'
+    assert sa.to_json(frozenset(items), include={0: True}) == b'[10,20,30]'
+    assert sa.to_json(deque(items, maxlen=5), include={0: True}) == b'[10]'
+
+    # An iterator has no length to fold by, so the view asks with each position as it is pulled
+    # and refuses a negative key outright -- which is the first pull rather than the call, since
+    # nothing is asked until an item exists to be asked about.  The json arm has nowhere to put
+    # laziness but keeps the filtering, so the same key is refused by the call.
+    assert list(sa.to_python((i for i in range(3)), include={0: True})) == [0]
+    assert list(sa.to_python((i for i in range(3)), exclude={1: True})) == [0, 2]
+    assert sa.to_python((i for i in range(3)), mode='json', include={0: True}) == [0]
+    assert sa.to_json((i for i in range(3)), include={0: True}) == b'[0]'
+    with pytest.raises(ValueError, match='Negative indices cannot be used to exclude items on '
+                                         'unsized iterables'):
+        list(sa.to_python((i for i in range(3)), include={-1: True}))
+    with pytest.raises(PydanticSerializationError, match='Error serializing to JSON: ValueError'):
+        sa.to_json((i for i in range(3)), include={-1: True})
+
+
+def test_a_typed_node_that_lets_inference_answer_keeps_the_run_filter():
+    # The state carries the pair into inference, so a node that refused its value hands over the
+    # filter it was asked under rather than starting the walk unfiltered.
+    items = [10, 20, 30]
+    typed = SchemaSerializer(core_schema.list_schema(core_schema.int_schema()))
+    # The item is a list at an int node, so the node reports the refusal once and the answer it
+    # gives way to is asked about under the item's own sub-filter.
+    for run, expected in ((typed.to_python, [[20]]), (typed.to_json, b'[[20]]')):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            assert run([items], include={0: {1: True}}) == expected
+            messages = [str(w.message) for w in caught]
+            assert len(messages) == 1, messages
+            assert 'Expected `int`' in messages[0], messages[0]
+    # A list node whose items have no serializer of their own asks the same question per item,
+    # and owes no warning of its own for what the walk makes of them.
+    bare = SchemaSerializer(core_schema.list_schema())
+    for run, expected in ((bare.to_python, [[20]]), (bare.to_json, b'[[20]]')):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            assert run([items], include={0: {1: True}}) == expected
+            assert [str(w.message) for w in caught] == []
+    assert bare.to_python([items], include={0: True}) == [items]
+
+
+def test_a_function_serializer_hands_its_result_an_empty_filter_pair():
+    # Rust hands the value a serializer function returned to its return serializer under an empty
+    # include/exclude pair (function.rs:220 "Filtering was done by the function, so drop
+    # include/exclude for the return serializer"): the names in the filter were picked for the
+    # schema, and a function that ran has already answered for them.
+    src = {'a': 1, 'b': 2}
+    out = {'x': [10, 20, 30], 'y': 'Y'}
+
+    def dict_sch():
+        return core_schema.dict_schema(core_schema.str_schema(), core_schema.int_schema())
+
+    plain = SchemaSerializer(core_schema.dict_schema(core_schema.str_schema(), core_schema.int_schema(),
+        serialization=core_schema.plain_serializer_function_ser_schema(lambda v: dict(out))))
+    wrapped = SchemaSerializer(core_schema.dict_schema(core_schema.str_schema(), core_schema.int_schema(),
+        serialization=core_schema.wrap_serializer_function_ser_schema(lambda v, h: dict(out), schema=dict_sch())))
+    declared = SchemaSerializer(core_schema.dict_schema(core_schema.str_schema(), core_schema.int_schema(),
+        serialization=core_schema.plain_serializer_function_ser_schema(
+            lambda v: {'x': 10, 'y': 20}, return_schema=dict_sch())))
+    for s, python_form, json_form in ((plain, out, b'{"x":[10,20,30],"y":"Y"}'),
+                                      (wrapped, out, b'{"x":[10,20,30],"y":"Y"}'),
+                                      (declared, {'x': 10, 'y': 20}, b'{"x":10,"y":20}')):
+        for include, exclude in (({'x'}, None), (None, {'x'}), ({'a'}, None),
+                                 ({'x': {0: True}}, None), (None, {'y': {0: True}}), (None, None)):
+            assert s.to_python(src, include=include, exclude=exclude) == python_form
+            assert s.to_json(src, include=include) == json_form
+            assert s.to_json(src, exclude=exclude) == json_form
+    # The pair is dropped for the result, not for the handler a wrap function is handed: passing
+    # the value on is the schema answering, so it keeps the filter it was asked under.
+    passthru = SchemaSerializer(core_schema.dict_schema(core_schema.str_schema(), core_schema.int_schema(),
+        serialization=core_schema.wrap_serializer_function_ser_schema(lambda v, h: h(v), schema=dict_sch())))
+    assert passthru.to_python(src, include={'a'}) == {'a': 1}
+    assert passthru.to_python(src, exclude={'a'}) == {'b': 2}
+    assert passthru.to_json(src, include={'a'}) == b'{"a":1}'
+    # A function the mode of the run skips never ran, so it is not the answer either: the pair
+    # travels on to the schema the function was wrapped around.
+    skipped = SchemaSerializer(core_schema.dict_schema(core_schema.str_schema(), core_schema.int_schema(),
+        serialization=core_schema.plain_serializer_function_ser_schema(
+            lambda v: dict(out), when_used='json')))
+    assert skipped.to_python(src, include={'a'}) == {'a': 1}
+    assert skipped.to_python(src, exclude={'a'}) == {'b': 2}
+    assert skipped.to_json(src, include={'a'}) == b'{"x":[10,20,30],"y":"Y"}'

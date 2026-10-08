@@ -1413,12 +1413,18 @@ static py::object make_serialization_iterator(const py::object& value, const Ser
 }
 
 // The infer walk's own answer for an iterator (infer.rs:264-271): the same lazy view, with
-// each item left to the walk rather than to a serializer node, and no index filter -- Rust
-// passes SchemaFilter::default() here.
-static py::object make_inferred_iterator(const py::object& value, bool exc_none, bool round_trip) {
+// each item left to the walk rather than to a serializer node, and the run's pair asked about
+// each position with no length to fold against -- index_filter over value.len()? (:204-213).
+static py::object make_inferred_iterator(const py::object& value, bool exc_none, bool round_trip,
+                                         const py::object& include, const py::object& exclude) {
     auto out = std::make_shared<SerializationIterator>();
     out->items = py::iter(value);
     out->infer_items = true;
+    // infer.rs:204-213 asks index_filter with no length for every item it pulls, so an inferred
+    // iterator is filtered exactly like the generator node's view -- the pair travels with the
+    // view, which is why it outlives the call that built it, and an item that is itself a
+    // container is inferred under the pair that position named.
+    out->filter.bind(include, exclude, -1);
     out->exc_none = exc_none;
     out->round_trip = round_trip;
     ser_warn_snapshot_into(*out);
@@ -2235,7 +2241,10 @@ struct SerNode {
     }
 
     // Feed a custom serializer function's result through its declared return
-    // serializer (Rust FunctionPlain/WrapSerializer::to_python).
+    // serializer (Rust FunctionPlain/WrapSerializer::to_python).  Rust hands the
+    // result an empty include/exclude pair -- function.rs:220 "Filtering was done
+    // by the function, so drop include/exclude for the return serializer" -- so
+    // every caller below passes py::none() for both.
     py::object apply_return_ser(const py::object& result, bool json_mode, bool exc_none, bool round_trip,
                                 const py::object& include, const py::object& exclude, bool by_alias,
                                 bool exclude_unset, bool exclude_defaults, const py::object& context) const {
@@ -2290,7 +2299,7 @@ struct SerNode {
         // keeps falling through to ser_check_accepts below.
         if (g_ser_check == 0 && !value_matches_type(value)) {
             ser_warn_unexpected_value("", type_name_for_warning(), value);
-            return serialize_any_value(value, exc_none, round_trip, json_mode);
+            return serialize_any_value(value, exc_none, round_trip, json_mode, include, exclude);
         }
         // Rust's IsType::Subclass arm (simple.rs:126-132, float.rs:103-110): a JSON run extracts
         // the value into the node's own number -- a bool at an int node becomes the int 1, an int
@@ -2433,7 +2442,7 @@ struct SerNode {
                 if (!children.empty()) {
                     json_str = children[0]->to_json(value, false, -1, round_trip, py::none(), py::none(), false, false, false, exc_none, context);
                 } else {
-                    json_str = infer_json(value, false, -1);
+                    json_str = infer_json(value, false, -1, py::none(), py::none());
                 }
                 return py::cast(json_str);
             }
@@ -2509,7 +2518,7 @@ struct SerNode {
                     try { model_name = py::getattr(class_, "__name__").cast<std::string>(); }
                     catch (const py::error_already_set&) { PyErr_Clear(); }
                     ser_warn_unexpected_value("", model_name, value);
-                    return serialize_any_value(value, exc_none, round_trip, json_mode);
+                    return serialize_any_value(value, exc_none, round_trip, json_mode, include, exclude);
                 }
             }
             // For root models, extract the 'root' attribute before delegating
@@ -2537,20 +2546,20 @@ struct SerNode {
                         if (child->info_arg) {
                             auto info = make_ser_info(round_trip, "root", context, include, exclude);
                             return child->apply_return_ser(child->py_func(value, root_val, handler, py::cast(info)),
-                                json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
+                                json_mode, exc_none, round_trip, py::none(), py::none(), by_alias, exclude_unset, exclude_defaults, context);
                         } else {
                             return child->apply_return_ser(child->py_func(value, root_val, handler),
-                                json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
+                                json_mode, exc_none, round_trip, py::none(), py::none(), by_alias, exclude_unset, exclude_defaults, context);
                         }
                     } else {
                         // function-plain
                         if (child->info_arg) {
                             auto info = make_ser_info(round_trip, "root", context, include, exclude);
                             return child->apply_return_ser(child->py_func(value, root_val, py::cast(info)),
-                                json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
+                                json_mode, exc_none, round_trip, py::none(), py::none(), by_alias, exclude_unset, exclude_defaults, context);
                         } else {
                             return child->apply_return_ser(child->py_func(value, root_val),
-                                json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
+                                json_mode, exc_none, round_trip, py::none(), py::none(), by_alias, exclude_unset, exclude_defaults, context);
                         }
                     }
                 }
@@ -2559,7 +2568,7 @@ struct SerNode {
                 // serialized from its runtime type, so a subclass's extra
                 // fields are visible even though the schema declares the base.
                 if (g_ser_extra.serialize_as_any) {
-                    return SerNode::serialize_any_value(root_val, exc_none, round_trip, json_mode);
+                    return SerNode::serialize_any_value(root_val, exc_none, round_trip, json_mode, include, exclude);
                 }
                 return children[0]->to_python(root_val, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
             }
@@ -2586,16 +2595,16 @@ struct SerNode {
                     if (info_arg) {
                         auto info = make_ser_info(round_trip, "", context, include, exclude);
                         return apply_return_ser(py_func(value, py::cast(info)), json_mode, exc_none, round_trip,
-                                                include, exclude, by_alias, exclude_unset, exclude_defaults, context);
+                                                py::none(), py::none(), by_alias, exclude_unset, exclude_defaults, context);
                     }
                     return apply_return_ser(py_func(value), json_mode, exc_none, round_trip,
-                                            include, exclude, by_alias, exclude_unset, exclude_defaults, context);
+                                            py::none(), py::none(), by_alias, exclude_unset, exclude_defaults, context);
                 } catch (const py::error_already_set& e) {
                     // Rust (function.rs on_error + infer_to_python): a serializer
                     // function that rejects its own value leaves a warning behind
                     // and the value is serialized by inference instead.
                     if (!handle_ser_call_error(e, func_name)) throw;
-                    return SerNode::serialize_any_value(value, exc_none, round_trip, json_mode);
+                    return SerNode::serialize_any_value(value, exc_none, round_trip, json_mode, include, exclude);
                 }
             }
             if (type == "function-after" || type == "function-before" || type == "function-wrap") {
@@ -2627,9 +2636,9 @@ struct SerNode {
                         // back as a PydanticSerializationError naming the
                         // function rather than raw.
                         if (!handle_ser_call_error(e, func_name)) throw;
-                        return SerNode::serialize_any_value(value, exc_none, round_trip, json_mode);
+                        return SerNode::serialize_any_value(value, exc_none, round_trip, json_mode, include, exclude);
                     }
-                    return apply_return_ser(wrapped, json_mode, exc_none, round_trip, include, exclude,
+                    return apply_return_ser(wrapped, json_mode, exc_none, round_trip, py::none(), py::none(),
                                             by_alias, exclude_unset, exclude_defaults, context);
                 }
                 try {
@@ -2663,7 +2672,7 @@ struct SerNode {
                 std::string deque_name =
                     "deque[" + (children.empty() ? std::string("any") : type_name_for_warning(children[0])) + "]";
                 ser_warn_unexpected_value("", deque_name, value);
-                return serialize_any_value(value, exc_none, round_trip, json_mode);
+                return serialize_any_value(value, exc_none, round_trip, json_mode, include, exclude);
             }
             std::optional<size_t> maxlen = py_deque_maxlen(value);
 
@@ -2772,7 +2781,7 @@ struct SerNode {
                     if (!next.omit) {
                         py::object element = py::reinterpret_borrow<py::object>(item);
                         result.append(children.empty()
-                            ? serialize_any_value(element, exc_none, round_trip, json_mode)
+                            ? serialize_any_value(element, exc_none, round_trip, json_mode, next.include, next.exclude)
                             : children[0]->to_python(check_item_type(children[0], element), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context));
                     }
                     idx++;
@@ -2810,7 +2819,7 @@ struct SerNode {
                     throw std::runtime_error("Unexpected value for serializer " + nt_name);
                 }
                 ser_warn_unexpected_value("", nt_name, value);
-                return serialize_any_value(value, exc_none, round_trip, json_mode);
+                return serialize_any_value(value, exc_none, round_trip, json_mode, include, exclude);
             }
             auto seq = value.cast<py::sequence>();
             size_t n_items = static_cast<size_t>(py::len(seq));
@@ -2890,7 +2899,7 @@ struct SerNode {
                         // Past the declared items the leftover belongs to Any, not to the
                         // last declared serializer: an extra str at a tuple[int] owes no
                         // Expected `int` of its own.
-                        temp.append(serialize_any_value(v, exc_none, round_trip, json_mode));
+                        temp.append(serialize_any_value(v, exc_none, round_trip, json_mode, next.include, next.exclude));
                     }
                 }
                 i++;
@@ -2906,7 +2915,7 @@ struct SerNode {
         if (type == "any" || type == "call") {
             // Rust builds no dedicated serializer for a call schema, so the
             // value is inferred (a namedtuple thus becomes a plain tuple).
-            return serialize_any_value(value, exc_none, round_trip, json_mode);
+            return serialize_any_value(value, exc_none, round_trip, json_mode, include, exclude);
         }
         // Rust ToStringSerializer is a leaf: str(value), gated by when_used.
         if (type == "to-string") {
@@ -2931,7 +2940,7 @@ struct SerNode {
         if (type == "fraction") {
             if (!py::isinstance(value, py_fraction_type())) {
                 ser_warn_unexpected_value("", type, value);
-                return serialize_any_value(value, exc_none, round_trip, json_mode);
+                return serialize_any_value(value, exc_none, round_trip, json_mode, include, exclude);
             }
             return py::str(value);
         }
@@ -3002,7 +3011,7 @@ struct SerNode {
             double fd = 0.0;
             if (!ser_extract_f64(value.ptr(), &fd)) {
                 ser_warn_unexpected_value("", type_name_for_warning(), value);
-                return infer_json(value, ensure_ascii, indent);
+                return infer_json(value, ensure_ascii, indent, include, exclude);
             }
             return ser_json_f64_modes(fd, inf_nan_mode);
         }
@@ -3012,7 +3021,7 @@ struct SerNode {
         // error instead of answering at all.
         if (g_ser_check == 0 && !value_matches_type(value)) {
             ser_warn_unexpected_value("", type_name_for_warning(), value);
-            return infer_json(value, ensure_ascii, indent);
+            return infer_json(value, ensure_ascii, indent, include, exclude);
         }
         if (!ser_check_accepts(value)) {
             throw std::runtime_error("Unexpected value for serializer " + type);
@@ -3056,7 +3065,7 @@ struct SerNode {
                 py::object out_k = children[0]->to_json_key(k, exc_none, round_trip, by_alias, context);
                 std::string val_json = children.size() > 1
                     ? children[1]->to_json(check_item_type(children[1], v), ensure_ascii, -1, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context)
-                    : infer_json(v, ensure_ascii, -1);
+                    : infer_json(v, ensure_ascii, -1, next.include, next.exclude);
                 if (!first) out += ",";
                 first = false;
                 std::string key_str = out_k.cast<std::string>();
@@ -3066,7 +3075,7 @@ struct SerNode {
             return out;
         }
         if (type == "is-instance" || type == "is-subclass") {
-            return infer_json(value, ensure_ascii, indent);
+            return infer_json(value, ensure_ascii, indent, include, exclude);
         }
         if (type == "none" || type == "is-none") return "null";
         // Above the python-shape bool arm, which would otherwise answer b'true' here: Rust's int
@@ -3111,7 +3120,7 @@ struct SerNode {
                 if (!children.empty()) {
                     inner_json = children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
                 } else {
-                    inner_json = infer_json(value, ensure_ascii, indent);
+                    inner_json = infer_json(value, ensure_ascii, indent, include, exclude);
                 }
                 return json_escape(inner_json, ensure_ascii);
             }
@@ -3147,9 +3156,9 @@ struct SerNode {
             if (py_hasattr(value, "value")) {
                 auto ev = py::getattr(value, "value");
                 if (!children.empty()) return children[0]->to_json(ev, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
-                return infer_json(ev, ensure_ascii, indent);
+                return infer_json(ev, ensure_ascii, indent, include, exclude);
             }
-            return infer_json(value, ensure_ascii, indent);
+            return infer_json(value, ensure_ascii, indent, include, exclude);
         }
         if (type == "complex" && PyComplex_Check(value.ptr())) {
             return json_escape(complex_to_str_rust(PyComplex_RealAsDouble(value.ptr()),
@@ -3160,7 +3169,7 @@ struct SerNode {
         if (type == "fraction") {
             if (!py::isinstance(value, py_fraction_type())) {
                 ser_warn_unexpected_value("", type, value);
-                return infer_json(value, ensure_ascii, indent);
+                return infer_json(value, ensure_ascii, indent, include, exclude);
             }
             return json_escape(py::str(value).cast<std::string>(), ensure_ascii);
         }
@@ -3273,7 +3282,7 @@ struct SerNode {
                     throw std::runtime_error("Unexpected value for serializer " + nt_name);
                 }
                 ser_warn_unexpected_value("", nt_name, value);
-                return infer_json(value, ensure_ascii, indent);
+                return infer_json(value, ensure_ascii, indent, include, exclude);
             }
             auto seq = value.cast<py::sequence>();
             size_t n_items = static_cast<size_t>(py::len(seq));
@@ -3328,7 +3337,7 @@ struct SerNode {
                     throw std::runtime_error("Unexpected value for serializer " + tn);
                 }
                 ser_warn_unexpected_value("", tn, value);
-                return infer_json(value, ensure_ascii, indent);
+                return infer_json(value, ensure_ascii, indent, include, exclude);
             }
             auto seq = py::reinterpret_borrow<py::sequence>(value);
             py::ssize_t n_items = py::len(seq);
@@ -3366,7 +3375,7 @@ struct SerNode {
                                ? (*child)->to_json(check_item_type(*child, v), ensure_ascii, -1,
                                                    round_trip, next.include, next.exclude, by_alias,
                                                    exclude_unset, exclude_defaults, exc_none, context)
-                               : infer_json(v, ensure_ascii, -1);
+                               : infer_json(v, ensure_ascii, -1, next.include, next.exclude);
                 }
                 i++;
             }
@@ -3404,7 +3413,7 @@ struct SerNode {
                         // the way down: exclude_unset and exclude_defaults travel with the item.
                         out += children[0]->to_json(check_item_type(children[0], obj), ensure_ascii, -1, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
                     } else {
-                        out += infer_json(obj, ensure_ascii, -1);
+                        out += infer_json(obj, ensure_ascii, -1, next.include, next.exclude);
                     }
                 }
                 idx++;
@@ -3424,7 +3433,7 @@ struct SerNode {
                 if (!children.empty()) {
                     out += children[0]->to_json(check_item_type(children[0], obj), ensure_ascii, -1, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
                 } else {
-                    out += infer_json(obj, ensure_ascii, -1);
+                    out += infer_json(obj, ensure_ascii, -1, include, exclude);
                 }
             }
             out += "]";
@@ -3475,7 +3484,7 @@ struct SerNode {
                     try { model_name = py::getattr(class_, "__name__").cast<std::string>(); }
                     catch (const py::error_already_set&) { PyErr_Clear(); }
                     ser_warn_unexpected_value("", model_name, value);
-                    return infer_json(value, ensure_ascii, indent);
+                    return infer_json(value, ensure_ascii, indent, include, exclude);
                 }
             }
             // For root models, extract the 'root' attribute before delegating
@@ -3516,13 +3525,13 @@ struct SerNode {
                         } else {
                             result = child->py_func(value, root_val);
                         }
-                        return infer_json(result, ensure_ascii, indent);
+                        return infer_json(result, ensure_ascii, indent, py::none(), py::none());
                     }
                 }
                 // Rust ModelSerializer::serialize_root_model swaps in
                 // AnySerializer when serialize_as_any is set (see to_python).
                 if (g_ser_extra.serialize_as_any) {
-                    return infer_json(root_val, ensure_ascii, indent);
+                    return infer_json(root_val, ensure_ascii, indent, include, exclude);
                 }
                 return children[0]->to_json(root_val, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
             }
@@ -3542,7 +3551,7 @@ struct SerNode {
             }
             if (skip_serializer) {
                 if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
-                return infer_json(value, ensure_ascii, indent);
+                return infer_json(value, ensure_ascii, indent, include, exclude);
             }
             py::object result;
             if (type == "function-plain") {
@@ -3555,25 +3564,25 @@ struct SerNode {
                     }
                 } catch (const py::error_already_set& e) {
                     if (!handle_ser_call_error(e, func_name)) throw;
-                    return infer_json(value, ensure_ascii, indent);
+                    return infer_json(value, ensure_ascii, indent, include, exclude);
                 }
             } else {
                 result = to_python(value, true, exc_none, round_trip, include, exclude, by_alias,
                                    exclude_unset, exclude_defaults, context);
             }
-            result = apply_return_ser(result, true, exc_none, round_trip, include, exclude, by_alias,
+            result = apply_return_ser(result, true, exc_none, round_trip, py::none(), py::none(), by_alias,
                                       exclude_unset, exclude_defaults, context);
-            return infer_json(result, ensure_ascii, indent);
+            return infer_json(result, ensure_ascii, indent, py::none(), py::none());
         }
         if (type == "format" && !format_str.empty() && !ser_when_used_skips(when_used, true, value)) {
             py::object spec = py::str(format_str);
             if (PyObject* r = PyObject_Format(value.ptr(), spec.ptr())) {
                 py::object formatted = py::reinterpret_steal<py::object>(r);
-                return infer_json(formatted, ensure_ascii, indent);
+                return infer_json(formatted, ensure_ascii, indent, include, exclude);
             }
             PyErr_Clear();
         }
-        return infer_json(value, ensure_ascii, indent);
+        return infer_json(value, ensure_ascii, indent, include, exclude);
     }
 
     // Get the default value for this serializer node (for default/with-default types)
@@ -4019,7 +4028,9 @@ private:
         return inferred();
     }
 
-    static std::string infer_json(const py::object& value, bool ensure_ascii, int indent) {
+    static std::string infer_json(const py::object& value, bool ensure_ascii, int indent,
+                                  const py::object& include = py::none(),
+                                  const py::object& exclude = py::none()) {
         std::vector<const void*>& st = json_rec_stack();
         const void* p = value.ptr();
         for (const void* q : st) {
@@ -4035,17 +4046,18 @@ private:
             std::vector<const void*>& s;
             ~StackPop() { s.pop_back(); }
         } popper{st};
-        return infer_json_body(value, ensure_ascii, indent);
+        return infer_json_body(value, ensure_ascii, indent, include, exclude);
     }
 
-    static std::string infer_json_body(const py::object& value, bool ensure_ascii, int indent) {
+    static std::string infer_json_body(const py::object& value, bool ensure_ascii, int indent,
+                                       const py::object& include, const py::object& exclude) {
         if (value.is_none()) return "null";
         // Rust infer_serialize ObType::Enum: serialize the member's value. This
         // must precede the bool/int/str leaves, because a mixin member (IntEnum,
         // str Enum) also satisfies those checks, and the __dict__ fallback at the
         // bottom, because a member's __dict__ holds _value_/_name_.
         if (is_enum_instance(value)) {
-            return infer_json(py::getattr(value, "value"), ensure_ascii, indent);
+            return infer_json(py::getattr(value, "value"), ensure_ascii, indent, include, exclude);
         }
         if (py::isinstance<py::bool_>(value)) return value.cast<bool>() ? "true" : "false";
         if (py::isinstance<py::int_>(value)) return py::str(py::repr(value)).cast<std::string>();
@@ -4097,14 +4109,35 @@ private:
             if (json_infer_leaf(value, conv)) return json_escape_converted(conv, ensure_ascii);
         }
         if (py::isinstance<py::set>(value) || py::isinstance<py::frozenset>(value) ||
-            py::isinstance(value, py_deque_type()) ||  // ObType::Deque, a sequence like the set arms
+            py::isinstance(value, py_deque_type()) ||  // ObType::Deque, a sequence unlike the set arms
             PyIter_Check(value.ptr())) {  // ObType::Set/FrozenSet/Generator
+            // Two answers, not one: serialize_seq! (infer.rs:340-357) hands a set's or frozenset's
+            // items an empty pair -- a set has no position to ask about -- while a deque is
+            // measured and filtered by position and an iterator is filtered with no length at all
+            // (:482-490), which is where a negative key is refused instead of folded.
             std::string out = "[";
             bool first = true;
+            bool no_position = py::isinstance<py::set>(value) || py::isinstance<py::frozenset>(value);
+            SerIndexFilter filter;
+            if (!no_position) {
+                py::ssize_t dlen = -1;
+                if (!PyIter_Check(value.ptr())) {
+                    try { dlen = py::len(value); } catch (...) { PyErr_Clear(); }
+                }
+                filter.bind(include, exclude, dlen);
+            }
+            py::ssize_t idx = 0;
             for (auto item : py::reinterpret_borrow<py::iterable>(value)) {
+                SerFilterResult next;  // a set's items keep an empty pair
+                if (!no_position) {
+                    next = filter.ask(idx);
+                    idx++;
+                    if (next.omit) continue;
+                }
                 if (!first) out += ",";
                 first = false;
-                out += infer_json(py::reinterpret_borrow<py::object>(item), ensure_ascii, -1);
+                out += infer_json(py::reinterpret_borrow<py::object>(item), ensure_ascii, -1,
+                                  next.include, next.exclude);
             }
             out += "]";
             return out;
@@ -4121,10 +4154,17 @@ private:
         if (py::isinstance<py::list>(value) || py::isinstance<py::tuple>(value)) {
             std::string out = "[";
             bool first = true;
+            SerIndexFilter filter;
+            filter.bind(include, exclude, py::len(value));
+            py::ssize_t idx = 0;
             for (auto item : py::reinterpret_borrow<py::sequence>(value)) {
+                auto next = filter.ask(idx);
+                idx++;
+                if (next.omit) continue;
                 if (!first) out += ",";
                 first = false;
-                out += infer_json(py::reinterpret_borrow<py::object>(item), ensure_ascii, -1);
+                out += infer_json(py::reinterpret_borrow<py::object>(item), ensure_ascii, -1,
+                                  next.include, next.exclude);
             }
             out += "]";
             return out;
@@ -4134,11 +4174,15 @@ private:
             bool first = true;
             auto d = value.cast<py::dict>();
             for (auto item : d) {
+                // The key is asked exactly as written, before it is turned into its json form.
+                auto next = apply_ser_filter(py::reinterpret_borrow<py::object>(item.first), include, exclude);
+                if (next.omit) continue;
                 if (!first) out += ",";
                 first = false;
                 out += json_escape(infer_json_key(py::reinterpret_borrow<py::object>(item.first), true).cast<std::string>(), ensure_ascii);
                 out += ":";
-                out += infer_json(py::reinterpret_borrow<py::object>(item.second), ensure_ascii, -1);
+                out += infer_json(py::reinterpret_borrow<py::object>(item.second), ensure_ascii, -1,
+                                  next.include, next.exclude);
             }
             out += "}";
             return out;
@@ -4193,7 +4237,7 @@ private:
         // class's own namespace, so Rust refuses type objects here as well
         // (ob_type.rs:421); walking it used to report the failure as a mappingproxy.
         if (py_hasattr(value, "__dict__") && !PyType_Check(value.ptr()) && dict_inferable_object(value))
-            return infer_json(value.attr("__dict__"), ensure_ascii, indent);
+            return infer_json(value.attr("__dict__"), ensure_ascii, indent, include, exclude);
 
         // Rust infer_serialize ObType::Unknown (infer.rs:495-508): the run's `fallback`
         // is asked first and what it returns is re-inferred, because a fallback may hand
@@ -4202,7 +4246,7 @@ private:
         // definition something this run cannot print usefully -- and a fallback that
         // raises keeps its own error, which the serde boundary then names.
         if (g_ser_extra.fallback.ptr() && !g_ser_extra.fallback.is_none())
-            return infer_json(g_ser_extra.fallback(value), ensure_ascii, indent);
+            return infer_json(g_ser_extra.fallback(value), ensure_ascii, indent, include, exclude);
         if (g_ser_extra.serialize_unknown) return json_escape(ser_serialize_unknown(value), ensure_ascii);
         throw PydanticSerializationError("Unable to serialize unknown type: " + ser_safe_repr(py::type::of(value)));
     }
@@ -4225,7 +4269,9 @@ private:
     // decoration: a fallback that returns its own argument repeats an id at the second step and a
     // fallback that builds a new object every call never repeats one, so neither is a container and
     // the walk between them and a segfault is this guard.
-    static py::object serialize_any_value(const py::object& v, bool exc_none, bool round_trip, bool json_mode = false) {
+    static py::object serialize_any_value(const py::object& v, bool exc_none, bool round_trip, bool json_mode = false,
+                                          const py::object& include = py::none(),
+                                          const py::object& exclude = py::none()) {
         std::vector<const void*>& st = py_rec_stack();
         const void* p = v.ptr();
         for (const void* q : st) {
@@ -4243,10 +4289,11 @@ private:
             std::vector<const void*>& s;
             ~StackPop() { s.pop_back(); }
         } popper{st};
-        return serialize_any_value_inner(v, exc_none, round_trip, json_mode);
+        return serialize_any_value_inner(v, exc_none, round_trip, json_mode, include, exclude);
     }
 
-    static py::object serialize_any_value_inner(const py::object& v, bool exc_none, bool round_trip, bool json_mode) {
+    static py::object serialize_any_value_inner(const py::object& v, bool exc_none, bool round_trip, bool json_mode,
+                                                const py::object& include, const py::object& exclude) {
         if (v.is_none()) return py::none();
         // Model / dataclass instances: use __pydantic_serializer__ if available
         if (py_hasattr(v, "__pydantic_serializer__") && !PyType_Check(v.ptr())) {
@@ -4267,36 +4314,60 @@ private:
             for (auto item : d) {
                 auto k = py::reinterpret_borrow<py::object>(item.first);
                 auto val = py::reinterpret_borrow<py::object>(item.second);
+                // serialize_pairs (infer.rs:729-741) asks AnyFilter::key_filter about every key of
+                // an inferred mapping and hands the value the pair that answer names, with the key
+                // asked exactly as written -- it is the entry's *key* that is turned afterwards.
+                auto next = apply_ser_filter(k, include, exclude);
+                if (next.omit) continue;
                 // This walk runs in SerMode::Json when json_mode is set, and a map key in
                 // that mode is turned with json_key (shared.rs:737-740), so an int key
                 // leaves as "1" and a tuple key as "1,2" while the values keep their
                 // Python forms.
                 if (json_mode) k = infer_json_key(k, false);
-                out[k] = serialize_any_value(val, exc_none, round_trip, json_mode);
+                out[k] = serialize_any_value(val, exc_none, round_trip, json_mode, next.include, next.exclude);
             }
             return std::move(out);
         }
         if (py::isinstance<py::list>(v)) {
             py::list out;
             auto lst = v.cast<py::list>();
+            SerIndexFilter filter;
+            filter.bind(include, exclude, py::len(lst));
+            py::ssize_t idx = 0;
             for (auto item : lst) {
-                out.append(serialize_any_value(py::reinterpret_borrow<py::object>(item), exc_none, round_trip, json_mode));
+                auto next = filter.ask(idx);
+                idx++;
+                if (next.omit) continue;
+                out.append(serialize_any_value(py::reinterpret_borrow<py::object>(item), exc_none, round_trip,
+                                               json_mode, next.include, next.exclude));
             }
             return std::move(out);
         }
         if (py::isinstance<py::tuple>(v)) {
             py::list temp;
             auto t = v.cast<py::tuple>();
+            SerIndexFilter filter;
+            filter.bind(include, exclude, py::len(t));
+            py::ssize_t idx = 0;
             for (auto item : t) {
-                temp.append(serialize_any_value(py::reinterpret_borrow<py::object>(item), exc_none, round_trip, json_mode));
+                auto next = filter.ask(idx);
+                idx++;
+                if (next.omit) continue;
+                temp.append(serialize_any_value(py::reinterpret_borrow<py::object>(item), exc_none, round_trip,
+                                                json_mode, next.include, next.exclude));
             }
             if (json_mode) return std::move(temp);  // JSON has no tuple type
             return py::tuple(temp);
         }
         if (py::isinstance<py::set>(v) || py::isinstance<py::frozenset>(v)) {
             py::list temp;
+            // The set and frozenset arms are the one place the infer walk *drops* a filter on the
+            // way down (serialize_seq!, infer.rs:68-77): a set has no position to ask about, and
+            // its items are inferred under an empty pair, so a run that asked for index 0 keeps a
+            // set's whole tuple item rather than that tuple's first element.
             for (auto item : py::reinterpret_borrow<py::iterable>(v)) {
-                temp.append(serialize_any_value(py::reinterpret_borrow<py::object>(item), exc_none, round_trip, json_mode));
+                temp.append(serialize_any_value(py::reinterpret_borrow<py::object>(item), exc_none, round_trip,
+                                                json_mode));
             }
             if (json_mode) return std::move(temp);  // JSON has no set type
             return py::isinstance<py::frozenset>(v)
@@ -4306,17 +4377,27 @@ private:
         // Sequence[Model] serializes through pydantic's serialize_sequence_via_list,
         // which hands back the container type it was given; the items still need
         // serializing, as Rust's own sequence serializer does.
-        try {
-            py::object deque_cls = py::module_::import("collections").attr("deque");
-            if (py::isinstance(v, deque_cls)) {
-                py::list temp;
-                for (auto item : v) {
-                    temp.append(serialize_any_value(py::reinterpret_borrow<py::object>(item), exc_none, round_trip, json_mode));
-                }
-                if (json_mode) return std::move(temp);  // JSON has no deque type
-                return deque_cls(temp);
+        if (py::isinstance(v, py_deque_type())) {
+            py::list temp;
+            // A deque is a sequence to the infer walk (serialize_seq_filter! over value.len()?,
+            // infer.rs:156-158 / 250-252), so its positions are filtered -- a filter that is
+            // neither a set nor a dict is refused from inside that ask -- and new_deque puts the
+            // source's maxlen back on the value that comes out.
+            SerIndexFilter filter;
+            py::ssize_t dlen = -1;
+            try { dlen = py::len(v); } catch (...) { PyErr_Clear(); }
+            filter.bind(include, exclude, dlen);
+            py::ssize_t idx = 0;
+            for (auto item : v) {
+                auto next = filter.ask(idx);
+                idx++;
+                if (next.omit) continue;
+                temp.append(serialize_any_value(py::reinterpret_borrow<py::object>(item), exc_none, round_trip,
+                                                json_mode, next.include, next.exclude));
             }
-        } catch (const py::error_already_set&) { PyErr_Clear(); }
+            if (json_mode) return std::move(temp);  // JSON has no deque type
+            return py_deque_new(temp, py_deque_maxlen(v));
+        }
         // Rust infer_to_python ObType::Generator (infer.rs:264-271): a python run does not
         // consume the iterator it was handed, it hands the caller a lazy SerializationIterator
         // that serializes each item as that item is pulled.  This is the answer for a value that
@@ -4325,10 +4406,20 @@ private:
         // nowhere to put laziness, so its arm drains the iterator into a list like the other
         // sequence arms above.  Being a known type, it is answered before the fallback is asked.
         if (PyIter_Check(v.ptr())) {
-            if (!json_mode) return make_inferred_iterator(v, exc_none, round_trip);
+            if (!json_mode) return make_inferred_iterator(v, exc_none, round_trip, include, exclude);
+            // The json arm has nowhere to put laziness but keeps the filtering: infer.rs:202-213
+            // (python) and :482-490 (serde) both ask index_filter with no length, which is where a
+            // negative key is refused rather than folded.
             py::list temp;
+            SerIndexFilter filter;
+            filter.bind(include, exclude, -1);
+            py::ssize_t idx = 0;
             for (auto item : py::reinterpret_borrow<py::iterable>(v)) {
-                temp.append(serialize_any_value(py::reinterpret_borrow<py::object>(item), exc_none, round_trip, json_mode));
+                auto next = filter.ask(idx);
+                idx++;
+                if (next.omit) continue;
+                temp.append(serialize_any_value(py::reinterpret_borrow<py::object>(item), exc_none, round_trip,
+                                                json_mode, next.include, next.exclude));
             }
             return std::move(temp);
         }
@@ -4340,12 +4431,12 @@ private:
         // through untouched.
         if (!py_infer_known_type(v) && g_ser_extra.fallback.ptr() && !g_ser_extra.fallback.is_none()) {
             py::object next = g_ser_extra.fallback(v);
-            return serialize_any_value(next, exc_none, round_trip, json_mode);
+            return serialize_any_value(next, exc_none, round_trip, json_mode, include, exclude);
         }
         if (json_mode) {
             // Rust infer_to_python ObType::Enum serializes the member's value.
             if (is_enum_instance(v) && py_hasattr(v, "value")) {
-                return serialize_any_value(py::getattr(v, "value"), exc_none, round_trip, json_mode);
+                return serialize_any_value(py::getattr(v, "value"), exc_none, round_trip, json_mode, include, exclude);
             }
             // infer_to_python's json arm (infer.rs:115-121): a float that is neither finite
             // nor a number is taken away by the mode that asks for it to be gone -- the mode
@@ -4580,11 +4671,11 @@ private:
             }
 
             if (ser_as_any) {
-                serialized = serialize_any_value(fv, exc_none, round_trip, json_mode);
+                serialized = serialize_any_value(fv, exc_none, round_trip, json_mode, next.include, next.exclude);
             } else if (ser_type_mismatch) {
                 // Field value does not match its declared type: warn and fall
                 // back to infer serialization (Rust behavior).
-                serialized = serialize_any_value(fv, exc_none, round_trip, json_mode);
+                serialized = serialize_any_value(fv, exc_none, round_trip, json_mode, next.include, next.exclude);
             } else if (use_field_serializer) {
                 // Try field serializer call with model instance first
                 auto info = make_ser_info(round_trip, k, context, next.include, next.exclude);
@@ -4653,8 +4744,8 @@ private:
                         serialized = ser->to_python(fv, json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context);
                     }
                 } else {
-                    serialized = ser->apply_return_ser(serialized, json_mode, exc_none, round_trip, next.include,
-                        next.exclude, by_alias, exclude_unset, exclude_defaults, context);
+                    serialized = ser->apply_return_ser(serialized, json_mode, exc_none, round_trip, py::none(),
+                        py::none(), by_alias, exclude_unset, exclude_defaults, context);
                 }
             } else {
                 // Use the field serializer directly (it handles list/dict iteration, etc.)
@@ -4679,7 +4770,7 @@ private:
                 py::object serialized = extra_ser
                     ? extra_ser->to_python(v, json_mode, exc_none, round_trip, next.include, next.exclude,
                                            by_alias, exclude_unset, exclude_defaults, context)
-                    : serialize_any_value(v, exc_none, round_trip, json_mode);
+                    : serialize_any_value(v, exc_none, round_trip, json_mode, next.include, next.exclude);
                 result[py::str(k)] = serialized;
             }
         }
@@ -4695,7 +4786,7 @@ private:
                     if (next.omit) continue;
                     py::object v = py::reinterpret_borrow<py::object>(item.second);
                     if (exc_none && v.is_none()) continue;
-                    result[py::str(k)] = serialize_any_value(v, exc_none, round_trip, json_mode);
+                    result[py::str(k)] = serialize_any_value(v, exc_none, round_trip, json_mode, next.include, next.exclude);
                 }
             }
         }
@@ -4841,7 +4932,7 @@ private:
             }
 
             if (ser_as_any) {
-                field_json = infer_json(fv, ensure_ascii, -1);
+                field_json = infer_json(fv, ensure_ascii, -1, next.include, next.exclude);
             } else if (use_field_serializer) {
                 // Try field serializer call with model instance first
                 auto info = make_ser_info(round_trip, k, context, next.include, next.exclude);
@@ -4895,7 +4986,7 @@ private:
                             }
                         }
                     }
-                    field_json = infer_json(result, ensure_ascii, -1);
+                    field_json = infer_json(result, ensure_ascii, -1, py::none(), py::none());
                     tried = true;
                 } catch (const py::error_already_set& e) {
                     tried = handle_ser_call_error(e, ser->func_name) ? false : true;
@@ -4908,7 +4999,7 @@ private:
             } else if (ser_type_mismatch) {
                 // Field value does not match its declared type: warn and fall
                 // back to infer serialization (Rust behavior).
-                field_json = infer_json(fv, ensure_ascii, -1);
+                field_json = infer_json(fv, ensure_ascii, -1, next.include, next.exclude);
             } else {
                 // Use the field serializer directly (handles list/dict iteration, etc.)
                 field_json = ser->to_json(fv, ensure_ascii, -1, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
@@ -4934,7 +5025,7 @@ private:
                 std::string field_json = extra_ser
                     ? extra_ser->to_json(v, ensure_ascii, -1, round_trip, next.include, next.exclude,
                                          by_alias, exclude_unset, exclude_defaults, exc_none, context)
-                    : infer_json(v, ensure_ascii, -1);
+                    : infer_json(v, ensure_ascii, -1, next.include, next.exclude);
                 if (!first) out += ",";
                 first = false;
                 out += json_escape(k, ensure_ascii) + ":" + field_json;
@@ -4953,7 +5044,7 @@ private:
                     if (exc_none && v.is_none()) continue;
                     if (!first) out += ",";
                     first = false;
-                    out += json_escape(k, ensure_ascii) + ":" + infer_json(v, ensure_ascii, -1);
+                    out += json_escape(k, ensure_ascii) + ":" + infer_json(v, ensure_ascii, -1, next.include, next.exclude);
                 }
             }
         }
@@ -5961,7 +6052,7 @@ public:
             ser_warn_enter(warnings);
             try {
                 py::object result = SerNode::serialize_any_value(
-                    value, exc_none, round_trip, mode && *mode == "json");
+                    value, exc_none, round_trip, mode && *mode == "json", inc, exc);
                 ser_warn_leave(false);
                 return result;
             } catch (...) {
@@ -6055,7 +6146,7 @@ public:
             struct InferGuard { ~InferGuard() { g_ser_infer_applied = false; } } infer_guard;
             ser_warn_enter(warnings);
             try {
-                std::string json = SerNode::infer_json(value, e, -1);
+                std::string json = SerNode::infer_json(value, e, -1, inc, exc);
                 if (indent.has_value()) json = json_pretty_print(json, static_cast<int>(*indent));
                 return py::bytes(std::move(json));  // the warning frame is left for the caller
             } catch (...) {
@@ -7161,7 +7252,7 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                 py::object value = self.infer_items
                     ? SerNode::serialize_any_value(
                           py::reinterpret_borrow<py::object>(item), self.exc_none, self.round_trip,
-                          false)
+                          false, next.include, next.exclude)
                     : self.child->to_python(
                           SerNode::check_item_type(self.child, py::reinterpret_borrow<py::object>(item)),
                           false, self.exc_none, self.round_trip, next.include, next.exclude,
