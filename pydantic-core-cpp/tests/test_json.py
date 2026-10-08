@@ -1,6 +1,8 @@
+import array
 import dataclasses
 import datetime
 import decimal
+import enum
 import fractions
 import ipaddress
 import json
@@ -3698,6 +3700,55 @@ def test_a_type_form_function_node_must_name_the_schema_it_wraps():
     assert SchemaSerializer({'type': 'function-plain'}).to_python({'a': 1}) == {'a': 1}
     assert SchemaSerializer({'type': 'function-plain', 'schema': None}).to_python({'a': 1}) == {'a': 1}
     assert SchemaSerializer({'type': 'function-plain', 'schema': 5}).to_python([1]) == [1]
+
+
+def test_a_value_the_infer_walk_has_an_arm_for_never_meets_the_fallback():
+    # `fallback` is called from infer's ObType::Unknown arm alone, so the values that reach
+    # it are exactly the ones infer's own type table refuses -- range, array.array, a
+    # PurePath, a plain object.  A Decimal, an Enum member, a Path, a Url or an IPv4Address
+    # has an arm further down the walk, and asking a narrower duck test at the gate handed
+    # every one of them to the caller's callable instead of serializing it.
+    class Color(enum.Enum):
+        RED = 'r'
+
+    class Plain:
+        pass
+
+    def asked():
+        seen = []
+
+        def fb(v):
+            seen.append(type(v).__name__)
+            return 'FB'
+
+        return fb, seen
+
+    s = SchemaSerializer(core_schema.any_schema())
+    known = [decimal.Decimal('1.5'), Color.RED, uuid.UUID(int=7), pathlib.Path('/tmp/a'),
+             complex(1, 2), ipaddress.IPv4Address('1.2.3.4'), re.compile('ab+'),
+             pydantic_core_cpp.Url('https://example.com'), deque([1, 2]), fractions.Fraction(1, 2)]
+    for v in known:
+        fb, seen = asked()
+        assert s.to_python(v, fallback=fb) == s.to_python(v)
+        assert s.to_python(v, mode='json', fallback=fb) == s.to_python(v, mode='json')
+        assert s.to_json(v, fallback=fb) == s.to_json(v)
+        assert to_jsonable_python(v, fallback=fb) == to_jsonable_python(v)
+        assert seen == [], repr(v)
+
+    for v in (range(3), array.array('i', [1, 2]), pathlib.PurePosixPath('/tmp/a'), Plain(), Color):
+        fb, seen = asked()
+        assert s.to_python(v, fallback=fb) == 'FB'
+        assert seen == [type(v).__name__], repr(v)
+        seen.clear()
+        assert s.to_python(v, mode='json', fallback=fb) == 'FB'
+        assert seen == [type(v).__name__], repr(v)
+
+    # what a fallback hands back is re-inferred, so it may answer with a type infer knows
+    as_decimal = lambda v: decimal.Decimal('2.5')
+    assert s.to_python(range(3), fallback=as_decimal) == decimal.Decimal('2.5')
+    assert s.to_python(range(3), fallback=as_decimal, mode='json') == '2.5'
+    assert s.to_json(range(3), fallback=as_decimal) == b'"2.5"'
+    assert to_jsonable_python(range(3), fallback=as_decimal) == '2.5'
 
 
 def test_the_serializer_methods_refuse_keywords_they_do_not_declare():

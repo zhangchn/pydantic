@@ -1751,20 +1751,6 @@ static bool py_is_datetime_like(PyObject* p) {
     return PyDateTime_Check(p) || PyDate_Check(p) || PyTime_Check(p) || PyDelta_Check(p);
 }
 
-// Types Rust's infer layer recognizes on its own; anything else is ObType::Unknown
-// and therefore eligible for the caller-supplied `fallback`.
-static bool py_infer_known_type(const py::object& v) {
-    if (v.is_none()) return true;
-    if (py::isinstance<py::bool_>(v) || py::isinstance<py::int_>(v) || py::isinstance<py::float_>(v) ||
-        py::isinstance<py::str>(v) || py::isinstance<py::bytes>(v) || py::isinstance<py::bytearray>(v) ||
-        py_is_datetime_like(v.ptr()) || py::isinstance<py::dict>(v) || py::isinstance<py::list>(v) ||
-        py::isinstance<py::tuple>(v) || py::isinstance<py::set>(v) || py::isinstance<py::frozenset>(v) ||
-        py::isinstance(v, py_fraction_type())) {
-        return true;
-    }
-    return py_hasattr(v, "__pydantic_serializer__");
-}
-
 // Rust's infer layer consults its own type table before it calls a value unknown
 // (ob_type.rs:215-407): every exact type in that table, everything that reaches one of them
 // by walking tp_base, and then the isinstance list at :336-407 -- plus the two ducks tested
@@ -4596,8 +4582,11 @@ private:
         if (py::isinstance(v, py_fraction_type())) return ser_display(v);
         // Rust infer_to_python ObType::Unknown: the caller's `fallback` callable
         // gets a turn (its result is re-inferred) before the value is passed
-        // through untouched.
-        if (!py_infer_known_type(v) && g_ser_extra.fallback.ptr() && !g_ser_extra.fallback.is_none()) {
+        // through untouched.  The turn is keyed on the same type table infer's
+        // own dispatch is keyed on, so a value that has an arm below -- a Decimal,
+        // an Enum member, a Path, a Url -- never reaches a caller's fallback; asking
+        // the narrower duck-test here instead handed all of them to it.
+        if (!ser_infer_known_ob_type(v) && g_ser_extra.fallback.ptr() && !g_ser_extra.fallback.is_none()) {
             py::object next = g_ser_extra.fallback(v);
             return serialize_any_value(next, exc_none, round_trip, json_mode, include, exclude);
         }
