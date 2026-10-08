@@ -3024,3 +3024,52 @@ def test_a_function_serializer_hands_its_result_an_empty_filter_pair():
     assert skipped.to_python(src, include={'a'}) == {'a': 1}
     assert skipped.to_python(src, exclude={'a'}) == {'b': 2}
     assert skipped.to_json(src, include={'a'}) == b'{"x":[10,20,30],"y":"Y"}'
+
+
+def test_the_module_level_to_json_hands_its_filter_to_the_walk():
+    # mod.rs:256 puts this entry's own include/exclude on the state and :257-263 walks the value
+    # through AnySerializer::get(), so the pair is what the infer walk answers under -- the entry has
+    # no serializer of its own to answer with.
+    items = [10, 20, 30]
+    assert to_json(items, include={0: True}) == b'[10]'
+    assert to_json(items, exclude={1: True}) == b'[10,30]'
+    assert to_json(items, include={-1: True}) == b'[30]'
+    # folded against the length it was measured with, so a key past the end wraps instead of missing
+    assert to_json(items, include={7: True}) == b'[20]'
+    assert to_json(items, include=[1]) == b'[20]'
+    assert to_json(items, exclude=[0]) == b'[20,30]'
+    assert to_json(items, include=set()) == b'[]'
+    assert to_json(items, exclude=set()) == b'[10,20,30]'
+    assert to_json(items, include={'__all__'}) == b'[10,20,30]'
+    assert to_json(items, include={'a': True}) == b'[]'
+    assert to_json(items, include=None) == b'[10,20,30]'
+    assert to_json((10, 20, 30), include={0: True}) == b'[10]'
+    assert to_json(deque(items), include={0: True}) == b'[10]'
+    # a set has no position to ask about, so its items keep an empty pair and the tuple survives
+    assert to_json({(1, 2, 3)}, include={0: True}) == b'[[1,2,3]]'
+    assert to_json(frozenset([(1, 2, 3)]), exclude={0: True}) == b'[[1,2,3]]'
+    assert to_json({'a': 1, 'b': 2}, include={'a': True}) == b'{"a":1}'
+    # the key is asked exactly as written, before its json form is worked out
+    assert to_json({1: 'a', 2: 'b'}, include={0: True}) == b'{}'
+    assert to_json({1: 'a', 2: 'b'}, include={1: True}) == b'{"1":"a"}'
+    assert to_json({1: 'a', 2: 'b'}, exclude={1: True}) == b'{"2":"b"}'
+    assert to_json([items], include={0: {1: True}}) == b'[[20]]'
+    assert to_json({'a': items}, include={'a': {0: True}}) == b'{"a":[10]}'
+    assert to_json({'a': items}, exclude={'a': {0: True}}) == b'{"a":[20,30]}'
+    assert to_json([{'a': 1, 'b': 2}], include={0: {'b': True}}) == b'[{"b":2}]'
+    assert to_json((i for i in items), include={0: True}) == b'[10]'
+    assert to_json((i for i in items), exclude={1: True}) == b'[10,30]'
+    # an unsized iterable has no length to fold a negative key against, and the drain refuses
+    with pytest.raises(PydanticSerializationError, match=re.escape('Error serializing to JSON: ValueError')):
+        to_json((i for i in items), include={-1: True})
+    for bad in (True, 's'):
+        with pytest.raises(PydanticSerializationError, match=re.escape('`include` argument must be a set or dict')):
+            to_json(items, include=bad)
+        with pytest.raises(PydanticSerializationError, match=re.escape('`exclude` argument must be a set or dict')):
+            to_json(items, exclude=bad)
+    # the pretty-print is applied to the whole string afterwards, so it sees the filtered form
+    assert to_json(items, indent=2, include={0: True}) == b'[\n  10\n]'
+    # the two neighbours already handled the pair: the jsonable entry and the method
+    assert to_jsonable_python(items, include={0: True}) == [10]
+    assert to_jsonable_python({'a': 1, 'b': 2}, include={'a': True}) == {'a': 1}
+    assert SchemaSerializer(core_schema.list_schema(core_schema.int_schema())).to_json(items, include={0: True}) == b'[10]'

@@ -6251,7 +6251,7 @@ static std::string json_pretty_print(const std::string& compact, int indent) {
 }
 
 static py::bytes to_json_fn(const py::object& value, std::optional<size_t> indent, std::optional<bool> ea,
-    std::optional<py::object>, std::optional<py::object>, bool by_alias, bool, bool round_trip,
+    std::optional<py::object> include, std::optional<py::object> exclude, bool by_alias, bool, bool round_trip,
     std::string timedelta_mode, std::string temporal_mode, std::string bytes_mode,
     std::string inf_nan_mode, bool serialize_unknown,
     std::optional<py::object> fallback, bool, std::optional<bool> polymorphic, std::optional<py::object> context) {
@@ -6290,7 +6290,12 @@ static py::bytes to_json_fn(const py::object& value, std::optional<size_t> inden
     // thread local otherwise still answers for whoever ran last.
     g_polymorphic_serialization = polymorphic;
     try {
-        std::string json = any->to_json(value, ea.value_or(false), -1, round_trip, py::none(), py::none(), by_alias, false, false, false);
+        // mod.rs:256 puts this entry's own include/exclude on the state and :257-263 walks the
+        // value through AnySerializer::get(), so the pair rides on to the infer walk -- the only
+        // thing that can answer for a value that brings no serializer of its own.
+        std::string json = any->to_json(value, ea.value_or(false), -1, round_trip,
+            include && !include->is_none() ? *include : py::none(),
+            exclude && !exclude->is_none() ? *exclude : py::none(), by_alias, false, false, false);
         if (indent.has_value()) json = json_pretty_print(json, static_cast<int>(*indent));
         return py::bytes(std::move(json));
     } catch (py::error_already_set& e) {
