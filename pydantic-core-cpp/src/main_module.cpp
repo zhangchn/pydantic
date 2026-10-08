@@ -4669,6 +4669,19 @@ bool SerNode::value_matches_type(const SerRef& n, const py::object& v) {
     return n->value_matches_type(v);
 }
 
+// A class kept for the lifetime of the interpreter and asked whether a value is one of
+// it.  A class that could not be imported asks nothing: the node stays permissive, which is
+// what it was before it had a predicate at all, rather than refusing every value.
+static bool ser_matches_class(const py::object& cls, const py::object& v) {
+    if (!cls.ptr()) return true;
+    try {
+        return py::isinstance(v, cls);
+    } catch (const py::error_already_set&) {
+        PyErr_Clear();
+        return true;
+    }
+}
+
 bool SerNode::value_matches_type(const py::object& v) const {
     if (v.is_none()) return true;
     const std::string& t = type;
@@ -4687,6 +4700,45 @@ bool SerNode::value_matches_type(const py::object& v) const {
     // class itself is only compared while a union checks its choices.
     if (t == "named-tuple") return py::isinstance<py::tuple>(v);
     if (t == "dict") return py::isinstance<py::dict>(v);
+    // The rest of Rust's leaf serializers refuse a value that is not of their own type --
+    // or of a subclass of it, which ob_type.rs's ancestor walk grants -- warn in that
+    // type's name, and print what inference makes of the value instead.
+    if (t == "date" || t == "datetime" || t == "time" || t == "timedelta") {
+        try {
+            static const py::object& date_cls =
+                held_python_object([] { return py::module_::import("datetime").attr("date"); });
+            static const py::object& datetime_cls =
+                held_python_object([] { return py::module_::import("datetime").attr("datetime"); });
+            static const py::object& time_cls =
+                held_python_object([] { return py::module_::import("datetime").attr("time"); });
+            static const py::object& timedelta_cls =
+                held_python_object([] { return py::module_::import("datetime").attr("timedelta"); });
+            // A datetime is date's own subclass, yet the date serializer says E:date for it,
+            // so the date node asks for a date that is not a datetime rather than trusting
+            // the ancestor walk.
+            if (t == "date" && py::isinstance(v, datetime_cls)) return false;
+            const py::object& want = t == "date" ? date_cls
+                                         : t == "datetime" ? datetime_cls
+                                         : t == "time" ? time_cls : timedelta_cls;
+            return py::isinstance(v, want);
+        } catch (const py::error_already_set&) {
+            PyErr_Clear();
+            return true;
+        }
+    }
+    const SerStrClasses& str_classes = ser_str_classes();
+    if (t == "decimal") return ser_matches_class(str_classes.decimal, v);
+    if (t == "uuid") return ser_matches_class(str_classes.uuid, v);
+    // Url and MultiHostUrl are each their own type: a Url at a multi-host node warns.
+    if (t == "url") return ser_matches_class(str_classes.url, v);
+    if (t == "multi-host-url") return ser_matches_class(str_classes.multihost_url, v);
+    if (t == "complex") return PyComplex_Check(v.ptr());
+    if (t == "fraction") return ser_matches_class(py_fraction_type(), v);
+    // Rust's generator check is the iterator protocol -- a pyo3 downcast to PyIterator, which
+    // is tp_iternext on the value's type -- so a generator and a list_iterator both pass while
+    // a str, a list or an IPv4Network is foreign. Walking the foreign ones is both the wrong
+    // answer and, for a /8 network, unbounded.
+    if (t == "generator") return PyIter_Check(v.ptr());
     return true;
 }
 

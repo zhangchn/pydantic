@@ -1949,3 +1949,78 @@ def test_a_tuple_owes_the_name_of_every_item_serializer():
     assert warned_name(core_schema.tuple_variable_schema(I), wrap=False) == 'tuple[int, ...]'
     assert warned_name(TP(I, S), wrap=False) == 'tuple[int, str]'
     assert warned_name(TP(), wrap=False) == 'tuple[]'
+
+
+
+def test_a_node_with_a_value_type_of_its_own_says_so_about_a_foreign_one():
+    import warnings
+
+    class MyDate(datetime.date):
+        pass
+
+    class MyDecimal(decimal.Decimal):
+        pass
+
+    class MyUrl(pydantic_core_cpp.Url):
+        pass
+
+    def gen():
+        yield 1
+
+    def warned(schema, value):
+        s = SchemaSerializer(schema)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            out = s.to_json(value)
+        name = None
+        for w in caught:
+            m = re.search(r'Expected `([^`]*)`', re.sub(r'\s+', ' ', str(w.message)))
+            if m:
+                name = m.group(1)
+        return name, out
+
+    # A leaf node that has a value type of its own refuses anything else: it warns with its own
+    # name and the value is then inferred on its own, so an int at a date node costs b'1'.
+    for schema, value, name, jbytes in [
+        (core_schema.date_schema(), 1, 'date', b'1'),
+        (core_schema.date_schema(), b'x', 'date', b'"x"'),
+        (core_schema.date_schema(), 2 + 3j, 'date', b'"2+3j"'),
+        (core_schema.date_schema(), datetime.datetime(2020, 1, 2, 3, 4),
+         'date', b'"2020-01-02T03:04:00"'),
+        (core_schema.datetime_schema(), datetime.date(2020, 1, 2), 'datetime', b'"2020-01-02"'),
+        (core_schema.time_schema(), 'x', 'time', b'"x"'),
+        (core_schema.timedelta_schema(), 'x', 'timedelta', b'"x"'),
+        (core_schema.decimal_schema(), 1, 'decimal', b'1'),
+        (core_schema.uuid_schema(), 1, 'uuid', b'1'),
+        (core_schema.complex_schema(), 1, 'complex', b'1'),
+        (core_schema.url_schema(), 'x', 'url', b'"x"'),
+        (core_schema.multi_host_url_schema(), pydantic_core_cpp.Url('https://example.com/x'),
+         'multi-host-url', b'"https://example.com/x"'),
+        (core_schema.generator_schema(core_schema.int_schema()), 'abc', 'generator', b'"abc"'),
+        (core_schema.generator_schema(core_schema.int_schema()), b'abc', 'generator', b'"abc"'),
+        (core_schema.generator_schema(core_schema.int_schema()), 1, 'generator', b'1'),
+        (core_schema.generator_schema(core_schema.int_schema()), ipaddress.IPv4Network('127.0.0.0/24'),
+         'generator', b'"127.0.0.0/24"'),
+        # The generator node asks for the iterator protocol, so an iterable is foreign even
+        # when it would print the same array.
+        (core_schema.generator_schema(core_schema.int_schema()), [1, 2], 'generator', b'[1,2]'),
+    ]:
+        assert warned(schema, value) == (name, jbytes), (name, value)
+
+    # A subclass is fine, and the exact type is fine: neither says anything.
+    for schema, value, jbytes in [
+        (core_schema.date_schema(), MyDate(2020, 1, 2), b'"2020-01-02"'),
+        (core_schema.decimal_schema(), MyDecimal('1.5'), b'"1.5"'),
+        (core_schema.url_schema(), pydantic_core_cpp.Url('https://example.com/x'),
+         b'"https://example.com/x"'),
+        (core_schema.url_schema(), MyUrl('https://example.com/x'), b'"https://example.com/x"'),
+        (core_schema.uuid_schema(), uuid.UUID('12345678-1234-5678-1234-567812345678'),
+         b'"12345678-1234-5678-1234-567812345678"'),
+        (core_schema.complex_schema(), 2 + 3j, b'"2+3j"'),
+        (core_schema.timedelta_schema(), datetime.timedelta(seconds=5), b'"PT5S"'),
+        (core_schema.multi_host_url_schema(), pydantic_core_cpp.MultiHostUrl('redis://host1:1/host2'),
+         b'"redis://host1:1/host2"'),
+        (core_schema.generator_schema(core_schema.int_schema()), gen(), b'[1]'),
+        (core_schema.generator_schema(core_schema.int_schema()), iter([1, 2]), b'[1,2]'),
+    ]:
+        assert warned(schema, value) == (None, jbytes), value
