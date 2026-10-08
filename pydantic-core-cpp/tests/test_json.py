@@ -2322,3 +2322,49 @@ def test_a_warning_a_filter_turns_into_an_error_escapes_a_json_run_as_itself():
     assert caught(lambda: ser.to_json(['a', object()])) == (
         ('PydanticSerializationError', "Unable to serialize unknown type: <class 'object'>"), 0)
     assert caught(lambda: ser.to_json(['b'])) == (('ok', b'["b"]'), 1)
+
+
+def test_an_iterator_handed_to_the_walk_comes_back_as_a_lazy_view_of_itself():
+    # infer.rs:264-271 (ObType::Generator): a python run does not consume the iterator it was
+    # handed.  It hands the caller a SerializationIterator that serializes each item as that item
+    # is pulled, so the items are never materialized -- which is also the answer a node of another
+    # type gives once it has warned about the value and fallen through to inference.  A json run
+    # has nowhere to keep the laziness, so it drains the iterator into a list.  A range is not an
+    # iterator and stays exactly what it is.
+    ser = SchemaSerializer(core_schema.any_schema())
+
+    it = iter([1, 2])
+    view = ser.to_python(it)
+    assert type(view).__name__ == 'SerializationIterator'
+    assert iter(view) is view
+    assert view.index == 0
+    assert repr(view) == 'SerializationIterator(index=0, iterator=%s)' % repr(it)
+
+    assert next(view) == 1
+    assert view.index == 1
+    assert list(view) == [2]
+    assert view.index == 2
+    # Single use, like the iterator underneath it.
+    assert list(view) == []
+    assert repr(view) == 'SerializationIterator(index=2, iterator=%s)' % repr(it)
+
+    # The items go through the walk itself, so an iterator among the items is a view too.
+    nested = next(ser.to_python(iter([iter([7])])))
+    assert type(nested).__name__ == 'SerializationIterator'
+    assert list(nested) == [7]
+
+    assert list(ser.to_python(iter([]))) == []
+
+    int_ser = SchemaSerializer(core_schema.int_schema())
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        refused = int_ser.to_python(iter([1, 2]))
+    assert type(refused).__name__ == 'SerializationIterator'
+    assert len(caught) == 1
+
+    assert type(ser.to_python(range(3))).__name__ == 'range'
+    assert ser.to_python(range(3)) == range(3)
+
+    assert ser.to_python(iter([1, 2]), mode='json') == [1, 2]
+    assert ser.to_json(iter([1, 2])) == b'[1,2]'
+    assert to_jsonable_python(iter([1, 2])) == [1, 2]

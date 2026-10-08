@@ -1275,6 +1275,9 @@ static py::object map_negative_indices(const py::object& obj, py::ssize_t len) {
 struct SerializationIterator {
     py::object items;  // the wrapped iterator, also what its repr shows
     SerRef child;
+    // An iterator the *infer* walk was handed has no item serializer to keep -- the item
+    // is whatever the walk makes of it (infer.rs:266-271 hands it to AnySerializer).
+    bool infer_items = false;
     py::object include = py::none();
     py::object exclude = py::none();
     py::object context = py::none();
@@ -1302,6 +1305,18 @@ static py::object make_serialization_iterator(const py::object& value, const Ser
     out->by_alias = by_alias;
     out->exclude_unset = exclude_unset;
     out->exclude_defaults = exclude_defaults;
+    return py::cast(out);
+}
+
+// The infer walk's own answer for an iterator (infer.rs:264-271): the same lazy view, with
+// each item left to the walk rather than to a serializer node, and no index filter -- Rust
+// passes SchemaFilter::default() here.
+static py::object make_inferred_iterator(const py::object& value, bool exc_none, bool round_trip) {
+    auto out = std::make_shared<SerializationIterator>();
+    out->items = py::iter(value);
+    out->infer_items = true;
+    out->exc_none = exc_none;
+    out->round_trip = round_trip;
     return py::cast(out);
 }
 
@@ -4131,6 +4146,21 @@ private:
                 return deque_cls(temp);
             }
         } catch (const py::error_already_set&) { PyErr_Clear(); }
+        // Rust infer_to_python ObType::Generator (infer.rs:264-271): a python run does not
+        // consume the iterator it was handed, it hands the caller a lazy SerializationIterator
+        // that serializes each item as that item is pulled.  This is the answer for a value that
+        // is *itself* an iterator -- a range is not one, and a node of another type gets here too
+        // once it has warned about the value and fallen through to inference.  A json run has
+        // nowhere to put laziness, so its arm drains the iterator into a list like the other
+        // sequence arms above.  Being a known type, it is answered before the fallback is asked.
+        if (PyIter_Check(v.ptr())) {
+            if (!json_mode) return make_inferred_iterator(v, exc_none, round_trip);
+            py::list temp;
+            for (auto item : py::reinterpret_borrow<py::iterable>(v)) {
+                temp.append(serialize_any_value(py::reinterpret_borrow<py::object>(item), exc_none, round_trip, json_mode));
+            }
+            return std::move(temp);
+        }
         // Rust infer_to_python ObType::Fraction: the display string in both
         // Python and JSON mode, and a display that pyo3 makes safe to fail.
         if (py::isinstance(v, py_fraction_type())) return ser_display(v);
@@ -6942,6 +6972,9 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                 size_t idx = self.index++;
                 auto next = apply_ser_filter(py::int_(static_cast<long long>(idx)), self.include, self.exclude);
                 if (next.omit) continue;
+                if (self.infer_items)
+                    return SerNode::serialize_any_value(
+                        py::reinterpret_borrow<py::object>(item), self.exc_none, self.round_trip, false);
                 return self.child->to_python(
                     SerNode::check_item_type(self.child, py::reinterpret_borrow<py::object>(item)),
                     false, self.exc_none, self.round_trip, next.include, next.exclude, self.by_alias,
