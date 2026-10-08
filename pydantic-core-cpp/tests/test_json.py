@@ -1856,3 +1856,63 @@ def test_a_tuples_item_count_is_checked_against_its_declaration():
         var.to_json((1, 2, 3))
         var.to_json(())
     assert [str(w.message) for w in caught] == [], [str(w.message) for w in caught]
+
+
+def test_none_is_what_every_node_answers_to_a_none():
+    import warnings
+
+    def TP(*items):
+        return core_schema.tuple_positional_schema(list(items))
+
+    typed = [
+        core_schema.int_schema(),
+        core_schema.float_schema(),
+        core_schema.bool_schema(),
+        core_schema.str_schema(),
+        core_schema.bytes_schema(),
+        core_schema.date_schema(),
+        core_schema.decimal_schema(),
+        core_schema.uuid_schema(),
+        core_schema.list_schema(core_schema.int_schema()),
+        core_schema.dict_schema(core_schema.str_schema(), core_schema.int_schema()),
+        core_schema.set_schema(core_schema.int_schema()),
+        TP(core_schema.int_schema()),
+        core_schema.tuple_variable_schema(core_schema.int_schema()),
+        core_schema.nullable_schema(core_schema.int_schema()),
+        core_schema.union_schema([core_schema.int_schema(), core_schema.str_schema()]),
+        core_schema.any_schema(),
+        core_schema.none_schema(),
+    ]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        for sch in typed:
+            ser = SchemaSerializer(sch)
+            assert ser.to_json(None) == b'null', sch['type']
+            assert ser.to_python(None) is None, sch['type']
+    # Null is not a surprise: none of those nodes warns about it.
+    assert [str(w.message) for w in caught] == [], [str(w.message) for w in caught]
+
+    class Inner:
+        def __init__(self, x: int = 1):
+            self.x = x
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        model_ser = SchemaSerializer(
+            core_schema.model_schema(
+                Inner,
+                core_schema.typed_dict_schema({'x': core_schema.typed_dict_field(core_schema.int_schema())}),
+                root_model=False,
+            )
+        )
+        assert model_ser.to_json(None) == b'null'
+
+        # A None item inside a container is nulled where the container's item node is typed.
+        assert SchemaSerializer(core_schema.list_schema(core_schema.int_schema())).to_json([1, None]) == b'[1,null]'
+        assert SchemaSerializer(TP(core_schema.int_schema(), core_schema.str_schema())).to_json((1, None)) == b'[1,null]'
+        assert SchemaSerializer(core_schema.dict_schema(core_schema.str_schema(), core_schema.int_schema())).to_json({'a': None}) == b'{"a":null}'
+        assert SchemaSerializer(core_schema.list_schema(core_schema.str_schema())).to_python([None]) == [None]
+
+        # The key path is the one place None is not nulled -- it is stringified there.
+        assert SchemaSerializer(core_schema.dict_schema(core_schema.int_schema(), core_schema.str_schema())).to_json({None: 'v'}) == b'{"None":"v"}'
+        assert SchemaSerializer(core_schema.dict_schema(core_schema.int_schema(), core_schema.str_schema())).to_python({None: 'v'}) == {None: 'v'}

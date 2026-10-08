@@ -2008,6 +2008,14 @@ struct SerNode {
             } pop{&g, pair};
             return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
         }
+        // None is not a wrong-typed value, it is the null leaf every node answers to,
+        // at any depth and without a warning: int/list/tuple/model all answer None, and
+        // only the key path stringifies it.  Answering here rather than in each leaf
+        // also keeps the leaf forms (b'None', b'false', b'"None"', a cast RuntimeError,
+        // py::len on a NoneType) from being reached at all.
+        if (value.is_none()) {
+            return py::none();
+        }
         // Rust OnErr::Warn (serializers/mod.rs): a typed serializer whose input type
         // refuses the value leaves "Expected `X` ..." behind and the value goes
         // through inference, so it is never written in the node's own form.  While a
@@ -2693,6 +2701,9 @@ struct SerNode {
                 ~GuardPop() { --g->depth; g->active.erase(pair); }
             } pop{&g, pair};
             return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
+        }
+        if (value.is_none()) {
+            return "null";
         }
         // See the same rule in to_python: refuse the value, warn, write what
         // inference makes of it.  Handing a str to the int writer used to print it
