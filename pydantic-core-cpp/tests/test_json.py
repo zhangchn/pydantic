@@ -2736,3 +2736,58 @@ def test_a_lazy_view_reports_what_a_pull_registers():
         with pytest.raises(PydanticSerializationError, match='Pydantic serializer warnings'):
             list(view)
         assert view.index == 2
+
+
+def test_a_dict_without_keys_asks_its_keys_of_the_any_serializer():
+    import enum
+
+    class Colour(enum.Enum):
+        RED = 1
+
+    # A dict with no keys_schema builds the any serializer for its keys (dict.rs:42-44), so a key
+    # of any type is taken as it arrives and costs no warning, and the node is named after that
+    # serializer -- dict[any, any] (dict.rs:57-62 with any.rs get_name), not dict[str, any].
+    untyped = SchemaSerializer(core_schema.dict_schema())
+    keys = [
+        1, 1.5, 'k', True, None, (1, 2), b'xy', frozenset((1, 2)),
+        datetime.datetime(2020, 1, 2, 3, 4, 5),
+        uuid.UUID('12345678-1234-5678-1234-567812345678'),
+        decimal.Decimal('1.5'), Colour.RED,
+    ]
+    for key in keys:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            assert untyped.to_python({key: 'v'}) == {key: 'v'}
+            assert [str(w.message) for w in caught] == [], key
+
+    # A JSON run asks the same serializer for the key's text, so each of these is the form the
+    # infer walk writes for it -- and a frozenset is refused outright, as no key can be one.
+    text_form = [
+        (1, b'{"1":"v"}'), (1.5, b'{"1.5":"v"}'), ('k', b'{"k":"v"}'),
+        (True, b'{"true":"v"}'), (None, b'{"None":"v"}'), ((1, 2), b'{"1,2":"v"}'),
+        (b'xy', b'{"xy":"v"}'), (datetime.datetime(2020, 1, 2, 3, 4, 5), b'{"2020-01-02T03:04:05":"v"}'),
+        (uuid.UUID('12345678-1234-5678-1234-567812345678'), b'{"12345678-1234-5678-1234-567812345678":"v"}'),
+        (decimal.Decimal('1.5'), b'{"1.5":"v"}'), (Colour.RED, b'{"1":"v"}'),
+    ]
+    for key, expected in text_form:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            assert untyped.to_json({key: 'v'}) == expected, key
+            assert [str(w.message) for w in caught] == [], key
+    with pytest.raises(PydanticSerializationError, match='`frozenset` not valid as object key'):
+        untyped.to_json({frozenset((1, 2)): 'v'})
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        assert untyped.to_python(5) == 5
+        assert 'Expected `dict[any, any]`' in str(caught[0].message), str(caught[0].message)
+
+    # A keys_schema of str is a serializer of its own again: it keeps its name in the node and
+    # its refusal of anything that is not text.
+    str_keys = SchemaSerializer(core_schema.dict_schema(core_schema.str_schema()))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        assert str_keys.to_python({1: 'v'}) == {1: 'v'}
+        messages = [str(w.message) for w in caught]
+        assert len(messages) == 1, messages
+        assert 'Expected `str`' in messages[0], messages[0]

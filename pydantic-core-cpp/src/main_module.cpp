@@ -5355,7 +5355,12 @@ static SerRef build_ser_impl(const py::dict& schema,
         auto ks = [&](const char* k) -> SerRef { try { return build_ser(schema[k].cast<py::dict>(), defs, memo); } catch (...) { return nullptr; } };
         auto key_ser = ks("keys_schema");
         auto val_ser = ks("values_schema");
-        if (!key_ser) { key_ser = std::make_shared<SerNode>(); key_ser->type = "str"; }
+        // A dict with no keys_schema asks its keys of the any serializer, not of a str one
+        // (dict.rs:42-44 builds AnySerializer for the missing arm): the node is named
+        // dict[any, any] after it (dict.rs:57-62, any.rs get_name), a non-str key costs no
+        // warning, and a key of any type takes the infer walk's form -- which is what the
+        // "str" node was already falling back to, only after refusing first.
+        if (!key_ser) { key_ser = std::make_shared<SerNode>(); key_ser->type = "any"; }
         if (!val_ser) { val_ser = std::make_shared<SerNode>(); val_ser->type = "any"; }
         node->children.push_back(key_ser);
         node->children.push_back(val_ser);
