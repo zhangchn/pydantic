@@ -1,4 +1,3 @@
-import collections
 import dataclasses
 import datetime
 import decimal
@@ -2440,7 +2439,7 @@ def test_a_json_run_answers_the_filter_for_a_list_a_deque_and_a_tuple():
     # their own length and so fold an index key by it.
     cases = (
         (SchemaSerializer(core_schema.list_schema(core_schema.int_schema())), [10, 20, 30]),
-        (SchemaSerializer(core_schema.deque_schema(core_schema.int_schema())), collections.deque([10, 20, 30])),
+        (SchemaSerializer(core_schema.deque_schema(core_schema.int_schema())), deque([10, 20, 30])),
         (SchemaSerializer(core_schema.tuple_variable_schema(core_schema.int_schema())), (10, 20, 30)),
     )
     for ser, value in cases:
@@ -2459,3 +2458,21 @@ def test_a_json_run_answers_the_filter_for_a_list_a_deque_and_a_tuple():
     nested = [{'x': 1, 'y': 2}, {'x': 3, 'y': 4}]
     assert dicts.to_json(nested, include={0: {'x': True}}) == b'[{"x":1}]'
     assert dicts.to_json(nested, exclude={0: {'y': True}}) == b'[{"x":1},{"x":3,"y":4}]'
+
+
+def test_a_filters_refusal_is_a_python_error_so_a_json_run_can_rename_it():
+    # A filter that is neither a set nor a dict is refused from wherever a filter is consulted, as
+    # a Python error.  That is what lets a json run rename it at its serde boundary
+    # (`Error serializing to JSON: TypeError: ...`) while a python run, which has no such boundary,
+    # reports the TypeError itself -- so the refusal cannot be raised as an error the boundary
+    # never gets to see.
+    ser = SchemaSerializer(core_schema.list_schema(core_schema.int_schema()))
+    for argument in ('include', 'exclude'):
+        refusal = f'`{argument}` argument must be a set or dict.'
+        for kwargs in ({argument: True}, {argument: 1}):
+            with pytest.raises(TypeError, match=rf'`{argument}` argument must be a set or dict\.'):
+                ser.to_python([1, 2], **kwargs)
+            with pytest.raises(TypeError, match=rf'`{argument}` argument must be a set or dict\.'):
+                ser.to_python([1, 2], mode='json', **kwargs)
+            with pytest.raises(PydanticSerializationError, match=f'Error serializing to JSON: TypeError: {refusal}'):
+                ser.to_json([1, 2], **kwargs)

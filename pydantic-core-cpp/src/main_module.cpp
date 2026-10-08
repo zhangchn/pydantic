@@ -1345,6 +1345,17 @@ static void ser_check_index_key(const py::object& index_key) {
     throw py::error_already_set();
 }
 
+// A filter that is neither a set nor a dict is refused.  This is a Python error rather than
+// pybind's builtin_exception -- which is a std::runtime_error that only becomes a TypeError in
+// pybind's translator, past the JSON boundary -- because Rust raises it as a PyErr from wherever a
+// filter is consulted, so a json run renames it at errors.rs:71 and reports
+// `Error serializing to JSON: TypeError: ...` while a python run reports the bare TypeError.
+static void ser_filter_refusal(const char* argument) {
+    std::string message = std::string("`") + argument + "` argument must be a set or dict.";
+    PyErr_SetString(PyExc_TypeError, message.c_str());
+    throw py::error_already_set();
+}
+
 static SerFilterResult apply_ser_filter(const py::object& key, const py::object& include,
                                         const py::object& exclude) {
     SerFilterResult out;
@@ -1376,7 +1387,7 @@ static SerFilterResult apply_ser_filter(const py::object& key, const py::object&
                 return out;
             }
         } else {
-            throw py::type_error("`exclude` argument must be a set or dict.");
+            ser_filter_refusal("exclude");
         }
     }
 
@@ -1424,7 +1435,7 @@ static SerFilterResult apply_ser_filter(const py::object& key, const py::object&
             out.omit = true;
             return out;
         }
-        throw py::type_error("`include` argument must be a set or dict.");
+        ser_filter_refusal("include");
     }
 
     // No include filter: keep the item, propagate the exclude sub-filter
