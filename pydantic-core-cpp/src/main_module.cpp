@@ -5582,6 +5582,18 @@ static SerRef build_ser_impl(const py::dict& schema,
     }
 
     if (type == "function-plain" || type == "function-after" || type == "function-before" || type == "function-wrap") {
+        // A "function-plain" that arrives as schema.type rather than
+        // schema.serialization.type names no serializer at all: Rust's
+        // FunctionPlainSerializerBuilder::build is AnySerializer::build and nothing else
+        // (function.rs:65-76), because the plain-function meaning belongs to the
+        // serialization slot -- shared.rs:181-191 is where such a node is really built.
+        // So inference answers this value, under the run's pair, whatever the function or
+        // its when_used says; the port kept an inert function node here and its python arm
+        // handed the value back exactly as it came in, filtered or not.
+        if (type == "function-plain" && !has_ser_dict) {
+            node->type = "any";
+            return node;
+        }
         // Without a serialization override, function-before/after/wrap are
         // validation-only wrappers: serialize the inner schema directly,
         // matching Rust's FunctionBefore/After/WrapSerializerBuilder (which

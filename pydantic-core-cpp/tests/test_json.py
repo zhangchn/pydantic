@@ -3170,3 +3170,55 @@ def test_the_untyped_walk_hands_its_filter_to_a_value_that_brings_its_own_serial
     # and the model's own serializer, asked about a value it does not describe, keeps the pair
     # for the walk it falls back to
     assert Model.__pydantic_serializer__.to_json([m], include={0: {'a': True}}) == b'[{"a":1}]'
+
+
+def test_a_plain_serializer_function_written_as_the_schema_type_names_no_serializer():
+    # A plain-function schema means something in the serialization slot and nowhere else:
+    # CombinedSerializer::_build builds that node only from schema.serialization
+    # (shared.rs:181-191), and a "function-plain" that arrives as schema.type is
+    # FunctionPlainSerializerBuilder, whose build is AnySerializer::build and nothing else
+    # (function.rs:65-76).  So the function is never called and inference answers the value --
+    # under the run's pair, like any other inferred value.  The port kept an inert function
+    # node here, whose python arm handed the value back exactly as it came in.
+    called = []
+
+    def plain_fn(v):
+        called.append(v)
+        return 'CALLED'
+
+    src = {'a': 1, 'b': 2}
+    ser = SchemaSerializer({'type': 'function-plain', 'function': plain_fn})
+    assert ser.to_python(src) == {'a': 1, 'b': 2}
+    assert ser.to_python(src, include={'a': True}) == {'a': 1}
+    assert ser.to_python(src, exclude={'a': True}) == {'b': 2}
+    assert ser.to_json(src, include={'a': True}) == b'{"a":1}'
+    assert called == []
+    # when_used belongs to the node that was never built, so it changes nothing
+    wu = SchemaSerializer({'type': 'function-plain', 'function': plain_fn, 'when_used': 'json'})
+    assert wu.to_python(src, include={'a': True}) == {'a': 1}
+    assert wu.to_json(src, include={'a': True}) == b'{"a":1}'
+    assert called == []
+    # under a container the item is still asked about by position, and a value that needs no
+    # answer answers for itself
+    ln = SchemaSerializer(core_schema.list_schema({'type': 'function-plain', 'function': plain_fn}))
+    assert ln.to_python([src], include={0: {'a': True}}) == [{'a': 1}]
+    assert ln.to_json([src], include={0: {'a': True}}) == b'[{"a":1}]'
+    assert called == []
+    assert ser.to_python(b'ab') == b'ab'
+    assert ser.to_json(b'ab') == b'"ab"'
+    assert ser.to_json(float('nan')) == b'null'
+    # The same function in the serialization slot is a serializer, and runs: its own answer is
+    # what the run then filters -- or rather, does not, since a function ends the trip (the
+    # empty pair of function.rs:220-229).
+    ran = []
+
+    def plain_ser(v):
+        ran.append(v)
+        return {'x': 10, 'y': 20}
+
+    over = SchemaSerializer(core_schema.dict_schema(core_schema.str_schema(), core_schema.int_schema(),
+                                                    serialization=core_schema.plain_serializer_function_ser_schema(plain_ser)))
+    assert over.to_python(src) == {'x': 10, 'y': 20}
+    assert over.to_python(src, include={'x': True}) == {'x': 10, 'y': 20}
+    assert over.to_json(src, include={'y': True}) == b'{"x":10,"y":20}'
+    assert len(ran) == 3
