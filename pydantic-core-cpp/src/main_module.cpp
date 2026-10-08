@@ -757,6 +757,60 @@ static std::string rust_f64_display(double value) {
     return neg ? "-" + out : out;
 }
 
+// serde_json writes a float through ryu's "pretty" form, and that is what Rust's JSON
+// output carries: the shortest digits that round-trip, written as plain decimal while the
+// leading digit sits between 1e-5 and 1e16 and as d[.ddd]e+NN outside it, with an unpadded
+// exponent and a ".0" on a value with no fraction.  Python's repr shares the digits but not
+// the thresholds or the padding ("1e-05" where the JSON is 0.00001, "1e-07" where it is
+// 1e-7), and Rust's own Display is plain-only ("10000000000000000" for 1e16), so neither is
+// reusable here.  std::to_string is worse than both: six decimals, so a typed float node
+// turned 3.14159265358979 into 3.141593 and 1e-7 into 0.0.
+static std::string ser_json_f64(double value) {
+    if (std::isnan(value)) return "NaN";
+    if (std::isinf(value)) return value < 0 ? "-Infinity" : "Infinity";
+    const bool neg = std::signbit(value) != 0;
+    std::string sign = neg ? "-" : "";
+    if (value == 0.0) return sign + "0.0";
+
+    // %e always writes one leading digit and an exponent, so the digits and their place
+    // can be read off without guessing which notation %g settled on.
+    const double magnitude = neg ? -value : value;
+    char buf[64];
+    for (int precision = 0; precision <= 16; ++precision) {
+        std::snprintf(buf, sizeof(buf), "%.*e", precision, magnitude);
+        if (std::strtod(buf, nullptr) == magnitude) break;
+    }
+    std::string text(buf);
+    size_t epos = text.find('e');
+    std::string mantissa = text.substr(0, epos);
+    const int e10 = std::stoi(text.substr(epos + 1));
+    std::string digits;
+    for (char ch : mantissa) {
+        if (ch != '.') digits += ch;
+    }
+    while (digits.size() > 1 && digits.back() == '0') digits.pop_back();
+
+    if (e10 >= -5 && e10 <= 15) {
+        std::string out;
+        if (e10 >= 0) {
+            size_t whole = static_cast<size_t>(e10) + 1;
+            out = digits.substr(0, std::min(whole, digits.size()));
+            if (whole > digits.size()) out += std::string(whole - digits.size(), '0');
+            if (whole < digits.size()) out += "." + digits.substr(whole);
+            else out += ".0";
+        } else {
+            out = "0." + std::string(static_cast<size_t>(-e10) - 1, '0') + digits;
+        }
+        return sign + out;
+    }
+    std::string out = digits.substr(0, 1);
+    if (digits.size() > 1) out += "." + digits.substr(1);
+    out += 'e';
+    out += e10 >= 0 ? "+" : "-";
+    out += std::to_string(e10 >= 0 ? e10 : -e10);
+    return sign + out;
+}
+
 // Rust serializers::type_serializers::complex::complex_to_str: the imaginary
 // part comes first, and the real part is prefixed only when it is non-zero.
 static std::string complex_to_str_rust(double re, double im) {
@@ -2794,19 +2848,7 @@ struct SerNode {
                 if (inf_nan_mode == "strings") return d > 0 ? "\"Infinity\"" : "\"-Infinity\"";
                 return d > 0 ? "Infinity" : "-Infinity";
             }
-            // Strip trailing zeros: 10.2 -> "10.2", not "10.200000"
-            std::string s = std::to_string(d);
-            auto dot = s.find('.');
-            if (dot != std::string::npos) {
-                auto last = s.find_last_not_of('0');
-                if (last > dot) {
-                    s.erase(last + 1);
-                } else {
-                    // Only zeros after decimal point, keep one trailing zero for "10.0"
-                    s.erase(dot + 2);
-                }
-            }
-            return s;
+            return ser_json_f64(d);
         }
         if (type == "str" || type == "string" || type == "str-constrained") {
             return json_escape(value.cast<std::string>(), ensure_ascii);
@@ -3740,9 +3782,7 @@ private:
                     return d > 0 ? "\"Infinity\"" : "\"-Infinity\"";
                 }
             }
-            if (std::isnan(d)) return "NaN";
-            if (std::isinf(d)) return d > 0 ? "Infinity" : "-Infinity";
-            return py::str(py::repr(value)).cast<std::string>();
+            return ser_json_f64(d);
         }
         if (py::isinstance<py::str>(value)) return json_escape(value.cast<std::string>(), ensure_ascii);
         if (PyComplex_Check(value.ptr())) {

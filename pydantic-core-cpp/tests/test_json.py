@@ -2024,3 +2024,40 @@ def test_a_node_with_a_value_type_of_its_own_says_so_about_a_foreign_one():
         (core_schema.generator_schema(core_schema.int_schema()), iter([1, 2]), b'[1,2]'),
     ]:
         assert warned(schema, value) == (None, jbytes), value
+
+
+def test_a_float_is_written_as_the_shortest_text_that_reads_back():
+    # serde_json writes a float through ryu: the shortest digits that round-trip, in plain
+    # decimal while the leading digit sits between 1e-5 and 1e16, in exponential form outside
+    # it with an exponent that is neither padded nor signed for the negative case, and with a
+    # ".0" on a value that has no fraction.  Six-decimal text was the alternative here, which
+    # is a different number: 3.14159265358979 came out as 3.141593 and 1e-7 as 0.0.
+    float_schema = core_schema.float_schema()
+    typed = SchemaSerializer(float_schema)
+    any_node = SchemaSerializer(core_schema.any_schema())
+    for value, text in [
+        (0.0, b'0.0'),
+        (-0.0, b'-0.0'),
+        (1.0, b'1.0'),
+        (1.5, b'1.5'),
+        (3.14159265358979, b'3.14159265358979'),
+        (123456.789, b'123456.789'),
+        (0.0001, b'0.0001'),
+        (0.00001, b'0.00001'),
+        (1e-6, b'1e-6'),
+        (1e-7, b'1e-7'),
+        (1e15, b'1000000000000000.0'),
+        (1e16, b'1e+16'),
+        (1e300, b'1e+300'),
+    ]:
+        assert typed.to_json(value) == text, value
+        assert any_node.to_json(value) == text, value
+        assert typed.to_python(value) == value, value
+
+    # An int at a float node is asked for its number, so a too-big one leaves as the double it
+    # becomes -- digits beyond the double are gone, and no ".0" tail stands in for them.
+    assert typed.to_json(2 ** 70) == b'1.1805916207174113e+21'
+
+    # A non-finite float is still the mode's business, not the number form's: the entry point's
+    # own answer for these is b'null', mode config notwithstanding.
+    assert typed.to_json(math.inf) == b'null'
