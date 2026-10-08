@@ -3925,6 +3925,17 @@ private:
             }
             return inferred();
         }
+        // A key the node's own type will not take is refused before it is asked for text:
+        // the refusal is what gets reported and the text is the infer walk's, exactly as
+        // warn_fallback_py then infer_json_key does (string.rs:58-70, simple.rs:140-152) and
+        // as the value walks do at their top.  While a union checks its choices the refusal
+        // stays an error instead, so that the next choice is tried.
+        if (!value_matches_type(key)) {
+            if (g_ser_check != 0)
+                throw std::runtime_error("Unexpected value for serializer " + type_name_for_warning());
+            ser_warn_unexpected_value("", type_name_for_warning(), key);
+            return inferred();
+        }
         PyObject* p = key.ptr();
         // A str key is the text already (string.rs:58-70).
         if (t == "str" || t == "string" || t == "str-constrained")
@@ -4998,7 +5009,9 @@ std::string SerNode::type_name_for_warning() const {
         std::string valn = children.size() > 1 ? type_name_for_warning(children[1]) : "any";
         return "dict[" + keyn + ", " + valn + "]";
     }
-    if (t == "none" || t == "is-none") return "None";
+    // simple.rs:25-39 keeps NoneSerializer's name as its EXPECTED_TYPE, so a bare node says
+    // Expected `none` and a container composes list[none], dict[none, any], tuple[none].
+    if (t == "none" || t == "is-none") return "none";
     if (t == "any") return "any";
     return t;
 }
@@ -5028,6 +5041,9 @@ bool SerNode::value_matches_type(const py::object& v) const {
     if (v.is_none()) return true;
     const std::string& t = type;
     if (t == "any" || t == "is-instance" || t == "is-subclass") return true;
+    // NoneSerializer answers its own type exactly (simple.rs:44-54, :56-68): a subclass of
+    // None cannot exist, so anything else is a mismatch it warns about and then infers.
+    if (t == "none" || t == "is-none") return false;
     if (t == "int" || t == "int-constrained") return py::isinstance<py::int_>(v);   // bool is an int subclass
     if (t == "float" || t == "float-constrained") return py::isinstance<py::float_>(v) || py::isinstance<py::int_>(v);
     if (t == "bool") return py::isinstance<py::bool_>(v);

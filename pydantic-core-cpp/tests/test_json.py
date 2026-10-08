@@ -2791,3 +2791,88 @@ def test_a_dict_without_keys_asks_its_keys_of_the_any_serializer():
         messages = [str(w.message) for w in caught]
         assert len(messages) == 1, messages
         assert 'Expected `str`' in messages[0], messages[0]
+
+
+def test_a_node_that_refuses_its_value_reports_the_refusal_in_every_walk():
+    # A typed serializer that is handed the wrong type warns and then writes what inference
+    # makes of the value (simple.rs:44-54 warn_fallback_py + infer_to_python).  NoneSerializer
+    # is one of those -- a subclass of None cannot exist, so anything but None is a mismatch --
+    # and its name is its own type spelled as Rust spells it, which a container composes into
+    # list[none] and dict[none, any].  A key is asked the same question before it is asked for
+    # its text (string.rs:58-70, simple.rs:140-152), so a JSON run reports the refusal too.
+    none_ser = SchemaSerializer(core_schema.none_schema())
+    for value, expected_python, expected_json in (('a', 'a', b'"a"'), (5, 5, b'5')):
+        for run, expected in ((none_ser.to_python, expected_python), (none_ser.to_json, expected_json)):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                assert run(value) == expected
+                messages = [str(w.message) for w in caught]
+                assert len(messages) == 1, messages
+                assert 'Expected `none`' in messages[0], messages[0]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        assert none_ser.to_python(None) is None
+        assert none_ser.to_json(None) == b'null'
+        assert [str(w.message) for w in caught] == []
+
+    # The name is the type's own, so every container that composes one says none.
+    named = (
+        (core_schema.list_schema(core_schema.none_schema()), 5, 'list[none]'),
+        (core_schema.set_schema(core_schema.none_schema()), 5, 'set[none]'),
+        (core_schema.tuple_schema([core_schema.none_schema()]), 5, 'tuple[none]'),
+        (core_schema.dict_schema(core_schema.none_schema()), 5, 'dict[none, any]'),
+        (core_schema.dict_schema(core_schema.str_schema(), core_schema.none_schema()), 5,
+         'dict[str, none]'),
+        (core_schema.nullable_schema(core_schema.none_schema()), 5, 'none'),
+    )
+    for schema, value, name in named:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            assert SchemaSerializer(schema).to_python(value) == value
+            messages = [str(w.message) for w in caught]
+            assert len(messages) == 1, messages
+            assert 'Expected `%s`' % name in messages[0], messages[0]
+
+    # An item position asks the same question of each item, and a union round does not
+    # report at all -- the choice that takes the value answers for it.
+    list_of_none = SchemaSerializer(core_schema.list_schema(core_schema.none_schema()))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        assert list_of_none.to_python(['a']) == ['a']
+        messages = [str(w.message) for w in caught]
+        assert len(messages) == 1 and 'Expected `none`' in messages[0], messages
+    union_ser = SchemaSerializer(
+        core_schema.union_schema([core_schema.none_schema(), core_schema.int_schema()]))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        assert union_ser.to_python(5) == 5
+        assert [str(w.message) for w in caught] == []
+
+    # A key is refused before it is asked for its text, in a JSON run as in a python one.
+    dict_of_none_keys = SchemaSerializer(core_schema.dict_schema(core_schema.none_schema()))
+    for run, expected in ((dict_of_none_keys.to_python, {'k': 'v'}),
+                          (dict_of_none_keys.to_json, b'{"k":"v"}')):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            assert run({'k': 'v'}) == expected
+            messages = [str(w.message) for w in caught]
+            assert len(messages) == 1, messages
+            assert 'Expected `none`' in messages[0], messages[0]
+
+    # A key of a type the key serializer will not take costs its text no change and the run
+    # its warning: the int key of a str-keyed dict is written as inference writes it.
+    str_keys = SchemaSerializer(core_schema.dict_schema(core_schema.str_schema()))
+    for key, expected_json in ((1, b'{"1":"v"}'), ((1, 2), b'{"1,2":"v"}'),
+                               (datetime.datetime(2020, 1, 2, 3, 4, 5), b'{"2020-01-02T03:04:05":"v"}')):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            assert str_keys.to_json({key: 'v'}) == expected_json, key
+            messages = [str(w.message) for w in caught]
+            assert len(messages) == 1, messages
+            assert 'Expected `str`' in messages[0], messages[0]
+    # None is the one value no node refuses, so a None key stays silent in both walks.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        assert str_keys.to_json({None: 'v'}) == b'{"None":"v"}'
+        assert str_keys.to_python({None: 'v'}) == {None: 'v'}
+        assert [str(w.message) for w in caught] == []
