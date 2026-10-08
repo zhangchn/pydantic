@@ -940,14 +940,37 @@ static bool json_infer_leaf(const py::object& value, py::object& out) {
                              g_ser_extra.temporal_mode, out);
 }
 
+// A `bytes` and a `bytearray` carry the same buffer to a json run: Rust names them two ObTypes
+// (Bytes, Bytearray) but gives the second one its own arm whose only extra step is reading the
+// array's contents (infer.rs:127-138 for a python value, :415-423 for json text, :562 for a key),
+// which then goes through `bytes_mode` exactly like the first.  Asking for a `bytes` instance
+// here instead let a bytearray walk out of the json run untouched.
+static bool ser_bytes_buffer(const py::object& value, std::string& out) {
+    PyObject* p = value.ptr();
+    char* data = nullptr;
+    Py_ssize_t len = 0;
+    if (PyBytes_Check(p)) {
+        data = PyBytes_AS_STRING(p);
+        len = PyBytes_GET_SIZE(p);
+    } else if (PyByteArray_Check(p)) {
+        data = PyByteArray_AS_STRING(p);
+        len = PyByteArray_GET_SIZE(p);
+    } else {
+        return false;
+    }
+    out.assign(data ? data : "", data ? (size_t)len : 0);
+    return true;
+}
+
 static bool json_leaf_convert(const std::string& type, const py::object& value,
                               const std::string& ser_json_bytes,
                               const std::string& ser_json_timedelta,
                               const std::string& ser_json_temporal,
                               py::object& out) {
     try {
-        if (type == "bytes" && py::isinstance<py::bytes>(value)) {
-            std::string b = value.cast<std::string>();
+        if (type == "bytes") {
+            std::string b;
+            if (!ser_bytes_buffer(value, b)) return false;
             if (ser_json_bytes == "base64") { out = py::str(b64_encode_string(b)); return true; }
             if (ser_json_bytes == "hex") {
                 static const char* hex_chars = "0123456789abcdef";
@@ -961,7 +984,7 @@ static bool json_leaf_convert(const std::string& type, const py::object& value,
             }
             // utf8: decodes UTF-8; invalid input raises and the caller keeps
             // handling the value (or reports an error).
-            out = py::str(value.cast<py::bytes>().operator std::string());
+            out = py::str(b);
             return true;
         }
         if (type == "decimal" || type == "uuid" || type == "ipaddress" ||
@@ -4196,8 +4219,9 @@ private:
                                                    PyComplex_ImagAsDouble(value.ptr())),
                                 ensure_ascii);
         }
-        if (py::isinstance<py::bytes>(value)) {
-            std::string b = value.cast<std::string>();
+        if (PyBytes_Check(value.ptr()) || PyByteArray_Check(value.ptr())) {
+            std::string b;
+            ser_bytes_buffer(value, b);
             if (g_ser_extra.bytes_mode == "hex") return json_escape(bytes_hex_encode(b), ensure_ascii);
             if (g_ser_extra.bytes_mode == "base64") return json_escape(b64_encode_string(b), ensure_ascii);
             // utf8 is a strict decode, not a best effort: bytes_to_string fails rather
@@ -4210,16 +4234,6 @@ private:
         // datetime or UUID reaches its own serializer; without these branches an
         // Any-typed value fell through to repr() and JSON got
         // "datetime.datetime(2024, 1, 1)" instead of "2024-01-01T00:00:00".
-        if (py::isinstance<py::bytearray>(value)) {
-            // ObType::Bytearray goes through the same bytes mode as bytes.
-            if (PyObject* b = PyBytes_FromObject(value.ptr())) {
-                py::object conv;
-                bool ok = json_infer_leaf(py::reinterpret_steal<py::object>(b), conv);
-                if (ok) return json_escape_converted(conv, ensure_ascii);
-            } else {
-                PyErr_Clear();
-            }
-        }
         {
             py::object conv;
             if (json_infer_leaf(value, conv)) return json_escape_converted(conv, ensure_ascii);

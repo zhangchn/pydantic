@@ -3751,6 +3751,47 @@ def test_a_value_the_infer_walk_has_an_arm_for_never_meets_the_fallback():
     assert to_jsonable_python(range(3), fallback=as_decimal) == '2.5'
 
 
+def test_a_bytearray_carries_the_same_buffer_to_a_json_run_as_the_same_bytes():
+    # Rust names a bytearray its own ObType, but the arm it gives it does one extra thing --
+    # read the array's contents -- and then runs the bytes_mode conversion the bytes arm runs
+    # (infer.rs:127-138, :415-423, :562).  Asking for a `bytes` instance at the leaf instead
+    # let a bytearray walk out of a json run untouched, in every shape it sat in.
+    ba = bytearray(b"s")
+    s = SchemaSerializer(core_schema.any_schema())
+    assert s.to_python(ba) == ba  # a python run keeps the array itself
+    assert s.to_python(ba, mode="json") == "s"
+    assert s.to_python({"k": ba}, mode="json") == {"k": "s"}
+    assert s.to_python([ba], mode="json") == ["s"]
+    assert s.to_python((ba,), mode="json") == ["s"]
+    assert s.to_json(ba) == b'"s"'
+    assert to_jsonable_python(ba) == "s"
+
+    sub = type("BASub", (bytearray,), {})(b"t")
+    assert s.to_python(sub, mode="json") == "t"
+    assert s.to_python(bytearray(), mode="json") == ""
+    assert s.to_python(bytearray(b"a\x00b"), mode="json") == "a\x00b"
+    assert s.to_json(bytearray(b"a\x00b")) == b'"a\u0000b"'
+
+    for mode, answer in (("base64", "cw=="), ("hex", "73")):
+        cfg = SchemaSerializer(core_schema.any_schema(), config=CoreConfig(ser_json_bytes=mode))
+        assert cfg.to_python(ba) == ba
+        assert cfg.to_python(ba, mode="json") == answer
+        assert cfg.to_json(ba) == ('"%s"' % answer).encode()
+        assert cfg.to_python([ba], mode="json") == [answer]
+        # neither of those modes decodes, so neither meets a utf8 refusal
+        raw = bytearray(b"\xff\xfe")
+        assert cfg.to_json(raw) == ('"%s"' % ("__4=" if mode == "base64" else "fffe")).encode()
+
+    # a typed bytes node reads the array's buffer the same way
+    b = SchemaSerializer(core_schema.bytes_schema(), config=CoreConfig(ser_json_bytes="base64"))
+    assert b.to_python(ba) == ba
+    assert b.to_python(ba, mode="json") == "cw=="
+    assert b.to_json(ba) == b'"cw=="'
+    lb = SchemaSerializer(core_schema.list_schema(core_schema.bytes_schema()))
+    assert lb.to_python([ba], mode="json") == ["s"]
+    assert lb.to_json([ba]) == b'["s"]'
+
+
 def test_the_serializer_methods_refuse_keywords_they_do_not_declare():
     # pyo3 parses the signature itself, so an undeclared keyword dies with CPython's own
     # message naming the qualname'd function, and the first unexpected one in call order is
