@@ -3222,3 +3222,57 @@ def test_a_plain_serializer_function_written_as_the_schema_type_names_no_seriali
     assert over.to_python(src, include={'x': True}) == {'x': 10, 'y': 20}
     assert over.to_json(src, include={'y': True}) == b'{"x":10,"y":20}'
     assert len(ran) == 3
+
+
+def test_a_map_key_nested_past_the_value_walks_bound_is_still_walked():
+    # Rust's recursion guard sits on the values the infer walk opens (infer.rs:52-67,
+    # recursion_guard.rs:32-42); a map key's own nesting is walked unguarded, so the reference
+    # build keeps answering until the process runs out of C stack -- to_json over a nested-tuple
+    # key prints b'{"leaf":1}' 20000 tuples deep and dies at 50000.  The port counted key frames
+    # on the value walk's stack, so a key 254 deep was refused as a circular reference there while
+    # the reference build printed the answer.  The key walk now has a bound of its own, set from
+    # what the C stack survives rather than from the value rule.
+    def nest(d, leaf='leaf'):
+        k = leaf
+        for _ in range(d):
+            k = (k,)
+        return k
+
+    def answered(fn):
+        try:
+            return ('ok', fn())
+        except BaseException as e:
+            return (type(e).__name__, str(e))
+
+    ser = SchemaSerializer(core_schema.any_schema())
+    typed = SchemaSerializer(core_schema.dict_schema(core_schema.any_schema(), core_schema.any_schema()))
+    for d in (1, 2, 253, 254, 255, 300, 1000):
+        assert ser.to_json({nest(d): 1}) == b'{"leaf":1}'
+        assert ser.to_python({nest(d): 1}, mode='json') == {'leaf': 1}
+        assert typed.to_json({nest(d): 1}) == b'{"leaf":1}'
+    # a python run hands the key back as it came in, however deep it is
+    assert ser.to_python({nest(300): 1}) == {nest(300): 1}
+    # the two budgets are separate: a key nested past the value walk's bound leaves that bound
+    # untouched for the value beside it, and a deep value leaves the key walk's frames alone
+    def deep_list(n):
+        v = 1
+        for _ in range(n):
+            v = [v]
+        return v
+
+    assert ser.to_json({nest(250): {nest(3): 1}}) == b'{"leaf":{"leaf":1}}'
+    assert ser.to_json({nest(1000): deep_list(250)}) == b'{"leaf":' + b'[' * 250 + b'1' + b']' * 250 + b'}'
+    assert ser.to_json({'a': {'b': {nest(1000): 1}}}) == b'{"a":{"b":{"leaf":1}}}'
+    # the bound only refuses, it never mis-encodes: keys that share a leaf print one after the
+    # other, and a key whose leaf is not a string is still turned into one
+    assert ser.to_json({nest(300): 1, nest(2): 2, 'plain': 3}) == b'{"leaf":1,"leaf":2,"plain":3}'
+    assert ser.to_json({nest(400, 7): 1}) == b'{"7":1}'
+    assert answered(lambda: ser.to_json({nest(20000): 1})) == (
+        'PydanticSerializationError',
+        'Error serializing to JSON: ValueError: Circular reference detected (depth exceeded)')
+    # values keep the borrowed 255 frames, refused exactly where the reference build refuses them
+    assert ser.to_json(deep_list(254)).count(b'[') == 254
+    with pytest.raises(PydanticSerializationError, match=r'Circular reference detected \(depth exceeded\)'):
+        ser.to_json(deep_list(255))
+    with pytest.raises(ValueError, match=r'Circular reference detected \(depth exceeded\)'):
+        ser.to_python(deep_list(255), mode='json')

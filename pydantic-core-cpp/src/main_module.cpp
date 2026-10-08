@@ -233,6 +233,21 @@ static thread_local int g_trampoline_depth = 0;
 // trampoline is a serializer node (polymorphism_trampoline.rs) and infer.rs:662 only
 // swaps the config -- so exactly one boundary names the failure.  Nothing inside such a
 // call may add a JSON wrapper or a class name; that is the outermost run's job.
+
+// How deep a map key's own nesting may be walked before the run is refused rather than
+// continued.  Not a rule copied from Rust -- Rust's key path carries no RecursionGuard, it just
+// runs until the process does: `to_json` over a nested-tuple key answers `{"leaf":1}` 20000
+// tuples deep on the reference build and segfaults at 50000.  The heaviest key path this module
+// walks is the one that invents a fresh key at every step -- a fallback handed back another
+// unknown, which test_json_key_fallback_termination exercises -- and here it reaches 49750 steps
+// before the stack gives out, on a main thread and on a default threading.Thread alike.  The
+// bound sits well under that cliff, so such a run ends with an error rather than with the
+// interpreter, and far above the nesting of any key a serializer is asked about.  The bound it
+// replaced was the value walk's 255, borrowed from Rust's RecursionGuard -- a rule about values
+// -- so a key nested past 253 was refused as a circular reference while the reference build
+// printed the answer.
+static constexpr int SER_INFER_KEY_DEPTH_LIMIT = 10000;
+
 static thread_local int g_ser_json_nested = 0;
 
 struct SerNestedCall {
@@ -3684,6 +3699,17 @@ private:
         return stack;
     }
 
+    // A map key is asked what it is written as, and Rust's key path carries no RecursionGuard
+    // at all: neither a repeat nor a depth is refused there, and `to_json` over a 20000-deep
+    // nested tuple key answers `{{"leaf":1}}` right up to the depth where the process runs out
+    // of C stack and dies.  This bound is therefore not a rule copied from Rust but the one
+    // thing that keeps a deep key from taking the interpreter down with it -- the bound is
+    // SER_INFER_KEY_DEPTH_LIMIT, measured rather than derived.
+    static int& json_key_depth() {
+        static thread_local int depth = 0;
+        return depth;
+    }
+
     static bool is_enum_instance(const py::object& v) {
         static const py::object& enum_cls = held_python_object([] { return py::module_::import("enum").attr("Enum"); });
         return py::isinstance(v, enum_cls);
@@ -3759,19 +3785,21 @@ private:
     static py::object infer_json_key(const py::object& key, bool json_text) {
         // Rust bounds neither the fallback nor a self-referential key here, and the reference
         // build dies at the bottom of that stack -- to_json({FH(): 1}, fallback=lambda v: FH())
-        // takes the wheel down with it.  The value walk's bound is what this leans on instead,
-        // so the run ends with the error that walk already reports.
-        std::vector<const void*>& st = json_rec_stack();
-        if (st.size() >= 255) {
+        // takes the wheel down with it.  The key walk's own bound is what this leans on, reported
+        // with the error the value walk already uses, so the run ends before the stack does.  A
+        // count rather than a set of open ids answers for a key because a key is hashed, and a
+        // container that could name itself never reaches here as one.
+        int& kd = json_key_depth();
+        if (kd >= SER_INFER_KEY_DEPTH_LIMIT) {
             if (json_text)
                 throw PydanticSerializationError("Error serializing to JSON: ValueError: Circular reference detected (depth exceeded)");
             throw py::value_error("Circular reference detected (depth exceeded)");
         }
-        st.push_back(key.ptr());
-        struct KeyStackPop {
-            std::vector<const void*>& s;
-            ~KeyStackPop() { if (!s.empty()) s.pop_back(); }
-        } popper{st};
+        ++kd;
+        struct KeyDepthPop {
+            int& d;
+            ~KeyDepthPop() { --d; }
+        } popper{kd};
         // ObType::Enum is asked before the mixin types a member also satisfies, and asks its
         // value the same question again (infer.rs:616-619).
         if (is_enum_instance(key)) return infer_json_key(py::getattr(key, "value"), json_text);
