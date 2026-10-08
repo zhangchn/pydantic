@@ -4229,6 +4229,12 @@ private:
             // boundary; the indent this run was asked for stays outside, since it is applied to
             // the whole compact string at the end by json_pretty_print.
             kw["ensure_ascii"] = ensure_ascii;
+            // Only the config is swapped (infer.rs:662-673): the state the walk carries --
+            // and its include/exclude -- is handed straight on, so the filters that got this
+            // far are the filters the delegated value's fields are asked about too.  Dropping
+            // them made `to_json(M(), include={"a": True})` print every field.
+            kw["include"] = include;
+            kw["exclude"] = exclude;
             py::bytes as_json = ser.attr("to_json")(value, **kw);
             return as_json.cast<std::string>();
         }
@@ -4306,6 +4312,10 @@ private:
             py::dict kw = ser_extra_forwarded();
             kw["exclude_none"] = exc_none;
             kw["round_trip"] = round_trip;
+            // The same state is kept through the delegation (infer.rs:662-673), so the pair
+            // this position was reached with is the pair its fields are asked about.
+            kw["include"] = include;
+            kw["exclude"] = exclude;
             return ser.attr("to_python")(v, py::arg("mode") = (json_mode ? "json" : "python"), **kw);
         }
         if (py::isinstance<py::dict>(v)) {

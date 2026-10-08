@@ -3073,3 +3073,100 @@ def test_the_module_level_to_json_hands_its_filter_to_the_walk():
     assert to_jsonable_python(items, include={0: True}) == [10]
     assert to_jsonable_python({'a': 1, 'b': 2}, include={'a': True}) == {'a': 1}
     assert SchemaSerializer(core_schema.list_schema(core_schema.int_schema())).to_json(items, include={0: True}) == b'[10]'
+
+
+def test_the_untyped_walk_hands_its_filter_to_a_value_that_brings_its_own_serializer():
+    # call_pydantic_serializer (infer.rs:662-673) swaps only the *config* for the delegated
+    # serializer's and writes the value with the state the walk already carries, so the pair that
+    # got this far is the pair the delegated value's fields are asked about.  Dropping it at the
+    # boundary made `to_json(Model(), include={'a': True})` print every field.
+    def fields(**fs):
+        return {'type': 'model-fields', 'model': None,
+                'fields': {name: {'type': 'model-field', 'schema': schema}
+                           for name, schema in fs.items()}}
+
+    def model_of(cls, schema):
+        return {'type': 'model', 'cls': cls, 'schema': schema,
+                'config': {'extra_fields_behavior': 'ignore'}}
+
+    class Model:
+        def __init__(self):
+            self.a = 1
+            self.b = 2
+
+    class Wide(Model):
+        def __init__(self):
+            super().__init__()
+            self.c = 3
+
+    class Rooty:
+        def __init__(self):
+            self.root = [10, 20, 30]
+
+    class Hold:
+        def __init__(self):
+            self.m = Model()
+            self.n = 9
+
+    ab = fields(a=core_schema.int_schema(), b=core_schema.int_schema())
+    Model.__pydantic_serializer__ = SchemaSerializer(model_of(Model, ab))
+    Wide.__pydantic_serializer__ = SchemaSerializer(
+        model_of(Wide, fields(a=core_schema.int_schema(), b=core_schema.int_schema(),
+                              c=core_schema.int_schema())))
+    Rooty.__pydantic_serializer__ = SchemaSerializer(
+        model_of(Rooty, fields(root=core_schema.list_schema(core_schema.int_schema()))))
+    Hold.__pydantic_serializer__ = SchemaSerializer(
+        model_of(Hold, fields(m=core_schema.any_schema(), n=core_schema.int_schema())))
+
+    m, wide, rooty, hold = Model(), Wide(), Rooty(), Hold()
+    assert to_json(m) == b'{"a":1,"b":2}'
+    assert to_json(m, include={'a': True}) == b'{"a":1}'
+    assert to_json(m, exclude={'a': True}) == b'{"b":2}'
+    # a sub-filter goes along too; an int has no position for it to land on
+    assert to_json(m, include={'b': {0: True}}) == b'{"b":2}'
+    assert to_json(m, include=set()) == b'{}'
+    assert to_json(m, include={'z': True}) == b'{}'
+    assert to_json(m, include={'__all__'}) == b'{"a":1,"b":2}'
+    assert to_json(m, include=None) == b'{"a":1,"b":2}'
+    # a position named by a bare True is asked for whole, exactly as an inferred dict is
+    assert to_json([m, m], include={1: True}) == b'[{"a":1,"b":2}]'
+    assert to_json([m], include={0: {'a': True}}) == b'[{"a":1}]'
+    assert to_json([m], exclude={0: {'a': True}}) == b'[{"b":2}]'
+    assert to_json((m, m), include={0: {'b': True}}) == b'[{"b":2}]'
+    assert to_json({'m': m}, include={'m': {'a': True}}) == b'{"m":{"a":1}}'
+    assert to_json({'m': m}, exclude={'m': {'a': True}}) == b'{"m":{"b":2}}'
+    # two delegations deep: the outer pair is filtered by the key path before either model sees it
+    assert to_json({'h': hold}, include={'h': {'m': {'a': True}}}) == b'{"h":{"m":{"a":1}}}'
+    # the fields of the delegated model are asked about in turn, so a list under one of them
+    # takes the index pair that its own key handed down
+    assert to_json(rooty, include={'root': {1: True}}) == b'{"root":[20]}'
+    assert to_json(rooty, include={0: True}) == b'{}'
+    assert to_json(wide, include={'a': True}) == b'{"a":1}'
+    assert to_json(wide, exclude={'c': True}) == b'{"a":1,"b":2}'
+    assert to_json({1: m, 2: m}, include={1: {'a': True}}) == b'{"1":{"a":1}}'
+    # the indent belongs to this run and is applied to the filtered text it ends up with
+    assert to_json(m, indent=2, include={'a': True}) == b'{\n  "a": 1\n}'
+    # a filter the delegated serializer would refuse is refused through this run too
+    with pytest.raises(PydanticSerializationError, match=re.escape('`include` argument must be a set or dict')):
+        to_json(m, include=True)
+    # the other way in: to_jsonable_python had already handed the pair on, and the python-mode
+    # infer walk is the one that reaches the same delegation
+    assert to_jsonable_python(m, include={'a': True}) == {'a': 1}
+    assert to_jsonable_python(m, exclude={'a': True}) == {'b': 2}
+    assert to_jsonable_python([m], include={0: {'a': True}}) == [{'a': 1}]
+    any_ser = SchemaSerializer(core_schema.any_schema())
+    assert any_ser.to_python(m, include={'a': True}) == {'a': 1}
+    assert any_ser.to_python(m, exclude={'a': True}) == {'b': 2}
+    assert any_ser.to_python(m, mode='json', include={'a': True}) == {'a': 1}
+    assert any_ser.to_python([m], include={0: {'a': True}}) == [{'a': 1}]
+    assert any_ser.to_python({'m': m}, include={'m': {'b': True}}) == {'m': {'b': 2}}
+    assert any_ser.to_json(m, include={'a': True}) == b'{"a":1}'
+    # a typed node that falls through to the walk for a value is no exception
+    assert SchemaSerializer(core_schema.dict_schema()).to_json({'m': m}, include={'m': {'a': True}}) == b'{"m":{"a":1}}'
+    list_any = SchemaSerializer(core_schema.list_schema(core_schema.any_schema()))
+    assert list_any.to_json([m], include={0: {'a': True}}) == b'[{"a":1}]'
+    tuple_any = SchemaSerializer(core_schema.tuple_schema([core_schema.any_schema()]))
+    assert tuple_any.to_json((m,), include={0: {'a': True}}) == b'[{"a":1}]'
+    # and the model's own serializer, asked about a value it does not describe, keeps the pair
+    # for the walk it falls back to
+    assert Model.__pydantic_serializer__.to_json([m], include={0: {'a': True}}) == b'[{"a":1}]'
