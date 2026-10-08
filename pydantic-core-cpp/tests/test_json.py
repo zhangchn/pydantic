@@ -1916,3 +1916,36 @@ def test_none_is_what_every_node_answers_to_a_none():
         # The key path is the one place None is not nulled -- it is stringified there.
         assert SchemaSerializer(core_schema.dict_schema(core_schema.int_schema(), core_schema.str_schema())).to_json({None: 'v'}) == b'{"None":"v"}'
         assert SchemaSerializer(core_schema.dict_schema(core_schema.int_schema(), core_schema.str_schema())).to_python({None: 'v'}) == {None: 'v'}
+
+
+def test_a_tuple_owes_the_name_of_every_item_serializer():
+    import re
+    import warnings
+
+    def TP(*items):
+        return core_schema.tuple_positional_schema(list(items))
+
+    def expected_text(fn, value='k'):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            assert fn(value) == b'"k"'
+        assert len(caught) == 1, [str(w.message) for w in caught]
+        return ' '.join(str(caught[0].message).split())
+
+    def warned_name(inner, wrap=True):
+        schema = core_schema.dict_schema(core_schema.str_schema(), inner) if wrap else inner
+        text = expected_text(SchemaSerializer(schema).to_json)
+        return re.search(r'Expected `([^`]*)`', text).group(1)
+
+    I, S = core_schema.int_schema(), core_schema.str_schema()
+    # Rust builds a tuple's name from every item serializer, with '...' after the variadic
+    # one, so the name says which of them the value disagreed with.
+    assert warned_name(core_schema.tuple_variable_schema(I)) == 'dict[str, tuple[int, ...]]'
+    assert warned_name(TP(I, S)) == 'dict[str, tuple[int, str]]'
+    assert warned_name(TP()) == 'dict[str, tuple[]]'
+    assert warned_name(TP(TP(I, S))) == 'dict[str, tuple[tuple[int, str]]]'
+    assert warned_name(core_schema.tuple_variable_schema(core_schema.list_schema(I))) == 'dict[str, tuple[list[int], ...]]'
+    # Asked about directly, the tuple owes its own name and nothing around it.
+    assert warned_name(core_schema.tuple_variable_schema(I), wrap=False) == 'tuple[int, ...]'
+    assert warned_name(TP(I, S), wrap=False) == 'tuple[int, str]'
+    assert warned_name(TP(), wrap=False) == 'tuple[]'

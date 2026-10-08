@@ -4632,7 +4632,24 @@ std::string SerNode::type_name_for_warning() const {
     if (t == "set") return "set[" + child0() + "]";
     if (t == "deque") return "deque[" + child0() + "]";
     if (t == "frozenset") return "frozenset[" + child0() + "]";
-    if (t == "tuple") return "tuple[" + child0() + "]";
+    if (t == "tuple") {
+        // Rust composes the name at build time from every item serializer and inserts "..."
+        // after the variadic one (tuple.rs:46-52), so a positional tuple keeps all of its
+        // items in the name, a variadic one says tuple[int, ...], and an empty one tuple[].
+        std::vector<std::string> names;
+        for (const auto& c : children) names.push_back(type_name_for_warning(c));
+        if (tuple_variadic_index >= 0) {
+            size_t at = static_cast<size_t>(tuple_variadic_index) + 1;
+            if (at > names.size()) at = names.size();
+            names.insert(names.begin() + at, "...");
+        }
+        std::string out = "tuple[";
+        for (size_t i = 0; i < names.size(); ++i) {
+            if (i) out += ", ";
+            out += names[i];
+        }
+        return out + "]";
+    }
     if (t == "named-tuple") return class_name.empty() ? std::string("named-tuple") : class_name;
     if (t == "dict") {
         std::string keyn = children.size() > 0 ? type_name_for_warning(children[0]) : "any";
