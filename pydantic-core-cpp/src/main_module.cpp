@@ -811,6 +811,39 @@ static std::string ser_json_f64(double value) {
     return sign + out;
 }
 
+// Rust's numeric leaves write the node's number, not the value's: an int node serializes an i64
+// and a float node a double, so True, an int subclass or an IntEnum come out as 1 or 1.0 instead
+// of true or the subclass.  A float node takes everything C's float converter accepts -- Decimal,
+// Fraction, any __float__ -- which is the set the wheel accepts and no wider: str and bytes are
+// refused although float("1.5") works, because they are not numbers at all, and an int past the
+// range of a double is refused too (float.rs:128-140).
+static bool ser_extract_f64(PyObject* v, double* out) {
+    if (!PyNumber_Check(v)) return false;
+    double d = PyFloat_AsDouble(v);
+    if (d == -1.0 && PyErr_Occurred()) {
+        PyErr_Clear();
+        return false;
+    }
+    *out = d;
+    return true;
+}
+
+// What a float node answers once it has a double, the inf_nan_mode included -- Rust's
+// serialize_f64 (float.rs:59-73), which the JSON writer reaches for every float value.
+static std::string ser_json_f64_modes(double d, const std::string& inf_nan_mode) {
+    if (std::isnan(d)) {
+        if (inf_nan_mode == "null") return "null";
+        if (inf_nan_mode == "strings") return "\"NaN\"";
+        return "NaN";
+    }
+    if (std::isinf(d)) {
+        if (inf_nan_mode == "null") return "null";
+        if (inf_nan_mode == "strings") return d > 0 ? "\"Infinity\"" : "\"-Infinity\"";
+        return d > 0 ? "Infinity" : "-Infinity";
+    }
+    return ser_json_f64(d);
+}
+
 // Rust serializers::type_serializers::complex::complex_to_str: the imaginary
 // part comes first, and the real part is prefixed only when it is non-zero.
 static std::string complex_to_str_rust(double re, double im) {
@@ -2079,6 +2112,20 @@ struct SerNode {
             ser_warn_unexpected_value("", type_name_for_warning(), value);
             return serialize_any_value(value, exc_none, round_trip, json_mode);
         }
+        // Rust's IsType::Subclass arm (simple.rs:126-132, float.rs:103-110): a JSON run extracts
+        // the value into the node's own number -- a bool at an int node becomes the int 1, an int
+        // or bool at a float node becomes a float -- while a python run takes the other arm and
+        // hands back the object it was given.  int()/float() are that extraction: for a subclass
+        // they unbind to an exact int/float, as extract::<i64>/extract::<f64> does, and an int past
+        // the range of a double raises through them here, which is what the wheel does too.
+        if (g_ser_check == 0 && json_mode &&
+            (type == "int" || type == "int-constrained" || type == "float" || type == "float-constrained") &&
+            ser_type_match(type, value) == 0) {
+            const bool int_leaf = (type == "int" || type == "int-constrained");
+            PyObject* converted = int_leaf ? PyNumber_Long(value.ptr()) : PyNumber_Float(value.ptr());
+            if (!converted) throw py::error_already_set();
+            return py::reinterpret_steal<py::object>(converted);
+        }
         if (!ser_check_accepts(value)) {
             throw std::runtime_error("Unexpected value for serializer " + type);
         }
@@ -2759,6 +2806,19 @@ struct SerNode {
         if (value.is_none()) {
             return "null";
         }
+        // Rust's FloatSerializer::serde_serialize (float.rs:128-140) asks extract::<f64> and
+        // nothing else, so the float node has to be asked before the mismatch rule below: a Decimal
+        // or a Fraction becomes its double here with no warning, in a json run only -- the same node
+        // in a jsonable run warns and infers -- while an int too large for a double is the one value
+        // the node's own type check accepts and this writer must not, so it warns and infers.
+        if (g_ser_check == 0 && (type == "float" || type == "float-constrained")) {
+            double fd = 0.0;
+            if (!ser_extract_f64(value.ptr(), &fd)) {
+                ser_warn_unexpected_value("", type_name_for_warning(), value);
+                return infer_json(value, ensure_ascii, indent);
+            }
+            return ser_json_f64_modes(fd, inf_nan_mode);
+        }
         // See the same rule in to_python: refuse the value, warn, write what
         // inference makes of it.  Handing a str to the int writer used to print it
         // unquoted, and a str to the float/bool/bytes writers raised pybind's cast
@@ -2822,11 +2882,10 @@ struct SerNode {
             return infer_json(value, ensure_ascii, indent);
         }
         if (type == "none" || type == "is-none") return "null";
-        if (type == "bool" || py::isinstance<py::bool_>(value)) {
-            return value.cast<bool>() ? "true" : "false";
-        }
+        // Above the python-shape bool arm, which would otherwise answer b'true' here: Rust's int
+        // arm extracts an i64, and a bool is one to it.  PyLong gives the digits either way, so the
+        // bool case needs no branch of its own.
         if (type == "int" || type == "int-constrained") {
-            if (py::isinstance<py::bool_>(value)) return value.cast<bool>() ? "true" : "false";
             int overflow = 0;
             long long iv = PyLong_AsLongLongAndOverflow(value.ptr(), &overflow);
             if (overflow != 0 || (iv == -1 && PyErr_Occurred())) {
@@ -2836,19 +2895,13 @@ struct SerNode {
             }
             return std::to_string(iv);
         }
+        // Only a union round reaches this arm now: outside one the float node was answered above.
+        // The round has already accepted the value's type, so the cast has nothing left to refuse.
         if (type == "float" || type == "float-constrained") {
-            double d = value.cast<double>();
-            if (std::isnan(d)) {
-                if (inf_nan_mode == "null") return "null";
-                if (inf_nan_mode == "strings") return "\"NaN\"";
-                return "NaN";
-            }
-            if (std::isinf(d)) {
-                if (inf_nan_mode == "null") return "null";
-                if (inf_nan_mode == "strings") return d > 0 ? "\"Infinity\"" : "\"-Infinity\"";
-                return d > 0 ? "Infinity" : "-Infinity";
-            }
-            return ser_json_f64(d);
+            return ser_json_f64_modes(value.cast<double>(), inf_nan_mode);
+        }
+        if (type == "bool" || py::isinstance<py::bool_>(value)) {
+            return value.cast<bool>() ? "true" : "false";
         }
         if (type == "str" || type == "string" || type == "str-constrained") {
             return json_escape(value.cast<std::string>(), ensure_ascii);

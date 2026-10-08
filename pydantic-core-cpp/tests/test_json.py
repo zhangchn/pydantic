@@ -2061,3 +2061,77 @@ def test_a_float_is_written_as_the_shortest_text_that_reads_back():
     # A non-finite float is still the mode's business, not the number form's: the entry point's
     # own answer for these is b'null', mode config notwithstanding.
     assert typed.to_json(math.inf) == b'null'
+
+
+def test_a_numeric_node_writes_its_own_number_rather_than_the_values_shape():
+    import warnings
+
+    int_node = SchemaSerializer(core_schema.int_schema())
+    float_node = SchemaSerializer(core_schema.float_schema())
+
+    def warn_names(fn):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            out = fn()
+        names = []
+        for w in caught:
+            m = re.search(r'Expected `([^`]*)`', re.sub(r'\s+', ' ', str(w.message)))
+            names.append(m.group(1) if m else str(w.message)[:30])
+        return names, out
+
+    # Rust's numeric leaves serialize the node's number -- an int node an i64, a float node a
+    # double -- so a bool costs 1 or 1.0 rather than true, in both JSON shapes.  A python run
+    # takes the other arm of the same IsType match and hands back the object it was given.
+    assert int_node.to_json(True) == b'1'
+    assert int_node.to_json(False) == b'0'
+    assert float_node.to_json(True) == b'1.0'
+    assert float_node.to_json(1) == b'1.0'
+    for value in (True, False):
+        assert type(int_node.to_python(value, mode='json')) is int
+        assert type(float_node.to_python(value, mode='json')) is float
+    assert int_node.to_python(True) is True
+    assert float_node.to_python(True) is True
+    assert type(float_node.to_python(1)) is int and float_node.to_python(1) == 1
+
+    # The same arm extracts an exact int/float, so a subclass does not ride along with the answer.
+    class MyInt(int):
+        pass
+
+    class MyFloat(float):
+        pass
+
+    assert type(int_node.to_python(MyInt(3), mode='json')) is int
+    assert type(float_node.to_python(MyFloat(3.5), mode='json')) is float
+    assert type(float_node.to_python(MyInt(3), mode='json')) is float
+    assert int_node.to_python(MyInt(3)) is None or type(int_node.to_python(MyInt(3))) is MyInt
+
+    # Items of a collection are each answered by their own node, so a list of ints answers for
+    # every bool in it -- and a mixed list of ints and bools says nothing while doing so.
+    def kinds(v):
+        return [type(x).__name__ for x in v]
+
+    ints = SchemaSerializer(core_schema.list_schema(core_schema.int_schema()))
+    floats = SchemaSerializer(core_schema.list_schema(core_schema.float_schema()))
+    assert ints.to_json([True, 1]) == b'[1,1]'
+    assert kinds(ints.to_python([True, 1], mode='json')) == ['int', 'int']
+    assert kinds(ints.to_python([True, 1])) == ['bool', 'int']
+    assert floats.to_json([True, 1]) == b'[1.0,1.0]'
+    assert kinds(floats.to_python([True, 1], mode='json')) == ['float', 'float']
+
+    # The float node is asked before the mismatch rule, because Rust's serde arm asks its
+    # converter and nothing else: a Decimal becomes its double here and says nothing, while the
+    # very same node in a jsonable run warns and infers the text instead.
+    names, out = warn_names(lambda: float_node.to_json(decimal.Decimal('1.5')))
+    assert out == b'1.5' and names == []
+    names, out = warn_names(lambda: float_node.to_json(fractions.Fraction(1, 2)))
+    assert out == b'0.5' and names == []
+    names, out = warn_names(lambda: float_node.to_python(decimal.Decimal('1.5'), mode='json'))
+    assert out == '1.5' and names == ['float']
+
+    # An int past the range of a double is the one value the node's own type check accepts and
+    # this writer must not: the json run warns and prints the digits, the jsonable one lets
+    # float() raise, which is what the wheel does.
+    names, out = warn_names(lambda: float_node.to_json(10 ** 400))
+    assert out == b'1' + b'0' * 400 and names == ['float']
+    with pytest.raises(OverflowError):
+        float_node.to_python(10 ** 400, mode='json')
