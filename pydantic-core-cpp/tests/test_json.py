@@ -2391,3 +2391,22 @@ def test_a_list_node_with_no_items_schema_still_walks_what_it_holds():
     assert ser.to_python([d])[0] is d
     assert ser.to_python([d], mode='json') == ['1.5']
     assert ser.to_json([d]) == b'["1.5"]'
+
+
+def test_an_index_key_is_folded_by_the_length_of_what_it_filters():
+    # filter.rs:21-36 asks Python for `key % len` of every index key, so an index past the end
+    # wraps around to a real position rather than matching nothing.  A key whose modulo fails --
+    # a string, or any key against an empty collection -- is left exactly as it was given.
+    ser = SchemaSerializer(core_schema.list_schema(core_schema.int_schema()))
+    assert ser.to_python([10, 20, 30], include={7: True}) == [20]
+    assert ser.to_python([10, 20, 30], include={3: True}) == [10]
+    assert ser.to_python([10, 20, 30], include={-1: True}) == [30]
+    assert ser.to_python([10, 20, 30], exclude={4: True}) == [10, 30]
+    assert ser.to_python([10, 20, 30], include={7}) == [20]
+    assert ser.to_python([10, 20, 30], include={2**70: True}) == [20]
+    assert ser.to_python([], include={7: True}) == []
+    assert ser.to_python([10, 20, 30], include={'a': True}) == []
+    assert ser.to_python([10, 20, 30], include={'%d': True}) == []
+
+    tup = SchemaSerializer(core_schema.tuple_variable_schema(core_schema.int_schema()))
+    assert tup.to_python((10, 20, 30), include={7: True}) == (20,)

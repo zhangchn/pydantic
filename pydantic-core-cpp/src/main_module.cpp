@@ -1239,13 +1239,17 @@ struct SerFilterResult {
     py::object exclude = py::none();   // sub-filter for the nested value
 };
 
-// Map a negative index to a positive one: key % len (Python mod semantics)
+// Fold an index key against the length.  filter.rs:21-36 (`map_negative_index`) asks Python for
+// `key % len` of *every* key, not just negative ones, so include={7: True} over a three-item list
+// is a request for index 1; anything whose modulo fails -- a string key, a length of zero -- is
+// left as it is, exactly like Rust's `unwrap_or_else(|_| value.clone())`.
 static py::object map_negative_index(const py::object& key, py::ssize_t len) {
-    if (py::isinstance<py::int_>(key)) {
-        py::ssize_t i = key.cast<py::ssize_t>();
-        if (i < 0) return py::int_(((i % len) + len) % len);
+    try {
+        return key.attr("__mod__")(py::int_(len));
+    } catch (const py::error_already_set&) {
+        PyErr_Clear();
+        return key;
     }
-    return key;
 }
 
 // Map all negative keys/items in an include/exclude object (dict or set)
