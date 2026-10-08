@@ -2534,3 +2534,85 @@ def test_an_iterable_without_a_length_is_filtered_by_its_keys_exactly_as_written
     assert list(ser.to_python(three(), include=set())) == []
     assert list(ser.to_python(three(), include={'__all__'})) == [10, 20, 30]
     assert list(ser.to_python(three(), exclude={1: True})) == [10, 30]
+
+
+def test_a_filter_that_cannot_answer_is_refused_rather_than_taken_for_a_no():
+    # filter.rs:290 `check_contains` has three answers, not two: yes, no, and "this object could not
+    # answer" -- no `__contains__` at all, or a call with the key that raises.  The third is no
+    # opinion, which is what lets the filter reach its refusal; reading it as a plain "no" made a str
+    # filter drop every item of a list instead of saying the argument must be a set or a dict.
+    class NoAttr:
+        pass
+
+    class Raiser:
+        def __contains__(self, key):
+            raise RuntimeError('boom')
+
+    class AllRaiser:  # answers for the key, refuses the `__all__` probe
+        def __contains__(self, key):
+            if key == '__all__':
+                raise RuntimeError('no-all')
+            return False
+
+    class Bag:
+        def __contains__(self, key):
+            return key == 1
+
+    class AllTrue:
+        def __contains__(self, key):
+            return key == '__all__'
+
+    class Asker:  # does a truthy first answer skip the `__all__` probe?
+        asked = []
+
+        def __contains__(self, key):
+            Asker.asked.append('all' if key == '__all__' else 'key')
+            return key == 0
+
+    ser = SchemaSerializer(core_schema.list_schema(core_schema.int_schema()))
+    three = [10, 20, 30]
+
+    for argument in ('include', 'exclude'):
+        pattern = rf'`{argument}` argument must be a set or dict\.'
+        for cannot_answer in ('nope', Raiser(), NoAttr()):
+            with pytest.raises(TypeError, match=pattern):
+                ser.to_python(three, **{argument: cannot_answer})
+            with pytest.raises(TypeError, match=pattern):
+                ser.to_python(three, mode='json', **{argument: cannot_answer})
+            with pytest.raises(PydanticSerializationError,
+                               match=f'Error serializing to JSON: TypeError: `{argument}` argument '
+                                     f'must be a set or dict.'):
+                ser.to_json(three, **{argument: cannot_answer})
+
+        # A failing `__all__` probe is not a second chance to refuse -- the object did answer for the
+        # key, so its own error is the walk's answer, and a json run renames that too.
+        with pytest.raises(RuntimeError, match='no-all'):
+            ser.to_python(three, mode='json', **{argument: AllRaiser()})
+        with pytest.raises(PydanticSerializationError,
+                           match='Error serializing to JSON: RuntimeError: no-all'):
+            ser.to_json(three, **{argument: AllRaiser()})
+
+    # What an object that can answer means, on both sides.
+    assert ser.to_json(three, include=Bag()) == b'[20]'
+    assert ser.to_python(three, include=Bag()) == [20]
+    assert ser.to_json(three, exclude=Bag()) == b'[10,30]'
+    assert ser.to_json(three, include=AllTrue()) == b'[10,20,30]'
+    assert ser.to_json(three, exclude=AllTrue()) == b'[]'
+    # A list, a frozenset and a tuple all answer through `__contains__`: none of them is a `set`,
+    # so none of them is taken by the branch above it.
+    for filter_like in ([0], frozenset({0}), (0,)):
+        assert ser.to_json(three, include=filter_like) == b'[10]'
+        assert ser.to_json(three, exclude=filter_like) == b'[20,30]'
+
+    # The truthy answer short-circuits the `__all__` probe, so the position that said yes is asked
+    # once and the two that said no are asked twice.
+    Asker.asked = []
+    assert ser.to_json(three, include=Asker()) == b'[10]'
+    assert Asker.asked == ['key', 'key', 'all', 'key', 'all']
+
+    # A dict node asks the same question about its keys.
+    dicts = SchemaSerializer(
+        core_schema.dict_schema(core_schema.str_schema(), core_schema.int_schema())
+    )
+    assert dicts.to_python({'a': 1, 'b': 2, 'c': 3}, include=Bag()) == {}
+    assert dicts.to_python({'a': 1, 'b': 2, 'c': 3}, exclude=Bag()) == {'a': 1, 'b': 2, 'c': 3}

@@ -1405,6 +1405,13 @@ static void ser_check_index_key(const py::object& index_key) {
     throw py::error_already_set();
 }
 
+// filter.rs:290 -- the ask for an object that is neither a dict nor a set.  It has three answers,
+// not two: yes, no, and "this object cannot answer" -- no `__contains__` at all, or a call with the
+// key that raises -- and the third is what lands on the refusal below rather than on a plain no.
+// Defined with the jsonable walk's copy of the filter, which asks the same question; both walks need
+// the same three answers.
+static bool ser_check_contains(const py::object& o, const py::object& key, bool* found);
+
 // A filter that is neither a set nor a dict is refused.  This is a Python error rather than
 // pybind's builtin_exception -- which is a std::runtime_error that only becomes a TypeError in
 // pybind's translator, past the JSON boundary -- because Rust raises it as a PyErr from wherever a
@@ -1438,16 +1445,14 @@ static SerFilterResult apply_ser_filter(const py::object& key, const py::object&
                 out.omit = true;
                 return out;
             }
-        } else if (py_hasattr(exclude, "__contains__")) {
-            bool c1 = false, c2 = false;
-            try { c1 = py::cast<bool>(exclude.attr("__contains__")(key)); } catch (...) {}
-            try { c2 = py::cast<bool>(exclude.attr("__contains__")(py::str("__all__"))); } catch (...) {}
-            if (c1 || c2) {
+        } else {
+            bool holds = false;
+            if (!ser_check_contains(exclude, key, &holds))
+                ser_filter_refusal("exclude");
+            if (holds) {
                 out.omit = true;
                 return out;
             }
-        } else {
-            ser_filter_refusal("exclude");
         }
     }
 
@@ -1483,19 +1488,16 @@ static SerFilterResult apply_ser_filter(const py::object& key, const py::object&
             out.omit = true;  // key not in include
             return out;
         }
-        if (py_hasattr(include, "__contains__")) {
-            bool c1 = false, c2 = false;
-            try { c1 = py::cast<bool>(include.attr("__contains__")(key)); } catch (...) {}
-            try { c2 = py::cast<bool>(include.attr("__contains__")(py::str("__all__"))); } catch (...) {}
-            if (c1 || c2) {
-                out.include = py::none();
-                out.exclude = next_exclude;
-                return out;
-            }
-            out.omit = true;
+        bool holds = false;
+        if (!ser_check_contains(include, key, &holds))
+            ser_filter_refusal("include");
+        if (holds) {
+            out.include = py::none();
+            out.exclude = next_exclude;
             return out;
         }
-        ser_filter_refusal("include");
+        out.omit = true;  // key not in include
+        return out;
     }
 
     // No include filter: keep the item, propagate the exclude sub-filter
