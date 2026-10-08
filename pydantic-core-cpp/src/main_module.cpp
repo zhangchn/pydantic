@@ -190,6 +190,25 @@ static std::string ser_safe_repr(const py::object& v) {
     return "<unprintable object>";
 }
 
+// The pairs Rust asks a dataclass for (infer.rs:681-706, with get_field_marker at :709-713):
+// `__dataclass_fields__` in declaration order, keeping only the entries whose `_field_type` is
+// dataclasses._FIELD -- a ClassVar or an InitVar is passed over *before* its name is read, and an
+// InitVar has no attribute to read -- with each value taken back by getattr, so a field the
+// instance never set still answers from the class and a slot-backed one is found at all.  An
+// object's __dict__ answers none of that: it has nothing for a slots class, nothing for an
+// init=False field the instance never set, and everything for an attribute no field names.
+static py::dict ser_dataclass_pairs(const py::object& v) {
+    static const py::object& field_marker =
+        held_python_object([] { return py::module_::import("dataclasses").attr("_FIELD"); });
+    py::dict out;
+    for (auto item : py::getattr(v, "__dataclass_fields__").cast<py::dict>()) {
+        py::object name = py::reinterpret_borrow<py::object>(item.first);
+        if (!py::getattr(item.second, "_field_type").is(field_marker)) continue;
+        out[name] = py::getattr(v, name);
+    }
+    return out;
+}
+
 // Rust infer::serialize_unknown (infer.rs:520): str(value), or a placeholder when
 // str() itself raises.
 static std::string ser_serialize_unknown(const py::object& v) {
@@ -4080,6 +4099,17 @@ private:
     static std::string infer_json_body(const py::object& value, bool ensure_ascii, int indent,
                                        const py::object& include, const py::object& exclude) {
         if (value.is_none()) return "null";
+        // The dataclass duck test heads the walk rather than sit among the arms, because Rust
+        // matches the value's own type pointer first and only reaches `is_dataclass` once that
+        // table has named nothing (ob_type.rs:219-305).  A dataclass built over a base type is
+        // therefore asked its fields rather than answered by what it inherits: `@dataclass class
+        // D(int)` and `@dataclass class D(set)` are both `b'{"a":1}'` there, not the number nor
+        // the sequence.  Only `is_pydantic_serializable` (ob_type.rs:287) is asked earlier, one
+        // test ahead, so a value that carries a serializer of its own is left to the arm below --
+        // which is what keeps a pydantic dataclass's aliases and fields intact.
+        if (!PyType_Check(value.ptr()) && py_hasattr(value, "__dataclass_fields__")
+            && !py_hasattr(value, "__pydantic_serializer__"))
+            return infer_json(ser_dataclass_pairs(value), ensure_ascii, indent, include, exclude);
         // Rust infer_serialize ObType::Enum: serialize the member's value. This
         // must precede the bool/int/str leaves, because a mixin member (IntEnum,
         // str Enum) also satisfies those checks, and the __dict__ fallback at the
@@ -4348,23 +4378,18 @@ private:
         }
         // A dataclass that carries no serializer of its own has its fields inferred one by one
         // (ob_type.rs:290-291 puts the `__dataclass_fields__` duck test right after the
-        // `__pydantic_serializer__` one and refuses it for a class, and infer.rs:681-706 reads
-        // the pairs from there rather than from __dict__: declaration order, only the entries
-        // whose `_field_type` is dataclasses._FIELD -- skipped *before* the name is read, since
-        // an InitVar has no attribute to read -- and the value read back with getattr, so a field
-        // that lives behind a property or in __slots__ is still found).  What comes out is pairs
+        // `__pydantic_serializer__` one and refuses it for a class).  What comes out is pairs
         // through serialize_pairs, so a field's name is what the filter is asked about and its
         // value is inferred under the pair that answer names, exactly as a mapping's entries are.
         if (py_hasattr(v, "__dataclass_fields__") && !PyType_Check(v.ptr())) {
-            static const py::object& dc_field_marker =
-                held_python_object([] { return py::module_::import("dataclasses").attr("_FIELD"); });
+            py::dict fields = ser_dataclass_pairs(v);
             py::dict out;
-            for (auto item : py::getattr(v, "__dataclass_fields__").cast<py::dict>()) {
+            for (auto item : fields) {
                 py::object name = py::reinterpret_borrow<py::object>(item.first);
-                if (!py::getattr(item.second, "_field_type").is(dc_field_marker)) continue;
                 auto next = apply_ser_filter(name, include, exclude);
                 if (next.omit) continue;
-                out[name] = serialize_any_value(py::getattr(v, name), exc_none, round_trip, json_mode,
+                out[name] = serialize_any_value(py::reinterpret_borrow<py::object>(item.second),
+                                                exc_none, round_trip, json_mode,
                                                 next.include, next.exclude);
             }
             return std::move(out);
@@ -6647,6 +6672,14 @@ static py::object infer_jsonable_python(const py::object& v, const JsonableRun& 
         ~StackPop() { s.pop_back(); }
     } popper{st};
     if (v.is_none()) return py::none();
+    // Head of the walk for the reason `infer_json` gives: Rust's exact-type table is matched
+    // first and `is_dataclass` after it, so a dataclass is asked its fields before any arm can
+    // answer it by the type it inherits -- `@dataclass class D(int)` becomes `{"a": 1}`, not the
+    // int.  A value with a serializer of its own (a pydantic dataclass, whose aliases only that
+    // serializer knows) is the one thing asked earlier still, and the delegation arm below has it.
+    if (!PyType_Check(v.ptr()) && py_hasattr(v, "__dataclass_fields__")
+        && !py_hasattr(v, "__pydantic_serializer__"))
+        return infer_jsonable_python(ser_dataclass_pairs(v), run, include, exclude);
     // ObType::Enum is recognised by the metaclass of the value's own type being exactly
     // type(enum.Enum) (ob_type.rs:283 and :315), and Rust tests it ahead of the numbers
     // because its lookup matches exact type pointers, which an IntEnum member never
@@ -6845,13 +6878,12 @@ static py::object infer_jsonable_python(const py::object& v, const JsonableRun& 
         kw["exclude"] = exclude;
         return ser.attr("to_python")(v, py::arg("mode") = "json", **kw);
     }
-    // A dataclass carries no serializer of its own, so its fields are inferred one by
-    // one (Rust ObType::Dataclass).  Nothing else is: a type object answers the same
-    // probes and is refused (ob_type.rs:421), and walking an arbitrary __dict__ both
-    // invented output for values Rust refuses -- a SimpleNamespace became its fields, a
-    // plain instance its attributes -- and could not stop.  A module's __dict__ holds
-    // sys.modules, which holds every module in the process; to_jsonable_python(sys)
-    // recursed through that until the stack gave out and took the interpreter with it.
+    // A dataclass was already asked its fields above, with the containers.  What is left here is
+    // an object whose __dict__ Rust does not walk at all: refusing it is what keeps a
+    // SimpleNamespace from becoming its fields and a plain instance from becoming its attributes,
+    // and keeps to_jsonable_python(sys) from recursing through sys.modules -- every module in the
+    // process -- until the stack gave out and took the interpreter with it.  A type object answers
+    // the same probes and is refused too (ob_type.rs:421).
     if (py_hasattr(v, "__dict__") && !PyType_Check(v.ptr()) && SerNode::dict_inferable_object(v)) {
         py::object fields;
         try {

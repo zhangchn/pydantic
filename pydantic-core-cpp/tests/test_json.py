@@ -3314,6 +3314,19 @@ class SerSlotsDC:
     x: int
 
 
+@dataclasses.dataclass
+class SerListDC(list):
+    a: int = 1
+
+
+@dataclasses.dataclass
+class SerIntDC(int):
+    a: int = 1
+
+    def __new__(cls, *args, **kw):
+        return super().__new__(cls, 3)
+
+
 def test_a_dataclass_under_the_python_infer_walk_is_asked_its_fields():
     # A dataclass that brings no `__pydantic_serializer__` of its own is inferred field by field
     # (ob_type.rs:290-291, infer.rs:681-706): the pairs come from `__dataclass_fields__` rather
@@ -3372,3 +3385,73 @@ def test_a_dataclass_under_the_python_infer_walk_is_asked_its_fields():
     ):
         ser.to_json(SerPlainDC)
     assert ser.to_python(SerPlainDC) is SerPlainDC
+
+
+def test_a_dataclass_under_the_json_walk_and_the_module_level_walk_is_asked_its_fields():
+    # The json text walk and the module-level `to_jsonable_python` build their answer themselves
+    # and both took a dataclass's pairs from `__dict__`, which has nothing for a slots class,
+    # nothing for an init=False field the instance never set, and room for an attribute no field
+    # names.  Rust asks `__dataclass_fields__` and reads each value back by getattr
+    # (infer.rs:681-706), which is what the python walk had been made to do; these two now share
+    # the same pair source.
+    ser = SchemaSerializer(core_schema.any_schema())
+
+    assert ser.to_json(SerPlainDC(1)) == b'{"a":1,"b":"x"}'
+    # the value an InitVar was handed is not a field and the init=False one is, whether or not
+    # the instance carries it -- so `b` is here although `__dict__` never held it
+    assert ser.to_json(SerMetaDC(1)) == b'{"a":1,"b":7}'
+    assert ser.to_json(SerSlotsDC(1)) == b'{"x":1}'
+    # the fields' own nesting is inferred by the same walk
+    assert ser.to_json(SerHolderDC(SerPlainDC(1))) == b'{"inner":{"a":1,"b":"x"}}'
+    assert ser.to_json([SerHolderDC(SerSlotsDC(1))]) == b'[{"inner":{"x":1}}]'
+    # a field's name is what the filter is asked about, here too
+    assert ser.to_json(SerChildDC(1, 2), include={'a'}) == b'{"a":1}'
+    assert ser.to_json(SerChildDC(1, 2), exclude={'a'}) == b'{"b":2}'
+    assert ser.to_json(SerHolderDC(SerChildDC(1, 2)), include={'inner': {'a': True}}) == (
+        b'{"inner":{"a":1}}')
+    # an attribute no field names is passed over and a field the instance does not carry is read
+    # from the class, the way getattr reads it
+    with_extra = SerPlainDC(1)
+    object.__setattr__(with_extra, 'extra', 'not a field')
+    assert ser.to_json(with_extra) == b'{"a":1,"b":"x"}'
+    without_attr = SerPlainDC(1)
+    del without_attr.b
+    assert ser.to_json(without_attr) == b'{"a":1,"b":"x"}'
+
+    assert to_jsonable_python(SerPlainDC(1)) == {'a': 1, 'b': 'x'}
+    assert to_jsonable_python(SerMetaDC(1)) == {'a': 1, 'b': 7}
+    assert to_jsonable_python(SerSlotsDC(1)) == {'x': 1}
+    assert to_jsonable_python(SerHolderDC(SerSlotsDC(1))) == {'inner': {'x': 1}}
+    assert to_jsonable_python(SerMetaDC(1), exclude={'a'}) == {'b': 7}
+    assert to_jsonable_python(with_extra) == {'a': 1, 'b': 'x'}
+    assert to_jsonable_python(without_attr) == {'a': 1, 'b': 'x'}
+    # Rust matches a value's own type pointer first and only then falls through to `is_dataclass`
+    # (ob_type.rs:219-305), so all three walks ask a dataclass its fields before any of their arms
+    # can answer it by the type it inherits -- a number or a list that happens to be a dataclass
+    # leaves as its fields, not as what it subclasses.
+    for value, json_form, py_form in [
+        (SerIntDC(), b'{"a":1}', {'a': 1}),
+        (SerListDC(), b'{"a":1}', {'a': 1}),
+    ]:
+        assert ser.to_json(value) == json_form
+        assert ser.to_python(value) == py_form
+        assert to_jsonable_python(value) == py_form
+    # only `is_pydantic_serializable` is asked earlier (ob_type.rs:287), so a pydantic dataclass
+    # still answers through its own serializer and keeps the alias only that serializer knows
+    import pydantic
+
+    @pydantic.dataclasses.dataclass
+    class SerPydDCJson:
+        a: int
+        b: int = pydantic.Field(default=2, alias='bee')
+
+    assert ser.to_json(SerPydDCJson(1)) == b'{"a":1,"b":2}'
+    assert ser.to_json(SerPydDCJson(1), by_alias=True) == b'{"a":1,"bee":2}'
+    assert to_jsonable_python(SerPydDCJson(1), by_alias=True) == {'a': 1, 'bee': 2}
+    # a class carries `__dataclass_fields__` too and is refused by both walks rather than walked
+    for refuse in (lambda: ser.to_json(SerPlainDC), lambda: to_jsonable_python(SerPlainDC)):
+        with pytest.raises(
+                PydanticSerializationError,
+                match=r"Unable to serialize unknown type: <class 'type'>",
+        ):
+            refuse()
