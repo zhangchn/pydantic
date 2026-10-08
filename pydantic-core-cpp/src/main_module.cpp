@@ -2676,10 +2676,14 @@ struct SerNode {
             }
             SerIndexFilter filter;
             filter.bind(include, exclude, len);
-            // A set node has no position to ask about (see below), so what its items are built
-            // with is the filter this node was handed, folded against the set's own length.
-            py::object inc = filter.folded_include;
-            py::object exc = filter.folded_exclude;
+            // A set node has no position to ask about (see below), and set_frozenset.rs hands its
+            // items `state` untouched -- no filter of its own, and no key to have folded.  So the
+            // items are built with the pair this node was handed exactly as written, folded by
+            // whichever node they reach against *that* node's length: a set of three 5-tuples with
+            // include={5: True} hands each tuple {5: True}, which the tuple folds to {0: True},
+            // where folding here would hand them {2: True} and answer with the third element.
+            py::object inc = include;
+            py::object exc = exclude;
             // In JSON the items have to become an array here, but Python mode
             // keeps an iterator lazy for the caller to drain.  The view is handed the call's own
             // filter, unsized: generator.rs:68 never takes a length, so it is the view's job to

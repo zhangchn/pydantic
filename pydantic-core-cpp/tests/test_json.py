@@ -2433,6 +2433,34 @@ def test_a_set_node_never_consults_the_filter_it_is_handed():
             assert ser.to_json(source, exclude=exclude) == b'[10,20,30]', exclude
 
 
+def test_a_set_node_hands_its_items_the_filter_exactly_as_it_was_written():
+    # set_frozenset.rs hands its items `state` untouched -- the node has no filter of its own, so it
+    # has no key to have folded either.  A set of three 5-tuples handed include={5: True} therefore
+    # hands every tuple {5: True}, and the *tuple* -- whose length is five -- folds that to {0: True}
+    # and answers with its first element.  Folding against the set's own length of three here would
+    # hand the tuples {2: True} and answer with the third element of each instead.
+    five = [core_schema.int_schema()] * 5
+    rows = [(10, 11, 12, 13, 14), (20, 21, 22, 23, 24), (30, 31, 32, 33, 34)]
+    cases = (
+        ({'include': {5: True}}, [[10], [20], [30]]),
+        ({'include': {2: True}}, [[12], [22], [32]]),
+        ({'include': {7: True}}, [[12], [22], [32]]),
+        ({'include': {-1: True}}, [[14], [24], [34]]),
+        ({'exclude': {5: True}}, [[11, 12, 13, 14], [21, 22, 23, 24], [31, 32, 33, 34]]),
+        ({'exclude': {-1: True}}, [[10, 11, 12, 13], [20, 21, 22, 23], [30, 31, 32, 33]]),
+    )
+    for schema, source in (
+        (core_schema.set_schema(core_schema.tuple_schema(five)), set(rows)),
+        (core_schema.frozenset_schema(core_schema.tuple_schema(five)), frozenset(rows)),
+    ):
+        ser = SchemaSerializer(schema)
+        for kwargs, expected in cases:
+            # A set answers in its own order, so every answer is sorted before it is compared.
+            assert sorted(ser.to_python(source, **kwargs)) == [tuple(row) for row in expected], kwargs
+            assert sorted(ser.to_python(source, mode='json', **kwargs)) == expected, kwargs
+            assert sorted(json.loads(ser.to_json(source, **kwargs))) == expected, kwargs
+
+
 def test_a_json_run_answers_the_filter_for_a_list_a_deque_and_a_tuple():
     # list.rs:64, deque.rs:75 and generator.rs:68 all ask the filter about every position, so a
     # to_json run that was handed include/exclude answers it.  A list, a deque and a tuple know
