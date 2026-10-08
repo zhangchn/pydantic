@@ -1505,9 +1505,31 @@ static void ser_filter_refusal(const char* argument) {
 }
 
 static SerFilterResult apply_ser_filter(const py::object& key, const py::object& include,
-                                        const py::object& exclude) {
+                                        const py::object& exclude,
+                                        const std::optional<std::unordered_set<int64_t>>* sch_inc = nullptr,
+                                        const std::optional<std::unordered_set<int64_t>>* sch_exc = nullptr) {
     SerFilterResult out;
     py::object next_exclude = py::none();
+
+    // filter.rs:134-142 key_filter hashes the key itself and asks the node's own
+    // sets twice: explicit_include rescues a key the call-time include missed
+    // rather than omitting it, and default_filter -- not the call-time include
+    // alone -- then decides a key neither filter already answered for.
+    int64_t key_hash = 0;
+    bool hashed = false;
+    auto hash_of = [&]() {
+        if (!hashed) { key_hash = (int64_t)py::hash(key); hashed = true; }
+        return key_hash;
+    };
+    auto explicit_include = [&]() {
+        return sch_inc && sch_inc->value().count(hash_of()) != 0;
+    };
+    auto default_keep = [&]() {
+        if (!sch_inc && !sch_exc) return true;
+        if (sch_inc && sch_inc->value().count(hash_of()) == 0) return false;
+        if (sch_exc && sch_exc->value().count(hash_of()) != 0) return false;
+        return true;
+    };
 
     // Exclude handling
     if (!exclude.is_none()) {
@@ -1556,34 +1578,43 @@ static SerFilterResult apply_ser_filter(const py::object& key, const py::object&
                 out.exclude = next_exclude;
                 return out;
             }
-            out.omit = true;  // key not in include
-            return out;
-        }
-        if (py::isinstance<py::set>(include)) {
+            if (!explicit_include()) {
+                out.omit = true;  // key not in include
+                return out;
+            }
+        } else if (py::isinstance<py::set>(include)) {
             py::set iset = include.cast<py::set>();
             if (iset.contains(key) || iset.contains(py::str("__all__"))) {
                 out.include = py::none();
                 out.exclude = next_exclude;
                 return out;
             }
-            out.omit = true;  // key not in include
-            return out;
+            if (!explicit_include()) {
+                out.omit = true;  // key not in include
+                return out;
+            }
+        } else {
+            bool holds = false;
+            if (!ser_check_contains(include, key, &holds))
+                ser_filter_refusal("include");
+            if (holds) {
+                out.include = py::none();
+                out.exclude = next_exclude;
+                return out;
+            }
+            if (!explicit_include()) {
+                out.omit = true;  // key not in include
+                return out;
+            }
         }
-        bool holds = false;
-        if (!ser_check_contains(include, key, &holds))
-            ser_filter_refusal("include");
-        if (holds) {
-            out.include = py::none();
-            out.exclude = next_exclude;
-            return out;
-        }
-        out.omit = true;  // key not in include
-        return out;
     }
 
-    // No include filter: keep the item, propagate the exclude sub-filter
+    // No call-time include kept the item: propagate the exclude sub-filter,
+    // else the node's own include/exclude answers for it (filter.rs:227-232).
     if (!next_exclude.is_none()) {
         out.exclude = next_exclude;
+    } else if (!default_keep()) {
+        out.omit = true;
     }
     return out;
 }
@@ -2054,6 +2085,11 @@ struct SerNode {
     std::unordered_map<std::string, std::string> field_aliases;
     // Exclude-if callables: field_name -> Python callable (for serialization)
     std::unordered_map<std::string, py::object> field_exclude_if;
+    // dict.rs:48-52 builds the node's own SchemaFilter<isize> from
+    // serialization={'include': ..., 'exclude': ...} at build time: the key hashes
+    // (filter.rs build_set_hashes) that filter.key_filter asks about per entry.
+    std::optional<std::unordered_set<int64_t>> ser_key_include;
+    std::optional<std::unordered_set<int64_t>> ser_key_exclude;
     // Fields excluded at schema level (Field(exclude=True))
     std::unordered_set<std::string> field_excluded;
     // Set of computed field names (excluded when round_trip=True)
@@ -2829,7 +2865,9 @@ struct SerNode {
             for (auto item : d) {
                 auto k = py::reinterpret_borrow<py::object>(item.first);
                 auto v = py::reinterpret_borrow<py::object>(item.second);
-                auto next = apply_ser_filter(k, include, exclude);
+                auto next = apply_ser_filter(k, include, exclude,
+                                             ser_key_include ? &ser_key_include : nullptr,
+                                             ser_key_exclude ? &ser_key_exclude : nullptr);
                 if (next.omit) continue;
                 // In json mode the key is asked for its text, not its serialized value
                 // (dict.rs:90-93), which is why a float key leaves the run as "1.5".
@@ -3094,7 +3132,9 @@ struct SerNode {
             for (auto item : d) {
                 auto k = py::reinterpret_borrow<py::object>(item.first);
                 auto v = py::reinterpret_borrow<py::object>(item.second);
-                auto next = apply_ser_filter(k, include, exclude);
+                auto next = apply_ser_filter(k, include, exclude,
+                                             ser_key_include ? &ser_key_include : nullptr,
+                                             ser_key_exclude ? &ser_key_exclude : nullptr);
                 if (next.omit) continue;
                 py::object out_k = children[0]->to_json_key(k, exc_none, round_trip, by_alias, context);
                 std::string val_json = children.size() > 1
@@ -5567,6 +5607,29 @@ static SerRef build_ser_impl(const py::dict& schema,
         if (!val_ser) { val_ser = std::make_shared<SerNode>(); val_ser->type = "any"; }
         node->children.push_back(key_ser);
         node->children.push_back(val_ser);
+        // dict.rs:48-52: the node's own include/exclude are read at build time,
+        // must be sets (build_set_hashes casts to PySet, so everything else --
+        // frozenset included -- is a build error) and enter the node's filter as
+        // the hashes Rust stores.
+        if (has_ser_dict) {
+            auto hashes = [&](const char* which) -> std::optional<std::unordered_set<int64_t>> {
+                if (!ser_dict.contains(which)) return std::nullopt;
+                py::object v = ser_dict[which];
+                if (v.is_none()) return std::nullopt;
+                if (!py::isinstance<py::set>(v))
+                    throw SchemaError(std::string("Error building `dict` serializer:\n  TypeError: '")
+                                      + v.ptr()->ob_type->tp_name + "' object is not an instance of 'set'");
+                std::unordered_set<int64_t> hs;
+                for (py::handle item : py::set(v)) {
+                    Py_hash_t h = PyObject_Hash(item.ptr());
+                    if (h == -1) throw py::error_already_set();
+                    hs.insert((int64_t)h);
+                }
+                return hs;
+            };
+            node->ser_key_include = hashes("include");
+            node->ser_key_exclude = hashes("exclude");
+        }
     }
 
     if (type == "named-tuple") {

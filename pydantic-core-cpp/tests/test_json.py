@@ -3517,3 +3517,50 @@ def test_a_map_key_of_the_untyped_python_walk_is_inferred_like_its_value():
     assert ser.to_python(both, exclude={fractions.Fraction(3, 2)}) == {5: 2}
     assert ser.to_python(both, include={'3/2'}) == {}
     assert ser.to_python({1: {2: 3}}, include={1: {2: True}}) == {1: {2: 3}}
+
+
+def test_a_dict_node_with_its_own_include_or_exclude_answers_for_every_entry():
+    # dict.rs:48-52 reads the node's own serialization include/exclude at build time and
+    # dict.rs:86/:130 asks that filter about every entry: the sets are hashes of the keys as
+    # they are written (1 reaches True and 1.0, -1 keeps its own hash), and a set -- not a
+    # frozenset, not a list -- is the only shape the build accepts.
+    inc = SchemaSerializer(core_schema.dict_schema(serialization={'include': {1}}))
+    exc = SchemaSerializer(core_schema.dict_schema(serialization={'exclude': {2}}))
+    both = SchemaSerializer(core_schema.dict_schema(serialization={'include': {1, 2}, 'exclude': {2}}))
+
+    assert inc.to_python({1: 'a', 2: 'b'}) == {1: 'a'}
+    assert inc.to_json({1: 'a', 2: 'b'}) == b'{"1":"a"}'
+    assert exc.to_python({1: 'a', 2: 'b'}) == {1: 'a'}
+    assert exc.to_json({1: 'a', 2: 'b'}) == b'{"1":"a"}'
+    assert both.to_python({1: 'a', 2: 'b'}) == {1: 'a'}
+    assert SchemaSerializer(core_schema.dict_schema(
+        serialization={'include': set()})).to_python({1: 'a'}) == {}
+    assert SchemaSerializer(core_schema.dict_schema(
+        serialization={'include': None})).to_python({1: 'a'}) == {1: 'a'}
+    assert inc.to_python({True: 'a', 2: 'b'}) == {True: 'a'}
+    assert inc.to_python({1.0: 'a', 2: 'b'}) == {1.0: 'a'}
+    assert SchemaSerializer(core_schema.dict_schema(
+        serialization={'include': {-1}})).to_python({1: 'a', -1: 'b'}) == {-1: 'b'}
+
+    # the node's filter and the call's pair are one decision, not two walks (filter.rs:198-232):
+    # the node's include rescues a key the call's include missed and walks it under an empty
+    # pair rather than the call's nested one, and the call's exclude still refuses a key the
+    # node's include would have kept
+    assert inc.to_python({1: 'a', 2: 'b'}, include={2}) == {1: 'a', 2: 'b'}
+    assert inc.to_python({1: 'a', 2: 'b'}, include={1}) == {1: 'a'}
+    assert inc.to_python({1: 'a', 2: 'b'}, exclude={1}) == {}
+    assert exc.to_python({1: 'a', 2: 'b'}, exclude={1}) == {}
+    assert exc.to_python({1: 'a', 2: 'b'}, include={1}) == {1: 'a'}
+    assert inc.to_python({1: {'x': 1, 'y': 2}, 2: {'x': 3, 'y': 4}}, include={2: {'x'}}) == {
+        1: {'x': 1, 'y': 2}, 2: {'x': 3}}
+
+    # every dict node answers for its own entries, whoever walked down to it
+    nest = SchemaSerializer(core_schema.list_schema(
+        core_schema.dict_schema(serialization={'include': {1}})))
+    assert nest.to_python([{1: 'a', 2: 'b'}, {1: 'c'}]) == [{1: 'a'}, {1: 'c'}]
+    assert nest.to_json([{1: 'a', 2: 'b'}, {1: 'c'}]) == b'[{"1":"a"},{"1":"c"}]'
+
+    for bad, tn in ((frozenset({1}), 'frozenset'), ([1], 'list'), (5, 'int')):
+        with pytest.raises(SchemaError, match=re.escape(
+                f"Error building `dict` serializer:\n  TypeError: '{tn}' object is not an instance of 'set'")):
+            SchemaSerializer(core_schema.dict_schema(serialization={'include': bad}))
