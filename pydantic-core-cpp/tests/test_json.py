@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import uuid
+import warnings
 from collections import deque
 
 import pytest
@@ -2275,3 +2276,49 @@ def test_the_walk_refuses_a_repeated_id_and_a_run_that_only_gets_absurdly_deep()
         'ValueError', 'Circular reference detected (id repeated)')
     assert answered(lambda: ser.to_python(Unknown(), mode='json', fallback=fresh)) == (
         'ValueError', 'Circular reference detected (depth exceeded)')
+
+
+def test_a_warning_a_filter_turns_into_an_error_escapes_a_json_run_as_itself():
+    # Rust asks the warnings a run collected for their say only after the encoded bytes have come
+    # back through the serde mapping (mod.rs:189 runs after to_json_bytes), so an escalated
+    # warning never takes the "Error serializing to JSON: " name that a failure of the encoding
+    # itself does: in warn mode a filter that turns the UserWarning into an error lets that
+    # UserWarning out, and warnings='error' raises a bare PydanticSerializationError.  A run that
+    # failed on the way to its bytes never reaches the flush and says nothing at all.
+    ser = SchemaSerializer(core_schema.list_schema(core_schema.int_schema()))
+
+    def caught(fn):
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter('always')
+            try:
+                out = ('ok', fn())
+            except BaseException as e:
+                out = (type(e).__name__, str(e).split('\n')[0])
+            return out, len(w)
+
+    def under_error_filter(fn):
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            try:
+                return ('ok', fn())
+            except BaseException as e:
+                return (type(e).__name__, str(e).split('\n')[0])
+
+    assert under_error_filter(lambda: ser.to_json(['a'])) == (
+        'UserWarning', 'Pydantic serializer warnings:')
+    assert under_error_filter(lambda: ser.to_python(['a'])) == (
+        'UserWarning', 'Pydantic serializer warnings:')
+
+    assert caught(lambda: ser.to_json(['a'], warnings='error')) == (
+        ('PydanticSerializationError', 'Pydantic serializer warnings:'), 0)
+    assert caught(lambda: ser.to_python(['a'], warnings='error')) == (
+        ('PydanticSerializationError', 'Pydantic serializer warnings:'), 0)
+
+    # The bytes still come back -- the warning is what the run has to say afterwards.
+    assert caught(lambda: ser.to_json(['a'])) == (('ok', b'["a"]'), 1)
+
+    # A run that never got its bytes keeps its warnings to itself, and a finished run leaves
+    # nothing behind for the next one.
+    assert caught(lambda: ser.to_json(['a', object()])) == (
+        ('PydanticSerializationError', "Unable to serialize unknown type: <class 'object'>"), 0)
+    assert caught(lambda: ser.to_json(['b'])) == (('ok', b'["b"]'), 1)

@@ -5781,15 +5781,27 @@ public:
                       bool exclude_computed_fields, bool round_trip, py::object warnings, std::optional<py::object> fallback,
                       bool serialize_as_any, std::optional<bool> polymorphic, py::object context) const {
         SerJsonRun run;
+        py::bytes encoded;
         try {
-            return to_json_inner(value, indent, ea, include, exclude, by_alias, exclude_unset, exclude_defaults,
-                                 exc_none, exclude_computed_fields, round_trip, warnings, fallback, serialize_as_any,
-                                 polymorphic, context);
+            // to_json_inner leaves the warning frame open when the encoding succeeded, so
+            // the flush below is the only thing that closes it and it happens past this
+            // mapping.
+            encoded = to_json_inner(value, indent, ea, include, exclude, by_alias, exclude_unset, exclude_defaults,
+                                    exc_none, exclude_computed_fields, round_trip, warnings, fallback,
+                                    serialize_as_any, polymorphic, context);
         } catch (py::error_already_set& e) {
             std::string named;
             if (!ser_json_name_python_error(e, &named)) throw;
             throw PydanticSerializationError("Error serializing to JSON: " + named);
         }
+        // Rust asks the warnings for their say after the encoded bytes have already come
+        // back through the serde mapping (mod.rs:189 runs after to_json_bytes), so what a
+        // warning filter turns into an error escapes a json run as itself -- a UserWarning,
+        // not the serialization error the encoding step would have named it.  Flushing here
+        // rather than inside the encoding is what keeps that difference; a run that failed
+        // never reaches it, and its warnings are dropped the way Rust drops them.
+        ser_warn_leave(false);  // may emit UserWarning / raise PydanticSerializationError
+        return encoded;
     }
 
     py::bytes to_json_inner(const py::object& value, std::optional<size_t> indent, std::optional<bool> ea,
@@ -5833,9 +5845,8 @@ public:
             ser_warn_enter(warnings);
             try {
                 std::string json = SerNode::infer_json(value, e, -1);
-                ser_warn_leave(false);
                 if (indent.has_value()) json = json_pretty_print(json, static_cast<int>(*indent));
-                return py::bytes(std::move(json));
+                return py::bytes(std::move(json));  // the warning frame is left for the caller
             } catch (...) {
                 ser_warn_leave(true);
                 throw;
@@ -5844,9 +5855,8 @@ public:
         ser_warn_enter(warnings);
         try {
             std::string json = ser_->to_json(value, e, -1, round_trip, inc, exc, use_alias, exclude_unset, exclude_defaults, exc_none, context);
-            ser_warn_leave(false);  // may emit UserWarning / raise PydanticSerializationError
             if (indent.has_value()) json = json_pretty_print(json, static_cast<int>(*indent));
-            return py::bytes(std::move(json));
+            return py::bytes(std::move(json));  // the warning frame is left for the caller
         } catch (...) {
             ser_warn_leave(true);  // discard warnings collected before the error
             throw;
