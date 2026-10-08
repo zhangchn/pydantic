@@ -4346,6 +4346,29 @@ private:
             kw["exclude"] = exclude;
             return ser.attr("to_python")(v, py::arg("mode") = (json_mode ? "json" : "python"), **kw);
         }
+        // A dataclass that carries no serializer of its own has its fields inferred one by one
+        // (ob_type.rs:290-291 puts the `__dataclass_fields__` duck test right after the
+        // `__pydantic_serializer__` one and refuses it for a class, and infer.rs:681-706 reads
+        // the pairs from there rather than from __dict__: declaration order, only the entries
+        // whose `_field_type` is dataclasses._FIELD -- skipped *before* the name is read, since
+        // an InitVar has no attribute to read -- and the value read back with getattr, so a field
+        // that lives behind a property or in __slots__ is still found).  What comes out is pairs
+        // through serialize_pairs, so a field's name is what the filter is asked about and its
+        // value is inferred under the pair that answer names, exactly as a mapping's entries are.
+        if (py_hasattr(v, "__dataclass_fields__") && !PyType_Check(v.ptr())) {
+            static const py::object& dc_field_marker =
+                held_python_object([] { return py::module_::import("dataclasses").attr("_FIELD"); });
+            py::dict out;
+            for (auto item : py::getattr(v, "__dataclass_fields__").cast<py::dict>()) {
+                py::object name = py::reinterpret_borrow<py::object>(item.first);
+                if (!py::getattr(item.second, "_field_type").is(dc_field_marker)) continue;
+                auto next = apply_ser_filter(name, include, exclude);
+                if (next.omit) continue;
+                out[name] = serialize_any_value(py::getattr(v, name), exc_none, round_trip, json_mode,
+                                                next.include, next.exclude);
+            }
+            return std::move(out);
+        }
         if (py::isinstance<py::dict>(v)) {
             py::dict out;
             auto d = v.cast<py::dict>();

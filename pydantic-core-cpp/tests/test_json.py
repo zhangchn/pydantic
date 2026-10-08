@@ -13,6 +13,8 @@ import sys
 import uuid
 import warnings
 from collections import deque
+from dataclasses import InitVar
+from typing import ClassVar
 
 import pytest
 from dirty_equals import IsFloatNan, IsList
@@ -3276,3 +3278,97 @@ def test_a_map_key_nested_past_the_value_walks_bound_is_still_walked():
         ser.to_json(deep_list(255))
     with pytest.raises(ValueError, match=r'Circular reference detected \(depth exceeded\)'):
         ser.to_python(deep_list(255), mode='json')
+
+
+@dataclasses.dataclass
+class SerPlainDC:
+    a: int
+    b: str = 'x'
+
+
+@dataclasses.dataclass
+class SerMetaDC:
+    a: int
+    b: int = dataclasses.field(init=False, default=7)
+    c: ClassVar[int] = 99
+    d: InitVar[int] = 5
+
+
+@dataclasses.dataclass
+class SerBaseDC:
+    a: int
+
+
+@dataclasses.dataclass
+class SerChildDC(SerBaseDC):
+    b: int
+
+
+@dataclasses.dataclass
+class SerHolderDC:
+    inner: object
+
+
+@dataclasses.dataclass(slots=True)
+class SerSlotsDC:
+    x: int
+
+
+def test_a_dataclass_under_the_python_infer_walk_is_asked_its_fields():
+    # A dataclass that brings no `__pydantic_serializer__` of its own is inferred field by field
+    # (ob_type.rs:290-291, infer.rs:681-706): the pairs come from `__dataclass_fields__` rather
+    # than `__dict__`, so a slots dataclass is answered at all, a field that only the class
+    # carries still gets its value, and an attribute that no field names is left out.  The python
+    # walk had no such arm and handed the instance back untouched.
+    ser = SchemaSerializer(core_schema.any_schema())
+
+    assert ser.to_python(SerPlainDC(1)) == {'a': 1, 'b': 'x'}
+    assert ser.to_python(SerPlainDC(1), mode='json') == {'a': 1, 'b': 'x'}
+    assert ser.to_json(SerChildDC(1, 2)) == b'{"a":1,"b":2}'
+    # a field's own nesting is inferred too: containers and a dataclass inside a dataclass
+    assert ser.to_python([SerPlainDC(1)]) == [{'a': 1, 'b': 'x'}]
+    assert ser.to_python((SerPlainDC(1),)) == ({'a': 1, 'b': 'x'},)
+    assert ser.to_python({'k': SerPlainDC(1)}) == {'k': {'a': 1, 'b': 'x'}}
+    assert ser.to_python(SerHolderDC(SerPlainDC(1))) == {'inner': {'a': 1, 'b': 'x'}}
+    # neither a ClassVar nor an InitVar is a field, so the filter is asked about the names
+    # the class really has and the value an InitVar was handed never leaks into the output
+    assert ser.to_python(SerMetaDC(1)) == {'a': 1, 'b': 7}
+    assert ser.to_python(SerMetaDC(1, 6)) == {'a': 1, 'b': 7}
+    # inherited fields keep their declaration order, base first
+    assert ser.to_python(SerChildDC(1, 2)) == {'a': 1, 'b': 2}
+    # the value is read with getattr, so a field the instance does not carry is still answered
+    # from the class, and an attribute no field names never appears
+    without_attr = SerPlainDC(1)
+    del without_attr.b
+    assert ser.to_python(without_attr) == {'a': 1, 'b': 'x'}
+    with_extra = SerPlainDC(1)
+    object.__setattr__(with_extra, 'extra', 'not a field')
+    assert ser.to_python(with_extra) == {'a': 1, 'b': 'x'}
+    # a slots dataclass has no `__dict__` at all
+    assert ser.to_python(SerSlotsDC(1)) == {'x': 1}
+    assert ser.to_python(SerSlotsDC(1), mode='json') == {'x': 1}
+    # a field's name is what the filter is asked about, and the value keeps the pair it names
+    assert ser.to_python(SerChildDC(1, 2), include={'a'}) == {'a': 1}
+    assert ser.to_python(SerChildDC(1, 2), exclude={'a'}) == {'b': 2}
+    assert ser.to_python(SerHolderDC(SerPlainDC(1)), include={'inner': {'a': True}}) == {
+        'inner': {'a': 1}}
+    # a dataclass that does carry a serializer is still handed to it: the `__pydantic_serializer__`
+    # duck test comes first (ob_type.rs:288), which is what makes a pydantic dataclass's aliases
+    # and fields reach this walk through its own serializer.
+    import pydantic
+
+    @pydantic.dataclasses.dataclass
+    class SerPydDC:
+        a: int
+        b: int = pydantic.Field(default=2, alias='bee')
+
+    assert ser.to_python(SerPydDC(1)) == {'a': 1, 'b': 2}
+    assert ser.to_python(SerPydDC(1), by_alias=True) == {'a': 1, 'bee': 2}
+    # a class answers the same duck test -- it carries `__dataclass_fields__` too -- and is refused
+    # rather than walked, and the refusal names the value's own type (ob_type.rs:410-419)
+    with pytest.raises(
+            PydanticSerializationError,
+            match=r"Unable to serialize unknown type: <class 'type'>",
+    ):
+        ser.to_json(SerPlainDC)
+    assert ser.to_python(SerPlainDC) is SerPlainDC
