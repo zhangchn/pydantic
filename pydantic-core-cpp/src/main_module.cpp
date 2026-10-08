@@ -3239,21 +3239,47 @@ struct SerNode {
             out += "]";
             return out;
         }
-        if (type == "list" && !children.empty()) {
+        // list/deque/generator: serialize as a JSON array, asking the call's filter about every
+        // position -- list.rs:64, deque.rs:75 and generator.rs:68 all call index_filter.  A list
+        // and a deque have a length to fold an index key by; a generator's length is never taken
+        // (`None` at generator.rs:68), which in Rust means "use the key as given, and refuse a
+        // negative one" rather than "skip the filter" -- that part is not here yet, so a filter
+        // over a generator is still dropped whole.
+        if ((type == "list" && !children.empty()) || type == "deque" || type == "generator") {
+            py::iterable seq = py::reinterpret_borrow<py::iterable>(value);
+            py::ssize_t len = -1;
+            if (type != "generator" && (!include.is_none() || !exclude.is_none())) {
+                try {
+                    len = py::len(seq);
+                } catch (...) {
+                    PyErr_Clear();
+                }
+            }
+            py::object inc = (include.is_none() || len < 0) ? py::none() : map_negative_indices(include, len);
+            py::object exc = (exclude.is_none() || len < 0) ? py::none() : map_negative_indices(exclude, len);
             std::string out = "[";
             bool first = true;
-            for (auto item : py::reinterpret_borrow<py::iterable>(value)) {
-                if (!first) out += ",";
-                first = false;
-                out += children[0]->to_json(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), ensure_ascii, -1,
-                                            round_trip, py::none(), py::none(), by_alias, false, false,
-                                            exc_none, context);
+            py::ssize_t idx = 0;
+            for (auto item : seq) {
+                auto next = apply_ser_filter(py::int_(idx), inc, exc);
+                if (!next.omit) {
+                    if (!first) out += ",";
+                    first = false;
+                    py::object obj = py::reinterpret_borrow<py::object>(item);
+                    if (!children.empty()) {
+                        out += children[0]->to_json(check_item_type(children[0], obj), ensure_ascii, -1, round_trip, next.include, next.exclude, by_alias, false, false, exc_none, context);
+                    } else {
+                        out += infer_json(obj, ensure_ascii, -1);
+                    }
+                }
+                idx++;
             }
             out += "]";
             return out;
         }
-        // set/frozenset/deque/generator: serialize as JSON array
-        if (type == "set" || type == "frozenset" || type == "deque" || type == "generator") {
+        // A set has no position to ask about, so it never consults the filter and hands its items
+        // the state it was given (set_frozenset.rs).  JSON has no set type: it becomes an array.
+        if (type == "set" || type == "frozenset") {
             std::string out = "[";
             bool first = true;
             for (auto item : py::reinterpret_borrow<py::iterable>(value)) {
@@ -3261,7 +3287,7 @@ struct SerNode {
                 first = false;
                 py::object obj = py::reinterpret_borrow<py::object>(item);
                 if (!children.empty()) {
-                    out += children[0]->to_json(check_item_type(children[0], obj), ensure_ascii, -1, round_trip, py::none(), py::none(), by_alias, false, false, exc_none, context);
+                    out += children[0]->to_json(check_item_type(children[0], obj), ensure_ascii, -1, round_trip, include, exclude, by_alias, false, false, exc_none, context);
                 } else {
                     out += infer_json(obj, ensure_ascii, -1);
                 }

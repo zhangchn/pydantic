@@ -1,3 +1,4 @@
+import collections
 import dataclasses
 import datetime
 import decimal
@@ -2431,3 +2432,30 @@ def test_a_set_node_never_consults_the_filter_it_is_handed():
             assert ser.to_python(source, exclude=exclude) == expected, exclude
             assert ser.to_python(source, exclude=exclude, mode='json') == [10, 20, 30], exclude
             assert ser.to_json(source, exclude=exclude) == b'[10,20,30]', exclude
+
+
+def test_a_json_run_answers_the_filter_for_a_list_a_deque_and_a_tuple():
+    # list.rs:64, deque.rs:75 and generator.rs:68 all ask the filter about every position, so a
+    # to_json run that was handed include/exclude answers it.  A list, a deque and a tuple know
+    # their own length and so fold an index key by it.
+    cases = (
+        (SchemaSerializer(core_schema.list_schema(core_schema.int_schema())), [10, 20, 30]),
+        (SchemaSerializer(core_schema.deque_schema(core_schema.int_schema())), collections.deque([10, 20, 30])),
+        (SchemaSerializer(core_schema.tuple_variable_schema(core_schema.int_schema())), (10, 20, 30)),
+    )
+    for ser, value in cases:
+        assert ser.to_json(value, include={0: True}) == b'[10]'
+        assert ser.to_json(value, include=set()) == b'[]'
+        assert ser.to_json(value, include={-1: True}) == b'[30]'
+        assert ser.to_json(value, include={7: True}) == b'[20]'
+        assert ser.to_json(value, exclude={1: True}) == b'[10,30]'
+        assert ser.to_json(value, include={'__all__'}) == b'[10,20,30]'
+        assert ser.to_python(value, include={0: True}, mode='json') == [10]
+
+    # The filter an item was let through by is that item's own filter from here down.
+    dicts = SchemaSerializer(
+        core_schema.list_schema(core_schema.dict_schema(core_schema.str_schema(), core_schema.int_schema()))
+    )
+    nested = [{'x': 1, 'y': 2}, {'x': 3, 'y': 4}]
+    assert dicts.to_json(nested, include={0: {'x': True}}) == b'[{"x":1}]'
+    assert dicts.to_json(nested, exclude={0: {'y': True}}) == b'[{"x":1},{"x":3,"y":4}]'
