@@ -3792,6 +3792,59 @@ def test_a_bytearray_carries_the_same_buffer_to_a_json_run_as_the_same_bytes():
     assert lb.to_json([ba]) == b'["s"]'
 
 
+def test_a_json_run_refuses_a_byte_string_it_cannot_decode():
+    # bytes_to_string is a strict decode that REPORTS its failure.  A run that returns Python
+    # objects answers with CPython's own UnicodeDecodeError, and one that writes text refuses
+    # through the serializer's error type -- handing the raw buffer back, or writing it into the
+    # JSON, leaves an undecodable byte string in an answer no reader can get back.  A base64 or
+    # hex run never decodes, so neither ever refuses.
+    s = SchemaSerializer(core_schema.any_schema())
+    typed = SchemaSerializer(core_schema.bytes_schema())
+    lb = SchemaSerializer(core_schema.list_schema(core_schema.bytes_schema()))
+    db = SchemaSerializer(core_schema.dict_schema(core_schema.str_schema(), core_schema.bytes_schema()))
+
+    decode_err = {
+        b"\xff\xfe": "'utf-8' codec can't decode byte 0xff in position 0: invalid utf-8",
+        b"a\xc3": "'utf-8' codec can't decode byte 0xc3 in position 1: invalid utf-8",
+        b"\xe2\x82": "'utf-8' codec can't decode bytes in position 0-1: invalid utf-8",
+    }
+    text_reason = {
+        b"\xff\xfe": "invalid utf-8 sequence of 1 bytes from index 0",
+        b"a\xc3": "incomplete utf-8 byte sequence from index 1",
+        b"\xe2\x82": "incomplete utf-8 byte sequence from index 0",
+    }
+    for v, msg in decode_err.items():
+        for run in (lambda v=v: s.to_python(v, mode="json"),
+                    lambda v=v: s.to_python({"k": v}, mode="json"),
+                    lambda v=v: s.to_python([v], mode="json"),
+                    lambda v=v: s.to_python({v: 1}, mode="json"),
+                    lambda v=v: typed.to_python(v, mode="json"),
+                    lambda v=v: lb.to_python([v], mode="json"),
+                    lambda v=v: db.to_python({"k": v}, mode="json"),
+                    lambda v=v: to_jsonable_python(v)):
+            with pytest.raises(UnicodeDecodeError, match=re.escape(msg)):
+                run()
+        assert s.to_python(v) == v
+        assert typed.to_python(v) == v
+        for run in (lambda v=v: s.to_json(v),
+                    lambda v=v: typed.to_json(v),
+                    lambda v=v: lb.to_json([v]),
+                    lambda v=v: db.to_json({"k": v})):
+            with pytest.raises(PydanticSerializationError,
+                               match=re.escape("Error serializing to JSON: " + text_reason[v])):
+                run()
+        # a key's failure reaches the text run as the decode error itself, which it then reports
+        with pytest.raises(PydanticSerializationError) as key_err:
+            s.to_json({v: 1})
+        assert str(key_err.value).startswith("Error serializing to JSON: UnicodeDecodeError: " + msg)
+
+    for mode, answer in (("base64", "__4="), ("hex", "fffe")):
+        cfg = SchemaSerializer(core_schema.any_schema(), config=CoreConfig(ser_json_bytes=mode))
+        assert cfg.to_python(b"\xff\xfe", mode="json") == answer
+        assert cfg.to_python([b"\xff\xfe"], mode="json") == [answer]
+        assert cfg.to_json(b"\xff\xfe") == ('"%s"' % answer).encode()
+
+
 def test_the_serializer_methods_refuse_keywords_they_do_not_declare():
     # pyo3 parses the signature itself, so an undeclared keyword dies with CPython's own
     # message naming the qualname'd function, and the first unexpected one in call order is

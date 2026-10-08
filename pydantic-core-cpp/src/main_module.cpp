@@ -982,8 +982,11 @@ static bool json_leaf_convert(const std::string& type, const py::object& value,
                 out = py::str(enc);
                 return true;
             }
-            // utf8: decodes UTF-8; invalid input raises and the caller keeps
-            // handling the value (or reports an error).
+            // utf8 is a strict decode that REPORTS its failure: bytes_to_string hands the
+            // caller a UnicodeDecodeError, so a byte string no reader could decode never
+            // becomes a json run's answer.  Declining here instead let the raw value walk
+            // out of the run, in every shape it sat in and under a typed node too.
+            if (auto bad = utf8_bad(b)) raise_rust_decode_error(b, *bad);
             out = py::str(b);
             return true;
         }
@@ -1067,6 +1070,11 @@ static bool json_leaf_convert(const std::string& type, const py::object& value,
             out = py::str(result);
             return true;
         }
+    } catch (const py::error_already_set& e) {
+        // A decode failure is the conversion answering "no, and here is why", not the leaf
+        // declining to answer, so it goes on rather than into the catch-all below.
+        if (e.matches(PyExc_UnicodeDecodeError)) throw;
+        PyErr_Clear();
     } catch (...) {
         PyErr_Clear();
     }
@@ -3210,15 +3218,16 @@ struct SerNode {
             return json_escape(value.cast<std::string>(), ensure_ascii);
         }
         if (type == "bytes") {
-            std::string b = value.cast<std::string>();
+            std::string b;
+            if (!ser_bytes_buffer(value, b)) b = value.cast<std::string>();
             if (ser_json_bytes == "base64") return "\"" + b64_encode_string(b) + "\"";
             if (ser_json_bytes == "hex") return "\"" + bytes_hex_encode(b) + "\"";
-            // Default: UTF-8
-            try {
-                return json_escape(b, ensure_ascii);
-            } catch (...) {
-                return "\"<bytes>\"";
-            }
+            // Default: UTF-8, and this run reports a buffer it cannot decode through the
+            // serializer's own error type -- writing the bytes into the text instead makes
+            // JSON that no parser downstream can read back.
+            if (auto bad = utf8_bad(b))
+                throw PydanticSerializationError("Error serializing to JSON: " + rust_utf8_reason(*bad));
+            return json_escape(b, ensure_ascii);
         }
         if (type == "json") {
             if (round_trip) {
