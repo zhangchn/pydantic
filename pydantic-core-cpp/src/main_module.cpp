@@ -3359,7 +3359,9 @@ struct SerNode {
                     first = false;
                     py::object obj = py::reinterpret_borrow<py::object>(item);
                     if (!children.empty()) {
-                        out += children[0]->to_json(check_item_type(children[0], obj), ensure_ascii, -1, round_trip, next.include, next.exclude, by_alias, false, false, exc_none, context);
+                        // state.scoped_include_exclude (list.rs:104) swaps only the filter pair on
+                        // the way down: exclude_unset and exclude_defaults travel with the item.
+                        out += children[0]->to_json(check_item_type(children[0], obj), ensure_ascii, -1, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
                     } else {
                         out += infer_json(obj, ensure_ascii, -1);
                     }
@@ -3379,7 +3381,7 @@ struct SerNode {
                 first = false;
                 py::object obj = py::reinterpret_borrow<py::object>(item);
                 if (!children.empty()) {
-                    out += children[0]->to_json(check_item_type(children[0], obj), ensure_ascii, -1, round_trip, include, exclude, by_alias, false, false, exc_none, context);
+                    out += children[0]->to_json(check_item_type(children[0], obj), ensure_ascii, -1, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
                 } else {
                     out += infer_json(obj, ensure_ascii, -1);
                 }

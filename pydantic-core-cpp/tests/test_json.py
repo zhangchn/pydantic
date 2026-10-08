@@ -2644,3 +2644,52 @@ def test_a_filter_that_cannot_answer_is_refused_rather_than_taken_for_a_no():
     )
     assert dicts.to_python({'a': 1, 'b': 2, 'c': 3}, include=Bag()) == {}
     assert dicts.to_python({'a': 1, 'b': 2, 'c': 3}, exclude=Bag()) == {'a': 1, 'b': 2, 'c': 3}
+
+
+def test_a_container_hands_its_child_the_run_unset_and_default_flags():
+    # state.scoped_include_exclude swaps only the include/exclude pair on the way to a list's item
+    # (list.rs:104), so exclude_unset and exclude_defaults travel with the value into every child
+    # serializer.  A json run that was handed either flag and dropped it on the way answered with
+    # the field the caller had just asked to leave out: [M(x=5)] dumped to {"x":5,"y":2} where the
+    # answer is {"x":5}.
+    class UnsetModel:
+        def __init__(self, x, y=2):
+            self.x = x
+            self.y = y
+            self.__pydantic_fields_set__ = {'x'}
+            self.__pydantic_extra__ = None
+            self.__pydantic_private__ = None
+
+    model = core_schema.model_schema(
+        UnsetModel,
+        core_schema.model_fields_schema({
+            'x': core_schema.model_field(core_schema.int_schema()),
+            'y': core_schema.model_field(
+                core_schema.with_default_schema(core_schema.int_schema(), default=2)
+            ),
+        }),
+    )
+    value = UnsetModel(5)
+    # The python answer keeps the container's own type; a json run answers with lists throughout.
+    cases = (
+        (core_schema.list_schema(model), [value], [{'x': 5}], [{'x': 5}], b'[{"x":5}]'),
+        (core_schema.list_schema(core_schema.list_schema(model)), [[value]], [[{'x': 5}]],
+         [[{'x': 5}]], b'[[{"x":5}]]'),
+        (core_schema.deque_schema(model), deque([value]), deque([{'x': 5}]), [{'x': 5}],
+         b'[{"x":5}]'),
+        (core_schema.tuple_schema([model]), (value,), ({'x': 5},), [{'x': 5}], b'[{"x":5}]'),
+        (core_schema.dict_schema(core_schema.str_schema(), model), {'a': value},
+         {'a': {'x': 5}}, {'a': {'x': 5}}, b'{"a":{"x":5}}'),
+    )
+    for schema, source, expected_python, expected_json_mode, expected_json in cases:
+        ser = SchemaSerializer(schema)
+        for flags in ({'exclude_unset': True}, {'exclude_defaults': True},
+                      {'exclude_unset': True, 'by_alias': True}):
+            assert ser.to_python(source, **flags) == expected_python, flags
+            assert ser.to_python(source, mode='json', **flags) == expected_json_mode, flags
+            assert ser.to_json(source, **flags) == expected_json, flags
+
+    # Without the flags the default is still a field like any other.
+    ser = SchemaSerializer(core_schema.list_schema(model))
+    assert ser.to_python([value]) == [{'x': 5, 'y': 2}]
+    assert ser.to_json([value]) == b'[{"x":5,"y":2}]'
