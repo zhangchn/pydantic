@@ -3698,3 +3698,29 @@ def test_a_type_form_function_node_must_name_the_schema_it_wraps():
     assert SchemaSerializer({'type': 'function-plain'}).to_python({'a': 1}) == {'a': 1}
     assert SchemaSerializer({'type': 'function-plain', 'schema': None}).to_python({'a': 1}) == {'a': 1}
     assert SchemaSerializer({'type': 'function-plain', 'schema': 5}).to_python([1]) == [1]
+
+
+def test_the_serializer_methods_refuse_keywords_they_do_not_declare():
+    # pyo3 parses the signature itself, so an undeclared keyword dies with CPython's own
+    # message naming the qualname'd function, and the first unexpected one in call order is
+    # the one reported -- not pybind's overload dump.
+    s = SchemaSerializer(core_schema.int_schema())
+    for kw in ("inf_nan_mode", "bytes_mode", "temporal_mode", "zzz"):
+        with pytest.raises(TypeError, match=re.escape(
+                f"SchemaSerializer.to_python() got an unexpected keyword argument '{kw}'")):
+            s.to_python(5, **{kw: "x"})
+        with pytest.raises(TypeError, match=re.escape(
+                f"SchemaSerializer.to_json() got an unexpected keyword argument '{kw}'")):
+            s.to_json(5, **{kw: "x"})
+    for first in ("zzz", "aaa"):
+        with pytest.raises(TypeError, match=re.escape(
+                f"SchemaSerializer.to_json() got an unexpected keyword argument '{first}'")):
+            s.to_json(5, **{first: 1, ("aaa" if first == "zzz" else "zzz"): 2})
+
+    # the keywords that ARE declared answer exactly as they did under the typed declaration
+    assert s.to_python(5, mode="json") == 5
+    assert s.to_json(5, indent=None, ensure_ascii=None, include=None, exclude=None,
+                     by_alias=None, exclude_unset=False, exclude_defaults=False,
+                     exclude_none=False, round_trip=False, warnings="warn",
+                     serialize_as_any=False, polymorphic_serialization=None,
+                     context=None) == b"5"

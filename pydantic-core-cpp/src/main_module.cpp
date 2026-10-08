@@ -5412,6 +5412,17 @@ static SerRef build_ser(const py::dict& schema,
 // extracted the way pyo3 extracts usize -- PyNumber_Index's own message for a non-index item,
 // and pyo3's OverflowError wordings for a negative index or one past u64::MAX -- all wrapped
 // into the build error the way CombinedSerializer::build wraps a child's failure.
+static void ser_check_unexpected_kw(const char* fname, const std::vector<std::string>& allowed,
+                                   const py::kwargs& kwargs) {
+    for (auto item : kwargs) {
+        std::string k = py::cast<std::string>(item.first);
+        bool found = false;
+        for (const auto& a : allowed) if (a == k) { found = true; break; }
+        if (!found)
+            throw py::type_error(std::string(fname) + " got an unexpected keyword argument '" + k + "'");
+    }
+}
+
 static std::optional<std::unordered_set<int64_t>> ser_index_filter_set(const py::object& v,
                                                                        const std::string& tname) {
     static const std::string wrap = "` serializer:\n  ";
@@ -7919,20 +7930,58 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
              py::arg("schema"), py::arg("config") = py::none())
         .def(py::init<const py::dict&, const std::optional<py::dict>&, bool>(),
              py::arg("schema"), py::arg("config") = py::none(), py::arg("_use_prebuilt") = true)
-        .def("to_python", &PySchemaSerializer::to_python,
-             py::arg("value"), py::kw_only(),
-             py::arg("mode") = py::none(), py::arg("include") = py::none(), py::arg("exclude") = py::none(),
-             py::arg("by_alias") = py::none(), py::arg("exclude_unset") = false, py::arg("exclude_defaults") = false,
-             py::arg("exclude_none") = false, py::arg("exclude_computed_fields") = false, py::arg("round_trip") = false,
-             py::arg("warnings") = "warn", py::arg("fallback") = py::none(), py::arg("serialize_as_any") = false,
-             py::arg("polymorphic_serialization") = py::none(), py::arg("context") = py::none())
-        .def("to_json", &PySchemaSerializer::to_json,
-             py::arg("value"), py::kw_only(),
-             py::arg("indent") = py::none(), py::arg("ensure_ascii") = py::none(), py::arg("include") = py::none(),
-             py::arg("exclude") = py::none(), py::arg("by_alias") = py::none(), py::arg("exclude_unset") = false,
-             py::arg("exclude_defaults") = false, py::arg("exclude_none") = false, py::arg("exclude_computed_fields") = false,
-             py::arg("round_trip") = false, py::arg("warnings") = "warn", py::arg("fallback") = py::none(),
-             py::arg("serialize_as_any") = false, py::arg("polymorphic_serialization") = py::none(), py::arg("context") = py::none())
+        // pyo3 parses the signature itself, so an undeclared keyword dies with CPython's
+        // own "got an unexpected keyword argument" on the first one in call order, not with
+        // pybind's overload dump.  The kwargs here are then unpacked with the defaults the
+        // old typed declaration carried.
+        .def("to_python", [](const PySchemaSerializer& self, const py::object& value, py::kwargs kwargs) -> py::object {
+            static const std::vector<std::string> allowed = {"mode", "include", "exclude", "by_alias",
+                "exclude_unset", "exclude_defaults", "exclude_none", "exclude_computed_fields", "round_trip",
+                "warnings", "fallback", "serialize_as_any", "polymorphic_serialization", "context"};
+            ser_check_unexpected_kw("SchemaSerializer.to_python()", allowed, kwargs);
+            auto opt_str = [&](const char* k) -> std::optional<std::string> {
+                if (!kwargs.contains(k) || kwargs[k].is_none()) return std::nullopt;
+                return kwargs[k].cast<std::string>(); };
+            auto opt_obj = [&](const char* k) -> std::optional<py::object> {
+                if (!kwargs.contains(k) || kwargs[k].is_none()) return std::nullopt;
+                return py::object(kwargs[k]); };
+            auto opt_bool = [&](const char* k) -> std::optional<bool> {
+                if (!kwargs.contains(k) || kwargs[k].is_none()) return std::nullopt;
+                return kwargs[k].cast<bool>(); };
+            auto flag = [&](const char* k) -> bool {
+                return kwargs.contains(k) && kwargs[k].cast<bool>(); };
+            return self.to_python(value, opt_str("mode"), opt_obj("include"), opt_obj("exclude"),
+                                  opt_bool("by_alias"), flag("exclude_unset"), flag("exclude_defaults"),
+                                  flag("exclude_none"), flag("exclude_computed_fields"), flag("round_trip"),
+                                  kwargs.contains("warnings") ? py::object(kwargs["warnings"]) : py::str("warn"),
+                                  opt_obj("fallback"), flag("serialize_as_any"),
+                                  opt_bool("polymorphic_serialization"),
+                                  kwargs.contains("context") ? py::object(kwargs["context"]) : py::none());
+        }, py::arg("value"))
+        .def("to_json", [](const PySchemaSerializer& self, const py::object& value, py::kwargs kwargs) -> py::object {
+            static const std::vector<std::string> allowed = {"indent", "ensure_ascii", "include", "exclude",
+                "by_alias", "exclude_unset", "exclude_defaults", "exclude_none", "exclude_computed_fields",
+                "round_trip", "warnings", "fallback", "serialize_as_any", "polymorphic_serialization", "context"};
+            ser_check_unexpected_kw("SchemaSerializer.to_json()", allowed, kwargs);
+            auto opt_obj = [&](const char* k) -> std::optional<py::object> {
+                if (!kwargs.contains(k) || kwargs[k].is_none()) return std::nullopt;
+                return py::object(kwargs[k]); };
+            auto opt_bool = [&](const char* k) -> std::optional<bool> {
+                if (!kwargs.contains(k) || kwargs[k].is_none()) return std::nullopt;
+                return kwargs[k].cast<bool>(); };
+            auto flag = [&](const char* k) -> bool {
+                return kwargs.contains(k) && kwargs[k].cast<bool>(); };
+            std::optional<size_t> indent;
+            if (kwargs.contains("indent") && !kwargs["indent"].is_none())
+                indent = kwargs["indent"].cast<size_t>();
+            return self.to_json(value, indent, opt_bool("ensure_ascii"), opt_obj("include"), opt_obj("exclude"),
+                                opt_bool("by_alias"), flag("exclude_unset"), flag("exclude_defaults"),
+                                flag("exclude_none"), flag("exclude_computed_fields"), flag("round_trip"),
+                                kwargs.contains("warnings") ? py::object(kwargs["warnings"]) : py::str("warn"),
+                                opt_obj("fallback"), flag("serialize_as_any"),
+                                opt_bool("polymorphic_serialization"),
+                                kwargs.contains("context") ? py::object(kwargs["context"]) : py::none());
+        }, py::arg("value"))
         .def("__repr__", &PySchemaSerializer::repr)
         // Pickle support: __reduce__ returns (cls, (schema, config))
         .def("__reduce__", [](const PySchemaSerializer& self) -> py::tuple {
