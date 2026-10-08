@@ -2368,3 +2368,26 @@ def test_an_iterator_handed_to_the_walk_comes_back_as_a_lazy_view_of_itself():
     assert ser.to_python(iter([1, 2]), mode='json') == [1, 2]
     assert ser.to_json(iter([1, 2])) == b'[1,2]'
     assert to_jsonable_python(iter([1, 2])) == [1, 2]
+
+
+def test_a_list_node_with_no_items_schema_still_walks_what_it_holds():
+    # list.rs:37-41 builds the any serializer as the item serializer when the schema names no
+    # items_schema, so a list node still serializes every element -- there is only no child node
+    # to ask, and the walk itself is asked instead.
+    ser = SchemaSerializer(core_schema.list_schema())
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        out = ser.to_python([iter([1, 'a']), 5])
+    assert len(caught) == 0
+    assert type(out[0]).__name__ == 'SerializationIterator'
+    assert list(out[0]) == [1, 'a']
+    assert out[1] == 5
+
+    assert ser.to_python([iter([1, 'a']), 5], mode='json') == [[1, 'a'], 5]
+    assert ser.to_json([iter([1, 'a']), 5]) == b'[[1,"a"],5]'
+
+    d = decimal.Decimal('1.5')
+    assert ser.to_python([d])[0] is d
+    assert ser.to_python([d], mode='json') == ['1.5']
+    assert ser.to_json([d]) == b'["1.5"]'

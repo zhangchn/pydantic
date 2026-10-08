@@ -2568,8 +2568,13 @@ struct SerNode {
             return py_deque_new(items, maxlen);
         }
 
-        // For list/dict/tuple/containers, serialize children
-        if ((type == "list" || type == "set" || type == "frozenset" || type == "generator") && !children.empty()) {
+        // For list/dict/tuple/containers, serialize children.  A list with no items_schema is
+        // built with the any serializer as its item serializer (list.rs:37-41: `None =>
+        // AnySerializer::build`), so its elements still go through the walk -- there is simply no
+        // child node to ask, and the walk is asked directly below.  The other containers here are
+        // answered as they always were when they have no child.
+        if (type == "list" ||
+            ((type == "set" || type == "frozenset" || type == "generator") && !children.empty())) {
             py::iterable seq = py::reinterpret_borrow<py::iterable>(value);
             // A length is only needed to resolve negative include/exclude keys,
             // and an arbitrary iterable (a custom Iterable, a lazy validator
@@ -2640,7 +2645,10 @@ struct SerNode {
                 for (auto item : seq) {
                     auto next = apply_ser_filter(py::int_(idx), inc, exc);
                     if (!next.omit) {
-                        result.append(children[0]->to_python(check_item_type(children[0], py::reinterpret_borrow<py::object>(item)), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context));
+                        py::object element = py::reinterpret_borrow<py::object>(item);
+                        result.append(children.empty()
+                            ? serialize_any_value(element, exc_none, round_trip, json_mode)
+                            : children[0]->to_python(check_item_type(children[0], element), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context));
                     }
                     idx++;
                 }
