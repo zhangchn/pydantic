@@ -3665,3 +3665,36 @@ def test_a_sequence_node_with_its_own_include_or_exclude_answers_for_its_own_pos
         with pytest.raises(SchemaError, match=re.escape(
                 f"Error building `list` serializer:\n  {msg}")):
             SchemaSerializer(core_schema.list_schema(I, serialization={'include': bad}))
+
+
+def test_a_type_form_function_node_must_name_the_schema_it_wraps():
+    # function.rs:41/:60/:320 -- a before/after/wrap written as a type is
+    # get_as_req("schema"), and the thing named must be a schema dict (pyo3 names None as
+    # 'None', without the "object" word the rest get). The function itself is never asked
+    # for -- a serializer never runs a before/after/wrap validator -- and a function-plain
+    # written as a type names no serializer at all (function.rs:70-74, "any" answers), so
+    # it needs neither key.
+    fn = lambda v: v
+    I = core_schema.int_schema()
+
+    for name in ("function-before", "function-after", "function-wrap"):
+        with pytest.raises(SchemaError, match=re.escape(
+                f"Error building `{name}` serializer:\n  KeyError: 'schema'")):
+            SchemaSerializer({'type': name, 'function': fn})
+        with pytest.raises(SchemaError, match=re.escape(
+                f"Error building `{name}` serializer:\n"
+                "  TypeError: 'None' is not an instance of 'dict'")):
+            SchemaSerializer({'type': name, 'function': fn, 'schema': None})
+        for bad, tn in ((5, 'int'), ('x', 'str'), ([], 'list'), (fn, 'function')):
+            with pytest.raises(SchemaError, match=re.escape(
+                    f"Error building `{name}` serializer:\n"
+                    f"  TypeError: '{tn}' object is not an instance of 'dict'")):
+                SchemaSerializer({'type': name, 'function': fn, 'schema': bad})
+        SchemaSerializer({'type': name, 'schema': I})
+        SchemaSerializer({'type': name, 'function': None, 'schema': I})
+        SchemaSerializer({'type': name, 'function': fn,
+                          'serialization': core_schema.plain_serializer_function_ser_schema(fn)})
+
+    assert SchemaSerializer({'type': 'function-plain'}).to_python({'a': 1}) == {'a': 1}
+    assert SchemaSerializer({'type': 'function-plain', 'schema': None}).to_python({'a': 1}) == {'a': 1}
+    assert SchemaSerializer({'type': 'function-plain', 'schema': 5}).to_python([1]) == [1]

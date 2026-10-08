@@ -5853,6 +5853,20 @@ static SerRef build_ser_impl(const py::dict& schema,
         // validators (e.g. root_validator returning a fixed dict) and produce
         // wrong output.
         if ((type == "function-before" || type == "function-after" || type == "function-wrap") && !has_ser_dict) {
+            // function.rs:41/:60/:320 -- get_as_req(intern!("schema")): written as a type,
+            // before/after/wrap must name a schema to serialize and that schema must be a
+            // dict.  pyo3 names None as 'None' without the "object" word the rest get.
+            static const std::string fnwrap = "` serializer:\n  ";
+            if (!schema.contains("schema"))
+                throw SchemaError("Error building `" + type + fnwrap + "KeyError: 'schema'");
+            py::object inner_schema = schema["schema"];
+            if (!py::isinstance<py::dict>(inner_schema)) {
+                if (inner_schema.is_none())
+                    throw SchemaError("Error building `" + type + fnwrap + "TypeError: 'None' is not an instance of 'dict'");
+                throw SchemaError("Error building `" + type + fnwrap + "TypeError: '" +
+                                  std::string(inner_schema.ptr()->ob_type->tp_name) +
+                                  "' object is not an instance of 'dict'");
+            }
             auto inner = sub();
             if (inner) return inner;
         }
