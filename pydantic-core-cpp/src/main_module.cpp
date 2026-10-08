@@ -4030,22 +4030,33 @@ private:
         return stack;
     }
 
+    // Rust takes a recursion guard for every value the infer walks, not only for containers, and
+    // the guard answers two questions at once (infer.rs:52-67, recursion_guard.rs:32-42): an id
+    // already on the way down is a reference cycle, and a walk that only gets absurdly deep is
+    // refused the same way it is stopped -- depth > 255, so 255 values may be open at once.  A
+    // python run swallows either answer and hands back the value it was given, while a json run --
+    // and mode='json' is one -- lets the ValueError out (extra.rs:93-94).  Counting scalars is not
+    // decoration: a fallback that returns its own argument repeats an id at the second step and a
+    // fallback that builds a new object every call never repeats one, so neither is a container and
+    // the walk between them and a segfault is this guard.
     static py::object serialize_any_value(const py::object& v, bool exc_none, bool round_trip, bool json_mode = false) {
-        if (v.is_none()) return py::none();
-        if (py::isinstance<py::dict>(v) || py::isinstance<py::list>(v) || py::isinstance<py::tuple>(v) || py_hasattr(v, "__pydantic_serializer__")) {
-            std::vector<const void*>& st = py_rec_stack();
-            const void* p = v.ptr();
-            for (const void* q : st) {
-                if (q == p) return v;  // cycle: stop recursing, mirror Rust
+        std::vector<const void*>& st = py_rec_stack();
+        const void* p = v.ptr();
+        for (const void* q : st) {
+            if (q == p) {
+                if (!json_mode) return v;
+                throw py::value_error("Circular reference detected (id repeated)");
             }
-            if (st.size() >= 255) return v;
-            st.push_back(p);
-            struct StackPop {
-                std::vector<const void*>& s;
-                ~StackPop() { s.pop_back(); }
-            } popper{st};
-            return serialize_any_value_inner(v, exc_none, round_trip, json_mode);
         }
+        if (st.size() >= 255) {
+            if (!json_mode) return v;
+            throw py::value_error("Circular reference detected (depth exceeded)");
+        }
+        st.push_back(p);
+        struct StackPop {
+            std::vector<const void*>& s;
+            ~StackPop() { s.pop_back(); }
+        } popper{st};
         return serialize_any_value_inner(v, exc_none, round_trip, json_mode);
     }
 

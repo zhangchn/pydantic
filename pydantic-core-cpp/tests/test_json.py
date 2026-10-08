@@ -2205,3 +2205,73 @@ def test_a_json_run_answers_a_scalar_subclass_as_the_exact_type_it_subclasses():
 
     # A bool is an exact type of its own and no rebuild turns it into an int.
     assert answered(lambda: any_node.to_python(True, mode='json')) == ('bool', True)
+
+
+def test_the_walk_refuses_a_repeated_id_and_a_run_that_only_gets_absurdly_deep():
+    # Rust takes a recursion guard for every value the infer walks, not only for containers
+    # (infer.rs:52-67, recursion_guard.rs:32-42), and it answers two questions at once: an id
+    # already open on the way down is a reference cycle, and a walk with more than 255 values
+    # open at once is refused the same way it is stopped. The caller splits by mode (extra.rs:93-94):
+    # a python run swallows either answer and hands back the value it was given, while a json run
+    # -- and mode='json' is a json run -- lets the ValueError out, which to_json then wraps.
+    ser = SchemaSerializer(core_schema.any_schema())
+
+    def answered(fn):
+        try:
+            return ('ok', fn())
+        except BaseException as e:
+            return (type(e).__name__, str(e))
+
+    def nest(n):
+        v = 1
+        for _ in range(n):
+            v = [v]
+        return v
+
+    selfdict = {}
+    selfdict['self'] = selfdict
+
+    # A cycle comes back as the same cyclic shape and a 300-deep list comes back whole.
+    assert ser.to_python(selfdict)['self'] is selfdict
+    assert ser.to_python(nest(300)) == nest(300)
+
+    assert answered(lambda: ser.to_python(selfdict, mode='json')) == (
+        'ValueError', 'Circular reference detected (id repeated)')
+    assert answered(lambda: to_jsonable_python(selfdict)) == (
+        'ValueError', 'Circular reference detected (id repeated)')
+    assert answered(lambda: ser.to_json(selfdict)) == (
+        'PydanticSerializationError',
+        'Error serializing to JSON: ValueError: Circular reference detected (id repeated)')
+
+    # The bound is on values open at once, so the walk goes 255 deep and refuses the 256th.
+    assert answered(lambda: to_jsonable_python(nest(254))) == ('ok', nest(254))
+    assert answered(lambda: to_jsonable_python(nest(255))) == (
+        'ValueError', 'Circular reference detected (depth exceeded)')
+
+    # A fallback that answers with the value it was handed repeats an id at the second step, and
+    # one that invents a fresh object never repeats an id at all, so only the depth bound can stop
+    # it. Neither value is a container, so before this guard the second of them recursed until the
+    # C stack ran out -- a segfault rather than an error. The call count is where the walk gave up.
+    class Unknown:
+        pass
+
+    asked = []
+
+    def fresh(v):
+        asked.append(v)
+        return Unknown()
+
+    def same(v):
+        asked.append(v)
+        return v
+
+    assert type(ser.to_python(Unknown(), fallback=same)).__name__ == 'Unknown'
+    assert len(asked) == 1
+    asked.clear()
+    assert type(ser.to_python(Unknown(), fallback=fresh)).__name__ == 'Unknown'
+    assert len(asked) == 255
+
+    assert answered(lambda: ser.to_python(Unknown(), mode='json', fallback=same)) == (
+        'ValueError', 'Circular reference detected (id repeated)')
+    assert answered(lambda: ser.to_python(Unknown(), mode='json', fallback=fresh)) == (
+        'ValueError', 'Circular reference detected (depth exceeded)')
