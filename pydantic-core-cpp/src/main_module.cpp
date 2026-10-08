@@ -1163,6 +1163,31 @@ static void ser_warn_leave(bool discard) {
     }
 }
 
+// A lazy SerializationIterator outlives the call that built it, so it cannot share that call's
+// frame.  Rust's __next__ rebuilds a state from the Extra the view kept (generator.rs:181) and
+// runs final_check after serializing the item (:190), which has the effect of a fresh frame per
+// pull that starts out holding whatever the run had already registered when the view was built:
+// those warnings are reported again on *every* pull, next to whatever the item just registered.
+static void ser_warn_enter_snapshot(bool enabled, bool as_error,
+                                    const std::vector<std::string>& seed) {
+    ser_warn_stack().push_back(SerWarnFrame{enabled, as_error, seed});
+}
+
+struct SerWarnViewScope {
+    bool closed = false;
+    SerWarnViewScope(bool enabled, bool as_error, const std::vector<std::string>& seed) {
+        ser_warn_enter_snapshot(enabled, as_error, seed);
+    }
+    void emit() {  // pops the frame and reports what it collected
+        if (closed) return;
+        closed = true;
+        ser_warn_leave(false);
+    }
+    ~SerWarnViewScope() {
+        if (!closed) ser_warn_leave(true);
+    }
+};
+
 // Depth of "a union is trying its candidates" regions. A serializer function
 // that rejects its value while a candidate is merely being tried is not a
 // warning: Rust keeps those errors for itself and only reports them once every
@@ -1351,8 +1376,22 @@ struct SerializationIterator {
     bool by_alias = false;
     bool exclude_unset = false;
     bool exclude_defaults = false;
+    // What the run had already registered when this view was built, re-emitted on every pull.
+    bool warn_enabled = false;
+    bool warn_as_error = false;
+    std::vector<std::string> warn_seed;
     size_t index = 0;
 };
+
+// The view is built while the run's own frame is the innermost one, which is where the warnings
+// it will report on each pull have to be picked up from.
+static void ser_warn_snapshot_into(SerializationIterator& it) {
+    if (ser_warn_stack().empty()) return;
+    const SerWarnFrame& frame = ser_warn_stack().back();
+    it.warn_enabled = frame.enabled;
+    it.warn_as_error = frame.as_error;
+    it.warn_seed = frame.items;
+}
 
 static py::object make_serialization_iterator(const py::object& value, const SerRef& child,
                                               bool exc_none, bool round_trip,
@@ -1369,6 +1408,7 @@ static py::object make_serialization_iterator(const py::object& value, const Ser
     out->by_alias = by_alias;
     out->exclude_unset = exclude_unset;
     out->exclude_defaults = exclude_defaults;
+    ser_warn_snapshot_into(*out);
     return py::cast(out);
 }
 
@@ -1381,6 +1421,7 @@ static py::object make_inferred_iterator(const py::object& value, bool exc_none,
     out->infer_items = true;
     out->exc_none = exc_none;
     out->round_trip = round_trip;
+    ser_warn_snapshot_into(*out);
     return py::cast(out);
 }
 
@@ -7095,13 +7136,17 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                 auto next = self.filter.ask(static_cast<py::ssize_t>(self.index));
                 self.index += 1;
                 if (next.omit) continue;
-                if (self.infer_items)
-                    return SerNode::serialize_any_value(
-                        py::reinterpret_borrow<py::object>(item), self.exc_none, self.round_trip, false);
-                return self.child->to_python(
-                    SerNode::check_item_type(self.child, py::reinterpret_borrow<py::object>(item)),
-                    false, self.exc_none, self.round_trip, next.include, next.exclude, self.by_alias,
-                    self.exclude_unset, self.exclude_defaults, self.context);
+                SerWarnViewScope scope(self.warn_enabled, self.warn_as_error, self.warn_seed);
+                py::object value = self.infer_items
+                    ? SerNode::serialize_any_value(
+                          py::reinterpret_borrow<py::object>(item), self.exc_none, self.round_trip,
+                          false)
+                    : self.child->to_python(
+                          SerNode::check_item_type(self.child, py::reinterpret_borrow<py::object>(item)),
+                          false, self.exc_none, self.round_trip, next.include, next.exclude,
+                          self.by_alias, self.exclude_unset, self.exclude_defaults, self.context);
+                scope.emit();
+                return value;
             }
         })
         .def("__repr__", [](SerializationIterator& self) {

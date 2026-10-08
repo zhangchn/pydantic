@@ -2693,3 +2693,46 @@ def test_a_container_hands_its_child_the_run_unset_and_default_flags():
     ser = SchemaSerializer(core_schema.list_schema(model))
     assert ser.to_python([value]) == [{'x': 5, 'y': 2}]
     assert ser.to_json([value]) == b'[{"x":5,"y":2}]'
+
+
+def test_a_lazy_view_reports_what_a_pull_registers():
+    # A view outlives the call that built it, so that call's warning frame cannot report for it.
+    # generator.rs:181 rebuilds a state from the Extra the view kept and :190 runs final_check
+    # after serializing the item, which amounts to a fresh frame per pull that starts out already
+    # holding what the run had registered when the view was built: a pull reports those again,
+    # next to whatever the item it just serialized registered.
+    int_ser = SchemaSerializer(core_schema.int_schema())
+    gen_ser = SchemaSerializer(core_schema.generator_schema(core_schema.int_schema()))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        view = int_ser.to_python(iter([1, 'a', 2]))
+        # The node expects an int and was handed an iterator: one report for the call itself.
+        assert [str(w.message) for w in caught] == [
+            s for s in (str(w.message) for w in caught) if 'iterator' in s
+        ], [str(w.message) for w in caught]
+        assert len(caught) == 1
+        assert [repr(x) for x in view] == ['1', "'a'", '2']
+        # ... and the same report again for every pull -- three items, four reports in all.
+        assert len(caught) == 4, [str(w.message) for w in caught]
+        assert all('iterator' in str(w.message) for w in caught)
+
+    # A node that expects the iterator registers nothing, so its view's seed is empty and each pull
+    # reports only the item that pull found -- 'b' arrives without 'a' attached to it.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        assert list(gen_ser.to_python((x for x in [1, 'a', 'b']))) == [1, 'a', 'b']
+        messages = [str(w.message) for w in caught]
+        assert len(messages) == 2, messages
+        assert "'a'" in messages[0] and "'b'" not in messages[0], messages[0]
+        assert "'b'" in messages[1] and "'a'" not in messages[1], messages[1]
+
+    # warnings='error' turns a pull into a raise, and the position is already past the item.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        view = gen_ser.to_python((x for x in [1, 'a']), warnings='error')
+        assert next(iter(view)) == 1
+        assert len(caught) == 0
+        with pytest.raises(PydanticSerializationError, match='Pydantic serializer warnings'):
+            list(view)
+        assert view.index == 2
