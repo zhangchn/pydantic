@@ -2476,3 +2476,61 @@ def test_a_filters_refusal_is_a_python_error_so_a_json_run_can_rename_it():
                 ser.to_python([1, 2], mode='json', **kwargs)
             with pytest.raises(PydanticSerializationError, match=f'Error serializing to JSON: TypeError: {refusal}'):
                 ser.to_json([1, 2], **kwargs)
+
+
+def test_an_iterable_without_a_length_is_filtered_by_its_keys_exactly_as_written():
+    # generator.rs:68 hands the filter no length at all, which in Rust is not "skip the filter" but
+    # "use every key exactly as written, and refuse a negative one" (filter.rs:27-33): an iterable
+    # with no end has nothing for a negative index to count back from.  The refusal happens inside
+    # the consult for one element, so an iterable that yields nothing is never asked about a key and
+    # never complains -- `to_json(iter(()), include={-1: True})` is simply an empty array.
+    ser = SchemaSerializer(core_schema.generator_schema(core_schema.int_schema()))
+
+    def three():
+        yield 10
+        yield 20
+        yield 30
+
+    def empty():
+        return iter(())
+
+    assert ser.to_json(three(), include={0: True}) == b'[10]'
+    assert ser.to_json(three(), include={1: True}) == b'[20]'
+    assert ser.to_json(three(), include=set()) == b'[]'
+    assert ser.to_json(three(), include={'__all__'}) == b'[10,20,30]'
+    assert ser.to_json(three(), exclude={'__all__'}) == b'[]'
+    assert ser.to_json(three(), exclude={1: True}) == b'[10,30]'
+    # A key past the end stays a key past the end: with no length there is no modulo to bring it
+    # back to a position that exists, which is what a list's include={7: True} does instead.
+    assert ser.to_json(three(), include={7: True}) == b'[]'
+    assert ser.to_python(three(), include={0: True}, mode='json') == [10]
+    assert ser.to_python(three(), exclude={1: True}, mode='json') == [10, 30]
+
+    refusal = 'Negative indices cannot be used to exclude items on unsized iterables'
+    for argument in ('include', 'exclude'):
+        for kwargs in ({argument: {-1: True}}, {argument: {-2: True}}):
+            with pytest.raises(ValueError, match=refusal):
+                ser.to_python(three(), mode='json', **kwargs)
+            with pytest.raises(PydanticSerializationError,
+                               match=f'Error serializing to JSON: ValueError: {refusal}'):
+                ser.to_json(three(), **kwargs)
+            # A python run hands back a lazy view rather than a list, so the refusal is not the
+            # serializer's answer yet -- it is the answer to the first item pulled, and the
+            # position whose consult refused is not consumed by it (generator.rs:184-185 asks the
+            # filter with the position before advancing past it).
+            view = ser.to_python(three(), **kwargs)
+            assert view.index == 0
+            with pytest.raises(ValueError, match=refusal):
+                next(view)
+            assert view.index == 0
+            # Nothing pulled, nothing refused.
+            assert ser.to_json(empty(), **kwargs) == b'[]'
+            assert ser.to_python(empty(), mode='json', **kwargs) == []
+            assert list(ser.to_python(empty(), **kwargs)) == []
+
+    # The lazy view answers the same filter as the two eager modes do, item by item.
+    assert list(ser.to_python(three(), include={0: True})) == [10]
+    assert list(ser.to_python(three(), include={1: True})) == [20]
+    assert list(ser.to_python(three(), include=set())) == []
+    assert list(ser.to_python(three(), include={'__all__'})) == [10, 20, 30]
+    assert list(ser.to_python(three(), exclude={1: True})) == [10, 30]

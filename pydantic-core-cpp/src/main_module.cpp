@@ -1239,21 +1239,45 @@ struct SerFilterResult {
     py::object exclude = py::none();   // sub-filter for the nested value
 };
 
+// filter.rs:29-32, the refusal for a negative index over an iterable with no length.  It is a
+// Python error rather than pybind's builtin_exception because the latter is a std::runtime_error
+// that only becomes a ValueError in pybind's translator, past the JSON boundary where the wheel's
+// `Error serializing to JSON: ValueError: ...` rename is decided.
+static void ser_unsized_index_refusal() {
+    PyErr_SetString(PyExc_ValueError,
+                    "Negative indices cannot be used to exclude items on unsized iterables");
+    throw py::error_already_set();
+}
+
 // Fold an index key against the length.  filter.rs:21-36 (`map_negative_index`) asks Python for
 // `key % len` of *every* key, not just negative ones, so include={7: True} over a three-item list
 // is a request for index 1; anything whose modulo fails -- a string key, a length of zero -- is
-// left as it is, exactly like Rust's `unwrap_or_else(|_| value.clone())`.
-static py::object map_negative_index(const py::object& key, py::ssize_t len) {
-    try {
-        return key.attr("__mod__")(py::int_(len));
-    } catch (const py::error_already_set&) {
-        PyErr_Clear();
-        return key;
+// left as it is, exactly like Rust's `unwrap_or_else(|_| value.clone())`.  A null `len` is Rust's
+// `None`: an iterable whose length is never taken (a generator, `None` at generator.rs:68) has
+// nothing to fold a key by, so the key is used exactly as written and a negative one is refused
+// outright (:27-33) rather than quietly kept.
+static py::object map_negative_index(const py::object& key, const py::object* len) {
+    if (len) {
+        try {
+            return key.attr("__mod__")(*len);
+        } catch (const py::error_already_set&) {
+            PyErr_Clear();
+            return key;
+        }
     }
+    static const py::object& zero = held_python_object([] { return py::int_(0); });
+    int negative = PyObject_RichCompareBool(key.ptr(), zero.ptr(), Py_LT);
+    if (negative < 0)
+        PyErr_Clear();   // :28 `unwrap_or(false)` -- a key that will not answer is not a negative one
+    else if (negative == 1)
+        ser_unsized_index_refusal();
+    return key;
 }
 
-// Map all negative keys/items in an include/exclude object (dict or set)
-static py::object map_negative_indices(const py::object& obj, py::ssize_t len) {
+// Map every key or member of an include/exclude object (:38-58).  Only a dict's keys and a set's
+// members name positions, so anything else is left alone for the filter to refuse or to ask
+// `__contains__` about.
+static py::object map_negative_indices(const py::object& obj, const py::object* len) {
     if (py::isinstance<py::dict>(obj)) {
         py::dict out;
         for (auto kv : obj.cast<py::dict>()) {
@@ -1273,6 +1297,43 @@ static py::object map_negative_indices(const py::object& obj, py::ssize_t len) {
     return obj;
 }
 
+// The form for a walk that always has the length in hand -- a tuple and a named tuple are both
+// measured before their items are paired with serializers.
+static py::object map_negative_indices(const py::object& obj, py::ssize_t len) {
+    py::object n = py::int_(len);
+    return map_negative_indices(obj, &n);
+}
+
+// The include/exclude a container node asks about each of its positions.  A sized iterable has a
+// length to fold an index key against, so the fold is done once, before the walk starts: with a
+// length in hand nothing can be refused and the answer cannot change from one element to the next.
+// An unsized one has no length, and Rust maps the keys *inside* every filter consult of its own
+// (filter.rs:100-105, `index_filter` -> `map_negative_indices`), which is where a negative key is
+// refused.  Asking per element is what lets an iterable that yields nothing pass without ever
+// getting as far as complaining.
+struct SerIndexFilter {
+    py::object include = py::none();          // as the call handed them
+    py::object exclude = py::none();
+    py::object folded_include = py::none();   // a sized iterable's, folded once
+    py::object folded_exclude = py::none();
+    bool unsized = false;
+
+    // `len < 0` is how these walks spell "no length"; a filter that was not passed stays None.
+    void bind(const py::object& inc, const py::object& exc, py::ssize_t len) {
+        include = inc;
+        exclude = exc;
+        unsized = (len < 0);
+        if (unsized) return;
+        py::object n = py::int_(len);
+        if (!inc.is_none()) folded_include = map_negative_indices(inc, &n);
+        if (!exc.is_none()) folded_exclude = map_negative_indices(exc, &n);
+    }
+
+    // The decision for one position, in the shape apply_ser_filter answers with: whether to keep
+    // the element and which sub-filter its contents are then asked about.
+    SerFilterResult ask(py::ssize_t index) const;
+};
+
 // Rust's GeneratorSerializer keeps a Python-mode iterator lazy: model_dump()
 // hands the caller a SerializationIterator that serializes each item as it is
 // pulled, so the items are never materialized and never measured.
@@ -1282,8 +1343,8 @@ struct SerializationIterator {
     // An iterator the *infer* walk was handed has no item serializer to keep -- the item
     // is whatever the walk makes of it (infer.rs:266-271 hands it to AnySerializer).
     bool infer_items = false;
-    py::object include = py::none();
-    py::object exclude = py::none();
+    // generator.rs:68 never takes a length, so the view is unsized whatever was handed it.
+    SerIndexFilter filter;
     py::object context = py::none();
     bool exc_none = false;
     bool round_trip = false;
@@ -1301,8 +1362,7 @@ static py::object make_serialization_iterator(const py::object& value, const Ser
     auto out = std::make_shared<SerializationIterator>();
     out->items = py::iter(value);
     out->child = child;
-    out->include = include;
-    out->exclude = exclude;
+    out->filter.bind(include, exclude, -1);
     out->context = context;
     out->exc_none = exc_none;
     out->round_trip = round_trip;
@@ -1443,6 +1503,16 @@ static SerFilterResult apply_ser_filter(const py::object& key, const py::object&
         out.exclude = next_exclude;
     }
     return out;
+}
+
+SerFilterResult SerIndexFilter::ask(py::ssize_t index) const {
+    py::object key = py::int_(static_cast<long long>(index));
+    if (!unsized) return apply_ser_filter(key, folded_include, folded_exclude);
+    // No length to fold by: every key is asked about as it was written, and a negative one is
+    // refused here -- once per element, only once an element exists to ask about.
+    py::object inc = include.is_none() ? include : map_negative_indices(include, nullptr);
+    py::object exc = exclude.is_none() ? exclude : map_negative_indices(exclude, nullptr);
+    return apply_ser_filter(key, inc, exc);
 }
 
 // Thread-local recursion guard mirroring Rust's RecursionState
@@ -2563,12 +2633,12 @@ struct SerNode {
                     PyErr_Clear();
                 }
             }
-            py::object inc = (include.is_none() || len < 0) ? py::none() : map_negative_indices(include, len);
-            py::object exc = (exclude.is_none() || len < 0) ? py::none() : map_negative_indices(exclude, len);
+            SerIndexFilter filter;
+            filter.bind(include, exclude, len);
             py::list items;
             py::ssize_t idx = 0;
             for (auto item : seq) {
-                auto next = apply_ser_filter(py::int_(idx), inc, exc);
+                auto next = filter.ask(idx);
                 if (!next.omit) {
                     py::object element = py::reinterpret_borrow<py::object>(item);
                     items.append(children.empty()
@@ -2602,12 +2672,18 @@ struct SerNode {
                     PyErr_Clear();
                 }
             }
-            py::object inc = (include.is_none() || len < 0) ? py::none() : map_negative_indices(include, len);
-            py::object exc = (exclude.is_none() || len < 0) ? py::none() : map_negative_indices(exclude, len);
+            SerIndexFilter filter;
+            filter.bind(include, exclude, len);
+            // A set node has no position to ask about (see below), so what its items are built
+            // with is the filter this node was handed, folded against the set's own length.
+            py::object inc = filter.folded_include;
+            py::object exc = filter.folded_exclude;
             // In JSON the items have to become an array here, but Python mode
-            // keeps an iterator lazy for the caller to drain.
+            // keeps an iterator lazy for the caller to drain.  The view is handed the call's own
+            // filter, unsized: generator.rs:68 never takes a length, so it is the view's job to
+            // ask about every key as it was written.
             if (type == "generator" && !json_mode && PyIter_Check(value.ptr())) {
-                return make_serialization_iterator(value, children[0], exc_none, round_trip, inc, exc,
+                return make_serialization_iterator(value, children[0], exc_none, round_trip, include, exclude,
                                                    by_alias, exclude_unset, exclude_defaults, context);
             }
             py::ssize_t idx = 0;
@@ -2645,7 +2721,7 @@ struct SerNode {
             } else {
                 py::list result;
                 for (auto item : seq) {
-                    auto next = apply_ser_filter(py::int_(idx), inc, exc);
+                    auto next = filter.ask(idx);
                     if (!next.omit) {
                         py::object element = py::reinterpret_borrow<py::object>(item);
                         result.append(children.empty()
@@ -3253,9 +3329,8 @@ struct SerNode {
         // list/deque/generator: serialize as a JSON array, asking the call's filter about every
         // position -- list.rs:64, deque.rs:75 and generator.rs:68 all call index_filter.  A list
         // and a deque have a length to fold an index key by; a generator's length is never taken
-        // (`None` at generator.rs:68), which in Rust means "use the key as given, and refuse a
-        // negative one" rather than "skip the filter" -- that part is not here yet, so a filter
-        // over a generator is still dropped whole.
+        // (`None` at generator.rs:68), which in Rust means "use the key exactly as written, and
+        // refuse a negative one", not "skip the filter".
         if ((type == "list" && !children.empty()) || type == "deque" || type == "generator") {
             py::iterable seq = py::reinterpret_borrow<py::iterable>(value);
             py::ssize_t len = -1;
@@ -3266,13 +3341,13 @@ struct SerNode {
                     PyErr_Clear();
                 }
             }
-            py::object inc = (include.is_none() || len < 0) ? py::none() : map_negative_indices(include, len);
-            py::object exc = (exclude.is_none() || len < 0) ? py::none() : map_negative_indices(exclude, len);
+            SerIndexFilter filter;
+            filter.bind(include, exclude, len);
             std::string out = "[";
             bool first = true;
             py::ssize_t idx = 0;
             for (auto item : seq) {
-                auto next = apply_ser_filter(py::int_(idx), inc, exc);
+                auto next = filter.ask(idx);
                 if (!next.omit) {
                     if (!first) out += ",";
                     first = false;
@@ -6623,8 +6698,10 @@ extern "C" int visit_serialization_iterator(PyObject* self, visitproc traverse_f
     if (auto* iter_obj = bound_cpp_object<SerializationIterator>(self)) {
         if (iter_obj->child) iter_obj->child->visit_refs(traverse_fn, arg);
         visit_ref(traverse_fn, arg, iter_obj->items);
-        visit_ref(traverse_fn, arg, iter_obj->include);
-        visit_ref(traverse_fn, arg, iter_obj->exclude);
+        visit_ref(traverse_fn, arg, iter_obj->filter.include);
+        visit_ref(traverse_fn, arg, iter_obj->filter.exclude);
+        visit_ref(traverse_fn, arg, iter_obj->filter.folded_include);
+        visit_ref(traverse_fn, arg, iter_obj->filter.folded_exclude);
         visit_ref(traverse_fn, arg, iter_obj->context);
     }
     return 0;
@@ -7005,8 +7082,10 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                 } catch (py::stop_iteration&) {
                     throw;
                 }
-                size_t idx = self.index++;
-                auto next = apply_ser_filter(py::int_(static_cast<long long>(idx)), self.include, self.exclude);
+                // generator.rs:184-185 asks the filter with the position and only then advances
+                // it, so a consult that refuses leaves the position unconsumed.
+                auto next = self.filter.ask(static_cast<py::ssize_t>(self.index));
+                self.index += 1;
                 if (next.omit) continue;
                 if (self.infer_items)
                     return SerNode::serialize_any_value(
