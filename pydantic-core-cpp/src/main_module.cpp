@@ -828,6 +828,43 @@ static bool ser_extract_f64(PyObject* v, double* out) {
     return true;
 }
 
+// The same numbers as the exact type a json-mode run answers with.  Rust rebuilds them from what
+// the value holds rather than from the converter its class might have written: crate::input::Int is
+// an i64 or a BigInt, so an int subclass that defines __int__ still answers its digits, and
+// PyFloat_AsDouble reads the double a float subclass stores rather than asking its __float__.
+static py::object ser_exact_int(const py::object& v) {
+    if (PyLong_CheckExact(v.ptr())) return v;
+    int overflow = 0;
+    long long x = PyLong_AsLongLongAndOverflow(v.ptr(), &overflow);
+    if (overflow == 0 && !(x == -1 && PyErr_Occurred()))
+        return py::reinterpret_steal<py::object>(PyLong_FromLongLong(x));
+    // Too big for a machine word, so ask int() for it: a plain subclass answers an exact int with
+    // every digit.  One that both defines __int__ and does not fit a machine word is the case this
+    // reads the subclass's answer rather than its digits, which no public digit read reaches.
+    PyErr_Clear();
+    PyObject* big = PyNumber_Long(v.ptr());
+    if (!big) throw py::error_already_set();
+    return py::reinterpret_steal<py::object>(big);
+}
+
+static py::object ser_exact_float(const py::object& v) {
+    if (PyFloat_CheckExact(v.ptr())) return v;
+    double d = PyFloat_AsDouble(v.ptr());
+    if (d == -1.0 && PyErr_Occurred()) throw py::error_already_set();
+    return py::float_(d);
+}
+
+// Text is copied by concatenating, which builds a new str from the buffer instead of asking the
+// subclass for __str__, which it is free to override.
+static py::object ser_exact_str(const py::object& v) {
+    if (PyUnicode_CheckExact(v.ptr())) return v;
+    static const py::object& empty = held_python_object(
+        [] { return py::reinterpret_steal<py::object>(PyUnicode_FromString("")); });
+    PyObject* copied = PyUnicode_Concat(empty.ptr(), v.ptr());
+    if (!copied) throw py::error_already_set();
+    return py::reinterpret_steal<py::object>(copied);
+}
+
 // What a float node answers once it has a double, the inf_nan_mode included -- Rust's
 // serialize_f64 (float.rs:59-73), which the JSON writer reaches for every float value.
 static std::string ser_json_f64_modes(double d, const std::string& inf_nan_mode) {
@@ -2115,16 +2152,18 @@ struct SerNode {
         // Rust's IsType::Subclass arm (simple.rs:126-132, float.rs:103-110): a JSON run extracts
         // the value into the node's own number -- a bool at an int node becomes the int 1, an int
         // or bool at a float node becomes a float -- while a python run takes the other arm and
-        // hands back the object it was given.  int()/float() are that extraction: for a subclass
-        // they unbind to an exact int/float, as extract::<i64>/extract::<f64> does, and an int past
-        // the range of a double raises through them here, which is what the wheel does too.
+        // hands back the object it was given (string.rs:47-49 is the same rule for text).  The
+        // extraction reads what the value holds and not what its class converts to, so an int
+        // subclass that defines __int__ arrives as its digits, a float subclass that defines
+        // __float__ as the double it stores and a str subclass as the text it holds; an int past
+        // the range of a double raises through the float arm here, which is what the wheel does too.
         if (g_ser_check == 0 && json_mode &&
-            (type == "int" || type == "int-constrained" || type == "float" || type == "float-constrained") &&
+            (type == "int" || type == "int-constrained" || type == "float" || type == "float-constrained" ||
+             type == "str" || type == "string" || type == "str-constrained") &&
             ser_type_match(type, value) == 0) {
-            const bool int_leaf = (type == "int" || type == "int-constrained");
-            PyObject* converted = int_leaf ? PyNumber_Long(value.ptr()) : PyNumber_Float(value.ptr());
-            if (!converted) throw py::error_already_set();
-            return py::reinterpret_steal<py::object>(converted);
+            if (type == "int" || type == "int-constrained") return ser_exact_int(value);
+            if (type == "float" || type == "float-constrained") return ser_exact_float(value);
+            return ser_exact_str(value);
         }
         if (!ser_check_accepts(value)) {
             throw std::runtime_error("Unexpected value for serializer " + type);
@@ -4106,6 +4145,15 @@ private:
                 if ((std::isnan(d) || std::isinf(d)) && g_ser_extra.inf_nan_mode == "null")
                     return py::none();
             }
+            // infer.rs:106-124 rebuilds a scalar subclass as the exact type it subclasses -- "have
+            // to do this to make sure subclasses of for example str are upcast to str" -- because
+            // what the json run holds is a number or a text, not an object that behaves like one.
+            // An exact value keeps its incref path, and the python run has no such arm at all,
+            // which is why model_dump() can hold a SubInt that model_dump(mode='json') answers as a
+            // plain int.  A bool is an exact type of its own and is not upcast to an int.
+            if (PyLong_Check(v.ptr()) && !PyBool_Check(v.ptr())) return ser_exact_int(v);
+            if (PyFloat_Check(v.ptr())) return ser_exact_float(v);
+            if (PyUnicode_Check(v.ptr())) return ser_exact_str(v);
             py::object converted;
             if (json_infer_leaf(v, converted)) return converted;
             if (ser_infer_json_str(v, converted)) return converted;
@@ -6219,16 +6267,11 @@ static py::object infer_jsonable_python(const py::object& v, const JsonableRun& 
         // are upcast" -- so an IntFlag member or a hand-rolled int subclass leaves here
         // as the number it behaves like, not as an object that only serializes because
         // json.dumps happens to follow the int protocol.
-        if (PyLong_CheckExact(v.ptr())) return v;
-        return py::reinterpret_steal<py::object>(PyNumber_Long(v.ptr()));
+        return ser_exact_int(v);
     }
     if (PyUnicode_Check(v.ptr())) {
-        if (PyUnicode_CheckExact(v.ptr())) return v;
-        // Same for str, and concat is how to copy the buffer without asking the subclass
-        // for __str__, which it is free to override.
-        static const py::object& empty_str =
-            held_python_object([] { return py::reinterpret_steal<py::object>(PyUnicode_FromString("")); });
-        return py::reinterpret_steal<py::object>(PyUnicode_Concat(empty_str.ptr(), v.ptr()));
+        // Same for str (infer.rs:124), by the same buffer copy.
+        return ser_exact_str(v);
     }
     if (PyFloat_Check(v.ptr())) {
         double d = v.cast<double>();

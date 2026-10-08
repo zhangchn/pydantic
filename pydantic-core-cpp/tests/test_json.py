@@ -2135,3 +2135,73 @@ def test_a_numeric_node_writes_its_own_number_rather_than_the_values_shape():
     assert out == b'1' + b'0' * 400 and names == ['float']
     with pytest.raises(OverflowError):
         float_node.to_python(10 ** 400, mode='json')
+
+
+def test_a_json_run_answers_a_scalar_subclass_as_the_exact_type_it_subclasses():
+    import warnings
+
+    # Rust's json run rebuilds a scalar subclass as the exact type it subclasses, both at a leaf
+    # that took it as a subclass and in the infer walk a mismatched node falls back to
+    # (infer.rs:106-124, string.rs:47-49): what such a run holds is a number or a text, not an
+    # object that merely behaves like one.  A python run has no arm of that match at all, which is
+    # why model_dump() keeps the class while model_dump(mode='json') does not.
+    class MyInt(int):
+        def __int__(self):
+            return 99
+
+    class MyFloat(float):
+        def __float__(self):
+            return 99.5
+
+    class MyStr(str):
+        def __str__(self):
+            return 'nope'
+
+    class BigMyInt(int):
+        pass
+
+    int_node = SchemaSerializer(core_schema.int_schema())
+    float_node = SchemaSerializer(core_schema.float_schema())
+    str_node = SchemaSerializer(core_schema.str_schema())
+    ints_node = SchemaSerializer(core_schema.list_schema(core_schema.int_schema()))
+    any_node = SchemaSerializer(core_schema.any_schema())
+
+    # The answer carries its type as well as its value, because MyInt(3) == 3 and a cell that
+    # compared values alone would read as a pass through the whole cluster.
+    def answered(fn):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            out = fn()
+        return type(out).__name__, out
+
+    # The rebuild is a read of what the value holds, not of what its class converts to, so a
+    # subclass that writes its own converter still answers what it was built from.
+    assert answered(lambda: any_node.to_python(MyInt(3), mode='json')) == ('int', 3)
+    assert answered(lambda: any_node.to_python(MyFloat(3.5), mode='json')) == ('float', 3.5)
+    assert answered(lambda: any_node.to_python(MyStr('ab'), mode='json')) == ('str', 'ab')
+    assert answered(lambda: any_node.to_python(BigMyInt(2**70), mode='json')) == ('int', 2**70)
+    assert any_node.to_json(MyInt(3)) == b'3'
+    assert any_node.to_json(MyFloat(3.5)) == b'3.5'
+    assert any_node.to_json(MyStr('ab')) == b'"ab"'
+
+    # A leaf of the node's own type takes the same arm of the same match.
+    assert answered(lambda: int_node.to_python(MyInt(3), mode='json')) == ('int', 3)
+    assert answered(lambda: float_node.to_python(MyFloat(3.5), mode='json')) == ('float', 3.5)
+    assert answered(lambda: str_node.to_python(MyStr('ab'), mode='json')) == ('str', 'ab')
+
+    # So does a node that warned the value in and inferred it, which is where the bytes of the run
+    # were already right and only the type of the object was wrong.
+    assert answered(lambda: ints_node.to_python(MyInt(3), mode='json')) == ('int', 3)
+    assert answered(lambda: int_node.to_python(MyStr('ab'), mode='json')) == ('str', 'ab')
+    assert answered(lambda: int_node.to_python(MyFloat(3.5), mode='json')) == ('float', 3.5)
+
+    # The standalone entry runs the same walk, and the python mode of both keeps the class.
+    assert answered(lambda: to_jsonable_python(MyInt(3))) == ('int', 3)
+    assert answered(lambda: to_jsonable_python(MyFloat(3.5))) == ('float', 3.5)
+    assert answered(lambda: to_jsonable_python(MyStr('ab'))) == ('str', 'ab')
+    for value in (MyInt(3), MyFloat(3.5), MyStr('ab')):
+        assert type(any_node.to_python(value)) is type(value)
+        assert type(int_node.to_python(value)) is type(value)
+
+    # A bool is an exact type of its own and no rebuild turns it into an int.
+    assert answered(lambda: any_node.to_python(True, mode='json')) == ('bool', True)
