@@ -5967,6 +5967,79 @@ static std::optional<std::unordered_set<int64_t>> ser_index_filter_set(const py:
     return out;
 }
 
+// find_serializer (shared.rs:64-78) wraps whatever a builder complains of in that builder's own
+// sentence, and a parent builds each child through the same entry, so a child's refusal comes back
+// inside the parent's -- "Error building `list` serializer: |   SchemaError: ..." -- once per
+// level.  An interpreter KeyError or TypeError (a required extraction that no builder turns into a
+// SchemaError) carries its own text through the same wrap, and `inner_prefix` puts the field's name
+// in front of it the way a fields builder does (model.rs:67).
+static std::string ser_pyerr_text(const py::error_already_set& e) {
+    PyObject* v = e.value().ptr();
+    std::string tname = v->ob_type->tp_name;
+    std::string msg;
+    PyObject* sv = PyObject_Str(v);
+    if (sv) {
+        const char* c = PyUnicode_AsUTF8(sv);
+        if (c) msg = c;
+        Py_DECREF(sv);
+    } else {
+        PyErr_Clear();
+    }
+    return tname + ": " + msg;
+}
+
+// A builtin pybind throw (the required-key reads that no builder turns into a SchemaError)
+// reaches Python as that builtin with this text as its argument, so asking set_error to make the
+// exception and reading str() back is what Rust's `{err}` shows -- including KeyError's habit of
+// rendering its argument quoted.
+static std::string ser_builtin_text(const py::builtin_exception& e) {
+    e.set_error();
+    PyObject *ty = nullptr, *val = nullptr, *tb = nullptr;
+    PyErr_Fetch(&ty, &val, &tb);
+    // SetString leaves the pair un-normalized, so the fetch hands back the class and the bare
+    // string; normalizing is what makes KeyError's own str() (its argument, quoted) answer.
+    PyErr_NormalizeException(&ty, &val, &tb);
+    std::string tname = ty ? ((PyTypeObject*)ty)->tp_name : "RuntimeError";
+    std::string msg;
+    if (val) {
+        PyObject* sv = PyObject_Str(val);
+        if (sv) {
+            const char* c = PyUnicode_AsUTF8(sv);
+            if (c) msg = c;
+            Py_DECREF(sv);
+        } else {
+            PyErr_Clear();
+        }
+        Py_XDECREF(val);
+    }
+    Py_XDECREF(ty);
+    Py_XDECREF(tb);
+    return tname + ": " + msg;
+}
+
+static SerRef build_ser_child(py::handle child, std::unordered_map<std::string, SerRef>& defs,
+                              SerMemo& memo, const std::string& parent,
+                              const std::string& inner_prefix = std::string()) {
+    static const std::string wrap = "` serializer:\n  ";
+    if (!PyDict_Check(child.ptr()))
+        throw SchemaError("Error building `" + parent + wrap + ser_downcast_typeerror(child.ptr(), "dict"));
+    // Every embedding is the Display of what the child threw: a SchemaError's carries its own
+    // "SchemaError: ", an interpreter error names itself.  Putting a field's name in front makes
+    // a new SchemaError, so that sentence gains a prefix of its own on the way out.
+    try {
+        return build_ser(py::reinterpret_borrow<py::dict>(child), defs, memo);
+    } catch (const SchemaError& e) {
+        throw SchemaError("Error building `" + parent + wrap + (inner_prefix.empty() ? std::string()
+                                    : "SchemaError: " + inner_prefix) + "SchemaError: " + e.what());
+    } catch (const py::error_already_set& e) {
+        throw SchemaError("Error building `" + parent + wrap + (inner_prefix.empty() ? std::string()
+                                    : "SchemaError: " + inner_prefix) + ser_pyerr_text(e));
+    } catch (const py::builtin_exception& e) {
+        throw SchemaError("Error building `" + parent + wrap + (inner_prefix.empty() ? std::string()
+                                    : "SchemaError: " + inner_prefix) + ser_builtin_text(e));
+    }
+}
+
 static SerRef build_ser_impl(const py::dict& schema,
                         std::unordered_map<std::string, SerRef>& defs,
                         SerMemo& memo) {
@@ -6045,6 +6118,13 @@ static SerRef build_ser_impl(const py::dict& schema,
     }
     if (!kSerKnownTypes.count(type))
         throw SchemaError("Unknown serialization schema type: `" + type + "`");
+
+    // Set when a class/field builder reused the serializer its class already carries.  Rust then
+    // never reads the inner schema at all, so whatever sits in that key -- a str, the class itself,
+    // nothing -- is legal; the port has no way to run the class's own serializer yet, so it keeps
+    // building the key when the key does hold a schema, and only a key that holds no schema at all
+    // stays unbuilt.
+    bool reused_prebuilt = false;
 
     // get_as_req on the wrapper builders: the key names the schema to hand to the next
     // CombinedSerializer::build, so a schema that does not name one fails on that KeyError and
@@ -6167,11 +6247,15 @@ static SerRef build_ser_impl(const py::dict& schema,
             req("cls", "type");                // enum_.rs:46, extracted as a type
         } else if (type == "model") {
             req("cls", "type");                // model.rs:119, extracted as a type
-            if (!prebuilt_class())
+            if (prebuilt_class())              // a finished model brings its own serializer
+                reused_prebuilt = true;
+            else
                 req("schema", "dict");         // model.rs:120
         } else if (type == "dataclass") {
             req("cls", "type");                // dataclass.rs:105
-            if (!prebuilt_class()) {           // a finished dataclass brings its own serializer
+            if (prebuilt_class())
+                reused_prebuilt = true;
+            else {                             // a finished dataclass brings its own serializer
                 req("schema", "dict");         // dataclass.rs:106
                 req("fields", "list");         // dataclass.rs:110, the field names themselves
             }
@@ -6344,8 +6428,13 @@ static SerRef build_ser_impl(const py::dict& schema,
         }
     } catch (...) {}
 
+    // Only a schema that never names the key is the optional case Rust's get_as leaves it; a key
+    // that names anything but a schema, or a child whose own build is refused, is the parent's
+    // error to report.
     auto sub = [&](const char* key = "schema") -> SerRef {
-        try { return build_ser(schema[key].cast<py::dict>(), defs, memo); } catch (...) { return nullptr; }
+        if (!schema.contains(key)) return nullptr;
+        if (reused_prebuilt && !PyDict_Check(schema[key].ptr())) return nullptr;
+        return build_ser_child(schema[key], defs, memo, type);
     };
 
     if (type == "definitions") {
@@ -6464,10 +6553,10 @@ static SerRef build_ser_impl(const py::dict& schema,
 
     // Types with items_schema key
     if (type == "list" || type == "set" || type == "frozenset" || type == "deque" || type == "generator") {
-        try {
-            auto c = build_ser_impl(schema["items_schema"].cast<py::dict>(), defs, memo);
+        if (schema.contains("items_schema")) {
+            auto c = build_ser_child(schema["items_schema"], defs, memo, type);
             if (c) node->children.push_back(c);
-        } catch (...) {}
+        }
         // list.rs:44, deque.rs:45 and generator.rs:45 build SchemaFilter<usize> from the
         // node's own serialization pair; set_frozenset.rs builds none, so a set node keeps
         // a filter it was handed as nothing at all.
@@ -6480,7 +6569,10 @@ static SerRef build_ser_impl(const py::dict& schema,
     }
 
     if (type == "dict") {
-        auto ks = [&](const char* k) -> SerRef { try { return build_ser(schema[k].cast<py::dict>(), defs, memo); } catch (...) { return nullptr; } };
+        auto ks = [&](const char* k) -> SerRef {
+            if (!schema.contains(k)) return nullptr;
+            return build_ser_child(schema[k], defs, memo, type);
+        };
         auto key_ser = ks("keys_schema");
         auto val_ser = ks("values_schema");
         // A dict with no keys_schema asks its keys of the any serializer, not of a str one
@@ -6536,10 +6628,17 @@ static SerRef build_ser_impl(const py::dict& schema,
             std::vector<SerRef> kids;
             for (auto it : schema["fields"].cast<py::list>()) {
                 py::dict f = it.cast<py::dict>();
-                kids.push_back(build_ser(f["schema"].cast<py::dict>(), defs, memo));
+                std::string fname;
+                try { fname = f["name"].cast<std::string>(); } catch (...) { PyErr_Clear(); }
+                if (!f.contains("schema") || !PyDict_Check(f["schema"].ptr()))
+                    throw SchemaError("Error building `" + type + "` serializer:\n  " +
+                                      ser_downcast_typeerror(f.contains("schema") ? f["schema"].ptr() : nullptr, "dict"));
+                kids.push_back(build_ser_child(f["schema"], defs, memo, type,
+                                               "Field `" + fname + "`:\n  "));
             }
             node->children = std::move(kids);
-        } catch (...) { PyErr_Clear(); }
+        } catch (const SchemaError&) { throw; }
+        catch (...) { PyErr_Clear(); }
         if (has_ser_dict) {
             if (ser_dict.contains("include"))
                 node->ser_key_include = ser_index_filter_set(ser_dict["include"].cast<py::object>(), type);
@@ -6552,12 +6651,13 @@ static SerRef build_ser_impl(const py::dict& schema,
             auto items = schema["items_schema"];
             if (py::isinstance<py::list>(items)) {
                 for (auto it : items.cast<py::list>())
-                    node->children.push_back(build_ser(it.cast<py::dict>(), defs, memo));
-            } else node->children.push_back(build_ser(items.cast<py::dict>(), defs, memo));
+                    node->children.push_back(build_ser_child(it, defs, memo, type));
+            } else node->children.push_back(build_ser_child(items, defs, memo, type));
             if (schema.contains("variadic_item_index")) {
                 node->tuple_variadic_index = schema["variadic_item_index"].cast<int>();
             }
-        } catch (...) {}
+        } catch (const SchemaError&) { throw; }
+        catch (...) {}
         if (has_ser_dict) {
             if (ser_dict.contains("include"))
                 node->ser_key_include = ser_index_filter_set(ser_dict["include"].cast<py::object>(), type);
@@ -6594,7 +6694,7 @@ static SerRef build_ser_impl(const py::dict& schema,
             }
             if (!PyDict_Check(ch))
                 throw SchemaError("Error building `union" + wrap + ser_downcast_typeerror(ch, "dict"));
-            node->children.push_back(build_ser(py::reinterpret_borrow<py::dict>(ch), defs, memo));
+            node->children.push_back(build_ser_child(ch, defs, memo, type));
         }
     }
 
@@ -6624,11 +6724,12 @@ static SerRef build_ser_impl(const py::dict& schema,
         try {
             for (auto item : schema["choices"].cast<py::dict>()) {
                 std::string tag = ser_tag_string(item.first);
-                auto choice = build_ser(item.second.cast<py::dict>(), defs, memo);
+                auto choice = build_ser_child(item.second, defs, memo, type);
                 node->tagged[tag] = choice;
                 node->tagged_left_to_right.push_back(std::move(choice));
             }
-        } catch (...) {}
+        } catch (const SchemaError&) { throw; }
+        catch (...) {}
     }
 
     if (type == "json-or-python") {
@@ -6799,14 +6900,22 @@ static SerRef build_ser_impl(const py::dict& schema,
                 // use a dict, while dataclass-args uses a list of
                 // {'name': ..., 'schema': ...} dicts.
                 std::vector<std::pair<std::string, py::dict>> field_defs;
+                int field_no = 0;
                 py::object fields_obj = schema["fields"];
                 if (py::isinstance<py::dict>(fields_obj)) {
                     for (auto item : fields_obj.cast<py::dict>()) {
-                        field_defs.emplace_back(py::str(item.first).cast<std::string>(), item.second.cast<py::dict>());
+                        if (!PyDict_Check(item.second.ptr()))
+                            throw SchemaError("Error building `" + type + "` serializer:\n  " +
+                                              ser_downcast_typeerror(item.second.ptr(), "dict"));
+                        field_defs.emplace_back(py::str(item.first).cast<std::string>(),
+                                                py::reinterpret_borrow<py::dict>(item.second));
                     }
                 } else if (!fields_obj.is_none()) {
                     for (auto item : py::reinterpret_borrow<py::iterable>(fields_obj)) {
-                        auto f = py::reinterpret_borrow<py::dict>(item);
+                        if (!PyDict_Check(item.ptr()))
+                            throw SchemaError("Error building `" + type + "` serializer:\n  " +
+                                              ser_downcast_typeerror(item.ptr(), "dict"));
+                        py::dict f = py::reinterpret_borrow<py::dict>(item);
                         std::string name;
                         if (f.contains("name")) name = f["name"].cast<std::string>();
                         field_defs.emplace_back(std::move(name), f);
@@ -6818,7 +6927,10 @@ static SerRef build_ser_impl(const py::dict& schema,
                     // 2. {'type': 'str'} - simplified format
                     py::dict field_schema;
                     if (fdef.contains("schema")) {
-                        field_schema = fdef["schema"].cast<py::dict>();
+                        if (!PyDict_Check(fdef["schema"].ptr()))
+                            throw SchemaError("Error building `" + type + "` serializer:\n  " +
+                                              ser_downcast_typeerror(fdef["schema"].ptr(), "dict"));
+                        field_schema = py::reinterpret_borrow<py::dict>(fdef["schema"]);
                         // Check for serialization alias (pydantic-core format)
                         if (fdef.contains("serialization_alias")) {
                             node->field_aliases[k] = fdef["serialization_alias"].cast<std::string>();
@@ -6848,11 +6960,15 @@ static SerRef build_ser_impl(const py::dict& schema,
                             node->field_excluded.insert(k);
                         }
                     }
-                    node->fields[k] = build_ser(field_schema, defs, memo);
+                    std::string holder = type == "dataclass-args" ? std::to_string(field_no) : k;
+                    field_no++;
+                    node->fields[k] = build_ser_child(field_schema, defs, memo, type,
+                                                      "Field `" + holder + "`:\n  ");
                     node->field_order.push_back(k);
                 }
             }
-        } catch (...) {}
+        } catch (const SchemaError&) { throw; }
+        catch (...) {}
         // A typed-dict with extra_behavior=allow keeps undeclared keys in its
         // own dict, so they are serialized as well; extras_schema (only legal
         // with extra_behavior=allow, as Rust enforces) names their serializer.
