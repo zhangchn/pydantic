@@ -3771,7 +3771,7 @@ def test_a_bytearray_carries_the_same_buffer_to_a_json_run_as_the_same_bytes():
     assert s.to_python(sub, mode="json") == "t"
     assert s.to_python(bytearray(), mode="json") == ""
     assert s.to_python(bytearray(b"a\x00b"), mode="json") == "a\x00b"
-    assert s.to_json(bytearray(b"a\x00b")) == b'"a\u0000b"'
+    assert s.to_json(bytearray(b"a\x00b")) == b'"a\\u0000b"'
 
     for mode, answer in (("base64", "cw=="), ("hex", "73")):
         cfg = SchemaSerializer(core_schema.any_schema(), config=CoreConfig(ser_json_bytes=mode))
