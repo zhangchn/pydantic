@@ -6046,6 +6046,48 @@ static SerRef build_ser_impl(const py::dict& schema,
     if (!kSerKnownTypes.count(type))
         throw SchemaError("Unknown serialization schema type: `" + type + "`");
 
+    // get_as_req on the wrapper builders: the key names the schema to hand to the next
+    // CombinedSerializer::build, so a schema that does not name one fails on that KeyError and
+    // one that names anything but a schema dict fails on the TypeError the extraction raises --
+    // pyo3 says "not an instance of 'dict'" because _build reads `serialization` out of the
+    // child, which has to be a dict to be read at all (shared.rs:178).  The dict that drives
+    // the build is the override when there is one: that is the dict the recursion handed the
+    // builder (shared.rs:222).
+    {
+        const py::dict& drv = ser_replaces ? ser_dict : schema;
+        static const std::string wrap = "` serializer:\n  ";
+        auto req = [&](const char* key, const char* want) {
+            if (!drv.contains(key))
+                throw SchemaError("Error building `" + type + wrap + "KeyError: '" + key + "'");
+            if (!want) return;
+            py::object v = drv[key];
+            if (!v) return;
+            bool ok = std::strcmp(want, "list") == 0 ? PyList_Check(v.ptr())
+                    : std::strcmp(want, "dict") == 0 ? PyDict_Check(v.ptr())
+                    : PyUnicode_Check(v.ptr());
+            if (!ok)
+                throw SchemaError("Error building `" + type + wrap + ser_downcast_typeerror(v.ptr(), want));
+        };
+        if (type == "nullable" || type == "default" || type == "custom-error") {
+            req("schema", "dict");
+        } else if (type == "chain") {
+            req("steps", "list");   // other.rs:23, and it is the last step that gets serialized
+        } else if (type == "lax-or-strict") {
+            req("strict_schema", "dict");   // other.rs:77 -- the lax one is not read at all
+        } else if (type == "json-or-python") {
+            req("json_schema", "dict");     // json_or_python.rs:29-30, json first
+            req("python_schema", "dict");
+        } else if (type == "format") {
+            req("formatting_string", "str");   // format.rs:77, empty or not
+        } else if (type == "definition-ref") {
+            req("schema_ref", "str");          // definitions.rs:66
+        } else if (type == "arguments") {
+            // other.rs:86-93 -- an arguments validator has no serializer to be found at all.
+            throw SchemaError("Error building `arguments` serializer:\n  "
+                              "SchemaError: `arguments` validators require a custom serializer");
+        }
+    }
+
     // FrozenDictSerializer::build (frozendict.rs:38-44) asks for the builtin before reading
     // anything else and refuses the schema when the interpreter has none to validate against,
     // so below 3.15 the wheel never has a frozendict serializer to run. find_serializer
