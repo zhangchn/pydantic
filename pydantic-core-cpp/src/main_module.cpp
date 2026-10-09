@@ -6454,6 +6454,27 @@ static SerRef build_ser_impl(const py::dict& schema,
         }
     }
 
+    // other.rs:22-28 and :71-77 -- the chain builder answers with the serializer of the LAST step,
+    // which it casts out of the list without looking at the steps in front of it, and
+    // lax-or-strict answers with the serializer of its strict half.
+    if (type == "chain" || type == "lax-or-strict") {
+        SerRef inner;
+        if (type == "chain") {
+            py::list steps = py::reinterpret_borrow<py::list>(schema["steps"]);
+            // An empty list is where the wheel unwraps the None it gets from `.last()` and
+            // panics; the port has no panic to raise, so it keeps the any node it always
+            // answered with and says nothing.
+            if (steps.size() > 0)
+                inner = build_ser_child(steps[steps.size() - 1], defs, memo, type);
+        } else {
+            inner = sub("strict_schema");
+        }
+        if (inner) {
+            node->copy_from(*inner);
+            return node;
+        }
+    }
+
     if (type == "definitions") {
         try {
             auto defs_list = schema["definitions"].cast<py::list>();
@@ -6549,12 +6570,6 @@ static SerRef build_ser_impl(const py::dict& schema,
             }
         } catch (...) {}
         return node;
-    }
-
-    // lax-or-strict: parse both schemas, use lax for serialization
-    if (type == "lax-or-strict") {
-        try { node->children.push_back(build_ser(schema["lax_schema"].cast<py::dict>(), defs, memo)); } catch (...) {}
-        try { node->children.push_back(build_ser(schema["strict_schema"].cast<py::dict>(), defs, memo)); } catch (...) {}
     }
 
     // is-instance: no-op for serialization (passthrough)
