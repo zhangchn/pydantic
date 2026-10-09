@@ -2429,6 +2429,12 @@ struct SerNode {
             return -1;
         }
         if (node_type == "bool") return PyBool_Check(v) ? 1 : -1;
+        // NoneSerializer asks is_type(value, ObType::None) and takes only Exact
+        // (simple.rs:44-54): there is no second arm to grant, since a subclass of None
+        // cannot exist, so a value that is not None is a plain mismatch at every level --
+        // the question a union's round asks -- rather than the level-dependent one an int
+        // node asks about a bool.
+        if (node_type == "none" || node_type == "is-none") return v == Py_None ? 1 : -1;
         if (node_type == "bytes") {
             if (Py_TYPE(v) == &PyBytes_Type) return 1;
             return PyBytes_Check(v) ? 0 : -1;
