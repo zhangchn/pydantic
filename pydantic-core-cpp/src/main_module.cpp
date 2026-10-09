@@ -5963,8 +5963,32 @@ static SerRef build_ser_impl(const py::dict& schema,
     }
     struct DepthGuard { ~DepthGuard() { _build_ser_depth--; } } _guard;
 
+    // CombinedSerializer::build reads `type` as a required str before it looks anything else
+    // up, and find_serializer (shared.rs:64-78) knows a closed list of names -- the builders
+    // that registered an EXPECTED_TYPE, and nothing else. A schema without the key fails on
+    // the KeyError, a name off that list fails with "Unknown serialization schema type", and
+    // either way there is no serializer to answer for the value.
+    static const std::unordered_set<std::string> kSerKnownTypes = {
+        "any", "arguments", "bool", "bytes", "call", "callable", "chain", "complex",
+        "custom-error", "dataclass", "dataclass-args", "date", "datetime", "decimal",
+        "default", "definition-ref", "definitions", "deque", "dict", "ellipsis", "enum",
+        "float", "format", "fraction", "frozendict", "frozenset", "function-after",
+        "function-before", "function-plain", "function-wrap", "generator", "int",
+        "is-instance", "is-subclass", "json", "json-or-python", "lax-or-strict", "list",
+        "literal", "missing-sentinel", "model", "model-fields", "multi-host-url",
+        "named-tuple", "none", "nullable", "set", "str", "tagged-union", "time",
+        "timedelta", "to-string", "tuple", "typed-dict", "union", "url", "uuid"};
+    if (!schema.contains("type"))
+        throw SchemaError("KeyError: 'type'");
     std::string type;
-    try { type = schema["type"].cast<std::string>(); } catch (...) { type = "any"; }
+    {
+        py::object type_val = schema["type"];
+        if (!PyUnicode_Check(type_val.ptr()))
+            throw SchemaError(ser_downcast_typeerror(type_val.ptr(), "str"));
+        type = type_val.cast<std::string>();
+    }
+    if (!kSerKnownTypes.count(type))
+        throw SchemaError("Unknown serialization schema type: `" + type + "`");
     std::string original_type = type;  // Save original type before serialization override
 
     // Check serialization override
