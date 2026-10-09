@@ -2213,6 +2213,15 @@ static bool ser_model_as_dict(const py::object& value) {
     return PyDict_Contains(value.ptr(), fields_set_key.ptr()) == 1;
 }
 
+// A step of a discriminator's lookup path: lookup_key.rs:52-56 keeps the first item as a key
+// and the rest as either a key or an index, and lookup_key.rs:307-314 asks anything but a str
+// for the indexed item without asking first.
+struct SerPathStep {
+    bool is_index = false;
+    std::string key;
+    long long index = 0;
+};
+
 struct SerNode {
     std::string type;
     // Rust-style serializer display name, e.g. "list[int]" (warnings).
@@ -2240,10 +2249,22 @@ struct SerNode {
     }
     // Rust locates a discriminator on a dict key, an object attribute, or
     // __pydantic_extra__: a validated value is a model instance, not a dict.
-    static bool lookup_discriminator(const py::object& value, const std::vector<std::string>& path, py::object* out) {
+    static bool lookup_discriminator(const py::object& value, const std::vector<SerPathStep>& path, py::object* out) {
         py::object cur = value;
-        for (const auto& key : path) {
+        for (const auto& step : path) {
             py::object next;
+            if (step.is_index) {
+                // A str is the one thing never indexed, and every other object is asked for
+                // the item blindly: a list too short for the index answers with no tag.
+                if (PyUnicode_Check(cur.ptr())) return false;
+                PyObject* idx = PyLong_FromLongLong(step.index);
+                PyObject* got = idx ? PyObject_GetItem(cur.ptr(), idx) : nullptr;
+                Py_XDECREF(idx);
+                if (!got) { PyErr_Clear(); return false; }
+                cur = py::reinterpret_steal<py::object>(got);
+                continue;
+            }
+            const std::string& key = step.key;
             if (py::isinstance<py::dict>(cur)) {
                 auto d = cur.cast<py::dict>();
                 if (!d.contains(key)) return false;
@@ -2284,7 +2305,7 @@ struct SerNode {
     std::unordered_map<std::string, SerRef> tagged;
     // For tagged-union: the discriminator lookup paths, and the choices in
     // declaration order for the left-to-right fallback.
-    std::vector<std::vector<std::string>> tagged_discriminator;
+    std::vector<std::vector<SerPathStep>> tagged_discriminator;
     // Discriminator(callable): Rust calls it on the value being serialized.
     py::object tagged_discriminator_callable = py::none();
     std::vector<SerRef> tagged_left_to_right;
@@ -6040,6 +6061,49 @@ static SerRef build_ser_child(py::handle child, std::unordered_map<std::string, 
     }
 }
 
+// lookup_key.rs:70-86 -- an alias path is a list whose first item names a key and whose rest
+// name keys or indices; lookup_key.rs:88-94 is a list of those, which is what AliasChoices
+// reads.  Each says what it wanted in the words the ValidationAlias extraction then repeats
+// once per variant it tried.
+static bool ser_alias_path(PyObject* src, std::vector<SerPathStep>& out, std::string& why) {
+    if (!PyList_Check(src)) { why = "TypeError: " + ser_downcast_message(src, "list"); return false; }
+    Py_ssize_t n = PyList_GET_SIZE(src);
+    if (n == 0) { why = "SchemaError: Each alias path should have at least one element"; return false; }
+    PyObject* first = PyList_GET_ITEM(src, 0);
+    if (!PyUnicode_Check(first)) { why = "TypeError: The first item in an alias path should be a string"; return false; }
+    try {
+        out.push_back({false, py::reinterpret_borrow<py::object>(first).cast<std::string>(), 0});
+    } catch (...) { PyErr_Clear(); why = "TypeError: The first item in an alias path should be a string"; return false; }
+    for (Py_ssize_t i = 1; i < n; i++) {
+        PyObject* item = PyList_GET_ITEM(src, i);
+        if (PyUnicode_Check(item)) {
+            try {
+                out.push_back({false, py::reinterpret_borrow<py::object>(item).cast<std::string>(), 0});
+                continue;
+            } catch (...) { PyErr_Clear(); }
+        } else if (PyLong_Check(item)) {
+            long long v = PyLong_AsLongLong(item);
+            if (PyErr_Occurred()) PyErr_Clear();
+            else { out.push_back({true, std::string(), v}); continue; }
+        }
+        why = "TypeError: Item in an alias path should be a string or int";
+        return false;
+    }
+    return true;
+}
+
+static bool ser_alias_choices(PyObject* src, std::vector<std::vector<SerPathStep>>& out, std::string& why) {
+    if (!PyList_Check(src)) { why = "TypeError: " + ser_downcast_message(src, "list"); return false; }
+    Py_ssize_t n = PyList_GET_SIZE(src);
+    if (n == 0) { why = "SchemaError: Lookup paths should have at least one element"; return false; }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        std::vector<SerPathStep> one;
+        if (!ser_alias_path(PyList_GET_ITEM(src, i), one, why)) return false;
+        out.push_back(std::move(one));
+    }
+    return true;
+}
+
 static SerRef build_ser_impl(const py::dict& schema,
                         std::unordered_map<std::string, SerRef>& defs,
                         SerMemo& memo) {
@@ -6742,26 +6806,33 @@ static SerRef build_ser_impl(const py::dict& schema,
     if (type == "tagged-union") {
         // The discriminator is a field name, or a list of field paths when the
         // union was split with a one_of discriminator.
-        try {
-            py::object disc = schema["discriminator"];
-            if (py::isinstance<py::str>(disc)) {
-                node->tagged_discriminator.push_back({disc.cast<std::string>()});
-            } else if (PyCallable_Check(disc.ptr())) {
-                node->tagged_discriminator_callable = disc;
-            } else if (py::isinstance<py::list>(disc)) {
-                for (auto item : disc.cast<py::list>()) {
-                    if (py::isinstance<py::str>(item)) {
-                        node->tagged_discriminator.push_back({item.cast<std::string>()});
-                    } else if (py::isinstance<py::list>(item)) {
-                        std::vector<std::string> path;
-                        for (auto step : item.cast<py::list>()) {
-                            path.push_back(py::str(step).cast<std::string>());
-                        }
-                        if (!path.empty()) node->tagged_discriminator.push_back(std::move(path));
-                    }
-                }
+        py::object disc = schema["discriminator"];
+        // common/union.rs:20-25 -- a callable is kept as the function itself and never
+        // extracted; everything else is a ValidationAlias, one of a str, an alias path or a
+        // list of them.  A list of strs is the one path that goes through all of them, not a
+        // key to try per element, so the second element is read out of what the first found.
+        if (PyCallable_Check(disc.ptr())) {
+            node->tagged_discriminator_callable = disc;
+        } else if (PyUnicode_Check(disc.ptr())) {
+            node->tagged_discriminator.push_back({SerPathStep{false, disc.cast<std::string>(), 0}});
+        } else {
+            std::vector<SerPathStep> one;
+            std::vector<std::vector<SerPathStep>> paths;
+            std::string path_why, choices_why;
+            if (ser_alias_path(disc.ptr(), one, path_why)) {
+                paths.push_back(std::move(one));
+            } else if (!ser_alias_choices(disc.ptr(), paths, choices_why)) {
+                throw SchemaError("Error building `" + type + "` serializer:\n"
+                    "  TypeError: failed to extract enum ValidationAlias ('Str | AliasPath | AliasChoices')\n"
+                    "- variant Str (Str): TypeError: failed to extract field ValidationAlias::Str.0, caused by TypeError: "
+                    + ser_downcast_message(disc.ptr(), "str") + "\n"
+                    "- variant AliasPath (AliasPath): TypeError: failed to extract field ValidationAlias::AliasPath.0, caused by "
+                    + path_why + "\n"
+                    "- variant AliasChoices (AliasChoices): TypeError: failed to extract field ValidationAlias::AliasChoices.0, caused by "
+                    + choices_why);
             }
-        } catch (...) {}
+            node->tagged_discriminator = std::move(paths);
+        }
         try {
             for (auto item : schema["choices"].cast<py::dict>()) {
                 std::string tag = ser_tag_string(item.first);
