@@ -5410,7 +5410,7 @@ private:
                 py::object v = py::reinterpret_borrow<py::object>(item.second);
                 if (exc_none && v.is_none()) continue;
                 if (v.is(missing_obj)) continue;
-                py::object serialized = extra_ser
+                py::object serialized = (extra_ser && !g_ser_extra.serialize_as_any)
                     ? extra_ser->to_python(v, json_mode, exc_none, round_trip, next.include, next.exclude,
                                            by_alias, exclude_unset, exclude_defaults, context)
                     : serialize_any_value(v, exc_none, round_trip, json_mode, next.include, next.exclude);
@@ -5429,7 +5429,14 @@ private:
                     if (next.omit) continue;
                     py::object v = py::reinterpret_borrow<py::object>(item.second);
                     if (exc_none && v.is_none()) continue;
-                    result[py::str(k)] = serialize_any_value(v, exc_none, round_trip, json_mode, next.include, next.exclude);
+                    // Rust GeneralFieldsSerializer::serialize_extra (fields.rs:304-319) hands every
+                    // extra to the extras serializer, which warns about a value it cannot take and
+                    // falls back to inference on its own; under serialize_as_any the answer the
+                    // schema gave is dropped and the extras are inferred (fields.rs:192-197).
+                    result[py::str(k)] = (extra_ser && !g_ser_extra.serialize_as_any)
+                        ? extra_ser->to_python(v, json_mode, exc_none, round_trip, next.include, next.exclude,
+                                               by_alias, exclude_unset, exclude_defaults, context)
+                        : serialize_any_value(v, exc_none, round_trip, json_mode, next.include, next.exclude);
                 }
             }
         }
@@ -5674,7 +5681,7 @@ private:
                 py::object v = py::reinterpret_borrow<py::object>(item.second);
                 if (exc_none && v.is_none()) continue;
                 if (v.is(missing_obj)) continue;
-                std::string field_json = extra_ser
+                std::string field_json = (extra_ser && !g_ser_extra.serialize_as_any)
                     ? extra_ser->to_json(v, ensure_ascii, -1, round_trip, next.include, next.exclude,
                                          by_alias, exclude_unset, exclude_defaults, exc_none, context)
                     : infer_json(v, ensure_ascii, -1, next.include, next.exclude);
@@ -5694,9 +5701,13 @@ private:
                     if (next.omit) continue;
                     py::object v = py::reinterpret_borrow<py::object>(item.second);
                     if (exc_none && v.is_none()) continue;
+                    std::string field_json = (extra_ser && !g_ser_extra.serialize_as_any)
+                        ? extra_ser->to_json(v, ensure_ascii, -1, round_trip, next.include, next.exclude,
+                                             by_alias, exclude_unset, exclude_defaults, exc_none, context)
+                        : infer_json(v, ensure_ascii, -1, next.include, next.exclude);
                     if (!first) out += ",";
                     first = false;
-                    out += json_escape(k, ensure_ascii) + ":" + infer_json(v, ensure_ascii, -1, next.include, next.exclude);
+                    out += json_escape(k, ensure_ascii) + ":" + field_json;
                 }
             }
         }
@@ -7166,6 +7177,15 @@ static SerRef build_ser_impl(const py::dict& schema,
                     try { node->extra_ser = build_ser(schema["extras_schema"].cast<py::dict>(), defs, memo); } catch (...) { PyErr_Clear(); }
                 }
             }
+        }
+        // Rust ModelFieldsBuilder (model.rs:41-53) builds the extras serializer when has_extra
+        // said allow, and the fields walk hands every __pydantic_extra__ entry to it.  The answer
+        // is this node's own, asked of the config the model above handed down (model.rs:120-121),
+        // which is why a model that allows extras but names no type for them has none here.
+        if (type == "model-fields" && schema.contains("extras_schema") &&
+            !schema["extras_schema"].is_none() &&
+            ser_extra_behavior_allow(schema, type, g_ser_build_config)) {
+            try { node->extra_ser = build_ser(schema["extras_schema"].cast<py::dict>(), defs, memo); } catch (...) { PyErr_Clear(); }
         }
         try {
             // Also add them to fields map with their return_schema serializer
