@@ -1770,6 +1770,52 @@ class SchemaValidator:
             _apply_model_post_init(instance, data)
         return instance
 
+    def _convert_extras(self, obj):
+        """Hand the extras over as the extras schema's own objects.
+
+        The field dict the C++ validator built for an extra has to go through the same
+        construction a declared field's does -- `__pydantic_fields_set__` and
+        `__pydantic_extra__` included -- and an extras value that is already the class it
+        was validated as passes through untouched, so this is safe to call wherever the
+        extras dict was just rewritten (construction, validate_assignment).
+        """
+        extra = getattr(obj, '__pydantic_extra__', None)
+        if not isinstance(extra, dict):
+            return
+        extras_schema = self._find_extras_schema()
+        if isinstance(extras_schema, dict):
+            for key, val in list(extra.items()):
+                extra[key] = self._dict_to_model(val, extras_schema)
+        object.__setattr__(obj, '__pydantic_extra__', extra)
+
+    def _find_extras_schema(self, schema=None):
+        """The extras_schema of the fields-position node, under whichever nodes wrap it.
+
+        A model whose class is shared with another schema -- which is exactly when a typed
+        `__pydantic_extra__` arrives as a definition-ref -- is wrapped in a `definitions`
+        node, so the fields node is two steps below the root rather than one, and an extras
+        dict read at the wrong depth is handed back as the validated field dict it was
+        built from, `__pydantic_fields_set__` and all.
+        """
+        if schema is None:
+            schema = self._schema
+        root = self._schema if isinstance(self._schema, dict) else {}
+        refs = {d.get('ref'): d for d in (root.get('definitions') or []) if isinstance(d, dict)}
+        for _ in range(8):
+            if not isinstance(schema, dict):
+                return None
+            extras_schema = schema.get('extras_schema')
+            if isinstance(extras_schema, dict):
+                return extras_schema
+            schema_type = schema.get('type')
+            if schema_type in ('definitions', 'model', 'dataclass'):
+                schema = schema.get('schema')
+            elif schema_type == 'definition-ref':
+                schema = refs.get(schema.get('schema_ref'))
+            else:
+                return None
+        return None
+
     def _process_model_fields(self, data, fields_schema):
         """Process model fields, recursively converting nested dicts to models."""
         fields = fields_schema.get("fields", {})
@@ -2010,14 +2056,7 @@ class SchemaValidator:
 
             # Convert extra field values set by C++ (they live on the instance,
             # not in __dict__, e.g. __pydantic_extra__: dict[str, Foo])
-            extra = getattr(self_instance, '__pydantic_extra__', None)
-            if isinstance(extra, dict):
-                inner = self._schema.get('schema', {}) if hasattr(self._schema, 'get') else {}
-                extras_schema = inner.get('extras_schema') if isinstance(inner, dict) else None
-                if isinstance(extras_schema, dict):
-                    for key, val in list(extra.items()):
-                        extra[key] = self._dict_to_model(val, extras_schema)
-                object.__setattr__(self_instance, '__pydantic_extra__', extra)
+            self._convert_extras(self_instance)
 
             # Call model_post_init AFTER nested models are processed (correct order)
             # Only call if the model actually overrides model_post_init
@@ -2123,10 +2162,12 @@ class SchemaValidator:
 
     def validate_assignment(self, obj, field_name, field_value):
         try:
-            return self._base.validate_assignment(obj, field_name, field_value)
+            out = self._base.validate_assignment(obj, field_name, field_value)
         except ValidationError as e:
             self._attach_error_context(e)
             raise
+        self._convert_extras(obj)
+        return out
 
     def __repr__(self):
         return self._base.__repr__()
