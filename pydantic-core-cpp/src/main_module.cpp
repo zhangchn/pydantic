@@ -2334,6 +2334,16 @@ struct SerNode {
     // For datetime/date/time serialization: "iso8601" (default), "seconds", or "milliseconds"
     std::string ser_json_temporal = "iso8601";
 
+    // What a literal node's schema listed, kept the way LiteralSerializer keeps
+    // it (literal.rs:23-27): the ints and the strs in the type each is written
+    // in, the bools and everything else in a list matched by Python's own `in`,
+    // and the name made of every member's repr, which is what a refusal gets
+    // registered under.
+    std::vector<long long> literal_ints;
+    std::vector<std::string> literal_strs;
+    py::object literal_py;      // none unless a bool or a non-int/str was listed
+    std::string literal_name;   // e.g. "literal[1,'x']"
+
     // Report the Python objects this node and its subtree hold so the cyclic
     // collector can see them (see Validator::visit_refs): a serializer names the
     // class it serializes and the class keeps its serializer, so neither the
@@ -2363,6 +2373,7 @@ struct SerNode {
         visit_ref(visit, arg, default_val);
         visit_ref(visit, arg, default_factory);
         visit_ref(visit, arg, class_);
+        visit_ref(visit, arg, literal_py);
     }
 
     // Copy content from another node into this one (preserves shared_ptr identity)
@@ -2389,6 +2400,10 @@ struct SerNode {
         return_ser = other.return_ser;
         root_model = other.root_model;
         class_ = other.class_;
+        literal_ints = other.literal_ints;
+        literal_strs = other.literal_strs;
+        literal_py = other.literal_py;
+        literal_name = other.literal_name;
         class_name = other.class_name;
         polymorphic_from_config = other.polymorphic_from_config;
         extra_allowed = other.extra_allowed;
@@ -2490,8 +2505,48 @@ struct SerNode {
         return 1;
     }
 
+    // LiteralSerializer::check (literal.rs:80-111) asked of a value: the int arm
+    // reads an int that is not a bool, the str arm the text a str object holds,
+    // and every other member by Python's own `in` over the list Rust kept them
+    // in.  A member the value cannot be is the node's one refusal.
+    bool literal_match(PyObject* v) const {
+        if (!literal_ints.empty() && PyLong_Check(v) && !PyBool_Check(v)) {
+            int overflow = 0;
+            long long n = PyLong_AsLongLongAndOverflow(v, &overflow);
+            if (PyErr_Occurred()) {
+                PyErr_Clear();   // an int subclass whose index it cannot read
+            } else if (overflow == 0) {
+                for (long long e : literal_ints) {
+                    if (e == n) return true;
+                }
+            }
+        }
+        if (!literal_strs.empty() && PyUnicode_Check(v)) {
+            const char* text = PyUnicode_AsUTF8(v);
+            if (!text) {
+                PyErr_Clear();
+            } else {
+                for (const auto& s : literal_strs) {
+                    if (s == text) return true;
+                }
+            }
+        }
+        if (literal_py) {   // a default-constructed py::object is a null handle, not None
+            int contained = PySequence_Contains(literal_py.ptr(), v);
+            if (contained < 0) PyErr_Clear();
+            else if (contained == 1) return true;
+        }
+        return false;
+    }
+
     bool ser_check_accepts(const py::object& value) const {
         if (g_ser_check == 0) return true;
+        if (type == "literal") {
+            // The members are all this node will take, and at either level: unlike
+            // the int and float nodes, whose Subclass arm lets a subclass through in
+            // the lax round, literal.rs:81 asks the same question of both.
+            return literal_match(value.ptr());
+        }
         if (type == "named-tuple") {
             // Rust tuple_value: while a union checks its choices the value has to
             // be an instance of the named tuple class itself; the lax round only
@@ -3288,6 +3343,16 @@ struct SerNode {
                 return std::move(out);
             }
             return py::tuple(temp);
+        }
+        if (type == "literal") {
+            // LiteralSerializer::to_python (literal.rs:117-136) has no leaf either: a
+            // member that is neither an int nor a str, and every value whatsoever
+            // while no check level is open, all go to inference -- which is what
+            // turns a str-Enum member into a plain string when the target is JSON.
+            // The one thing this node does that an any node does not is refuse, and
+            // by the time the walk gets here the generic mismatch rule above has
+            // already warned or raised in this node's own name.
+            return serialize_any_value(value, exc_none, round_trip, json_mode, include, exclude);
         }
         if (type == "any" || type == "call") {
             // Rust builds no dedicated serializer for a call schema, so the
@@ -5591,6 +5656,7 @@ std::string SerNode::type_name_for_warning() const {
     // Expected `none` and a container composes list[none], dict[none, any], tuple[none].
     if (t == "none" || t == "is-none") return "none";
     if (t == "any") return "any";
+    if (t == "literal") return literal_name.empty() ? std::string("literal") : literal_name;
     // GeneralFieldsSerializer::get_name (fields.rs:371) names every mode of the fields
     // family the same way, so a mismatch inside a list says list[general-fields].
     if (t == "model-fields" || t == "dataclass-args") return "general-fields";
@@ -5622,6 +5688,9 @@ bool SerNode::value_matches_type(const py::object& v) const {
     if (v.is_none()) return true;
     const std::string& t = type;
     if (t == "any" || t == "is-instance" || t == "is-subclass") return true;
+    // literal.rs:80-90: the members are only consulted while a check level is
+    // open, so with none enabled the node has no opinion about the value at all.
+    if (t == "literal") return true;
     // NoneSerializer answers its own type exactly (simple.rs:44-54, :56-68): a subclass of
     // None cannot exist, so anything else is a mismatch it warns about and then infers.
     if (t == "none" || t == "is-none") return false;
@@ -5827,12 +5896,75 @@ static SerRef build_ser_impl(const py::dict& schema,
     auto node = std::make_shared<SerNode>();
     node->type = type;
 
-    // Rust's LiteralSerializer has no leaf of its own: with the optional
-    // validate-while-serializing switch off (the default) it hands the value to
-    // inference, which is what turns a str-Enum member into a plain string when
+    // Rust's LiteralSerializer (literal.rs:33-76) reads the members it was given,
+    // splits them by the type each is written in, and names itself after every
+    // member's repr.  Keep that, and the node keeps the any shape it is answered
+    // by: literal.rs:80 only consults the members while a check level is open, so
+    // outside a union's choices the node takes whatever arrives and inference
+    // answers -- which is what turns a str-Enum member into a plain string when
     // the target is JSON.
     if (type == "literal") {
-        node->type = "any";
+        // Every object here is reached through a borrowed handle and kept by the
+        // list the node owns, because a py::reinterpret_borrow<py::list> of that
+        // very member would hand out an owning wrapper that drops the reference
+        // when the temporary dies -- leaving the node holding a freed list.
+        py::object expected = py::reinterpret_steal<py::object>(PyObject_GetItem(schema.ptr(),
+                                                                                 py::str("expected").ptr()));
+        if (!expected) {
+            PyErr_Clear();
+            return node;
+        }
+        PyObject* listed = expected.ptr();
+        if (!PyList_Check(listed) && !PyTuple_Check(listed)) {
+            if (PyErr_Occurred()) PyErr_Clear();
+            return node;
+        }
+        auto keep_other = [&](PyObject* item) {
+            if (!node->literal_py) node->literal_py = py::list();
+            PyList_Append(node->literal_py.ptr(), item);
+            PyErr_Clear();
+        };
+        Py_ssize_t size = PySequence_Size(listed);
+        std::string repr_args;
+        for (Py_ssize_t i = 0; i < size; ++i) {
+            PyObject* item = PySequence_GetItem(listed, i);   // new reference
+            if (!item) {
+                PyErr_Clear();
+                break;
+            }
+            std::string repr;
+            try {
+                repr = py::repr(py::handle(item)).cast<std::string>();
+            } catch (const py::error_already_set&) {
+                PyErr_Clear();
+            }
+            if (!repr_args.empty()) repr_args += ",";
+            repr_args += repr;
+            if (PyBool_Check(item)) {
+                keep_other(item);   // expected_int wants no bool (literal.rs:46-47)
+            } else if (PyLong_Check(item)) {
+                int overflow = 0;
+                long long n = PyLong_AsLongLongAndOverflow(item, &overflow);
+                if (PyErr_Occurred() || overflow != 0) {
+                    if (PyErr_Occurred()) PyErr_Clear();
+                    keep_other(item);   // past i64: extract::<i64> failed, so into the list
+                } else {
+                    node->literal_ints.push_back(n);
+                }
+            } else if (PyUnicode_Check(item)) {
+                const char* text = PyUnicode_AsUTF8(item);
+                if (text) {
+                    node->literal_strs.push_back(text);
+                } else {
+                    PyErr_Clear();
+                    keep_other(item);
+                }
+            } else {
+                keep_other(item);
+            }
+            Py_DECREF(item);
+        }
+        node->literal_name = "literal[" + repr_args + "]";
         return node;
     }
 
