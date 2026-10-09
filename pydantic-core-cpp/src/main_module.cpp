@@ -5942,6 +5942,19 @@ static std::string ser_downcast_typeerror(PyObject* v, const char* want) {
     return "TypeError: " + ser_downcast_message(v, want);
 }
 
+// model.rs:117 and dataclass.rs:103 read a model's or dataclass's own `config` before they
+// read so much as `cls`, and shared.rs:250-252 asks the same key again when the finished
+// serializer is wrapped for polymorphic dispatch.  Either way the value has to be a dict to
+// be read at all -- None included, since only a key that is not there at all is the None
+// these builders go on with.
+static bool ser_config_is_readable_dict(const py::dict& schema, std::string& text) {
+    if (!schema.contains("config")) return true;
+    py::object cfg = schema["config"];
+    if (PyDict_Check(cfg.ptr())) return true;
+    text = ser_downcast_typeerror(cfg.ptr(), "dict");
+    return false;
+}
+
 static void ser_check_unexpected_kw(const char* fname, const std::vector<std::string>& allowed,
                                    const py::kwargs& kwargs) {
     for (auto item : kwargs) {
@@ -6377,14 +6390,22 @@ static SerRef build_ser_impl(const py::dict& schema,
             }
             req("cls", "type");                // enum_.rs:46, extracted as a type
         } else if (type == "model") {
+            // A model that arrives finished never reaches its own builder, so its config is
+            // only asked by the trampoline below; one that has to be built asks it first.
+            std::string cfg_err;
+            if (!prebuilt_class() && !ser_config_is_readable_dict(schema, cfg_err))
+                throw SchemaError("Error building `" + type + wrap + cfg_err);
             req("cls", "type");                // model.rs:119, extracted as a type
-            if (prebuilt_class())              // a finished model brings its own serializer
+            if (reused_prebuilt || prebuilt_class())   // a finished model brings its own serializer
                 reused_prebuilt = true;
             else
                 req("schema", "dict");         // model.rs:120
         } else if (type == "dataclass") {
+            std::string cfg_err;
+            if (!reused_prebuilt && !prebuilt_class() && !ser_config_is_readable_dict(schema, cfg_err))
+                throw SchemaError("Error building `" + type + wrap + cfg_err);
             req("cls", "type");                // dataclass.rs:105
-            if (prebuilt_class())
+            if (reused_prebuilt || prebuilt_class())
                 reused_prebuilt = true;
             else {                             // a finished dataclass brings its own serializer
                 req("schema", "dict");         // dataclass.rs:106
@@ -7376,6 +7397,20 @@ static SerRef build_ser_impl(const py::dict& schema,
             };
             set_config(node);
         } catch (...) {}
+    }
+
+    // shared.rs:353 wraps every finished model or dataclass serializer in a
+    // PolymorphismTrampoline, and to do that it reads the node's own `config` (shared.rs:252).
+    // A node that was answered by a prebuilt serializer never reached its builder, so this is
+    // the only read made of its config; the refusal is the interpreter's own TypeError, so the
+    // builder this node sits inside is the one that names itself around it, and a build with
+    // nothing above it says nothing but the error itself.
+    if (reused_prebuilt && (original_type == "model" || original_type == "dataclass")) {
+        std::string cfg_err;
+        if (!ser_config_is_readable_dict(schema, cfg_err)) {
+            PyErr_SetString(PyExc_TypeError, cfg_err.substr(11).c_str());
+            throw py::error_already_set();
+        }
     }
 
     return node;
