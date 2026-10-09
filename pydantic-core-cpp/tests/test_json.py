@@ -25,6 +25,7 @@ import pydantic_core_cpp
 from pydantic_core_cpp import (
     CoreConfig,
     PydanticSerializationError,
+    PydanticSerializationUnexpectedValue,
     SchemaError,
     SchemaSerializer,
     SchemaValidator,
@@ -3869,3 +3870,19 @@ def test_the_serializer_methods_refuse_keywords_they_do_not_declare():
                      exclude_none=False, round_trip=False, warnings="warn",
                      serialize_as_any=False, polymorphic_serialization=None,
                      context=None) == b"5"
+
+
+def test_an_unexpected_value_is_a_sibling_of_the_serialization_error():
+    # Rust declares the two side by side, each with ValueError as its base, so a clause that
+    # catches a serialization failure is deliberately blind to a refusal an outer round -- a
+    # union's strict pass, a fallback -- is still going to retry or answer for itself.
+    assert PydanticSerializationUnexpectedValue.__mro__[1] is ValueError
+    assert not issubclass(PydanticSerializationUnexpectedValue, PydanticSerializationError)
+    assert not issubclass(PydanticSerializationError, PydanticSerializationUnexpectedValue)
+    assert str(PydanticSerializationUnexpectedValue("boom")) == "boom"
+    try:
+        raise PydanticSerializationUnexpectedValue("boom")
+    except PydanticSerializationError:
+        pytest.fail("an unexpected value was caught as a serialization error")
+    except PydanticSerializationUnexpectedValue as e:
+        assert e.args == ("boom",)

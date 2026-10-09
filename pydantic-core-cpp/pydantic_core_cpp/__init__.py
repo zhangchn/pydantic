@@ -2763,7 +2763,12 @@ class PydanticKnownError(ValueError):
 # would shadow the extension's class and break except clauses.
 
 
-class PydanticSerializationUnexpectedValue(PydanticSerializationError):
+# Rust declares the two serialization errors side by side, each with ValueError as
+# its base (errors.rs:35 PydanticSerializationError, errors.rs:111 this one), so an
+# unexpected value is NOT one of the errors a `except PydanticSerializationError`
+# clause catches -- inheriting from it here swallowed the refusals that clause is
+# meant to leave alone.
+class PydanticSerializationUnexpectedValue(ValueError):
     """An error raised when an unexpected value is encountered during serialization.
 
     This error is often caught and coerced into a warning, as pydantic-core
