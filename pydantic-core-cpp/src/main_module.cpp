@@ -5997,14 +5997,22 @@ static SerRef build_ser_impl(const py::dict& schema,
         // when the temporary dies -- leaving the node holding a freed list.
         py::object expected = py::reinterpret_steal<py::object>(PyObject_GetItem(schema.ptr(),
                                                                                  py::str("expected").ptr()));
+        // get_as_req (literal.rs:39) is a required key and a required type, so a schema
+        // without `expected`, or one that holds anything but a list, fails the build with
+        // the error the extraction itself raised; an empty list is refused on its own.
         if (!expected) {
             PyErr_Clear();
-            return node;
+            throw SchemaError("Error building `literal` serializer:\n  KeyError: 'expected'");
         }
         PyObject* listed = expected.ptr();
-        if (!PyList_Check(listed) && !PyTuple_Check(listed)) {
-            if (PyErr_Occurred()) PyErr_Clear();
-            return node;
+        if (!PyList_Check(listed)) {
+            throw SchemaError("Error building `literal` serializer:\n  TypeError: '" +
+                              std::string(listed->ob_type->tp_name) +
+                              "' object is not an instance of 'list'");
+        }
+        if (PyList_GET_SIZE(listed) == 0) {
+            throw SchemaError("Error building `literal` serializer:\n"
+                              "  SchemaError: `expected` should have length > 0");
         }
         auto keep_other = [&](PyObject* item) {
             if (!node->literal_py) node->literal_py = py::list();
