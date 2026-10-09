@@ -2963,8 +2963,11 @@ struct SerNode {
                     return serialize_any_value(value, exc_none, round_trip, json_mode, include, exclude);
                 }
             }
-            // For root models, extract the 'root' attribute before delegating
-            if (root_model && py_hasattr(value, "root")) {
+            // For root models, extract the 'root' attribute before delegating.
+            // model.rs:188-190 asks for it unconditionally and lets the
+            // AttributeError reach the caller, so an instance the schema names but
+            // that never grew a root is not walked on without one.
+            if (root_model) {
                 auto root_val = py::getattr(value, "root");
                 // If the child is a field serializer, pass the model instance
                 if (!children.empty() && children[0]->is_field_serializer && children[0]->py_func.ptr() && !children[0]->py_func.is_none()) {
@@ -3951,8 +3954,11 @@ struct SerNode {
                     return infer_json(value, ensure_ascii, indent, include, exclude);
                 }
             }
-            // For root models, extract the 'root' attribute before delegating
-            if (root_model && py_hasattr(value, "root")) {
+            // For root models, extract the 'root' attribute before delegating.
+            // model.rs:188-190 asks for it unconditionally and lets the
+            // AttributeError reach the caller, so an instance the schema names but
+            // that never grew a root is not walked on without one.
+            if (root_model) {
                 auto root_val = py::getattr(value, "root");
                 // If the child is a field serializer, pass the model instance
                 if (!children.empty() && children[0]->is_field_serializer && children[0]->py_func.ptr() && !children[0]->py_func.is_none()) {
