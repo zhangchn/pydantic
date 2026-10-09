@@ -6442,6 +6442,18 @@ static SerRef build_ser_impl(const py::dict& schema,
         return build_ser_child(schema[key], defs, memo, type);
     };
 
+    // other.rs:44-45 and :59-63 -- the custom-error builder reads its required schema and the call
+    // builder reads an optional return_schema, and each answers with the serializer that schema
+    // builds rather than wrapping it: the schema is what the node expects, and a call that names
+    // none is the any serializer it always was.
+    if (type == "custom-error" || type == "call") {
+        SerRef inner = (type == "custom-error") ? sub() : sub("return_schema");
+        if (inner) {
+            node->copy_from(*inner);
+            return node;
+        }
+    }
+
     if (type == "definitions") {
         try {
             auto defs_list = schema["definitions"].cast<py::list>();
