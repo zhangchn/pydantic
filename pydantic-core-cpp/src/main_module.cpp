@@ -7207,9 +7207,37 @@ static SerRef build_ser_impl(const py::dict& schema,
         try {
             // Also add them to fields map with their return_schema serializer
             if (schema.contains("computed_fields")) {
-                for (auto cf_item : schema["computed_fields"].cast<py::list>()) {
-                    auto cf = cf_item.cast<py::dict>();
-                    std::string prop = cf["property_name"].cast<std::string>();
+                static const std::string wrap = "` serializer:\n  ";
+                // computed_fields.rs:28 asks for the list itself, so a key that holds anything
+                // else -- None included -- is the extraction's complaint, not an absent key.
+                py::object cf_list = schema["computed_fields"];
+                if (!PyList_Check(cf_list.ptr()))
+                    throw SchemaError("Error building `" + type + wrap +
+                                      ser_downcast_typeerror(cf_list.ptr(), "list"));
+                for (auto cf_item : cf_list.cast<py::list>()) {
+                    // each entry is cast to a dict, so an entry that is not one is refused here
+                    if (!PyDict_Check(cf_item.ptr()))
+                        throw SchemaError("Error building `" + type + wrap +
+                                          ser_downcast_typeerror(cf_item.ptr(), "dict"));
+                    py::dict cf = py::reinterpret_borrow<py::dict>(cf_item);
+                    // computed_fields.rs:96-97: property_name and return_schema are both required
+                    // and each asked for a type -- a str and a dict -- so a missing key is the
+                    // KeyError that names it and any other value the extraction's own error, and
+                    // nothing below is read before that (an entry whose alias is wrong says
+                    // nothing about a return_schema that was refused first).
+                    if (!cf.contains("property_name"))
+                        throw SchemaError("Error building `" + type + wrap + "KeyError: 'property_name'");
+                    py::object prop_val = cf["property_name"];
+                    if (!PyUnicode_Check(prop_val.ptr()))
+                        throw SchemaError("Error building `" + type + wrap +
+                                          ser_downcast_typeerror(prop_val.ptr(), "str"));
+                    std::string prop = prop_val.cast<std::string>();
+                    if (!cf.contains("return_schema"))
+                        throw SchemaError("Error building `" + type + wrap + "KeyError: 'return_schema'");
+                    py::object return_schema = cf["return_schema"];
+                    if (!PyDict_Check(return_schema.ptr()))
+                        throw SchemaError("Error building `" + type + wrap +
+                                          ser_downcast_typeerror(return_schema.ptr(), "dict"));
                     node->computed_fields_.insert(prop);
                     // Computed field alias (from alias generator): serialization_alias takes precedence
                     if (cf.contains("serialization_alias")) {
@@ -7224,18 +7252,16 @@ static SerRef build_ser_impl(const py::dict& schema,
                             node->field_exclude_if[prop] = eif;
                         }
                     }
-                    try {
-                        node->fields[prop] = build_ser(cf["return_schema"].cast<py::dict>(), defs, memo);
-                    } catch (...) {
-                        // If no return_schema, fall back to any
-                        py::dict any_schema;
-                        any_schema["type"] = "any";
-                        node->fields[prop] = build_ser(any_schema, defs, memo);
-                    }
+                    // computed_fields.rs:98-99: the return schema is built and a refusal is
+                    // passed back with the field's own name in front of it, the way a field's
+                    // schema error is carried as `Field `x`:`.
+                    node->fields[prop] = build_ser_child(return_schema, defs, memo, type,
+                                                        "Computed field `" + prop + "`:\n  ");
                     node->field_order.push_back(prop);
                 }
             }
-        } catch (const std::exception& e) {
+        } catch (const SchemaError&) { throw; }
+        catch (const std::exception& e) {
             // Schema field parsing failed silently
             (void)e;
         } catch (...) {
