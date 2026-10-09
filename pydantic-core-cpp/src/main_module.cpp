@@ -6126,6 +6126,11 @@ static SerRef build_ser_impl(const py::dict& schema,
     // stays unbuilt.
     bool reused_prebuilt = false;
 
+    // dataclass.rs:106-110 reads the args schema, builds it, and only then asks the dataclass's
+    // own schema for the field names, so a dataclass whose args were refused never gets to say
+    // anything about `fields`.
+    bool dataclass_fields_after_args = false;
+
     // get_as_req on the wrapper builders: the key names the schema to hand to the next
     // CombinedSerializer::build, so a schema that does not name one fails on that KeyError and
     // one that names anything but a schema dict fails on the TypeError the extraction raises --
@@ -6257,7 +6262,7 @@ static SerRef build_ser_impl(const py::dict& schema,
                 reused_prebuilt = true;
             else {                             // a finished dataclass brings its own serializer
                 req("schema", "dict");         // dataclass.rs:106
-                req("fields", "list");         // dataclass.rs:110, the field names themselves
+                dataclass_fields_after_args = true;   // dataclass.rs:110, read below the args
             }
         } else if (type == "model-fields" || type == "typed-dict") {
             req("fields", "dict");             // model.rs:47, typed_dict.rs:47
@@ -7040,6 +7045,20 @@ static SerRef build_ser_impl(const py::dict& schema,
         auto c = sub();
         if (c) {
             node->children.push_back(c);
+        }
+        if (dataclass_fields_after_args) {
+            static const std::string wrap = "` serializer:\n  ";
+            if (!schema.contains("fields"))
+                throw SchemaError("Error building `" + type + wrap + "KeyError: 'fields'");
+            py::object flds = schema["fields"];
+            if (!flds || !PyList_Check(flds.ptr()))
+                throw SchemaError("Error building `" + type + wrap + ser_downcast_typeerror(flds.ptr(), "list"));
+            for (py::handle item : py::reinterpret_borrow<py::list>(flds)) {
+                // each name is extracted as a str, so a list of anything else is this builder's
+                // own complaint rather than the interpreter's bare TypeError
+                if (!PyUnicode_Check(item.ptr()))
+                    throw SchemaError("Error building `" + type + wrap + ser_downcast_typeerror(item.ptr(), "str"));
+            }
         }
     }
 
