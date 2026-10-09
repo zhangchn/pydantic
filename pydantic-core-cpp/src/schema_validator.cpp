@@ -54,16 +54,16 @@ SchemaValidator::SchemaValidator(const py::dict& schema,
         config_.strict = config["strict"].cast<bool>();
     }
     config_.extra_behavior = std::nullopt;
-    config_.from_attributes = std::nullopt;
-    if (config.contains("from_attributes") && !config["from_attributes"].is_none()) {
-        config_.from_attributes = config["from_attributes"].cast<bool>();
-    }
     // validators/validation_state.rs has no extra behaviour in the state: every validator
     // answers that question for itself at build time, and a model node replaces the config
     // it hands down with its own (model.rs:116-121).  Reading the root config's answer into
     // the state made it outrank every nested validator's own, so a model under a parent with
     // extra='allow' kept keys its own config drops -- and under a parent with extra='ignore'
     // dropped keys its own config allows.  The state carries only the call-time `extra`.
+    // The same applies to from_attributes: Extra is seeded only from the validate() call
+    // (validators/mod.rs:434-467) while each node answers from_attributes for itself at build
+    // time (union.rs:344 `union_from_attributes`, model.rs, typed_dict.rs) and is overridden
+    // per call by state.extra().from_attributes (union.rs:322).
     config_.py_config = py::reinterpret_borrow<py::object>(config);
     config_.cache_strings = StringCacheMode::All;
     if (config.contains("val_temporal_unit") && !config["val_temporal_unit"].is_none()) {
@@ -88,20 +88,7 @@ void SchemaValidator::build_validator() {
     // Set up config defaults
     config_.strict = std::nullopt;
     config_.extra_behavior = std::nullopt;
-    config_.from_attributes = std::nullopt;
     config_.cache_strings = StringCacheMode::All;
-
-    // Parse from_attributes from JSON config if available
-    if (!config_json_.empty()) {
-        simdjson::dom::parser parser;
-        auto doc = parser.parse(config_json_);
-        if (!doc.error()) {
-            auto fa = doc["from_attributes"];
-            if (!fa.error() && fa.value().is_bool()) {
-                config_.from_attributes = fa.value().get_bool();
-            }
-        }
-    }
 }
 
 std::string SchemaValidator::validate_python(const std::string& input_json,
