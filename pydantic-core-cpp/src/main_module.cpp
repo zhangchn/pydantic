@@ -6064,10 +6064,78 @@ static SerRef build_ser_impl(const py::dict& schema,
             if (!v) return;
             bool ok = std::strcmp(want, "list") == 0 ? PyList_Check(v.ptr())
                     : std::strcmp(want, "dict") == 0 ? PyDict_Check(v.ptr())
+                    : std::strcmp(want, "type") == 0 ? PyType_Check(v.ptr())
                     : PyUnicode_Check(v.ptr());
             if (!ok)
                 throw SchemaError("Error building `" + type + wrap + ser_downcast_typeerror(v.ptr(), want));
         };
+        // A field names the schema that serializes it (model.rs:67, typed_dict.rs:73) unless it
+        // is excluded outright; a dataclass field says the same after its `init_only` says
+        // otherwise (dataclass.rs:49-56); a named tuple wants `name` and `schema` of every
+        // entry (named_tuple.rs:53-54).  The field's own details are read in the same order the
+        // builders read them, so the first field that names nothing is the one complained of.
+        auto req_named_fields = [&](bool dataclass_args, bool named_tuple) {
+            py::object fields = drv["fields"];
+            if (!fields) return;
+            if (named_tuple || dataclass_args) {
+                for (py::handle item : py::reinterpret_borrow<py::list>(fields)) {
+                    if (!PyDict_Check(item.ptr()))
+                        throw SchemaError("Error building `" + type + wrap + ser_downcast_typeerror(item.ptr(), "dict"));
+                    py::dict f = py::reinterpret_borrow<py::dict>(item);
+                    if (!f.contains("name"))
+                        throw SchemaError("Error building `" + type + wrap + "KeyError: 'name'");
+                    bool skipped = false;
+                    if (!named_tuple) {
+                        if (dataclass_args && f.contains("init_only") &&
+                            f["init_only"].ptr() == Py_True)
+                            skipped = true;
+                        if (!skipped && f.contains("serialization_exclude") &&
+                            f["serialization_exclude"].ptr() == Py_True)
+                            skipped = true;
+                    }
+                    if (!skipped && !f.contains("schema"))
+                        throw SchemaError("Error building `" + type + wrap + "KeyError: 'schema'");
+                }
+            } else {
+                for (auto item : py::reinterpret_borrow<py::dict>(fields)) {
+                    py::object fdef = py::reinterpret_borrow<py::object>(item.second);
+                    if (!fdef || !PyDict_Check(fdef.ptr()))
+                        throw SchemaError("Error building `" + type + wrap + ser_downcast_typeerror(fdef.ptr(), "dict"));
+                    if (fdef.contains("serialization_exclude") &&
+                        fdef["serialization_exclude"].ptr() == Py_True)
+                        continue;
+                    if (!fdef.contains("schema"))
+                        throw SchemaError("Error building `" + type + wrap + "KeyError: 'schema'");
+                }
+            }
+        };
+
+        // A class that pydantic has finished building carries the serializer it will serialize
+        // with, and Rust reuses that instead of building the inner schema at all, so for such a
+        // class the inner schema is never read: it may be a str, another class, or missing.  A
+        // class that never went through pydantic has no `__pydantic_complete__` to answer with,
+        // and forcing the flag False on a model makes the inner schema required again.
+        auto prebuilt_class = [&]() -> bool {
+            if (!drv.contains("cls")) return false;
+            py::object cls = drv["cls"];
+            PyObject* c = cls.ptr();
+            PyObject* complete = PyObject_GetAttrString(c, "__pydantic_complete__");
+            if (!complete) { PyErr_Clear(); return false; }
+            int truthy = PyObject_IsTrue(complete);
+            Py_DECREF(complete);
+            if (truthy != 1) return false;
+            // The serializer is looked for in the class dict rather than by attribute: a model
+            // whose `__pydantic_serializer__` was deleted still answers getattr (the metaclass
+            // builds one on demand) and is refused all the same.
+            int has_built = 0;
+            try {
+                // A class hands that dict out as a proxy, so containment is asked of it.
+                py::object cd = cls.attr("__dict__");
+                has_built = cd.attr("__contains__")("__pydantic_serializer__").cast<bool>() ? 1 : 0;
+            } catch (...) { PyErr_Clear(); has_built = 0; }
+            return has_built == 1;
+        };
+
         if (type == "nullable" || type == "default" || type == "custom-error") {
             req("schema", "dict");
         } else if (type == "chain") {
@@ -6081,6 +6149,41 @@ static SerRef build_ser_impl(const py::dict& schema,
             req("formatting_string", "str");   // format.rs:77, empty or not
         } else if (type == "definition-ref") {
             req("schema_ref", "str");          // definitions.rs:66
+        } else if (type == "model") {
+            req("cls", "type");                // model.rs:119, extracted as a type
+            if (!prebuilt_class())
+                req("schema", "dict");         // model.rs:120
+        } else if (type == "dataclass") {
+            req("cls", "type");                // dataclass.rs:105
+            if (!prebuilt_class()) {           // a finished dataclass brings its own serializer
+                req("schema", "dict");         // dataclass.rs:106
+                req("fields", "list");         // dataclass.rs:110, the field names themselves
+            }
+        } else if (type == "model-fields" || type == "typed-dict") {
+            req("fields", "dict");             // model.rs:47, typed_dict.rs:47
+            req_named_fields(false, false);
+        } else if (type == "dataclass-args") {
+            req("fields", "list");             // dataclass.rs:36
+            req_named_fields(true, false);
+        } else if (type == "named-tuple") {
+            req("cls", "type");                // named_tuple.rs:42
+            req("fields", "list");             // named_tuple.rs:48
+            req_named_fields(false, true);
+        } else if (type == "tuple") {
+            req("items_schema", "list");       // tuple.rs:39
+        } else if (type == "definitions") {
+            req("definitions", "list");        // definitions.rs:30
+            for (py::handle item : drv["definitions"].cast<py::list>()) {
+                if (!PyDict_Check(item.ptr()))
+                    throw SchemaError("Error building `" + type + wrap + ser_downcast_typeerror(item.ptr(), "dict"));
+                py::dict d = py::reinterpret_borrow<py::dict>(item);
+                if (!d.contains("ref"))
+                    throw SchemaError("Error building `" + type + wrap + "KeyError: 'ref'");
+                py::object r = d["ref"];
+                if (!r || !PyUnicode_Check(r.ptr()))
+                    throw SchemaError("Error building `" + type + wrap + ser_downcast_typeerror(r.ptr(), "str"));
+            }
+            req("schema", "dict");             // definitions.rs:39
         } else if (type == "arguments") {
             // other.rs:86-93 -- an arguments validator has no serializer to be found at all.
             throw SchemaError("Error building `arguments` serializer:\n  "
