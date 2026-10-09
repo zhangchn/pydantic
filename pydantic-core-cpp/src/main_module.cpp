@@ -4546,7 +4546,11 @@ private:
             return infer_json(py::getattr(value, "value"), ensure_ascii, indent, include, exclude);
         }
         if (py::isinstance<py::bool_>(value)) return value.cast<bool>() ? "true" : "false";
-        if (py::isinstance<py::int_>(value)) return py::str(py::repr(value)).cast<std::string>();
+        // infer.rs:392 answers an int and an int subclass alike with serialize!(Int), the
+        // number the value holds, so what the object's own class says about it in __repr__
+        // never reaches the JSON -- an exact int keeps its digits and a subclass is rebuilt
+        // from them, which is also how the python walk's json arm answers (ser_exact_int).
+        if (py::isinstance<py::int_>(value)) return py::str(ser_exact_int(value)).cast<std::string>();
         if (py::isinstance<py::float_>(value)) {
             // serialize_f64 (float.rs:59-75): only the modes that name a non-finite float
             // differently change anything, and a finite float answers for itself either way.
