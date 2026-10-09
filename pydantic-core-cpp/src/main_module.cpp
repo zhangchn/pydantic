@@ -6223,6 +6223,15 @@ static SerRef build_ser_impl(const py::dict& schema,
 
         if (type == "nullable" || type == "default" || type == "custom-error") {
             req("schema", "dict");
+        } else if (type == "tagged-union") {
+            // union.rs:136-137 asks for the discriminator first and the choices dict second, and
+            // union.rs:347 refuses a dict that named nothing.  The choices are a dict of tag to
+            // schema rather than the `variants` the validator's shape suggests.
+            req("discriminator", nullptr);
+            req("choices", "dict");
+            if (PyDict_Check(drv["choices"].ptr()) && PyDict_Size(drv["choices"].ptr()) == 0)
+                throw SchemaError("Error building `" + type + wrap +
+                                  "SchemaError: One or more union choices required");
         } else if (type == "chain") {
             req("steps", "list");   // other.rs:23, and it is the last step that gets serialized
         } else if (type == "lax-or-strict") {
