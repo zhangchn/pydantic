@@ -58,12 +58,12 @@ SchemaValidator::SchemaValidator(const py::dict& schema,
     if (config.contains("from_attributes") && !config["from_attributes"].is_none()) {
         config_.from_attributes = config["from_attributes"].cast<bool>();
     }
-    if (config.contains("extra_fields_behavior") && !config["extra_fields_behavior"].is_none()) {
-        std::string eb = config["extra_fields_behavior"].cast<std::string>();
-        if (eb == "allow") config_.extra_behavior = ExtraBehavior::Allow;
-        else if (eb == "forbid") config_.extra_behavior = ExtraBehavior::Forbid;
-        else config_.extra_behavior = ExtraBehavior::Ignore;
-    }
+    // validators/validation_state.rs has no extra behaviour in the state: every validator
+    // answers that question for itself at build time, and a model node replaces the config
+    // it hands down with its own (model.rs:116-121).  Reading the root config's answer into
+    // the state made it outrank every nested validator's own, so a model under a parent with
+    // extra='allow' kept keys its own config drops -- and under a parent with extra='ignore'
+    // dropped keys its own config allows.  The state carries only the call-time `extra`.
     config_.py_config = py::reinterpret_borrow<py::object>(config);
     config_.cache_strings = StringCacheMode::All;
     if (config.contains("val_temporal_unit") && !config["val_temporal_unit"].is_none()) {
