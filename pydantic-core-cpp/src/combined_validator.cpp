@@ -1609,6 +1609,79 @@ static std::shared_ptr<Validator> try_prebuilt_validator(const py::dict& schema)
     return std::make_shared<PrebuiltValidator>(std::move(owner), reused);
 }
 
+// lookup_key.rs:70-86 -- an alias path is a list whose first item names a key and whose rest
+// name keys or indices; lookup_key.rs:88-94 is a list of those, which is what AliasChoices
+// reads.  Each says what it wanted in the words the ValidationAlias extraction then repeats
+// once per variant it tried (common/union.rs:22 asks pyo3 for a ValidationAlias).
+using TuPath = TaggedUnionValidator::PathStep;
+
+static bool val_alias_path(PyObject* src, std::vector<TuPath>& out, std::string& why) {
+    if (!PyList_Check(src)) {
+        why = "TypeError: " + pyo3_downcast_text(py::reinterpret_borrow<py::object>(src), "list");
+        return false;
+    }
+    Py_ssize_t n = PyList_GET_SIZE(src);
+    if (n == 0) {
+        why = "SchemaError: Each alias path should have at least one element";
+        return false;
+    }
+    PyObject* first = PyList_GET_ITEM(src, 0);
+    if (!PyUnicode_Check(first)) {
+        why = "TypeError: The first item in an alias path should be a string";
+        return false;
+    }
+    try {
+        out.push_back({false, py::reinterpret_borrow<py::object>(first).cast<std::string>(), 0});
+    } catch (const py::error_already_set&) {
+        PyErr_Clear();
+        why = "TypeError: The first item in an alias path should be a string";
+        return false;
+    }
+    for (Py_ssize_t i = 1; i < n; i++) {
+        PyObject* item = PyList_GET_ITEM(src, i);
+        if (PyUnicode_Check(item)) {
+            try {
+                out.push_back({false, py::reinterpret_borrow<py::object>(item).cast<std::string>(), 0});
+                continue;
+            } catch (const py::error_already_set&) { PyErr_Clear(); }
+        } else if (PyLong_Check(item)) {
+            long long index = PyLong_AsLongLong(item);
+            if (PyErr_Occurred()) PyErr_Clear();
+            else {
+                out.push_back({true, std::string(), index});
+                continue;
+            }
+        }
+        why = "TypeError: Item in an alias path should be a string or int";
+        return false;
+    }
+    return true;
+}
+
+static bool val_alias_choices(PyObject* src, std::vector<std::vector<TuPath>>& out,
+                              std::string& why) {
+    if (!PyList_Check(src)) {
+        why = "TypeError: " + pyo3_downcast_text(py::reinterpret_borrow<py::object>(src), "list");
+        return false;
+    }
+    Py_ssize_t n = PyList_GET_SIZE(src);
+    if (n == 0) {
+        why = "SchemaError: Lookup paths should have at least one element";
+        return false;
+    }
+    std::vector<std::vector<TuPath>> paths;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        std::vector<TuPath> one;
+        if (!val_alias_path(PyList_GET_ITEM(src, i), one, why)) {
+            out.clear();
+            return false;
+        }
+        paths.push_back(std::move(one));
+    }
+    out = std::move(paths);
+    return true;
+}
+
 static std::shared_ptr<Validator> build_from_py_dict_uncached(
     const py::dict& schema,
     const py::dict& config,
@@ -2406,45 +2479,35 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             uv = std::make_shared<TaggedUnionValidator>(
                 disc_obj.cast<py::object>(), std::move(repr), std::move(choices));
         } else {
-            std::vector<std::vector<std::string>> paths;
-            std::vector<std::string> repr_parts;
-            auto quote = [](const std::string& key) { return "'" + key + "'"; };
-            if (py::isinstance<py::str>(disc_obj)) {
-                paths.push_back({disc_obj.cast<std::string>()});
-            } else if (py::isinstance<py::list>(disc_obj)) {
-                for (auto entry : disc_obj.cast<py::list>()) {
-                    if (py::isinstance<py::str>(entry)) {
-                        paths.push_back({entry.cast<std::string>()});
-                    } else if (py::isinstance<py::list>(entry)) {
-                        std::vector<std::string> path;
-                        for (auto part : entry.cast<py::list>()) {
-                            if (!py::isinstance<py::str>(part)) {
-                                throw SchemaError("The first item in an alias path should be a string");
-                            }
-                            path.push_back(part.cast<std::string>());
-                        }
-                        if (path.empty()) {
-                            throw SchemaError("Each alias path should have at least one element");
-                        }
-                        paths.push_back(std::move(path));
-                    }
-                }
+            // common/union.rs:22 -- everything that is not callable is extracted as a
+            // ValidationAlias, and the variants are tried in order: a list that starts with a
+            // key is ONE nested path rather than several to choose from, and only a list of
+            // lists is several.  A value none of the three variants fits is the extraction's
+            // own error, naming every variant it tried.
+            std::vector<TuPath> one;
+            std::vector<std::vector<TuPath>> paths;
+            std::string path_why, choices_why;
+            if (PyUnicode_Check(disc_obj.ptr())) {
+                paths.push_back({TuPath{false, disc_obj.cast<std::string>(), 0}});
+            } else if (val_alias_path(disc_obj.ptr(), one, path_why)) {
+                paths.push_back(std::move(one));
+            } else if (!val_alias_choices(disc_obj.ptr(), paths, choices_why)) {
+                throw_python_error(PyExc_TypeError,
+                    "failed to extract enum ValidationAlias ('Str | AliasPath | AliasChoices')\n"
+                    "- variant Str (Str): TypeError: failed to extract field ValidationAlias::Str.0, caused by TypeError: "
+                    + pyo3_downcast_text(disc_obj, "str") + "\n"
+                    "- variant AliasPath (AliasPath): TypeError: failed to extract field ValidationAlias::AliasPath.0, caused by "
+                    + path_why + "\n"
+                    "- variant AliasChoices (AliasChoices): TypeError: failed to extract field ValidationAlias::AliasChoices.0, caused by "
+                    + choices_why);
             }
-            for (const auto& path : paths) {
-                std::string part = quote(path.front());
-                for (size_t i = 1; i < path.size(); i++) part += "." + path[i];
-                repr_parts.push_back(std::move(part));
-            }
-            std::string repr;
-            for (size_t i = 0; i < repr_parts.size(); i++) {
-                repr += repr_parts[i];
-                if (i + 1 < repr_parts.size()) repr += " | ";
-            }
-            uv = std::make_shared<TaggedUnionValidator>(std::move(paths), std::move(repr), std::move(choices));
+            uv = std::make_shared<TaggedUnionValidator>(std::move(paths), std::move(choices));
         }
-        if (schema.contains("from_attributes")) {
-            uv->set_from_attributes(schema["from_attributes"].cast<bool>());
-        }
+        // union.rs:344 -- schema_or_config: the schema answers, and the config this node was
+        // built with speaks only for a schema that names no answer of its own.
+        auto from_attributes = py_bool_opt(schema, "from_attributes");
+        if (!from_attributes) from_attributes = py_bool_opt(config, "from_attributes");
+        uv->set_from_attributes(from_attributes.value_or(true));
         if (schema.contains("custom_error_type") && !schema["custom_error_type"].is_none()) {
             std::string cmsg = (schema.contains("custom_error_message") &&
                                 !schema["custom_error_message"].is_none())

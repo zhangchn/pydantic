@@ -290,14 +290,22 @@ public:
         std::shared_ptr<Validator> validator;
     };
 
+    // One step of a lookup path: a key, or an index into whatever the step before it found
+    // (lookup_key.rs:214-219).  A path always starts with a key.
+    struct PathStep {
+        bool is_index = false;
+        std::string key;
+        long long index = 0;
+    };
+
     TaggedUnionValidator() = default;
 
-    TaggedUnionValidator(std::vector<std::vector<std::string>> paths,
-                         std::string discriminator_repr,
-                         std::vector<Choice> choices)
-        : paths_(std::move(paths)), discriminator_repr_(std::move(discriminator_repr)),
-          choices_(std::move(choices)) {
+    // The tag of a tagged union is read the way a field's alias is read: one path of steps,
+    // or several -- an AliasChoices -- tried in order (lookup_key.rs:52-58).
+    TaggedUnionValidator(std::vector<std::vector<PathStep>> paths, std::vector<Choice> choices)
+        : paths_(std::move(paths)), choices_(std::move(choices)) {
         build_tags_repr();
+        build_discriminator_repr();
     }
 
     TaggedUnionValidator(py::object callable, std::string discriminator_repr,
@@ -329,16 +337,19 @@ public:
             }
             if (tag.is_none()) return tag_not_found(input, state);
         } else {
-            py::object source;
-            if (!fields_source(input, state, &source)) {
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::ModelAttributesType),
-                    state.location(), input.as_error_value().repr);
+            // union.rs:322 -- the answer the validation was started with wins over the one
+            // this union was built with.
+            bool from_attributes = state.from_attributes_or(from_attributes_);
+            TagSource source;
+            ErrorType::Kind unreadable = ErrorType::Kind::ModelAttributesType;
+            if (!fields_source(input, state, from_attributes, &source, &unreadable)) {
+                return ValError::line_error(ErrorType(unreadable),
+                                            state.location(), input.as_error_value().repr);
             }
             bool found = false;
             for (const auto& path : paths_) {
                 py::object value;
-                if (read_key_path(source, path, &value)) {
+                if (read_path(source, path, &value)) {
                     tag = std::move(value);
                     found = true;
                     break;
@@ -396,7 +407,7 @@ public:
         visit_ref(visit, arg, custom_error_context_);
     }
 private:
-    std::vector<std::vector<std::string>> paths_;
+    std::vector<std::vector<PathStep>> paths_;
     std::vector<Choice> choices_;
     py::object callable_ = py::none();
     std::string tags_repr_;
@@ -417,6 +428,22 @@ private:
         }
     }
 
+    // lookup_key.rs:237-259 prints a path with every key quoted and every index bare, and
+    // common/union.rs:25-30 joins the paths of an AliasChoices with " | ".
+    void build_discriminator_repr() {
+        for (size_t i = 0; i < paths_.size(); i++) {
+            if (i) discriminator_repr_ += " | ";
+            const auto& path = paths_[i];
+            if (path.empty()) continue;
+            discriminator_repr_ += "'" + path.front().key + "'";
+            for (size_t j = 1; j < path.size(); j++) {
+                discriminator_repr_ += ".";
+                discriminator_repr_ += path[j].is_index ? std::to_string(path[j].index)
+                                                        : "'" + path[j].key + "'";
+            }
+        }
+    }
+
     static LocItem tag_loc_item(const py::object& tag) {
         if (PyLong_Check(tag.ptr()) && !PyBool_Check(tag.ptr())) {
             int64_t value = PyLong_AsLongLong(tag.ptr());
@@ -427,42 +454,136 @@ private:
         catch (const py::error_already_set&) { PyErr_Clear(); return LocItem(std::string()); }
     }
 
-    static bool read_one(py::handle cur, const std::string& key, py::object* out) {
-        if (py::isinstance<py::dict>(cur)) {
-            py::dict d = cur.cast<py::dict>();
-            if (!d.contains(key)) return false;
-            *out = d[py::str(key)];
-            return true;
+    // Where the tag is read out of, and how: a mapping answers a key by key, an attribute
+    // source answers it by attribute (input_python.rs:899-922).
+    struct TagSource {
+        py::object value;
+        bool by_attr = false;
+    };
+
+    static bool item_get(py::handle cur, const py::object& key, py::object* out) {
+        PyObject* value = PyObject_GetItem(cur.ptr(), key.ptr());
+        if (!value) {
+            PyErr_Clear();
+            return false;
         }
-        if (py_hasattr(cur, key.c_str())) {
-            *out = py::getattr(cur, key.c_str());
-            return true;
-        }
-        return false;
+        *out = py::reinterpret_steal<py::object>(value);
+        return true;
     }
 
-    // Rust reads the tag through validate_model_fields, so an input that cannot
-    // be read as a field container at all (a str, an int, ...) reports
-    // model_attributes_type rather than union_tag_not_found.
-    bool fields_source(const Input& input, ValidationState& state, py::object* out) const {
+    // The first step of a path is the key the mapping itself answers, out of its own table
+    // whether or not it is a subclass that would rather answer elsewhere (lookup_key.rs:916).
+    static bool dict_get(py::handle cur, const std::string& key, py::object* out) {
+        py::object name = py::str(key);
+        PyObject* value = PyDict_GetItemWithError(cur.ptr(), name.ptr());
+        if (!value) {
+            if (PyErr_Occurred()) PyErr_Clear();
+            return false;
+        }
+        *out = py::reinterpret_borrow<py::object>(value);
+        return true;
+    }
+
+    // lookup_key.rs:360-371 -- an attribute source that is a dict answers by key, an exact
+    // dict out of its own table and a subclass through its own getitem; anything else is
+    // asked for the attribute, and only a missing attribute answers "not here"
+    // (lookup_key.rs:459-473).
+    static bool attr_get(py::handle cur, const std::string& key, py::object* out) {
+        if (PyDict_Check(cur.ptr())) {
+            if (Py_TYPE(cur.ptr()) == &PyDict_Type) return dict_get(cur, key, out);
+            return item_get(cur, py::str(key), out);
+        }
+        PyObject* value = PyObject_GetAttrString(cur.ptr(), key.c_str());
+        if (!value) {
+            PyErr_Clear();
+            return false;
+        }
+        *out = py::reinterpret_steal<py::object>(value);
+        return true;
+    }
+
+    // lookup_key.rs:296-306 -- every step after the first indexes the value the step before
+    // it found, and a str is deliberately never indexed.
+    static bool step_get_item(py::handle cur, const PathStep& step, py::object* out) {
+        if (PyUnicode_Check(cur.ptr())) return false;
+        return item_get(cur, step.is_index ? py::object(py::int_(step.index))
+                                           : py::object(py::str(step.key)),
+                        out);
+    }
+
+    // lookup_key.rs:317-323 -- on an attribute source a key step reads an attribute, or a
+    // key of a dict, while an index step still indexes.
+    static bool step_get_attrs(py::handle cur, const PathStep& step, py::object* out) {
+        if (step.is_index) return step_get_item(cur, step, out);
+        return attr_get(cur, step.key, out);
+    }
+
+    // The paths are tried in order and the first one that finds a value wins
+    // (union.rs:325-327); a path that dead-ends halfway simply does not answer.
+    static bool read_path(const TagSource& source, const std::vector<PathStep>& path,
+                          py::object* out) {
+        if (path.empty()) return false;
+        py::object cur;
+        if (!(source.by_attr ? attr_get(source.value, path.front().key, &cur)
+                             : dict_get(source.value, path.front().key, &cur)))
+            return false;
+        for (size_t i = 1; i < path.size(); i++) {
+            py::object next;
+            if (!(source.by_attr ? step_get_attrs(cur, path[i], &next)
+                                 : step_get_item(cur, path[i], &next)))
+                return false;
+            cur = std::move(next);
+        }
+        *out = std::move(cur);
+        return true;
+    }
+
+    // Rust reads the tag through validate_model_fields (input_python.rs:463-492): with
+    // from_attributes on, a dict is read as a dict and anything else that may be read by
+    // attribute becomes an attribute source, while an input that is neither reports
+    // model_attributes_type; with it off the lookup is only validate_dict, whose failure is
+    // dict_type.  A JSON input ignores from_attributes (input_abstract.rs:151-153) and
+    // fails as dict_type too (input_json.rs:228-233).
+    bool fields_source(const Input& input, ValidationState& state, bool from_attributes,
+                       TagSource* out, ErrorType::Kind* unreadable) const {
         if (auto* py_input = dynamic_cast<const PythonInput*>(&input)) {
             const py::object& obj = py_input->py_object();
-            if (py::isinstance<py::dict>(obj)) { *out = obj; return true; }
+            if (py::isinstance<py::dict>(obj)) {
+                out->value = obj;
+                return true;
+            }
+            if (!from_attributes) {
+                *unreadable = ErrorType::Kind::DictType;
+                return false;
+            }
+            // A Mapping that is not a dict is read through its attributes, not its keys.
             if (!state.strict_or(false) && PyMapping_Check(obj.ptr()) &&
                 !PyUnicode_Check(obj.ptr()) && !PyBytes_Check(obj.ptr()) &&
-                !PyByteArray_Check(obj.ptr()) && !PySequence_Check(obj.ptr())) { *out = obj; return true; }
-            if (from_attributes_ && from_attributes_applicable(obj)) { *out = obj; return true; }
+                !PyByteArray_Check(obj.ptr()) && !PySequence_Check(obj.ptr())) {
+                out->value = obj;
+                out->by_attr = true;
+                return true;
+            }
+            if (from_attributes_applicable(obj)) {
+                out->value = obj;
+                out->by_attr = true;
+                return true;
+            }
+            *unreadable = ErrorType::Kind::ModelAttributesType;
             return false;
         }
         auto dict_result = input.validate_dict(state.strict_or(false));
-        if (dict_result.is_err()) return false;
+        if (dict_result.is_err()) {
+            *unreadable = ErrorType::Kind::DictType;
+            return false;
+        }
         auto& dict = dict_result.value();
         py::dict py_dict;
         for (const auto& key : dict->keys()) {
             auto value = dict->get_value(key);
             if (value) py_dict[py::str(key)] = *value;
         }
-        *out = std::move(py_dict);
+        out->value = std::move(py_dict);
         return true;
     }
 
@@ -474,19 +595,6 @@ private:
             PyErr_Clear();
             return false;
         }
-    }
-
-    static bool read_key_path(const py::object& source, const std::vector<std::string>& path,
-                              py::object* out) {
-        if (path.empty()) return false;
-        py::object cur = source;
-        for (const auto& key : path) {
-            py::object next;
-            if (!read_one(cur, key, &next)) return false;
-            cur = std::move(next);
-        }
-        *out = cur;
-        return true;
     }
 
     bool has_custom_error() const { return !custom_error_type_.empty(); }
