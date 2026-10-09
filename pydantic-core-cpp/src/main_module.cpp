@@ -37,6 +37,19 @@ static thread_local bool g_exclude_computed_fields = false;
 // enables it while it tries its choices; outside a union a class mismatch is
 // not an error, so the model serializer keeps serializing what it was given.
 static thread_local int g_ser_check = 0;  // 0 none, 1 strict, 2 lax
+// Which walk the node call currently open is on.  A node that cannot take the value it was
+// handed refuses it differently on each: the python walk's on_fallback_py (extra.rs:452)
+// builds a message out of the expected type and the input, while the serde walk's
+// on_fallback_ser (:476) returns a bare marker that se_err_py_err (errors.rs:62-64) turns
+// into a message-less PydanticSerializationUnexpectedValue, whose Display is the words
+// "Unexpected Value" on their own (errors.rs:219-221).  A run of to_python(mode='json')
+// walks the python walk and only encodes afterwards, so this follows the walk, not the mode.
+static thread_local bool g_ser_walk_serde = false;
+struct SerWalkScope {
+    bool prev;
+    explicit SerWalkScope(bool serde) : prev(g_ser_walk_serde) { g_ser_walk_serde = serde; }
+    ~SerWalkScope() { g_ser_walk_serde = prev; }
+};
 struct SerCheckScope {
     int prev;
     explicit SerCheckScope(int level) : prev(g_ser_check) { g_ser_check = level; }
@@ -1358,10 +1371,22 @@ static std::string ser_unexpected_value_message(const std::string& field_name,
     return msg;
 }
 
+static void ser_raise_bare_unexpected_value();
+static void ser_raise_unexpected_value(const std::string& field_name, const std::string& field_type,
+                                       const py::object& value);
+
+// CollectWarnings::on_fallback_py / on_fallback_ser in one place (extra.rs:451-492): None is
+// silent, a node whose value it cannot take raises the mismatch while a union is checking its
+// choices -- which is exactly what moves that union on to its next member -- and otherwise
+// registers it as a warning that the run reports when it finishes.
 static void ser_warn_unexpected_value(const std::string& field_name,
                                       const std::string& field_type,
                                       const py::object& value) {
-    if (value.is_none()) return;  // Rust special-cases None: no warning
+    if (value.is_none()) return;  // Rust special-cases None: no warning, no error
+    if (g_ser_check != 0) {
+        if (g_ser_walk_serde) ser_raise_bare_unexpected_value();
+        ser_raise_unexpected_value(field_name, field_type, value);
+    }
     ser_warn_register("PydanticSerializationUnexpectedValue(" +
                       ser_unexpected_value_message(field_name, field_type, value) + ")");
 }
@@ -1375,6 +1400,26 @@ static void ser_raise_unexpected_value(const std::string& field_name,
     py::object exc_type =
         py::module_::import("pydantic_core_cpp").attr("PydanticSerializationUnexpectedValue");
     PyErr_SetString(exc_type.ptr(), ser_unexpected_value_message(field_name, field_type, value).c_str());
+    throw py::error_already_set();
+}
+
+// The refusal of the serde walk, whose message is empty and whose Display fills in the
+// words "Unexpected Value" (errors.rs:219-221, reached through UNEXPECTED_TYPE_SER_MARKER).
+static void ser_raise_bare_unexpected_value() {
+    py::object exc_type =
+        py::module_::import("pydantic_core_cpp").attr("PydanticSerializationUnexpectedValue");
+    PyErr_SetString(exc_type.ptr(), "Unexpected Value");
+    throw py::error_already_set();
+}
+
+// The refusal for a collection whose length, not its type, is the mismatch
+// (tuple.rs:206-209, named_tuple.rs:194-197).  Rust builds it with new_from_msg, so the
+// text carries no [input_value=.., input_type=..] tail.
+static void ser_fail_items(size_t expected, size_t got) {
+    py::object exc_type =
+        py::module_::import("pydantic_core_cpp").attr("PydanticSerializationUnexpectedValue");
+    PyErr_SetString(exc_type.ptr(),
+                    ("Expected " + std::to_string(expected) + " items, but got " + std::to_string(got)).c_str());
     throw py::error_already_set();
 }
 
@@ -2105,12 +2150,11 @@ struct SerNode {
     // is the union's round, where a mismatch is the answer that ends this choice.
     static const py::object& check_item_type(const SerRef& child, const py::object& item) {
         if (child && !value_matches_type(child, item)) {
-            // Rust CollectWarnings::on_fallback_py: while a union checks its
-            // choices (SerCheck::Strict/Lax) the mismatch is an error, not a
-            // warning, so the union bails out of this choice and tries the next.
-            if (g_ser_check != 0) {
-                throw std::runtime_error("Unexpected value for serializer " + type_name_for_warning(child));
-            }
+            // The refusal only, which is what makes the union bail out of this choice and
+            // try the next (on_fallback_py, extra.rs:459): at SerCheck::None the item's own
+            // node registers the warning as it serializes the item, so registering it here
+            // as well would report the same mismatch twice.
+            if (g_ser_check != 0) ser_warn_unexpected_value("", type_name_for_warning(child), item);
         }
         return item;
     }
@@ -2420,6 +2464,7 @@ struct SerNode {
                          bool exclude_unset = false,
                          bool exclude_defaults = false,
                          const py::object& context = py::none()) const {
+        SerWalkScope serde_walk(false);
         // Type-specific logic
         // definition-ref: apply the recursion guard (Rust definitions.rs:
         // state.recursion_guard(value, definition.id())), then delegate.
@@ -2475,7 +2520,11 @@ struct SerNode {
             return ser_exact_str(value);
         }
         if (!ser_check_accepts(value)) {
-            throw std::runtime_error("Unexpected value for serializer " + type);
+            // IsType::Subclass under SerCheck::Strict is the one refusal that names nothing:
+            // simple.rs:127 and float.rs:97 answer new_from_msg(None), whose Display is the
+            // bare "Unexpected Value".  Any other mismatch names the node.
+            if (ser_type_match(type, value) == 0 && g_ser_check == 1) ser_raise_bare_unexpected_value();
+            ser_warn_unexpected_value("", type_name_for_warning(), value);
         }
         if (type == "lax-or-strict") {
             if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
@@ -2670,9 +2719,9 @@ struct SerNode {
                         : (py_hasattr(value, "__dict__") || py::isinstance<py::dict>(value));
                 }
                 if (!ok) {
-                    if (g_ser_check != 0) {
-                        throw std::runtime_error("Value is not an instance of the expected model class");
-                    }
+                    // Rust allow_value hands the value to serialize_fallback (model.rs:172
+                    // and :187), the same rule as everywhere else: an error naming the model
+                    // class while a union checks its choices, a warning otherwise.
                     std::string model_name = "model";
                     try { model_name = py::getattr(class_, "__name__").cast<std::string>(); }
                     catch (const py::error_already_set&) { PyErr_Clear(); }
@@ -2981,17 +3030,13 @@ struct SerNode {
             if (!py::isinstance<py::tuple>(value) && !py::isinstance<py::list>(value)) {
                 // Rust tuple_value's cast::<PyTuple> fails: the value goes through
                 // inference, as an error while a union checks its choices.
-                if (g_ser_check != 0) {
-                    throw std::runtime_error("Unexpected value for serializer " + nt_name);
-                }
                 ser_warn_unexpected_value("", nt_name, value);
                 return serialize_any_value(value, exc_none, round_trip, json_mode, include, exclude);
             }
             auto seq = value.cast<py::sequence>();
             size_t n_items = static_cast<size_t>(py::len(seq));
             if (g_ser_check != 0 && n_items != children.size()) {
-                throw std::runtime_error("Expected " + std::to_string(children.size()) +
-                                         " items, but got " + std::to_string(n_items));
+                ser_fail_items(children.size(), n_items);
             }
             if (n_items < children.size()) {
                 ser_warn_register("PydanticSerializationUnexpectedValue(Unexpected too few items present in named tuple)");
@@ -3034,9 +3079,8 @@ struct SerNode {
             // is never a surprise; Rust takes that branch before the count checks
             // (for_each_tuple_item_and_serializer, type_serializers/tuple.rs:198-235).
             bool variadic = tuple_variadic_index >= 0;
-            if (!variadic && g_ser_check != 0 && static_cast<size_t>(n_items) != children.size()) {
-                throw std::runtime_error("Expected " + std::to_string(children.size()) +
-                                         " items, but got " + std::to_string(n_items));
+            if (!variadic && g_ser_check == 1 && static_cast<size_t>(n_items) != children.size()) {
+                ser_fail_items(children.size(), static_cast<size_t>(n_items));
             }
             if (!variadic && static_cast<size_t>(n_items) < children.size()) {
                 ser_warn_register("PydanticSerializationUnexpectedValue(Unexpected too few items present in tuple)");
@@ -3152,6 +3196,7 @@ struct SerNode {
                          bool exclude_defaults = false,
                          bool exc_none = false,
                          const py::object& context = py::none()) const {
+        SerWalkScope serde_walk(true);
         // definition-ref: recursion guard (Rust definitions.rs), then delegate.
         if (type == "definition-ref" && !children.empty()) {
             auto& g = SerRecursionState::get();
@@ -3196,7 +3241,9 @@ struct SerNode {
             return infer_json(value, ensure_ascii, indent, include, exclude);
         }
         if (!ser_check_accepts(value)) {
-            throw std::runtime_error("Unexpected value for serializer " + type);
+            // The serde walk's refusal carries no expected type (extra.rs:483-489), so the
+            // union that is checking its choices collects the bare "Unexpected Value".
+            ser_warn_unexpected_value("", type_name_for_warning(), value);
         }
         if (type == "lax-or-strict") {
             if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
@@ -3453,17 +3500,13 @@ struct SerNode {
         if (type == "named-tuple") {
             std::string nt_name = class_name.empty() ? std::string("named-tuple") : class_name;
             if (!py::isinstance<py::tuple>(value) && !py::isinstance<py::list>(value)) {
-                if (g_ser_check != 0) {
-                    throw std::runtime_error("Unexpected value for serializer " + nt_name);
-                }
                 ser_warn_unexpected_value("", nt_name, value);
                 return infer_json(value, ensure_ascii, indent, include, exclude);
             }
             auto seq = value.cast<py::sequence>();
             size_t n_items = static_cast<size_t>(py::len(seq));
             if (g_ser_check != 0 && n_items != children.size()) {
-                throw std::runtime_error("Expected " + std::to_string(children.size()) +
-                                         " items, but got " + std::to_string(n_items));
+                ser_fail_items(children.size(), n_items);
             }
             if (n_items < children.size()) {
                 ser_warn_register("PydanticSerializationUnexpectedValue(Unexpected too few items present in named tuple)");
@@ -3511,9 +3554,6 @@ struct SerNode {
             if (!py::isinstance<py::tuple>(value)) {
                 // Rust's cast::<PyTuple> fails: while a union tries its choices the
                 // choice is refused; otherwise the node warns and inference answers.
-                if (g_ser_check != 0) {
-                    throw std::runtime_error("Unexpected value for serializer " + tn);
-                }
                 ser_warn_unexpected_value("", tn, value);
                 return infer_json(value, ensure_ascii, indent, include, exclude);
             }
@@ -3524,9 +3564,8 @@ struct SerNode {
             py::object exc = exclude.is_none() ? py::none()
                                                : map_negative_indices(exclude, n_items);
             bool variadic = tuple_variadic_index >= 0;
-            if (!variadic && g_ser_check != 0 && static_cast<size_t>(n_items) != children.size()) {
-                throw std::runtime_error("Expected " + std::to_string(children.size()) +
-                                         " items, but got " + std::to_string(n_items));
+            if (!variadic && g_ser_check == 1 && static_cast<size_t>(n_items) != children.size()) {
+                ser_fail_items(children.size(), static_cast<size_t>(n_items));
             }
             if (!variadic && static_cast<size_t>(n_items) < children.size()) {
                 ser_warn_register("PydanticSerializationUnexpectedValue(Unexpected too few items present in tuple)");
@@ -3662,9 +3701,9 @@ struct SerNode {
                         : (py_hasattr(value, "__dict__") || py::isinstance<py::dict>(value));
                 }
                 if (!ok) {
-                    if (g_ser_check != 0) {
-                        throw std::runtime_error("Value is not an instance of the expected model class");
-                    }
+                    // Rust allow_value hands the value to serialize_fallback (model.rs:172
+                    // and :187), the same rule as everywhere else: an error naming the model
+                    // class while a union checks its choices, a warning otherwise.
                     std::string model_name = "model";
                     try { model_name = py::getattr(class_, "__name__").cast<std::string>(); }
                     catch (const py::error_already_set&) { PyErr_Clear(); }
@@ -4138,8 +4177,6 @@ private:
         // as the value walks do at their top.  While a union checks its choices the refusal
         // stays an error instead, so that the next choice is tried.
         if (!value_matches_type(key)) {
-            if (g_ser_check != 0)
-                throw std::runtime_error("Unexpected value for serializer " + type_name_for_warning());
             ser_warn_unexpected_value("", type_name_for_warning(), key);
             return inferred();
         }
