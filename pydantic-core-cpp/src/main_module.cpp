@@ -269,6 +269,24 @@ static constexpr int SER_INFER_KEY_DEPTH_LIMIT = 10000;
 
 static thread_local int g_ser_json_nested = 0;
 
+// Rust's SerializationState carries the model currently being serialized
+// (ModelSerializer::to_python :178 and its json twin :213, DataclassSerializer::serialize
+// :152, TypedDictSerializer :106/:126 -- each sets it around the inner serializer it
+// hands the value to).  The fields family does not look at the value for its model, it
+// asks the state (fields.rs:384 get_model) and refuses -- before a single field is read
+// -- when nobody put one there: `No model found for fields serialization`.  So a
+// `model-fields` node is only ever usable as the inner serializer of one of those three,
+// never as a run's root, however well-formed the dict handed to it is.
+static thread_local int g_ser_model_depth = 0;
+
+struct SerModelScope {
+    const bool on;
+    explicit SerModelScope(bool enabled = true) : on(enabled) { if (on) ++g_ser_model_depth; }
+    ~SerModelScope() { if (on) --g_ser_model_depth; }
+    SerModelScope(const SerModelScope&) = delete;
+    SerModelScope& operator=(const SerModelScope&) = delete;
+};
+
 struct SerNestedCall {
     const bool saved_pending = g_ser_delegate_pending;
     const bool saved_serialize_unknown = g_ser_delegate_serialize_unknown;
@@ -1698,22 +1716,23 @@ struct SerJsonRun {
 // The naming described above, for the failures that came from Python.  Returns false
 // when the error keeps its own identity instead: a run nested inside another one, or
 // anything inside a call that re-entered the module (both re-enter the entry point as
-// Python calls, so only the run that started the serialization gets to name), or an
-// unexpected value, which Rust carries across the boundary as a marker because it asks
-// for another try rather than reporting.
+// Python calls, so only the run that started the serialization gets to name).
+//
+// An unexpected-value error is NOT exempt.  It keeps its class in a python-output run,
+// where no boundary renames anything, and in a JSON run only when it reaches the
+// boundary as serde's own marker string (extra.rs:490 on_fallback_ser, raised with a
+// check level set -- inside a union's round, where the union catches it and the
+// boundary never sees it).  A site that raises the error itself hands it to serde with
+// `?`, which stringifies it with its type name in front (errors.rs:26 From<PyErr>), so
+// the boundary renames it like any other Python failure: `Error serializing to JSON:
+// PydanticSerializationUnexpectedValue: <what it said>`.
 static bool ser_json_name_python_error(py::error_already_set& e, std::string* out) {
     if (g_ser_json_depth != 1 || g_ser_json_nested != 0) return false;
     try {
-        py::object unexpected = py::module_::import("pydantic_core_cpp").attr("PydanticSerializationUnexpectedValue");
-        int is = PyObject_IsInstance(e.value().ptr(), unexpected.ptr());
-        PyErr_Clear();
-        if (is == 1) return false;
-        // Nor is a failure that already names itself one renamed: a delegated model's run
+        // A failure that already names itself one is not renamed: a delegated model's run
         // throws `Unable to serialize unknown type: ...` and reaches this boundary through a
         // Python call, where serde would hand the very same PyErr on untouched
-        // (errors.rs:63 renames only serde's own SerializationError).  The unexpected-value
-        // subclass keeps the exemption above, which asks for another try rather than
-        // reporting.
+        // (errors.rs:63 renames only serde's own SerializationError).
         py::object ser_err = py::module_::import("pydantic_core_cpp").attr("PydanticSerializationError");
         int is_ser = PyObject_IsInstance(e.value().ptr(), ser_err.ptr());
         PyErr_Clear();
@@ -2589,6 +2608,7 @@ struct SerNode {
         }
         // Delegate model/dataclass/typed-dict to inner serializer
         if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
+            SerModelScope model_scope;
             // Union discrimination (Rust ModelSerializer::allow_value): while a
             // union is trying its choices, reject a value that is not of (or not
             // even an instance of) the expected class so the next choice is tried.
@@ -3583,6 +3603,7 @@ struct SerNode {
         }
         // Delegate model/dataclass/typed-dict to inner serializer
         if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
+            SerModelScope model_scope;
             // Union discrimination (Rust ModelSerializer::allow_value): while a
             // union is trying its choices, reject a value that is not of (or not
             // even an instance of) the expected class so the next choice is tried.
@@ -4707,6 +4728,16 @@ private:
         }
     }
 
+    // fields.rs:384 get_model, reached only once extract_dicts accepted the value:
+    // the fields family answers for a model and says out loud when the run never gave
+    // it one, rather than walking the dict as if it had been asked to.
+    void ser_reject_no_model() const {
+        py::object exc_type =
+            py::module_::import("pydantic_core_cpp").attr("PydanticSerializationUnexpectedValue");
+        PyErr_SetString(exc_type.ptr(), "No model found for fields serialization");
+        throw py::error_already_set();
+    }
+
     py::object serialize_fields(const py::object& value, bool exc_none, bool round_trip = false,
                                  const py::object& include = py::none(),
                                  const py::object& exclude = py::none(),
@@ -4719,6 +4750,13 @@ private:
         py::dict main;
         if (py::isinstance<py::dict>(value)) main = value.cast<py::dict>();
         else if (py_hasattr(value, "__dict__")) main = py::getattr(value, "__dict__").cast<py::dict>();
+        if (type == "model-fields" && g_ser_model_depth == 0 && py::isinstance<py::dict>(value))
+            ser_reject_no_model();
+        // A typed-dict node walks the fields itself instead of handing them to a
+        // child the way the three setters above do, but it stands in for one of
+        // them (typed_dict.rs:106/:126 sets state.model around its inner fields
+        // serializer), so a fields node below it is as well provided for.
+        SerModelScope fields_model(type == "typed-dict");
         py::object missing_obj = missing_sentinel_obj();
         ser_reject_unexpected_fields(main);
 
@@ -4985,6 +5023,13 @@ private:
         py::dict main;
         if (py::isinstance<py::dict>(value)) main = value.cast<py::dict>();
         else if (py_hasattr(value, "__dict__")) main = py::getattr(value, "__dict__").cast<py::dict>();
+        if (type == "model-fields" && g_ser_model_depth == 0 && py::isinstance<py::dict>(value))
+            ser_reject_no_model();
+        // A typed-dict node walks the fields itself instead of handing them to a
+        // child the way the three setters above do, but it stands in for one of
+        // them (typed_dict.rs:106/:126 sets state.model around its inner fields
+        // serializer), so a fields node below it is as well provided for.
+        SerModelScope fields_model(type == "typed-dict");
         py::object missing_obj = missing_sentinel_obj();
         ser_reject_unexpected_fields(main);
 

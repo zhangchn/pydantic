@@ -3886,3 +3886,59 @@ def test_an_unexpected_value_is_a_sibling_of_the_serialization_error():
         pytest.fail("an unexpected value was caught as a serialization error")
     except PydanticSerializationUnexpectedValue as e:
         assert e.args == ("boom",)
+
+
+def test_a_fields_node_needs_a_model_above_it_before_it_reads_a_dict():
+    # The fields family never looks for its model in the value, it asks the run state
+    # (fields.rs:384 get_model) and refuses before a single field is read when nobody put one
+    # there.  ModelSerializer::to_python :178 and its json twin :213, DataclassSerializer
+    # :152 and TypedDictSerializer :106/:126 each set that state around the inner serializer
+    # they hand the value to, so a model-fields node is usable only as one of those three's
+    # inner serializer -- however well-formed the dict handed to it as a run's root is.
+    fields = core_schema.model_fields_schema({"a": core_schema.model_field(core_schema.int_schema())})
+    s = SchemaSerializer(fields)
+    for mode in ("python", "json"):
+        with pytest.raises(PydanticSerializationUnexpectedValue,
+                           match="No model found for fields serialization"):
+            s.to_python({"a": 1}, mode=mode)
+    # a json run names whatever escaped its boundary, the refusal's own class in front of it.
+    with pytest.raises(PydanticSerializationError, match=re.escape(
+            "Error serializing to JSON: PydanticSerializationUnexpectedValue: "
+            "No model found for fields serialization")):
+        s.to_json({"a": 1})
+
+    # nothing about the dict buys a model: an empty field list refuses, and so does every
+    # filter, since the refusal is what comes first.
+    with pytest.raises(PydanticSerializationUnexpectedValue, match="No model found"):
+        SchemaSerializer(core_schema.model_fields_schema({})).to_python({})
+    with pytest.raises(PydanticSerializationUnexpectedValue, match="No model found"):
+        s.to_python({"a": 1}, exclude={"a": True})
+
+    # a container that was never handed a model has none for the node it walks either.
+    for schema, value in (
+        (core_schema.list_schema(fields), [{"a": 1}]),
+        (core_schema.nullable_schema(fields), {"a": 1}),
+        (core_schema.dict_schema(core_schema.str_schema(), fields), {"k": {"a": 1}}),
+    ):
+        with pytest.raises(PydanticSerializationUnexpectedValue, match="No model found"):
+            SchemaSerializer(schema).to_python(value)
+
+    class Model:
+        def __init__(self, a):
+            self.a = a
+
+    # under one of the setters the very same node answers, at any depth below it.
+    m = SchemaSerializer({"type": "model", "cls": Model, "schema": fields})
+    assert m.to_python(Model(2)) == {"a": 2}
+    assert m.to_json(Model(2)) == b'{"a":2}'
+
+    # A typed-dict walks its fields itself instead of delegating, yet it stands for a model
+    # to a fields node below it just like the other three.
+    td = SchemaSerializer(core_schema.typed_dict_schema({"a": core_schema.typed_dict_field(fields)}))
+    assert td.to_python({"a": {"a": 3}}) == {"a": {"a": 3}}
+    assert td.to_json({"a": {"a": 3}}) == b'{"a":{"a":3}}'
+    td2 = SchemaSerializer(core_schema.typed_dict_schema({
+        "a": core_schema.typed_dict_field(core_schema.int_schema()),
+        "b": core_schema.typed_dict_field(fields),
+    }))
+    assert td2.to_python({"a": 3, "b": {"a": 4}}) == {"a": 3, "b": {"a": 4}}
