@@ -454,11 +454,13 @@ private:
         catch (const py::error_already_set&) { PyErr_Clear(); return LocItem(std::string()); }
     }
 
-    // Where the tag is read out of, and how: a mapping answers a key by key, an attribute
-    // source answers it by attribute (input_python.rs:899-922).
+    // Where the tag is read out of, and how: a dict answers a key out of its own table, a
+    // Mapping answers it through the get the input itself spells, and an attribute source
+    // answers it by attribute (input_python.rs:899-922).
     struct TagSource {
+        enum class Kind { Dict, Mapping, Attr };
         py::object value;
-        bool by_attr = false;
+        Kind kind = Kind::Dict;
     };
 
     static bool item_get(py::handle cur, const py::object& key, py::object* out) {
@@ -481,6 +483,25 @@ private:
             return false;
         }
         *out = py::reinterpret_borrow<py::object>(value);
+        return true;
+    }
+
+    // tools.rs:195-203 -- a Mapping answers the first key through the `get` it spells
+    // itself, handed the PydanticUndefined singleton as the default so that a value which
+    // really is None stays a value while a missing key does not.  A `get` that raises is
+    // not swallowed: union.rs:325-327 takes the first path that answers, and an error
+    // while getting one is the whole lookup's error, which reaches the caller as the
+    // input's own exception.
+    static bool mapping_get(py::handle cur, const std::string& key, py::object* out) {
+        py::object undefined = pydantic_undefined_obj();
+        py::object value;
+        try {
+            value = cur.attr("get")(py::str(key), undefined);
+        } catch (const py::error_already_set&) {
+            throw;
+        }
+        if (!undefined.is_none() && value.ptr() == undefined.ptr()) return false;
+        *out = std::move(value);
         return true;
     }
 
@@ -524,13 +545,24 @@ private:
                           py::object* out) {
         if (path.empty()) return false;
         py::object cur;
-        if (!(source.by_attr ? attr_get(source.value, path.front().key, &cur)
-                             : dict_get(source.value, path.front().key, &cur)))
-            return false;
+        const bool by_attr = source.kind == TagSource::Kind::Attr;
+        bool found = false;
+        switch (source.kind) {
+            case TagSource::Kind::Dict:
+                found = dict_get(source.value, path.front().key, &cur);
+                break;
+            case TagSource::Kind::Mapping:
+                found = mapping_get(source.value, path.front().key, &cur);
+                break;
+            case TagSource::Kind::Attr:
+                found = attr_get(source.value, path.front().key, &cur);
+                break;
+        }
+        if (!found) return false;
         for (size_t i = 1; i < path.size(); i++) {
             py::object next;
-            if (!(source.by_attr ? step_get_attrs(cur, path[i], &next)
-                                 : step_get_item(cur, path[i], &next)))
+            if (!(by_attr ? step_get_attrs(cur, path[i], &next)
+                          : step_get_item(cur, path[i], &next)))
                 return false;
             cur = std::move(next);
         }
@@ -539,34 +571,53 @@ private:
     }
 
     // Rust reads the tag through validate_model_fields (input_python.rs:463-492): with
-    // from_attributes on, a dict is read as a dict and anything else that may be read by
-    // attribute becomes an attribute source, while an input that is neither reports
-    // model_attributes_type; with it off the lookup is only validate_dict, whose failure is
-    // dict_type.  A JSON input ignores from_attributes (input_abstract.rs:151-153) and
-    // fails as dict_type too (input_json.rs:228-233).
+    // from_attributes on, anything that is an instance of dict is read out of the dict
+    // table -- a subclass's own getitem is not asked -- and otherwise a Mapping is read
+    // through its get while the run is not strict, before an object that may be read by
+    // attribute becomes an attribute source and anything else reports
+    // model_attributes_type.  With from_attributes off the lookup is only validate_dict,
+    // whose strict form (input_python.rs:415-422) takes an exact dict or any dict instance
+    // and whose lax form (input_python.rs:425-432) takes an exact dict or any Mapping, each
+    // of them reporting dict_type when neither fits.  Whether an input is a Mapping is
+    // decided by the abstract class (pyo3 casts to PyMapping through it), not by
+    // PyMapping_Check, which is true of every class that spells __getitem__ and of a str.
+    // A JSON input ignores from_attributes (input_abstract.rs:151-153) and fails as
+    // dict_type too (input_json.rs:228-233).
     bool fields_source(const Input& input, ValidationState& state, bool from_attributes,
                        TagSource* out, ErrorType::Kind* unreadable) const {
         if (auto* py_input = dynamic_cast<const PythonInput*>(&input)) {
             const py::object& obj = py_input->py_object();
+            const bool exact_dict = Py_TYPE(obj.ptr()) == &PyDict_Type;
+            if (!from_attributes) {
+                if (exact_dict) {
+                    out->value = obj;
+                    return true;
+                }
+                // An exact dict is the only dict either form asks for by table; past that
+                // the strict form still takes any instance of dict, while the lax form
+                // takes any Mapping.
+                const bool strict = state.strict_or(false);
+                if (strict ? py::isinstance<py::dict>(obj)
+                           : py_is_mapping_instance(obj)) {
+                    out->value = obj;
+                    out->kind = TagSource::Kind::Mapping;
+                    return true;
+                }
+                *unreadable = ErrorType::Kind::DictType;
+                return false;
+            }
             if (py::isinstance<py::dict>(obj)) {
                 out->value = obj;
                 return true;
             }
-            if (!from_attributes) {
-                *unreadable = ErrorType::Kind::DictType;
-                return false;
-            }
-            // A Mapping that is not a dict is read through its attributes, not its keys.
-            if (!state.strict_or(false) && PyMapping_Check(obj.ptr()) &&
-                !PyUnicode_Check(obj.ptr()) && !PyBytes_Check(obj.ptr()) &&
-                !PyByteArray_Check(obj.ptr()) && !PySequence_Check(obj.ptr())) {
+            if (!state.strict_or(false) && py_is_mapping_instance(obj)) {
                 out->value = obj;
-                out->by_attr = true;
+                out->kind = TagSource::Kind::Mapping;
                 return true;
             }
             if (from_attributes_applicable(obj)) {
                 out->value = obj;
-                out->by_attr = true;
+                out->kind = TagSource::Kind::Attr;
                 return true;
             }
             *unreadable = ErrorType::Kind::ModelAttributesType;
