@@ -6291,8 +6291,12 @@ static SerRef build_ser_impl(const py::dict& schema,
             node->class_name = schema["cls_name"].cast<std::string>();
         } catch (...) {
             PyErr_Clear();
-            try { node->class_name = node->class_.attr("__name__").cast<std::string>(); }
-            catch (...) { PyErr_Clear(); }
+            // A schema without `cls` leaves class_ a null handle rather than None, and
+            // asking a null handle for an attribute hands nullptr to PyObject_GetAttrString.
+            if (node->class_) {
+                try { node->class_name = node->class_.attr("__name__").cast<std::string>(); }
+                catch (...) { PyErr_Clear(); }
+            }
         }
         try {
             std::vector<SerRef> kids;
