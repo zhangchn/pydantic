@@ -287,6 +287,25 @@ struct SerModelScope {
     SerModelScope& operator=(const SerModelScope&) = delete;
 };
 
+// What stands above the fields walk decides whether it may look at an object at all: a model
+// hands its content the attribute dict it built first (model.rs:204 get_inner_value, the
+// (attrs, extras) tuple when the model keeps extras), a dataclass hands a dict of its declared
+// attributes (:134) and uses the instance itself only for the fast path at :152, which reads
+// those attributes without ever asking extract_dicts.  A typed-dict hands over the value it was
+// given (typed_dict.rs:103), and everything else hands over whatever its field held, so only
+// under a model or a dataclass does a fields walk see something other than the dict
+// extract_dicts would have taken -- which is what makes a plain object a fallback there and a
+// walked field list here.
+static thread_local bool g_ser_attrs_above = false;
+
+struct SerAttrsScope {
+    const bool saved = g_ser_attrs_above;
+    explicit SerAttrsScope(bool enabled = true) { if (enabled) g_ser_attrs_above = true; }
+    ~SerAttrsScope() { g_ser_attrs_above = saved; }
+    SerAttrsScope(const SerAttrsScope&) = delete;
+    SerAttrsScope& operator=(const SerAttrsScope&) = delete;
+};
+
 struct SerNestedCall {
     const bool saved_pending = g_ser_delegate_pending;
     const bool saved_serialize_unknown = g_ser_delegate_serialize_unknown;
@@ -1325,10 +1344,9 @@ static void ser_warn_message(const std::string& message, const py::object& value
     ser_warn_register("PydanticSerializationUnexpectedValue(" + msg + ")");
 }
 
-static void ser_warn_unexpected_value(const std::string& field_name,
-                                      const std::string& field_type,
-                                      const py::object& value) {
-    if (value.is_none()) return;  // Rust special-cases None: no warning
+static std::string ser_unexpected_value_message(const std::string& field_name,
+                                                const std::string& field_type,
+                                                const py::object& value) {
     std::string type_name = ser_warn_input_type(value);
     std::string value_str = ser_warn_input_repr(value);
     std::string msg = "Expected `" + field_type + "` - serialized value may not be as expected";
@@ -1337,7 +1355,27 @@ static void ser_warn_unexpected_value(const std::string& field_name,
     } else {
         msg += " [field_name='" + field_name + "', input_value=" + value_str + ", input_type=" + type_name + "]";
     }
-    ser_warn_register("PydanticSerializationUnexpectedValue(" + msg + ")");
+    return msg;
+}
+
+static void ser_warn_unexpected_value(const std::string& field_name,
+                                      const std::string& field_type,
+                                      const py::object& value) {
+    if (value.is_none()) return;  // Rust special-cases None: no warning
+    ser_warn_register("PydanticSerializationUnexpectedValue(" +
+                      ser_unexpected_value_message(field_name, field_type, value) + ")");
+}
+
+// The same mismatch handed back as an error rather than a warning: while a union is
+// checking its choices CollectWarnings::on_fallback_py (extra.rs:459) raises it, which is
+// what moves that union on to its next member.
+static void ser_raise_unexpected_value(const std::string& field_name,
+                                       const std::string& field_type,
+                                       const py::object& value) {
+    py::object exc_type =
+        py::module_::import("pydantic_core_cpp").attr("PydanticSerializationUnexpectedValue");
+    PyErr_SetString(exc_type.ptr(), ser_unexpected_value_message(field_name, field_type, value).c_str());
+    throw py::error_already_set();
 }
 
 // Result of applying an include/exclude filter to a key/index
@@ -2609,6 +2647,7 @@ struct SerNode {
         // Delegate model/dataclass/typed-dict to inner serializer
         if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
             SerModelScope model_scope;
+            SerAttrsScope model_attrs((type == "model" && !root_model) || type == "dataclass");
             // Union discrimination (Rust ModelSerializer::allow_value): while a
             // union is trying its choices, reject a value that is not of (or not
             // even an instance of) the expected class so the next choice is tried.
@@ -3231,7 +3270,7 @@ struct SerNode {
         if (type == "float" || type == "float-constrained") {
             return ser_json_f64_modes(value.cast<double>(), inf_nan_mode);
         }
-        if (type == "bool" || py::isinstance<py::bool_>(value)) {
+        if (type == "bool") {
             return value.cast<bool>() ? "true" : "false";
         }
         if (type == "str" || type == "string" || type == "str-constrained") {
@@ -3604,6 +3643,7 @@ struct SerNode {
         // Delegate model/dataclass/typed-dict to inner serializer
         if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
             SerModelScope model_scope;
+            SerAttrsScope model_attrs((type == "model" && !root_model) || type == "dataclass");
             // Union discrimination (Rust ModelSerializer::allow_value): while a
             // union is trying its choices, reject a value that is not of (or not
             // even an instance of) the expected class so the next choice is tried.
@@ -4738,6 +4778,27 @@ private:
         throw py::error_already_set();
     }
 
+    // fields.rs:144 extract_dicts: every mode but ModelExtra extracts a real dict and
+    // nothing else, and ModelExtra extracts the (attrs, extras) tuple model.rs:249 builds, so
+    // outside that builder a plain dict is as unextractable there as an int is.
+    bool ser_fields_extract(const py::object& value, py::dict& main) const {
+        if (!py::isinstance<py::dict>(value)) return false;
+        if (type == "model-fields" && extra_allowed && g_ser_model_depth == 0) return false;
+        main = value.cast<py::dict>();
+        return true;
+    }
+
+    // fields.rs:163 hands a value extract_dicts declined to serialize_fallback
+    // (shared.rs:704 for a python answer, :785 for json text): warn in the fields family's
+    // own name -- GeneralFieldsSerializer::get_name :371 -- and let inference answer for
+    // the value.  extra.rs:453/:476 keep that warning silent for None, "very common e.g.
+    // as a default value", and raise the mismatch instead while a union checks choices.
+    void ser_fields_fallback(const py::object& value) const {
+        if (value.is_none()) return;
+        if (g_ser_check != 0) ser_raise_unexpected_value("", "general-fields", value);
+        ser_warn_unexpected_value("", "general-fields", value);
+    }
+
     py::object serialize_fields(const py::object& value, bool exc_none, bool round_trip = false,
                                  const py::object& include = py::none(),
                                  const py::object& exclude = py::none(),
@@ -4747,16 +4808,24 @@ private:
                                  const py::object& context = py::none(),
                                  bool json_mode = false) const {
         py::dict result;
-        py::dict main;
-        if (py::isinstance<py::dict>(value)) main = value.cast<py::dict>();
-        else if (py_hasattr(value, "__dict__")) main = py::getattr(value, "__dict__").cast<py::dict>();
-        if (type == "model-fields" && g_ser_model_depth == 0 && py::isinstance<py::dict>(value))
-            ser_reject_no_model();
-        // A typed-dict node walks the fields itself instead of handing them to a
-        // child the way the three setters above do, but it stands in for one of
-        // them (typed_dict.rs:106/:126 sets state.model around its inner fields
-        // serializer), so a fields node below it is as well provided for.
+        // A typed-dict node walks the fields itself instead of handing them to a child the
+        // way the three setters above do, but it stands in for one of them
+        // (typed_dict.rs:106/:126 sets state.model around the fields serializer it hands its
+        // own value to), so a fields node below it is as well provided for.
         SerModelScope fields_model(type == "typed-dict");
+        py::dict main;
+        if (ser_fields_extract(value, main)) {
+            if (g_ser_model_depth == 0) ser_reject_no_model();
+        } else if (g_ser_attrs_above && py_hasattr(value, "__dict__")) {
+            // The dict a model's or a dataclass's delegation carries is the instance's own,
+            // which the port reads here where Rust would have built a copy before the call
+            // (model.rs:204 copies __dict__ and appends __pydantic_extra__ when the model keeps
+            // extras, dataclass.rs:134 reads the declared attributes one by one).
+            main = py::getattr(value, "__dict__").cast<py::dict>();
+        } else {
+            ser_fields_fallback(value);
+            return serialize_any_value(value, exc_none, round_trip, json_mode, include, exclude);
+        }
         py::object missing_obj = missing_sentinel_obj();
         ser_reject_unexpected_fields(main);
 
@@ -5020,16 +5089,17 @@ private:
                                        const py::object& context = py::none()) const {
         std::string out = "{";
         bool first = true;
-        py::dict main;
-        if (py::isinstance<py::dict>(value)) main = value.cast<py::dict>();
-        else if (py_hasattr(value, "__dict__")) main = py::getattr(value, "__dict__").cast<py::dict>();
-        if (type == "model-fields" && g_ser_model_depth == 0 && py::isinstance<py::dict>(value))
-            ser_reject_no_model();
-        // A typed-dict node walks the fields itself instead of handing them to a
-        // child the way the three setters above do, but it stands in for one of
-        // them (typed_dict.rs:106/:126 sets state.model around its inner fields
-        // serializer), so a fields node below it is as well provided for.
+        // See the python walk above for why the typed-dict node stands for a model here.
         SerModelScope fields_model(type == "typed-dict");
+        py::dict main;
+        if (ser_fields_extract(value, main)) {
+            if (g_ser_model_depth == 0) ser_reject_no_model();
+        } else if (g_ser_attrs_above && py_hasattr(value, "__dict__")) {
+            main = py::getattr(value, "__dict__").cast<py::dict>();
+        } else {
+            ser_fields_fallback(value);
+            return infer_json(value, ensure_ascii, indent, include, exclude);
+        }
         py::object missing_obj = missing_sentinel_obj();
         ser_reject_unexpected_fields(main);
 
@@ -5329,6 +5399,9 @@ std::string SerNode::type_name_for_warning() const {
     // Expected `none` and a container composes list[none], dict[none, any], tuple[none].
     if (t == "none" || t == "is-none") return "none";
     if (t == "any") return "any";
+    // GeneralFieldsSerializer::get_name (fields.rs:371) names every mode of the fields
+    // family the same way, so a mismatch inside a list says list[general-fields].
+    if (t == "model-fields" || t == "dataclass-args") return "general-fields";
     return t;
 }
 
@@ -6181,13 +6254,21 @@ static SerRef build_ser_impl(const py::dict& schema,
     // mirrored onto its fields node, which is what actually emits the extras.
     if (original_type == "model" || original_type == "model-fields" ||
         original_type == "typed-dict" || original_type == "dataclass") {
+        // ExtraBehavior::from_schema_or_config (build_tools.rs:181): the schema's own
+        // `extra_behavior` wins and the config's `extra_fields_behavior` is the fallback.
         bool extra_allowed = false;
         try {
-            py::object cfg = schema["config"];
-            if (py::isinstance<py::dict>(cfg)) {
-                extra_allowed = cfg.cast<py::dict>()["extra_fields_behavior"].cast<std::string>() == "allow";
-            }
+            std::string behavior = schema["extra_behavior"].cast<std::string>();
+            extra_allowed = behavior == "allow";
         } catch (...) { PyErr_Clear(); }
+        if (!extra_allowed) {
+            try {
+                py::object cfg = schema["config"];
+                if (py::isinstance<py::dict>(cfg)) {
+                    extra_allowed = cfg.cast<py::dict>()["extra_fields_behavior"].cast<std::string>() == "allow";
+                }
+            } catch (...) { PyErr_Clear(); }
+        }
         node->extra_allowed = extra_allowed;
         if (!node->children.empty() && node->children[0])
             node->children[0]->extra_allowed = extra_allowed;

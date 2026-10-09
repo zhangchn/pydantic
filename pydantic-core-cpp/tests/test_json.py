@@ -3942,3 +3942,94 @@ def test_a_fields_node_needs_a_model_above_it_before_it_reads_a_dict():
         "b": core_schema.typed_dict_field(fields),
     }))
     assert td2.to_python({"a": 3, "b": {"a": 4}}) == {"a": 3, "b": {"a": 4}}
+
+
+def test_a_fields_node_lets_inference_answer_for_a_value_it_cannot_extract():
+    # extract_dicts (fields.rs:144) accepts a real dict -- for every mode of the fields family
+    # except ModelExtra, whose value is the (attrs, extras) pair model.rs:249 builds -- and
+    # fields.rs:163 hands whatever declines to serialize_fallback: register the mismatch in the
+    # name GeneralFieldsSerializer::get_name gives the family (fields.rs:371, "general-fields",
+    # which is why a list of them says list[general-fields]), keep quiet for None, "very common
+    # e.g. as a default value" (extra.rs:453), and then let inference answer for the value
+    # rather than answering for a field list nobody handed over.
+    fields = core_schema.model_fields_schema({"a": core_schema.model_field(core_schema.int_schema())})
+    s = SchemaSerializer(fields)
+
+    class Plain:
+        def __repr__(self):
+            return "<Plain>"
+
+    plain = Plain()
+
+    def expected_warning(value, type_name="general-fields"):
+        return ("Pydantic serializer warnings: PydanticSerializationUnexpectedValue("
+                f"Expected `{type_name}` - serialized value may not be as expected "
+                f"[input_value={value!r}, input_type={type(value).__name__}])")
+
+    unset = object()
+
+    def warned(fn, value, answer=unset):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            got = fn()
+        assert got == (value if answer is unset else answer)
+        assert [" ".join(str(w.message).split()) for w in caught] == [expected_warning(value)]
+        return got
+
+    for value in (5, 1.5, "x", b"z", [1], (1, 2), {1}, plain):
+        warned(lambda value=value: s.to_python(value), value)
+    warned(lambda: s.to_python(b"z", mode="json"), b"z", "z")
+
+    # None is the silent one, and a json text run refuses whatever inference cannot name.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert s.to_python(None) is None
+    assert len(caught) == 0
+    warned(lambda: s.to_json(5), 5, b"5")
+    with pytest.raises(PydanticSerializationError, match="Unable to serialize unknown type"):
+        s.to_json(plain)
+
+    # What a model hands its content is the attribute dict it built first (model.rs:204), so the
+    # typed-dict below it is being handed attributes and asks for no warning -- even though the
+    # typed-dict itself, given that same object at the root of a run, cannot extract it.
+    class Model:
+        def __init__(self, a):
+            self.a = a
+
+    typed = core_schema.typed_dict_schema({"a": core_schema.typed_dict_field(core_schema.int_schema())})
+    m = SchemaSerializer({"type": "model", "cls": Model, "schema": typed})
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert m.to_python(Model(2)) == {"a": 2}
+    assert len(caught) == 0
+
+    td = SchemaSerializer(typed)
+    warned(lambda: td.to_python(plain), plain)
+
+    # ModelExtra extracts that pair and not a dict, so a bare dict reaches the same fallback.
+    allow = SchemaSerializer(core_schema.model_fields_schema(
+        {"a": core_schema.model_field(core_schema.int_schema())}, extra_behavior="allow"
+    ))
+    warned(lambda: allow.to_python({"a": 1}), {"a": 1})
+
+    # A dataclass-args node is one of the family too -- it is built as a fields serializer, so
+    # with no dataclass above there is no model to ask, dict or no dict, extra_behavior or not.
+    for extra in (None, "allow"):
+        args = SchemaSerializer(core_schema.dataclass_args_schema(
+            "D",
+            [core_schema.dataclass_field(name="a", schema=core_schema.int_schema())],
+            **({"extra_behavior": extra} if extra else {}),
+        ))
+        with pytest.raises(PydanticSerializationUnexpectedValue, match="No model found"):
+            args.to_python({"a": 1})
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert SchemaSerializer(core_schema.list_schema(fields)).to_python(5) == 5
+    assert [" ".join(str(w.message).split()) for w in caught] == [expected_warning(5, "list[general-fields]")]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert SchemaSerializer(core_schema.dict_schema(core_schema.str_schema(), fields)).to_python("x") == "x"
+    assert [" ".join(str(w.message).split()) for w in caught] == [
+        expected_warning("x", "dict[str, general-fields]")]
+
