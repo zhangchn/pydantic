@@ -1089,7 +1089,13 @@ protected:
                     if (result.is_ok()) {
                         ValidatedModelFieldsOutput::FieldValue fv;
                         fv.value = result.value();
-                        fv.type_name = extras_validator_->name();
+                        // An extras schema is a schema like a field's, so the stored
+                        // value is named the way a field's is: a model extras schema
+                        // hands back a PyObjectWrapper for an instance it was given
+                        // (revalidate != 'always'), and the name() of that validator
+                        // -- "model" -- would have the conversion read that wrapper as
+                        // a ValidatedModelFieldsOutput.
+                        fv.type_name = field_type_name(extras_validator_);
                         output.extra.emplace_back(key, std::move(fv));
                         output.fields_set.insert(key);
                     } else {
@@ -1168,7 +1174,13 @@ protected:
                     if (result.is_ok()) {
                         ValidatedModelFieldsOutput::FieldValue fv;
                         fv.value = result.value();
-                        fv.type_name = extras_validator_->name();
+                        // An extras schema is a schema like a field's, so the stored
+                        // value is named the way a field's is: a model extras schema
+                        // hands back a PyObjectWrapper for an instance it was given
+                        // (revalidate != 'always'), and the name() of that validator
+                        // -- "model" -- would have the conversion read that wrapper as
+                        // a ValidatedModelFieldsOutput.
+                        fv.type_name = field_type_name(extras_validator_);
                         output.extra.emplace_back(key, std::move(fv));
                         output.fields_set.insert(key);
                     } else {
