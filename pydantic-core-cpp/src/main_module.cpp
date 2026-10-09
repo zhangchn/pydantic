@@ -1439,6 +1439,25 @@ static std::string ser_error_text(const std::exception_ptr& e) {
             cls = py::str(t.attr("__name__")).cast<std::string>();
         } catch (const py::error_already_set&) { PyErr_Clear(); cls = "<unknown python object>"; }
         return cls + ": " + message;
+    } catch (const PydanticSerializationError& err) {
+        // A choice whose serializer function raised reaches the round as this C++ class
+        // rather than as a PyErr, so the class name that Display puts in front of it has to
+        // be put there by hand -- the round registers "PydanticSerializationError: Error
+        // calling function `boom`: ValueError: boom" beside a sibling's "Expected `str` -
+        // ...".  The site in front of the message may have already written the JSON
+        // boundary's own words: handle_ser_call_error adds "Error serializing to JSON: "
+        // for a run that ends in JSON, since a failure that crosses that boundary is
+        // stringified and renamed there (errors.rs:63).  A failure a round collects never
+        // gets there, so its text is the words the site wrote before reaching for the
+        // boundary's, and those come back off here.
+        std::string text = err.what();
+        static const std::string json_words = "Error serializing to JSON: ";
+        static const std::string cls = "PydanticSerializationError: ";
+        if (text.compare(0, json_words.size(), json_words) == 0) text = text.substr(json_words.size());
+        // The JSON arm of that site wrote the class name too, in the shape the boundary
+        // would have left it in; the one name the Display adds is added below.
+        if (text.compare(0, cls.size(), cls) == 0) text = text.substr(cls.size());
+        return cls + text;
     } catch (const std::exception& err) {
         return err.what();
     } catch (...) {
