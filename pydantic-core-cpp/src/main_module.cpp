@@ -2754,7 +2754,13 @@ struct SerNode {
             if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
         }
         if (type == "is-instance" || type == "is-subclass") {
-            return value;
+            // Both are built as an AnySerializer (other.rs:113-114), which has no leaf of
+            // its own: the value goes to inference (any.rs:39-42).  Handing it back here
+            // read the same in a python run and differed in a JSON one, where inference is
+            // the step that says Unable to serialize unknown type about an object nothing
+            // can name -- so an is-instance choice that "accepted" a value answered for it
+            // instead of letting the run find out what it can do with it.
+            return serialize_any_value(value, exc_none, round_trip, json_mode, include, exclude);
         }
         if (type == "missing-sentinel") {
             py::object missing = missing_sentinel_obj();
