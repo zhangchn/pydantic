@@ -7162,20 +7162,16 @@ static SerRef build_ser_impl(const py::dict& schema,
         // A typed-dict with extra_behavior=allow keeps undeclared keys in its
         // own dict, so they are serialized as well; extras_schema (only legal
         // with extra_behavior=allow, as Rust enforces) names their serializer.
-        if (type == "typed-dict") {
-            std::string eb;
-            try { if (schema.contains("extra_behavior")) eb = schema["extra_behavior"].cast<std::string>(); } catch (...) { PyErr_Clear(); }
-            if (eb.empty() && schema.contains("config") && py::isinstance<py::dict>(schema["config"])) {
-                try {
-                    py::dict cfg = schema["config"].cast<py::dict>();
-                    if (cfg.contains("extra_fields_behavior")) eb = cfg["extra_fields_behavior"].cast<std::string>();
-                } catch (...) { PyErr_Clear(); }
-            }
-            if (eb == "allow") {
-                node->typed_dict_allow_extra = true;
-                if (schema.contains("extras_schema") && !schema["extras_schema"].is_none()) {
-                    try { node->extra_ser = build_ser(schema["extras_schema"].cast<py::dict>(), defs, memo); } catch (...) { PyErr_Clear(); }
-                }
+        // The answer is asked the way typed_dict.rs:40 asks it -- the schema's own
+        // `extra_behavior` first, then `extra_fields_behavior` in the config this
+        // node was built with, which is what a SchemaSerializer built over a
+        // hand-written schema was handed.  A typed-dict schema nests no config of
+        // its own, so nothing else is asked.
+        if (type == "typed-dict" &&
+            ser_extra_behavior_allow(schema, type, g_ser_build_config)) {
+            node->typed_dict_allow_extra = true;
+            if (schema.contains("extras_schema") && !schema["extras_schema"].is_none()) {
+                try { node->extra_ser = build_ser(schema["extras_schema"].cast<py::dict>(), defs, memo); } catch (...) { PyErr_Clear(); }
             }
         }
         // Rust ModelFieldsBuilder (model.rs:41-53) builds the extras serializer when has_extra
