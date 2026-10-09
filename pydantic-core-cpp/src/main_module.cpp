@@ -2191,6 +2191,18 @@ static py::object missing_sentinel_obj() {
     return py::module_::import("pydantic_core_cpp").attr("MISSING");
 }
 
+// When the port's validator leaves a model as a dict instead of building an
+// instance, it marks that dict with the bookkeeping key its fields walk reads
+// back (schema_validator.cpp:1077-1084).  That mark is what licenses the dict at
+// a model node the way an instance dict is -- model.rs:147 asks for the latter
+// and nothing else, so a dict a caller hands in is refused and inferred instead.
+static bool ser_model_as_dict(const py::object& value) {
+    if (!PyDict_Check(value.ptr())) return false;
+    static const py::object& fields_set_key =
+        held_python_object([] { return py::str("__pydantic_fields_set__"); });
+    return PyDict_Contains(value.ptr(), fields_set_key.ptr()) == 1;
+}
+
 struct SerNode {
     std::string type;
     // Rust-style serializer display name, e.g. "list[int]" (warnings).
@@ -2922,17 +2934,23 @@ struct SerNode {
                     ok = (static_cast<void*>(value.ptr()->ob_type) == static_cast<void*>(class_.ptr()));
                 } else if (g_ser_check == 2) {
                     ok = py::isinstance(value, class_);
+                } else if (root_model) {
+                    // Rust allow_value_root_model (model.rs:151-156) wants an
+                    // instance of the class at every level, so with no check open
+                    // it asks for one anyway.
+                    ok = py::isinstance(value, class_);
+                } else if (type == "model") {
+                    // model.rs:147: with no check open a plain model node wants an
+                    // instance dict and nothing else.  A dict has none, so the wheel
+                    // refuses it -- `Expected `M`` -- and lets inference write it,
+                    // which prints the same dict by another route; the port used to
+                    // read any dict as the model's own attributes and say nothing,
+                    // which made a clean run of what the wheel reports as a value it
+                    // had to give up on.  The port's own dict model is licensed
+                    // separately, since for it this *is* the instance.
+                    ok = py_hasattr(value, "__dict__") || ser_model_as_dict(value);
                 } else {
-                    // Rust allow_value_root_model checks isinstance even with no
-                    // union active; a non-root model only needs an instance dict.
-                    // An unmatched value falls back to inference with a warning
-                    // instead of silently emitting an empty dict.
-                    // A model reached through this pipeline may still be the
-                    // dict representation that _dict_to_model turns into an
-                    // instance later, so a dict is accepted too.
-                    ok = root_model
-                        ? py::isinstance(value, class_)
-                        : (py_hasattr(value, "__dict__") || py::isinstance<py::dict>(value));
+                    ok = (py_hasattr(value, "__dict__") || py::isinstance<py::dict>(value));
                 }
                 if (!ok) {
                     // Rust allow_value hands the value to serialize_fallback (model.rs:172
@@ -3912,13 +3930,15 @@ struct SerNode {
                     ok = (static_cast<void*>(value.ptr()->ob_type) == static_cast<void*>(class_.ptr()));
                 } else if (g_ser_check == 2) {
                     ok = py::isinstance(value, class_);
+                } else if (root_model) {
+                    ok = py::isinstance(value, class_);   // model.rs:151-156
+                } else if (type == "model") {
+                    // model.rs:147 -- see the same rule in the python walk: an
+                    // instance dict (or the port's own marked dict model), so a
+                    // plain dict is refused and inferred.
+                    ok = py_hasattr(value, "__dict__") || ser_model_as_dict(value);
                 } else {
-                    // A model reached through this pipeline may still be the
-                    // dict representation that _dict_to_model turns into an
-                    // instance later, so a dict is accepted too.
-                    ok = root_model
-                        ? py::isinstance(value, class_)
-                        : (py_hasattr(value, "__dict__") || py::isinstance<py::dict>(value));
+                    ok = (py_hasattr(value, "__dict__") || py::isinstance<py::dict>(value));
                 }
                 if (!ok) {
                     // Rust allow_value hands the value to serialize_fallback (model.rs:172
