@@ -5859,6 +5859,8 @@ static SerRef build_ser_impl(const py::dict& schema,
                         std::unordered_map<std::string, SerRef>& defs,
                         SerMemo& memo);
 
+static std::string ser_downcast_message(PyObject* v, const char* want);
+
 static SerRef build_ser(const py::dict& schema,
                         std::unordered_map<std::string, SerRef>& defs,
                         SerMemo& memo) {
@@ -5872,6 +5874,18 @@ static SerRef build_ser(const py::dict& schema,
 
     int truncated = _build_ser_truncated;
     auto ser = build_ser_impl(schema, defs, memo);
+    // shared.rs:236-249 -- the polymorphism trampoline runs once the builder has answered,
+    // and reads the schema's own `type` as a str.  A schema whose `serialization` override
+    // named a serializer of its own never had that key looked up by find_serializer, so this
+    // is where the wheel notices it is missing or wrongly written -- and it is the
+    // extraction's own KeyError/TypeError, not a SchemaError, because no builder failed.
+    if (!schema.contains("type"))
+        throw py::key_error("type");
+    {
+        py::object type_val = schema["type"];
+        if (!PyUnicode_Check(type_val.ptr()))
+            throw py::type_error(ser_downcast_message(type_val.ptr(), "str"));
+    }
     // A subtree the recursion guard cut short is not the node this schema
     // describes, so it must not become the answer for that schema.
     if (ser && _build_ser_truncated == truncated) memo[schema.ptr()] = ser;
@@ -5885,11 +5899,15 @@ static SerRef build_ser(const py::dict& schema,
 // What pyo3 says when a value is not the type an extraction asked for: the object's type
 // name, with " object" after every name but None's -- PyNone's type name is "None", and the
 // wording that follows carries no "object" for it.
-static std::string ser_downcast_typeerror(PyObject* v, const char* want) {
+static std::string ser_downcast_message(PyObject* v, const char* want) {
     std::string label = (v == nullptr || v == Py_None)
         ? std::string("'None'")
         : std::string("'") + v->ob_type->tp_name + "' object";
-    return "TypeError: " + label + " is not an instance of '" + want + "'";
+    return label + " is not an instance of '" + want + "'";
+}
+
+static std::string ser_downcast_typeerror(PyObject* v, const char* want) {
+    return "TypeError: " + ser_downcast_message(v, want);
 }
 
 static void ser_check_unexpected_kw(const char* fname, const std::vector<std::string>& allowed,
@@ -5963,11 +5981,9 @@ static SerRef build_ser_impl(const py::dict& schema,
     }
     struct DepthGuard { ~DepthGuard() { _build_ser_depth--; } } _guard;
 
-    // CombinedSerializer::build reads `type` as a required str before it looks anything else
-    // up, and find_serializer (shared.rs:64-78) knows a closed list of names -- the builders
-    // that registered an EXPECTED_TYPE, and nothing else. A schema without the key fails on
-    // the KeyError, a name off that list fails with "Unknown serialization schema type", and
-    // either way there is no serializer to answer for the value.
+    // find_serializer (shared.rs:64-78) knows a closed list of names -- the builders that
+    // registered an EXPECTED_TYPE, and nothing else.  A name off that list has no serializer
+    // to answer for the value, no matter what the rest of the schema holds.
     static const std::unordered_set<std::string> kSerKnownTypes = {
         "any", "arguments", "bool", "bytes", "call", "callable", "chain", "complex",
         "custom-error", "dataclass", "dataclass-args", "date", "datetime", "decimal",
@@ -5978,33 +5994,57 @@ static SerRef build_ser_impl(const py::dict& schema,
         "literal", "missing-sentinel", "model", "model-fields", "multi-host-url",
         "named-tuple", "none", "nullable", "set", "str", "tagged-union", "time",
         "timedelta", "to-string", "tuple", "typed-dict", "union", "url", "uuid"};
-    if (!schema.contains("type"))
-        throw SchemaError("KeyError: 'type'");
-    std::string type;
-    {
+    // What the schema names itself, read loosely: only a schema that keeps its own name
+    // gets the required-str read below, and the replaced one has the key looked at again
+    // by build_ser after the override's serializer is built.
+    std::string original_type;
+    if (schema.contains("type")) {
+        py::object own = schema["type"];
+        if (PyUnicode_Check(own.ptr())) {
+            try { original_type = own.cast<std::string>(); } catch (...) { PyErr_Clear(); }
+        }
+    }
+
+    // shared.rs:178-224 -- `serialization` is read before `type`.  An override that names a
+    // serializer of its own replaces the schema outright (function-plain and function-wrap
+    // are the two exceptions, built from the outer schema, and the include-exclude/base64
+    // decorators only decorate it), so the replaced schema's name never reaches
+    // find_serializer and the override's own keys are what the builder reads.
+    py::dict ser_dict;
+    bool has_ser_dict = false;
+    bool ser_replaces = false;
+    std::string ser_name;
+    if (schema.contains("serialization")) {
+        py::object ser = schema["serialization"];
+        if (!PyDict_Check(ser.ptr()))
+            throw py::type_error(ser_downcast_message(ser.ptr(), "dict"));
+        ser_dict = ser.cast<py::dict>();
+        has_ser_dict = true;
+        if (ser_dict.contains("type")) {
+            py::object st = ser_dict["type"];
+            if (!PyUnicode_Check(st.ptr()))
+                throw py::type_error(ser_downcast_message(st.ptr(), "str"));
+            ser_name = st.cast<std::string>();
+            if (ser_name != "include-exclude-sequence" && ser_name != "include-exclude-dict" &&
+                ser_name != "base64")
+                ser_replaces = true;
+        }
+    }
+
+    std::string type = original_type;
+    if (ser_replaces) {
+        type = ser_name;
+    } else if (!schema.contains("type")) {
+        // shared.rs:229 -- the required str read that names the builder; at the root of a
+        // build nothing wraps it, so the interpreter's own error is what the caller gets.
+        throw py::key_error("type");
+    } else {
         py::object type_val = schema["type"];
         if (!PyUnicode_Check(type_val.ptr()))
-            throw SchemaError(ser_downcast_typeerror(type_val.ptr(), "str"));
-        type = type_val.cast<std::string>();
+            throw py::type_error(ser_downcast_message(type_val.ptr(), "str"));
     }
     if (!kSerKnownTypes.count(type))
         throw SchemaError("Unknown serialization schema type: `" + type + "`");
-    std::string original_type = type;  // Save original type before serialization override
-
-    // Check serialization override
-    py::dict ser_dict;
-    bool has_ser_dict = false;
-    try {
-        if (schema.contains("serialization")) {
-            ser_dict = schema["serialization"].cast<py::dict>();
-            has_ser_dict = true;
-            if (ser_dict.contains("type")) {
-                std::string st = ser_dict["type"].cast<std::string>();
-                if (st != "include-exclude-sequence" && st != "include-exclude-dict" && st != "base64")
-                    type = st;
-            }
-        }
-    } catch (...) {}
 
     // FrozenDictSerializer::build (frozendict.rs:38-44) asks for the builtin before reading
     // anything else and refuses the schema when the interpreter has none to validate against,
