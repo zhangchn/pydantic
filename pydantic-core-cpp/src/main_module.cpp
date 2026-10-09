@@ -1303,16 +1303,6 @@ struct SerWarnViewScope {
     }
 };
 
-// Depth of "a union is trying its candidates" regions. A serializer function
-// that rejects its value while a candidate is merely being tried is not a
-// warning: Rust keeps those errors for itself and only reports them once every
-// choice failed (union.rs register_union_serialization_warnings).
-static thread_local int g_ser_attempt_depth = 0;
-struct SerAttemptScope {
-    SerAttemptScope() { ++g_ser_attempt_depth; }
-    ~SerAttemptScope() { --g_ser_attempt_depth; }
-};
-
 static void ser_warn_register(const std::string& text) {
     auto& stack = ser_warn_stack();
     if (stack.empty() || !stack.back().enabled) return;
@@ -1884,10 +1874,12 @@ static bool handle_ser_call_error(const py::error_already_set& e, const std::str
     try {
         py::object unexpected = py::module_::import("pydantic_core_cpp").attr("PydanticSerializationUnexpectedValue");
         if (PyObject_IsInstance(exc, unexpected.ptr()) == 1) {
-            if (g_ser_check != 0 || g_ser_attempt_depth != 0) {
+            if (g_ser_check != 0) {
                 // Rust on_error: while a union checks its candidates the error
                 // propagates (Err(err)) so the next choice is tried; falling
-                // back to inference here would let the wrong branch succeed.
+                // back to inference here would let the wrong branch succeed.  The
+                // rounds are what opens that level, so no separate "an attempt is
+                // in progress" flag is needed to know one is.
                 PyErr_SetObject(reinterpret_cast<PyObject*>(Py_TYPE(exc)), exc);
                 throw py::error_already_set();
             }
@@ -2572,6 +2564,71 @@ struct SerNode {
         return false;
     }
 
+    // TaggedUnionSerializer::tagged_union_serialize (union.rs:261-313), the same rounds
+    // with one choice picked by the discriminator instead of left to right.  The variant
+    // gets the first pass at a union's initial check level -- strict at the top of a run,
+    // which is what lets a bool at an int node inside a variant refuse it there -- and, at
+    // the top only, one lax retry while some variant would answer differently there.  A
+    // variant that still refuses leaves the tagged union with the variant's own error,
+    // registered as the round registers it and nothing picked (union.rs:296-303), which
+    // hands the value to the caller's inference; nested, the error goes back out instead,
+    // because an outer union is the one deciding (:311).  With no tag, or a tag no variant
+    // answers to, the tagged union runs the untagged rounds over its variants in
+    // declaration order, warned about first -- and only at the top, since a nested one is
+    // not the level that registers anything (:277-281).
+    std::optional<py::object> tagged_rounds(const py::object& value, bool json_mode, bool exc_none,
+                                            bool round_trip, const py::object& include, const py::object& exclude,
+                                            bool by_alias, bool exclude_unset, bool exclude_defaults,
+                                            const py::object& context) const {
+        const bool top = (g_ser_check == 0);
+        SerRef choice;
+        if (!tagged_discriminator_callable.is_none()) {
+            // Discriminator::Function(func) => func.call1((value,)).ok(): a callable that
+            // raises simply leaves no tag, and the rounds below take over.
+            try {
+                auto cit = tagged.find(ser_tag_string(tagged_discriminator_callable(value)));
+                if (cit != tagged.end()) choice = cit->second;
+            } catch (const py::error_already_set&) {
+                PyErr_Clear();
+            }
+        }
+        if (!choice) {
+            for (const auto& path : tagged_discriminator) {
+                py::object tag_obj;
+                if (!lookup_discriminator(value, path, &tag_obj)) continue;
+                std::string tag = ser_tag_string(tag_obj);
+                if (tag.empty()) continue;
+                auto it = tagged.find(tag);
+                if (it != tagged.end()) { choice = it->second; break; }
+            }
+        }
+        if (!choice) {
+            if (top)
+                ser_warn_message("Defaulting to left to right union serialization - failed to get discriminator value for tagged union serialization", value);
+            return union_rounds(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset,
+                                exclude_defaults, context);
+        }
+        std::exception_ptr err;
+        try {
+            SerCheckScope scope(top ? 1 : g_ser_check);
+            return choice->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias,
+                                     exclude_unset, exclude_defaults, context);
+        } catch (...) {
+            err = std::current_exception();
+        }
+        if (top && union_retries_lax()) {
+            try {
+                SerCheckScope scope(2);
+                return choice->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias,
+                                         exclude_unset, exclude_defaults, context);
+            } catch (...) {
+            }
+        }
+        if (!top) std::rethrow_exception(err);
+        ser_warn_register("PydanticSerializationUnexpectedValue(" + ser_error_text(err) + ")");
+        return std::nullopt;
+    }
+
     // TypeSerializer::retry_with_lax_check, whose default is false (shared.rs:444-449): would
     // this node take a value it now refuses once subclasses are allowed?  A model, a
     // dataclass, either sequence node and an int node say yes (model.rs:292, dataclass.rs:206,
@@ -2700,68 +2757,12 @@ struct SerNode {
             return picked ? *picked : serialize_any_value(value, exc_none, round_trip, json_mode, include, exclude);
         }
         if (type == "tagged-union" && !tagged_left_to_right.empty()) {
-            SerAttemptScope attempt;
-            // Rust TaggedUnionSerializer resolves the discriminator and
-            // serializes with the matching choice. Reading it only from a dict
-            // key (and guessing the key name) meant a validated model instance
-            // never matched, so the fallback below emitted a different
-            // variant's fields.
-            if (!tagged_discriminator_callable.is_none()) {
-                // Rust: Discriminator::Function(func) => func.call1((value,)).ok(),
-                // so a callable that raises simply leaves no tag and the
-                // left-to-right fallback below takes over.
-                try {
-                    py::object tag_obj = tagged_discriminator_callable(value);
-                    std::string tag = ser_tag_string(tag_obj);
-                    auto cit = tagged.find(tag);
-                    if (cit != tagged.end()) {
-                        try {
-                            return cit->second->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
-                        } catch (const py::error_already_set&) {
-                            // Rust tagged_union_serialize (union.rs:305-312): only a tagged
-                            // union that is itself the top-level one keeps a failed variant
-                            // to itself; while an outer union is checking its choices the
-                            // variant's error propagates, so that union moves on to its next
-                            // choice instead of paying for this one's second attempt here.
-                            if (g_ser_check != 0) throw;
-                            PyErr_Clear();
-                            ser_warn_message("Pydantic serialization failed for tagged union variant '" + tag + "'", value);
-                        }
-                    }
-                } catch (const py::error_already_set&) {
-                    PyErr_Clear();
-                }
-            }
-            for (const auto& path : tagged_discriminator) {
-                py::object tag_obj;
-                if (!lookup_discriminator(value, path, &tag_obj)) continue;
-                std::string tag = ser_tag_string(tag_obj);
-                if (tag.empty()) continue;
-                auto it = tagged.find(tag);
-                if (it == tagged.end()) continue;
-                try {
-                    return it->second->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
-                } catch (const py::error_already_set&) {
-                    // See the callable arm: a failed variant stays an error while an
-                    // outer union is checking, and only a top-level tagged union
-                    // keeps it, warns for the matched variant, and falls through.
-                    if (g_ser_check != 0) throw;
-                    PyErr_Clear();
-                    ser_warn_message("Pydantic serialization failed for tagged union variant '" + tag + "'", value);
-                }
-            }
-            // No discriminator value: Rust registers a warning and tries the
-            // choices left to right, in declaration order.
-            // Rust UnionChoices::serialize: a strict pass first, then a lax
-            // pass, so a choice whose class does not match the value cannot
-            // "succeed" by emitting the wrong variant's fields.
-            ser_warn_message("Defaulting to left to right union serialization - failed to get discriminator value for tagged union serialization", value);
-            for (int level = 1; level <= 2; level++) {
-                SerCheckScope scope(level);
-                for (auto& c : tagged_left_to_right) {
-                    try { return c->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context); } catch (...) {}
-                }
-            }
+            // Rust TaggedUnionSerializer::to_python (union.rs:172-179): the rounds pick a
+            // variant and answer with it; when they picked nothing, inference answers for
+            // the value itself.
+            auto picked = tagged_rounds(value, json_mode, exc_none, round_trip, include, exclude, by_alias,
+                                        exclude_unset, exclude_defaults, context);
+            return picked ? *picked : serialize_any_value(value, exc_none, round_trip, json_mode, include, exclude);
         }
         if (type == "default" || type == "with-default") {
             // Rust WithDefaultSerializer::to_python forwards the value untouched:
@@ -3385,6 +3386,14 @@ struct SerNode {
             // node's, and a run that picked nothing writes the value it was given.
             auto picked = union_rounds(value, true, exc_none, round_trip, include, exclude, by_alias,
                                        exclude_unset, exclude_defaults, context);
+            return infer_json(picked ? *picked : value, ensure_ascii, indent, py::none(), py::none());
+        }
+        if (type == "tagged-union" && !tagged_left_to_right.empty()) {
+            // TaggedUnionSerializer::serde_serialize (union.rs:194-210): the variant is
+            // picked by the python-returning walk, exactly as in a python run, and what
+            // that walk answered is then written by inference with the filters emptied.
+            auto picked = tagged_rounds(value, true, exc_none, round_trip, include, exclude, by_alias,
+                                        exclude_unset, exclude_defaults, context);
             return infer_json(picked ? *picked : value, ensure_ascii, indent, py::none(), py::none());
         }
         if (type == "dict" && !children.empty()) {
