@@ -6771,6 +6771,13 @@ static SerRef build_ser_impl(const py::dict& schema,
             }
         } catch (const SchemaError&) { throw; }
         catch (...) {}
+        // union.rs:349 -- a tagged union with exactly one choice is not a union: the builder
+        // hands back that one serializer, so the tag is never looked up and the left-to-right
+        // fallback that registers its own warning never runs.
+        if (node->tagged_left_to_right.size() == 1) {
+            node->copy_from(*node->tagged_left_to_right[0]);
+            return node;
+        }
     }
 
     if (type == "json-or-python") {
