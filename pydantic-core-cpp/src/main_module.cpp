@@ -2326,6 +2326,10 @@ struct SerNode {
     std::unordered_set<std::string> field_excluded;
     // Set of computed field names (excluded when round_trip=True)
     std::unordered_set<std::string> computed_fields_;
+    // What the config that built this node said about serialize_by_alias: -1 named nothing,
+    // 0 and 1 are its answer.  fields.rs:34 keeps one per field, every builder of the family
+    // reads the same key once for all of them, so one per node says the same thing.
+    int ser_by_alias_cfg = -1;
     // For function serializers
     py::object py_func;
     bool info_arg = false;
@@ -5123,6 +5127,14 @@ private:
         throw py::error_already_set();
     }
 
+    // extra.rs:232-234 `self.by_alias.or(serialize_by_alias).unwrap_or(false)`: the run's own
+    // answer outranks the config's, and a run that never answered leaves the config -- which is
+    // this node's own model's, since a model replaces the config its subtree is built with.
+    bool ser_use_alias() const {
+        return g_ser_extra.by_alias.is_none() ? ser_by_alias_cfg == 1
+                                              : g_ser_extra.by_alias.ptr() == Py_True;
+    }
+
     // fields.rs:144 extract_dicts: every mode but ModelExtra extracts a real dict and
     // nothing else, and ModelExtra extracts the (attrs, extras) tuple model.rs:249 builds, so
     // outside that builder a plain dict is as unextractable there as an int is.
@@ -5234,7 +5246,7 @@ private:
 
             // Determine output key name
             std::string output_key = k;
-            if (by_alias) {
+            if (ser_use_alias()) {
                 auto alias_it = field_aliases.find(k);
                 if (alias_it != field_aliases.end()) {
                     output_key = alias_it->second;
@@ -5516,7 +5528,7 @@ private:
             
             // Determine output key name
             std::string output_key = k;
-            if (by_alias) {
+            if (ser_use_alias()) {
                 auto alias_it = field_aliases.find(k);
                 if (alias_it != field_aliases.end()) {
                     output_key = alias_it->second;
@@ -7106,6 +7118,21 @@ static SerRef build_ser_impl(const py::dict& schema,
     // model-fields, typed-dict, dataclass-args
     if (type == "model-fields" || type == "typed-dict" || type == "dataclass-args") {
         try {
+            // model.rs:56, typed_dict.rs:45 and dataclass.rs:44 ask `serialize_by_alias` of the
+            // config this node was built with -- which is its own model's, because a model hands
+            // its subtree the config under its own `config` key (model.rs:117) -- and they ask it
+            // before any field is read, so a wrong value there is heard before any field's own
+            // complaint.  A bool is the only value that answers: naming the key None is naming a
+            // value that is not a bool, only a key that is absent is no answer at all.
+            if (g_ser_build_config && PyDict_Check(g_ser_build_config.ptr()) &&
+                g_ser_build_config.contains("serialize_by_alias")) {
+                static const std::string wrap = "` serializer:\n  ";
+                py::object ba = g_ser_build_config["serialize_by_alias"];
+                if (!PyBool_Check(ba.ptr()))
+                    throw SchemaError("Error building `" + type + wrap +
+                                      ser_downcast_typeerror(ba.ptr(), "bool"));
+                node->ser_by_alias_cfg = ba.ptr() == Py_True ? 1 : 0;
+            }
             if (schema.contains("fields")) {
                 // Normalize to (name, fielddef) pairs: model-fields/typed-dict
                 // use a dict, while dataclass-args uses a list of
