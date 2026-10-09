@@ -5972,6 +5972,14 @@ static SerRef build_ser_impl(const py::dict& schema,
         }
     } catch (...) {}
 
+    // FrozenDictSerializer::build (frozendict.rs:38-44) asks for the builtin before reading
+    // anything else and refuses the schema when the interpreter has none to validate against,
+    // so below 3.15 the wheel never has a frozendict serializer to run. find_serializer
+    // (shared.rs:64-70) wraps that refusal the way it wraps every other type-lookup failure.
+    if (type == "frozendict" && !py_has_frozendict())
+        throw SchemaError("Error building `frozendict` serializer:\n  SchemaError: " +
+                          std::string(frozendict_build_blocker()));
+
     auto node = std::make_shared<SerNode>();
     node->type = type;
 
