@@ -311,10 +311,20 @@ struct SerModelScope {
 // walked field list here.
 static thread_local bool g_ser_attrs_above = false;
 
+// Which of the two hand-overs it was: model.rs:249 builds the (attrs, extras) tuple only for a
+// model that keeps extras of its own and the plain attribute dict for every other model, a
+// dataclass always builds the dict (dataclass.rs:140), and extract_dicts (:145) takes a tuple
+// from a fields node in ModelExtra mode and a dict from every other mode, so which one stood
+// above says whether the value below is the one this walk was handed.
+static thread_local bool g_ser_attrs_with_extras = false;
+
 struct SerAttrsScope {
     const bool saved = g_ser_attrs_above;
-    explicit SerAttrsScope(bool enabled = true) { if (enabled) g_ser_attrs_above = true; }
-    ~SerAttrsScope() { g_ser_attrs_above = saved; }
+    const bool saved_extras = g_ser_attrs_with_extras;
+    explicit SerAttrsScope(bool enabled = true, bool with_extras = false) {
+        if (enabled) { g_ser_attrs_above = true; g_ser_attrs_with_extras = with_extras; }
+    }
+    ~SerAttrsScope() { g_ser_attrs_above = saved; g_ser_attrs_with_extras = saved_extras; }
     SerAttrsScope(const SerAttrsScope&) = delete;
     SerAttrsScope& operator=(const SerAttrsScope&) = delete;
 };
@@ -2324,6 +2334,10 @@ struct SerNode {
     // Rust ModelSerializer::has_extra - only a model whose own config sets
     // extra_fields_behavior="allow" serializes its __pydantic_extra__ entries.
     bool extra_allowed = false;
+    // Whether this node's own schema named an `extra_behavior` at all, which is what decides
+    // the question below -- schema_or_config (build_tools.rs:187) lets that key win over a
+    // parent's config, so such a node keeps the mode it asked for.
+    bool extra_behavior_own = false;
     // Rust TypedDictSerializer with extra_behavior=allow (FieldsMode::TypedDictAllow):
     // a typed-dict keeps its undeclared keys in its own dict, and an optional
     // extras_schema says how to serialize them.
@@ -2419,6 +2433,7 @@ struct SerNode {
         class_name = other.class_name;
         polymorphic_from_config = other.polymorphic_from_config;
         extra_allowed = other.extra_allowed;
+        extra_behavior_own = other.extra_behavior_own;
         typed_dict_allow_extra = other.typed_dict_allow_extra;
         extra_ser = other.extra_ser;
         inf_nan_mode = other.inf_nan_mode;
@@ -2924,7 +2939,10 @@ struct SerNode {
         // Delegate model/dataclass/typed-dict to inner serializer
         if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
             SerModelScope model_scope;
-            SerAttrsScope model_attrs((type == "model" && !root_model) || type == "dataclass");
+            // Only a model that keeps extras of its own hands down a tuple, and a dataclass
+            // never does (dataclass.rs:140 builds the attribute dict).
+            SerAttrsScope model_attrs((type == "model" && !root_model) || type == "dataclass",
+                                      type == "model" && extra_allowed);
             // Union discrimination (Rust ModelSerializer::allow_value): while a
             // union is trying its choices, reject a value that is not of (or not
             // even an instance of) the expected class so the next choice is tried.
@@ -3016,6 +3034,16 @@ struct SerNode {
                     return SerNode::serialize_any_value(root_val, exc_none, round_trip, json_mode, include, exclude);
                 }
                 return children[0]->to_python(root_val, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
+            }
+            // Rust hands the child what get_inner_value (model.rs:203) built rather than the
+            // instance itself, and for a model that keeps no extras that is a plain dict -- the
+            // one thing the extract of a fields node in ModelExtra mode declines (:145). Handing
+            // the same dict here is what makes a refusal land on the attributes the wheel names
+            // in its warning rather than on the object still held here.
+            if (children[0]->ser_fields_attrs_kind_mismatch() && py_hasattr(value, "__dict__")) {
+                return children[0]->to_python(py::getattr(value, "__dict__").attr("copy")().cast<py::object>(),
+                                              json_mode, exc_none, round_trip, include, exclude, by_alias,
+                                              exclude_unset, exclude_defaults, context);
             }
             return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
         }
@@ -3923,7 +3951,10 @@ struct SerNode {
         // Delegate model/dataclass/typed-dict to inner serializer
         if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
             SerModelScope model_scope;
-            SerAttrsScope model_attrs((type == "model" && !root_model) || type == "dataclass");
+            // Only a model that keeps extras of its own hands down a tuple, and a dataclass
+            // never does (dataclass.rs:140 builds the attribute dict).
+            SerAttrsScope model_attrs((type == "model" && !root_model) || type == "dataclass",
+                                      type == "model" && extra_allowed);
             // Union discrimination (Rust ModelSerializer::allow_value): while a
             // union is trying its choices, reject a value that is not of (or not
             // even an instance of) the expected class so the next choice is tried.
@@ -4004,6 +4035,12 @@ struct SerNode {
                     return infer_json(root_val, ensure_ascii, indent, include, exclude);
                 }
                 return children[0]->to_json(root_val, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
+            }
+            // See the python walk: the child is handed the dict Rust builds, not the instance.
+            if (children[0]->ser_fields_attrs_kind_mismatch() && py_hasattr(value, "__dict__")) {
+                return children[0]->to_json(py::getattr(value, "__dict__").attr("copy")().cast<py::object>(),
+                                            ensure_ascii, indent, round_trip, include, exclude, by_alias,
+                                            exclude_unset, exclude_defaults, exc_none, context);
             }
             return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
         }
@@ -5070,9 +5107,19 @@ private:
     // outside that builder a plain dict is as unextractable there as an int is.
     bool ser_fields_extract(const py::object& value, py::dict& main) const {
         if (!py::isinstance<py::dict>(value)) return false;
-        if (type == "model-fields" && extra_allowed && g_ser_model_depth == 0) return false;
+        if (type == "model-fields" && extra_allowed &&
+            (g_ser_model_depth == 0 || (g_ser_attrs_above && !g_ser_attrs_with_extras)))
+            return false;
         main = value.cast<py::dict>();
         return true;
+    }
+
+    // The delegation a fields node in ModelExtra mode never got: model.rs:249 builds the
+    // (attrs, extras) tuple only when the model itself keeps extras, so every other model --
+    // and every dataclass -- hands down a plain dict, which extract_dicts (:145) declines to
+    // extract for that mode just as it declines one handed in from outside.
+    bool ser_fields_attrs_kind_mismatch() const {
+        return type == "model-fields" && extra_allowed && !g_ser_attrs_with_extras;
     }
 
     // fields.rs:163 hands a value extract_dicts declined to serialize_fallback
@@ -5103,7 +5150,8 @@ private:
         py::dict main;
         if (ser_fields_extract(value, main)) {
             if (g_ser_model_depth == 0) ser_reject_no_model();
-        } else if (g_ser_attrs_above && py_hasattr(value, "__dict__")) {
+        } else if (g_ser_attrs_above && !ser_fields_attrs_kind_mismatch() &&
+                   py_hasattr(value, "__dict__")) {
             // The dict a model's or a dataclass's delegation carries is the instance's own,
             // which the port reads here where Rust would have built a copy before the call
             // (model.rs:204 copies __dict__ and appends __pydantic_extra__ when the model keeps
@@ -5381,7 +5429,8 @@ private:
         py::dict main;
         if (ser_fields_extract(value, main)) {
             if (g_ser_model_depth == 0) ser_reject_no_model();
-        } else if (g_ser_attrs_above && py_hasattr(value, "__dict__")) {
+        } else if (g_ser_attrs_above && !ser_fields_attrs_kind_mismatch() &&
+                   py_hasattr(value, "__dict__")) {
             main = py::getattr(value, "__dict__").cast<py::dict>();
         } else {
             ser_fields_fallback(value);
@@ -6624,7 +6673,12 @@ static SerRef build_ser_impl(const py::dict& schema,
             } catch (...) { PyErr_Clear(); }
         }
         node->extra_allowed = extra_allowed;
-        if (!node->children.empty() && node->children[0])
+        node->extra_behavior_own = schema.contains("extra_behavior");
+        // The flag is mirrored onto the fields node that actually emits the extras, which is
+        // the mode Rust gives that node when its own schema names none -- has_extra (via
+        // from_schema_or_config) is asked of every node separately, so a nested fields node
+        // that does name one keeps it however its parent was configured.
+        if (!node->children.empty() && node->children[0] && !node->children[0]->extra_behavior_own)
             node->children[0]->extra_allowed = extra_allowed;
     }
 
