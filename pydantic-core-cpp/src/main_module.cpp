@@ -6104,6 +6104,48 @@ static bool ser_alias_choices(PyObject* src, std::vector<std::vector<SerPathStep
     return true;
 }
 
+// The config the builder was handed.  model.rs:116-121 and dataclass.rs:102-107 both say "models
+// ignore the parent config and always use the config from this model", so a model or dataclass
+// hands its own `config` down to the serializer it builds and every other builder passes on
+// whatever it was given (shared.rs:39); the answer reaches ExtraBehavior::from_schema_or_config
+// (build_tools.rs:180-198) as the fallback for a schema that names no `extra_behavior` of its own.
+static thread_local py::object g_ser_build_config;
+
+struct SerBuildCfgScope {
+    py::object saved;
+    explicit SerBuildCfgScope(py::object cfg) : saved(std::move(g_ser_build_config)) {
+        g_ser_build_config = std::move(cfg);
+    }
+    ~SerBuildCfgScope() { g_ser_build_config = std::move(saved); }
+};
+
+// build_tools.rs:180-198 read through build_tools.rs:15-31: the schema's `extra_behavior` answers
+// first, and only a schema that names no key at all lets the config's `extra_fields_behavior`
+// speak.  Naming the key None counts as naming it -- the extraction is to Option<str>, so None
+// extracts and the caller's default wins without the config being reached -- while anything but a
+// str is that extraction's TypeError and anything but the three answers is refused in the sentence
+// of whichever builder asked, which is why four builders call this and none of them agrees on when.
+static bool ser_extra_behavior_allow(const py::dict& drv, const std::string& type,
+                                    const py::object& config) {
+    static const std::string wrap = "` serializer:\n  ";
+    py::object behav;
+    if (drv.contains("extra_behavior")) {
+        behav = drv["extra_behavior"];
+    } else if (config.ptr() && PyDict_Check(config.ptr())) {
+        py::dict cfg = config.cast<py::dict>();
+        if (cfg.contains("extra_fields_behavior"))
+            behav = cfg["extra_fields_behavior"];
+    }
+    if (!behav || behav.is_none()) return false;
+    if (!PyUnicode_Check(behav.ptr()))
+        throw SchemaError("Error building `" + type + wrap + ser_downcast_typeerror(behav.ptr(), "str"));
+    std::string answer = behav.cast<std::string>();
+    if (answer == "allow") return true;
+    if (answer == "forbid" || answer == "ignore") return false;
+    throw SchemaError("Error building `" + type + wrap + "SchemaError: Invalid extra_behavior: `" +
+                      answer + "`");
+}
+
 static SerRef build_ser_impl(const py::dict& schema,
                         std::unordered_map<std::string, SerRef>& defs,
                         SerMemo& memo) {
@@ -6338,11 +6380,29 @@ static SerRef build_ser_impl(const py::dict& schema,
                 dataclass_fields_after_args = true;   // dataclass.rs:110, read below the args
             }
         } else if (type == "model-fields" || type == "typed-dict") {
+            // model.rs:42 and typed_dict.rs:40 ask the extra behavior before the `fields` either
+            // builder can do without, and model.rs:50-52 and typed_dict.rs:52-54 then answer a
+            // named `extras_schema` that the answer does not allow with a refusal of its own --
+            // named as None included, since the key being there is what the match looks at.
+            bool extra_allow = ser_extra_behavior_allow(drv, type, g_ser_build_config);
             req("fields", "dict");             // model.rs:47, typed_dict.rs:47
             req_named_fields(false, false);
+            if (drv.contains("extras_schema")) {
+                if (!extra_allow)
+                    throw SchemaError("Error building `" + type + wrap +
+                                      "SchemaError: extras_schema can only be used if extra_behavior=allow");
+                // Built as a plain child serializer, in this builder's name and with the config it
+                // was handed, so a schema below it that names nothing is refused; the port's fields
+                // walk emits its extras through its own fallback path, so the answer is only asked
+                // whether it builds at all.
+                build_ser_child(drv["extras_schema"], defs, memo, type);
+            }
         } else if (type == "dataclass-args") {
             req("fields", "list");             // dataclass.rs:36
             req_named_fields(true, false);
+            // dataclass.rs:39 asks the extra behavior after the list -- and, unlike the two
+            // builders above, never reads `extras_schema` at all, so one named here is kept.
+            ser_extra_behavior_allow(drv, type, g_ser_build_config);
         } else if (type == "named-tuple") {
             req("cls", "type");                // named_tuple.rs:42
             req("fields", "list");             // named_tuple.rs:48
@@ -7156,9 +7216,22 @@ static SerRef build_ser_impl(const py::dict& schema,
         if (schema.contains("cls")) {
             try { node->class_ = schema["cls"].cast<py::object>(); } catch (...) {}
         }
-        auto c = sub();
-        if (c) {
-            node->children.push_back(c);
+        {
+            // model.rs:116-121 and dataclass.rs:102-107: the model or dataclass replaces the
+            // config it was handed with its own `config` key -- None when it names none -- and
+            // hands that to the sub-serializer, so what a fields builder below answers of
+            // `extra_fields_behavior` is this model's config and nobody else's.  A typed-dict
+            // stands in the same branch for other reasons and inherits like everyone else.
+            py::object own_cfg = g_ser_build_config;
+            if (type == "model" || type == "dataclass") {
+                own_cfg = (schema.contains("config") && PyDict_Check(schema["config"].ptr()))
+                              ? schema["config"] : py::object();
+            }
+            SerBuildCfgScope cfg_scope(own_cfg);
+            auto c = sub();
+            if (c) {
+                node->children.push_back(c);
+            }
         }
         if (dataclass_fields_after_args) {
             static const std::string wrap = "` serializer:\n  ";
@@ -7176,25 +7249,38 @@ static SerRef build_ser_impl(const py::dict& schema,
         }
     }
 
+    // model.rs:128 asks has_extra of the model's own schema and the config from its own `config`
+    // key once the sub-serializer has been built, so an answer that is none of the three is
+    // complained of in the model's name here rather than by the fields builder under it.  The
+    // dataclass node asks nothing of its own (dataclass.rs:102-122), which is why the same wrong
+    // answer passes there.
+    if (original_type == "model")
+        ser_extra_behavior_allow(schema, type,
+                                 schema.contains("config") ? schema["config"] : py::object());
+
     // Rust ModelSerializer::has_extra - the model's own config decides whether
     // __pydantic_extra__ is serialized. The flag lives on the model node and is
     // mirrored onto its fields node, which is what actually emits the extras.
     if (original_type == "model" || original_type == "model-fields" ||
         original_type == "typed-dict" || original_type == "dataclass") {
         // ExtraBehavior::from_schema_or_config (build_tools.rs:181): the schema's own
-        // `extra_behavior` wins and the config's `extra_fields_behavior` is the fallback.
+        // `extra_behavior` wins and the config's `extra_fields_behavior` is the fallback -- of
+        // the config *this node was built with*, which is the model's own `config` key for a
+        // model (model.rs:116-128) and whatever was threaded down to it for a fields builder,
+        // including the config a SchemaSerializer was made with over a hand-written schema.  A
+        // dataclass node is asked nothing of its own (dataclass.rs:102-122), so it keeps reading
+        // the key its own schema names without the config being reached at all.
         bool extra_allowed = false;
-        try {
-            std::string behavior = schema["extra_behavior"].cast<std::string>();
-            extra_allowed = behavior == "allow";
-        } catch (...) { PyErr_Clear(); }
-        if (!extra_allowed) {
+        if (original_type == "dataclass") {
             try {
-                py::object cfg = schema["config"];
-                if (py::isinstance<py::dict>(cfg)) {
-                    extra_allowed = cfg.cast<py::dict>()["extra_fields_behavior"].cast<std::string>() == "allow";
-                }
+                std::string behavior = schema["extra_behavior"].cast<std::string>();
+                extra_allowed = behavior == "allow";
             } catch (...) { PyErr_Clear(); }
+        } else {
+            extra_allowed = ser_extra_behavior_allow(
+                schema, type,
+                original_type == "model" && schema.contains("config") ? schema["config"]
+                                                                     : g_ser_build_config);
         }
         node->extra_allowed = extra_allowed;
         node->extra_behavior_own = schema.contains("extra_behavior");
@@ -7290,6 +7376,11 @@ public:
         : schema_(schema) {
         std::unordered_map<std::string, SerRef> defs;
         SerMemo memo;
+        // SerializerConfig::from_config (config.rs:40) reads the config once for the whole build,
+        // and every builder is handed it until a model replaces it, so the config the top-level
+        // build is asked with is this serializer's `extra_fields_behavior` fallback.  Both of
+        // the constructors that take a config ask, the one that ignores `_use_prebuilt` too.
+        SerBuildCfgScope cfg_scope(cfg.has_value() ? py::object(*cfg) : py::object());
         ser_ = build_ser(schema, defs, memo);
         if (cfg.has_value()) {
             try {
