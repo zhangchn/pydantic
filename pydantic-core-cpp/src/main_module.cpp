@@ -6149,6 +6149,22 @@ static SerRef build_ser_impl(const py::dict& schema,
             req("formatting_string", "str");   // format.rs:77, empty or not
         } else if (type == "definition-ref") {
             req("schema_ref", "str");          // definitions.rs:66
+        } else if (type == "enum") {
+            // enum_.rs:36 -- `sub_type` is extracted as an Option<String> before `cls` is looked
+            // at: a str outside the three names is what the builder complains of first, and a
+            // value that is not a str at all -- None included, only an absent key is a None --
+            // fails on that extraction instead.
+            if (drv.contains("sub_type")) {
+                py::object st = drv["sub_type"];
+                if (!st || !PyUnicode_Check(st.ptr()))
+                    throw SchemaError("Error building `" + type + wrap + ser_downcast_typeerror(st.ptr(), "str"));
+                std::string sub;
+                try { sub = st.cast<std::string>(); } catch (...) { PyErr_Clear(); }
+                if (sub != "int" && sub != "str" && sub != "float")
+                    throw SchemaError("Error building `" + type + wrap + "SchemaError: `sub_type` "
+                                      "must be one of: 'int', 'str', 'float' or None");
+            }
+            req("cls", "type");                // enum_.rs:46, extracted as a type
         } else if (type == "model") {
             req("cls", "type");                // model.rs:119, extracted as a type
             if (!prebuilt_class())
