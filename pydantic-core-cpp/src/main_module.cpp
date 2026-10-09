@@ -5882,6 +5882,16 @@ static SerRef build_ser(const py::dict& schema,
 // extracted the way pyo3 extracts usize -- PyNumber_Index's own message for a non-index item,
 // and pyo3's OverflowError wordings for a negative index or one past u64::MAX -- all wrapped
 // into the build error the way CombinedSerializer::build wraps a child's failure.
+// What pyo3 says when a value is not the type an extraction asked for: the object's type
+// name, with " object" after every name but None's -- PyNone's type name is "None", and the
+// wording that follows carries no "object" for it.
+static std::string ser_downcast_typeerror(PyObject* v, const char* want) {
+    std::string label = (v == nullptr || v == Py_None)
+        ? std::string("'None'")
+        : std::string("'") + v->ob_type->tp_name + "' object";
+    return "TypeError: " + label + " is not an instance of '" + want + "'";
+}
+
 static void ser_check_unexpected_kw(const char* fname, const std::vector<std::string>& allowed,
                                    const py::kwargs& kwargs) {
     for (auto item : kwargs) {
@@ -6006,9 +6016,8 @@ static SerRef build_ser_impl(const py::dict& schema,
         }
         PyObject* listed = expected.ptr();
         if (!PyList_Check(listed)) {
-            throw SchemaError("Error building `literal` serializer:\n  TypeError: '" +
-                              std::string(listed->ob_type->tp_name) +
-                              "' object is not an instance of 'list'");
+            throw SchemaError("Error building `literal` serializer:\n  " +
+                              ser_downcast_typeerror(listed, "list"));
         }
         if (PyList_GET_SIZE(listed) == 0) {
             throw SchemaError("Error building `literal` serializer:\n"
@@ -6347,9 +6356,7 @@ static SerRef build_ser_impl(const py::dict& schema,
             throw SchemaError("Error building `union" + wrap + "KeyError: 'choices'");
         }
         if (!PyList_Check(choices.ptr()))
-            throw SchemaError("Error building `union" + wrap + "TypeError: '" +
-                              std::string(choices.ptr()->ob_type->tp_name) +
-                              "' object is not an instance of 'list'");
+            throw SchemaError("Error building `union" + wrap + ser_downcast_typeerror(choices.ptr(), "list"));
         if (PyList_GET_SIZE(choices.ptr()) == 0)
             throw SchemaError("Error building `union" + wrap +
                               "SchemaError: One or more union choices required");
@@ -6361,9 +6368,7 @@ static SerRef build_ser_impl(const py::dict& schema,
                 ch = PyTuple_GET_ITEM(ch, 0);
             }
             if (!PyDict_Check(ch))
-                throw SchemaError("Error building `union" + wrap + "TypeError: '" +
-                                  std::string(ch->ob_type->tp_name) +
-                                  "' object is not an instance of 'dict'");
+                throw SchemaError("Error building `union" + wrap + ser_downcast_typeerror(ch, "dict"));
             node->children.push_back(build_ser(py::reinterpret_borrow<py::dict>(ch), defs, memo));
         }
     }
