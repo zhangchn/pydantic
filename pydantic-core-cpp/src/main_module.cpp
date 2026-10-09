@@ -7266,12 +7266,6 @@ static SerRef build_ser_impl(const py::dict& schema,
                         throw SchemaError("Error building `" + type + wrap +
                                           ser_downcast_typeerror(return_schema.ptr(), "dict"));
                     node->computed_fields_.insert(prop);
-                    // Computed field alias (from alias generator): serialization_alias takes precedence
-                    if (cf.contains("serialization_alias")) {
-                        node->field_aliases[prop] = cf["serialization_alias"].cast<std::string>();
-                    } else if (cf.contains("alias")) {
-                        node->field_aliases[prop] = cf["alias"].cast<std::string>();
-                    }
                     // Computed field serialization_exclude_if (Field(exclude_if=...))
                     if (cf.contains("serialization_exclude_if")) {
                         py::object eif = cf["serialization_exclude_if"];
@@ -7284,6 +7278,19 @@ static SerRef build_ser_impl(const py::dict& schema,
                     // schema error is carried as `Field `x`:`.
                     node->fields[prop] = build_ser_child(return_schema, defs, memo, type,
                                                         "Computed field `" + prop + "`:\n  ");
+                    // computed_fields.rs:101-102: the alias is asked once the return schema has
+                    // been built, and it is a str or no answer at all -- an entry that names it
+                    // None is refused, and one that leaves it out is named by its own property.
+                    // `serialization_alias` is a plain field's key (model.rs:69) and is never
+                    // asked of a computed one, so an entry that names only that keeps its
+                    // property name.
+                    if (cf.contains("alias")) {
+                        py::object alias_val = cf["alias"];
+                        if (!PyUnicode_Check(alias_val.ptr()))
+                            throw SchemaError("Error building `" + type + wrap +
+                                              ser_downcast_typeerror(alias_val.ptr(), "str"));
+                        node->field_aliases[prop] = alias_val.cast<std::string>();
+                    }
                     node->field_order.push_back(prop);
                 }
             }
