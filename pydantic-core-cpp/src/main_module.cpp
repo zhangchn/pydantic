@@ -6329,14 +6329,39 @@ static SerRef build_ser_impl(const py::dict& schema,
     }
 
     if (type == "union") {
+        // union.rs:38-48 reads `choices` with get_as_req, so a schema without the key or with
+        // anything but a list in it fails the build on the extraction's own error, and
+        // from_choices (:346-350) refuses a list with nothing in it -- a union is never built
+        // to try no choices at all. A choice is a schema dict, or the first item of a tuple,
+        // and it is cast to one before the build, so the cast's TypeError is the union's too.
+        static const std::string wrap = "` serializer:\n  ";
+        py::object choices;
         try {
-            for (auto ch : schema["choices"].cast<py::list>()) {
-                if (py::isinstance<py::tuple>(ch)) {
-                    auto t = ch.cast<py::tuple>();
-                    node->children.push_back(build_ser(t[0].cast<py::dict>(), defs, memo));
-                } else node->children.push_back(build_ser(ch.cast<py::dict>(), defs, memo));
+            choices = schema["choices"];
+        } catch (const py::error_already_set&) {
+            PyErr_Clear();
+            throw SchemaError("Error building `union" + wrap + "KeyError: 'choices'");
+        }
+        if (!PyList_Check(choices.ptr()))
+            throw SchemaError("Error building `union" + wrap + "TypeError: '" +
+                              std::string(choices.ptr()->ob_type->tp_name) +
+                              "' object is not an instance of 'list'");
+        if (PyList_GET_SIZE(choices.ptr()) == 0)
+            throw SchemaError("Error building `union" + wrap +
+                              "SchemaError: One or more union choices required");
+        for (Py_ssize_t i = 0; i < PyList_GET_SIZE(choices.ptr()); ++i) {
+            PyObject* ch = PyList_GET_ITEM(choices.ptr(), i);
+            if (PyTuple_Check(ch)) {
+                if (PyTuple_GET_SIZE(ch) == 0)
+                    throw SchemaError("Error building `union" + wrap + "IndexError: tuple index out of range");
+                ch = PyTuple_GET_ITEM(ch, 0);
             }
-        } catch (...) {}
+            if (!PyDict_Check(ch))
+                throw SchemaError("Error building `union" + wrap + "TypeError: '" +
+                                  std::string(ch->ob_type->tp_name) +
+                                  "' object is not an instance of 'dict'");
+            node->children.push_back(build_ser(py::reinterpret_borrow<py::dict>(ch), defs, memo));
+        }
     }
 
     if (type == "tagged-union") {
