@@ -1423,6 +1423,53 @@ static void ser_fail_items(size_t expected, size_t got) {
     throw py::error_already_set();
 }
 
+// What a failure reads as once a union has collected it.  A collected
+// PydanticSerializationUnexpectedValue is registered verbatim and any other error is
+// registered as its Display (union.rs:421-436), which names the class in front of the
+// message: a choice whose function raised arrives as "PydanticSerializationError: Error
+// calling function `boom`: ValueError: boom" next to a sibling's "Expected `str` - ...".
+static std::string ser_error_text(const std::exception_ptr& e) {
+    std::string message;
+    try {
+        std::rethrow_exception(e);
+    } catch (const py::error_already_set& err) {
+        try {
+            message = py::str(err.value()).cast<std::string>();
+        } catch (const py::error_already_set&) {
+            PyErr_Clear();
+            message = "<unrepresentable>";
+        }
+        try {
+            py::object psuv = py::module_::import("pydantic_core_cpp").attr("PydanticSerializationUnexpectedValue");
+            if (PyObject_IsInstance(err.value().ptr(), psuv.ptr()) == 1) return message;
+        } catch (const py::error_already_set&) { PyErr_Clear(); }
+        std::string cls;
+        try {
+            py::object t = py::reinterpret_borrow<py::object>(err.value().get_type());
+            cls = py::str(t.attr("__name__")).cast<std::string>();
+        } catch (const py::error_already_set&) { PyErr_Clear(); cls = "<unknown python object>"; }
+        return cls + ": " + message;
+    } catch (const std::exception& err) {
+        return err.what();
+    } catch (...) {
+        return "<unknown python object>";
+    }
+}
+
+// The single error a nested union hands back: every mismatch its choices collected, joined
+// by newlines (union_serialization_unexpected_value, union.rs:411-418).
+static void ser_fail_joined(const std::vector<std::string>& messages) {
+    std::string joined;
+    for (size_t i = 0; i < messages.size(); ++i) {
+        if (i) joined += "\n";
+        joined += messages[i];
+    }
+    py::object exc_type =
+        py::module_::import("pydantic_core_cpp").attr("PydanticSerializationUnexpectedValue");
+    PyErr_SetString(exc_type.ptr(), joined.c_str());
+    throw py::error_already_set();
+}
+
 // Result of applying an include/exclude filter to a key/index
 struct SerFilterResult {
     bool omit = false;                 // true = drop the field/item
@@ -2437,8 +2484,15 @@ struct SerNode {
         }
         int match = ser_type_match(type, value);
         if (match != 0) return match > 0;
-        // IsType::Subclass: SerCheck::Strict refuses it, SerCheck::Lax allows it.
-        return g_ser_check == 2;
+        // IsType::Subclass is refused by two serializers and nothing else, both of them only
+        // while the check is strict: simple.rs:126 (int, bool) and float.rs:96.  A node whose
+        // Subclass arm reads the run's mode instead -- string.rs:47 has no check arm at all,
+        // so a str subclass answers a str node in the first round of a union and registers
+        // nothing -- takes the value at any level, and at SerCheck::Lax even int and float
+        // take it: the lax round exists to let exactly these through.
+        if (g_ser_check != 1) return true;
+        return !(type == "int" || type == "int-constrained" || type == "bool" || type == "float" ||
+                 type == "float-constrained");
     }
 
     // Feed a custom serializer function's result through its declared return
@@ -2455,6 +2509,94 @@ struct SerNode {
         }
         return return_ser->to_python(result, json_mode, exc_none, round_trip, include, exclude, by_alias,
                                      exclude_unset, exclude_defaults, context);
+    }
+
+    // UnionChoices::serialize (union.rs:366-400) -- the rounds both walks pick a choice with.
+    // One pass left to right at the initial check level, strict at the top of a run and the
+    // caller's own level while an outer union is already checking its choices (the level a
+    // nested union keeps is why a subclass value deep inside a choice is refused rather than
+    // accepted), with every failure collected instead of dropped.  A nested union gets no
+    // second round: it hands the collected mismatches back as one error, which is what tells
+    // the outer union this choice is not the one.  A top-level union then retries once while
+    // subclasses are allowed, and only if some choice would answer differently at that level
+    // at all, discarding that pass's errors; if that failed too it registers every mismatch
+    // the first pass collected as a warning and says it picked nothing, which is the point
+    // where the caller answers for the value by inference (union.rs:127/:279 map_or_else,
+    // Ok(None) => infer_serialize).  Note what that leaves uncollected: a choice that
+    // "succeeds" by inferring the value is a success, so the value it hands back -- a plain
+    // object at the end of a lax round -- is what gets written.
+    // The choices a union node runs its rounds over: an untagged union keeps them in
+    // children, a tagged one beside its tag map, since its own lookup is by tag.
+    const std::vector<SerRef>& union_choices() const {
+        return type == "tagged-union" ? tagged_left_to_right : children;
+    }
+
+    std::optional<py::object> union_rounds(const py::object& value, bool json_mode, bool exc_none,
+                                           bool round_trip, const py::object& include, const py::object& exclude,
+                                           bool by_alias, bool exclude_unset, bool exclude_defaults,
+                                           const py::object& context) const {
+        const bool top = (g_ser_check == 0);
+        std::vector<std::string> errors;
+        {
+            SerCheckScope scope(top ? 1 : g_ser_check);
+            for (auto& c : union_choices()) {
+                try {
+                    return c->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias,
+                                        exclude_unset, exclude_defaults, context);
+                } catch (...) {
+                    errors.push_back(ser_error_text(std::current_exception()));
+                }
+            }
+        }
+        if (!top) ser_fail_joined(errors);
+        if (union_retries_lax()) {
+            SerCheckScope scope(2);
+            for (auto& c : union_choices()) {
+                try {
+                    return c->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias,
+                                        exclude_unset, exclude_defaults, context);
+                } catch (...) {
+                }
+            }
+        }
+        for (const auto& msg : errors) ser_warn_register("PydanticSerializationUnexpectedValue(" + msg + ")");
+        return std::nullopt;
+    }
+
+    // UnionChoices::retry_with_lax_check (union.rs:350): worth trying again only if some
+    // choice would answer differently while subclasses are allowed.
+    bool union_retries_lax() const {
+        for (const auto& c : union_choices()) {
+            if (c && c->retry_with_lax_check()) return true;
+        }
+        return false;
+    }
+
+    // TypeSerializer::retry_with_lax_check, whose default is false (shared.rs:444-449): would
+    // this node take a value it now refuses once subclasses are allowed?  A model, a
+    // dataclass, either sequence node and an int node say yes (model.rs:292, dataclass.rs:206,
+    // tuple.rs:150, named_tuple.rs:153, simple.rs:184); a container asks its item and a
+    // nullable, default, definition, enum, function or union node asks what it wraps; the rest
+    // -- str, float, bool, bytes, dict, set, a typed dict, any, literal, an isinstance check
+    // -- have one answer and say no.  The depth cap is Rust's OnceCell: a recursive schema
+    // asks itself, and the answer to the question already being asked is the default one.
+    bool retry_with_lax_check(int depth = 0) const {
+        if (depth > 32) return false;
+        if (type == "model" || type == "dataclass" || type == "tuple" || type == "named-tuple" ||
+            type == "int" || type == "int-constrained")
+            return true;
+        if (type == "list" || type == "deque")
+            return !children.empty() && children[0] && children[0]->retry_with_lax_check(depth + 1);
+        if (type == "nullable" || type == "nullable-union" || type == "with-default" || type == "default" ||
+            type == "definition-ref" || type == "definitions" || type == "missing-sentinel" || type == "enum" ||
+            type == "union" || type == "tagged-union" || type == "function-after" || type == "function-before" ||
+            type == "function-plain" || type == "function-wrap") {
+            // A tagged union asks its variants, which it keeps beside the tag map.
+            for (const auto& c : union_choices()) {
+                if (c && c->retry_with_lax_check(depth + 1)) return true;
+            }
+        }
+        return false;
     }
 
     py::object to_python(const py::object& value, bool json_mode, bool exc_none, bool round_trip = false,
@@ -2511,7 +2653,7 @@ struct SerNode {
         // subclass that defines __int__ arrives as its digits, a float subclass that defines
         // __float__ as the double it stores and a str subclass as the text it holds; an int past
         // the range of a double raises through the float arm here, which is what the wheel does too.
-        if (g_ser_check == 0 && json_mode &&
+        if (g_ser_check != 1 && json_mode &&
             (type == "int" || type == "int-constrained" || type == "float" || type == "float-constrained" ||
              type == "str" || type == "string" || type == "str-constrained") &&
             ser_type_match(type, value) == 0) {
@@ -2551,32 +2693,11 @@ struct SerNode {
             if (!children.empty()) return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
         }
         if (type == "union") {
-            SerAttemptScope attempt;
-            // Rust UnionChoices::serialize: an inner union does not run its own
-            // strict/lax rounds while an outer union is checking choices; it gets
-            // one pass at the current check level and the failure propagates so
-            // the outer union can move on to its next choice. Running every
-            // round per nesting level re-ran each choice's serializers.
-            if (g_ser_check != 0) {
-                std::exception_ptr last;
-                for (auto& c : children) {
-                    try { return c->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context); }
-                    catch (...) { last = std::current_exception(); }
-                }
-                if (last) std::rethrow_exception(last);
-                throw std::runtime_error("Unexpected value for serializer union");
-            }
-            // Top level: try the choices left to right with strict class checks,
-            // then again with lax (isinstance) checks.
-            for (int level = 1; level <= 2; level++) {
-                SerCheckScope scope(level);
-                for (auto& c : children) {
-                    try { return c->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context); } catch (...) {}
-                }
-            }
-            for (auto& c : children) {
-                try { return c->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context); } catch (...) {}
-            }
+            // Rust's UnionSerializer::to_python (union.rs:127): the rounds pick a choice and
+            // answer with it; when none did, inference answers for the value itself.
+            auto picked = union_rounds(value, json_mode, exc_none, round_trip, include, exclude, by_alias,
+                                       exclude_unset, exclude_defaults, context);
+            return picked ? *picked : serialize_any_value(value, exc_none, round_trip, json_mode, include, exclude);
         }
         if (type == "tagged-union" && !tagged_left_to_right.empty()) {
             SerAttemptScope attempt;
@@ -2597,6 +2718,12 @@ struct SerNode {
                         try {
                             return cit->second->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
                         } catch (const py::error_already_set&) {
+                            // Rust tagged_union_serialize (union.rs:305-312): only a tagged
+                            // union that is itself the top-level one keeps a failed variant
+                            // to itself; while an outer union is checking its choices the
+                            // variant's error propagates, so that union moves on to its next
+                            // choice instead of paying for this one's second attempt here.
+                            if (g_ser_check != 0) throw;
                             PyErr_Clear();
                             ser_warn_message("Pydantic serialization failed for tagged union variant '" + tag + "'", value);
                         }
@@ -2615,9 +2742,11 @@ struct SerNode {
                 try {
                     return it->second->to_python(value, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
                 } catch (const py::error_already_set&) {
+                    // See the callable arm: a failed variant stays an error while an
+                    // outer union is checking, and only a top-level tagged union
+                    // keeps it, warns for the matched variant, and falls through.
+                    if (g_ser_check != 0) throw;
                     PyErr_Clear();
-                    // Rust warns for the matched variant and falls through to
-                    // inference rather than trying unrelated variants silently.
                     ser_warn_message("Pydantic serialization failed for tagged union variant '" + tag + "'", value);
                 }
             }
@@ -3249,28 +3378,14 @@ struct SerNode {
             if (!children.empty()) return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
         }
         if (type == "union") {
-            SerAttemptScope attempt;
-            // Rust UnionChoices::serialize: one pass at the current level and
-            // propagate when an outer union is already checking choices.
-            if (g_ser_check != 0) {
-                std::exception_ptr last;
-                for (auto& c : children) {
-                    try { return c->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context); }
-                    catch (...) { last = std::current_exception(); }
-                }
-                if (last) std::rethrow_exception(last);
-                throw std::runtime_error("Unexpected value for serializer union");
-            }
-            // Top level: strict pass, lax pass, then uncheck.
-            for (int level = 1; level <= 2; level++) {
-                SerCheckScope scope(level);
-                for (auto& c : children) {
-                    try { return c->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context); } catch (...) {}
-                }
-            }
-            for (auto& c : children) {
-                try { return c->to_json(value, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context); } catch (...) {}
-            }
+            // Rust's UnionSerializer::serde_serialize (union.rs:96-105) picks with the
+            // python-returning walk and then writes whatever that walk answered by inference,
+            // with the filters emptied: the json walk is never asked to guess a choice, so a
+            // choice that ends in inference writes the value's own form and not the guessed
+            // node's, and a run that picked nothing writes the value it was given.
+            auto picked = union_rounds(value, true, exc_none, round_trip, include, exclude, by_alias,
+                                       exclude_unset, exclude_defaults, context);
+            return infer_json(picked ? *picked : value, ensure_ascii, indent, py::none(), py::none());
         }
         if (type == "dict" && !children.empty()) {
             std::string out = "{";
