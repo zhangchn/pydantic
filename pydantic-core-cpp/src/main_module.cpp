@@ -337,14 +337,24 @@ struct SerAttrsScope {
     SerAttrsScope& operator=(const SerAttrsScope&) = delete;
 };
 
+// Rust keeps one warning collector for a whole run: infer.rs:671 and the trampoline only
+// swap the config, so a value handed to its own __pydantic_serializer__ registers what it
+// wants said in the collector that is already open, and the entry that opened it reports
+// them all together, in registration order, as a single UserWarning.  A re-entry therefore
+// asks the run it is about to make to join that collector rather than open -- and flush --
+// its own, which is what puts the delegated run's lines before the outer run's answer.
+static thread_local bool g_ser_join_warnings = false;
+
 struct SerNestedCall {
     const bool saved_pending = g_ser_delegate_pending;
     const bool saved_serialize_unknown = g_ser_delegate_serialize_unknown;
-    SerNestedCall() { ++g_ser_json_nested; }
+    const bool saved_join_warnings = g_ser_join_warnings;
+    SerNestedCall() { ++g_ser_json_nested; g_ser_join_warnings = true; }
     ~SerNestedCall() {
         --g_ser_json_nested;
         g_ser_delegate_pending = saved_pending;
         g_ser_delegate_serialize_unknown = saved_serialize_unknown;
+        g_ser_join_warnings = saved_join_warnings;
     }
     SerNestedCall(const SerNestedCall&) = delete;
     SerNestedCall& operator=(const SerNestedCall&) = delete;
@@ -1271,9 +1281,17 @@ static SerWarnMode ser_warnings_mode(const py::object& warnings) {
     return SerWarnMode::Warn;
 }
 
-static void ser_warn_enter(const py::object& warnings) {
+// Answering false means "somebody else's collector is already open, write into that one",
+// and the caller must not close it.  The flag is spent here so a Python callable the
+// delegated run goes on to call cannot join the collector by accident: only the run the
+// re-entry itself produced may, the way Rust's user-level to_python still starts fresh.
+static bool ser_warn_enter(const py::object& warnings) {
+    bool join = g_ser_join_warnings;
+    g_ser_join_warnings = false;
+    if (join && !ser_warn_stack().empty()) return false;
     SerWarnMode m = ser_warnings_mode(warnings);
     ser_warn_stack().push_back(SerWarnFrame{m != SerWarnMode::None, m == SerWarnMode::Error, {}});
+    return true;
 }
 
 static void ser_warn_leave(bool discard) {
@@ -7724,25 +7742,25 @@ public:
         if (serialize_as_any && !g_ser_infer_applied) {
             g_ser_infer_applied = true;
             struct InferGuard { ~InferGuard() { g_ser_infer_applied = false; } } infer_guard;
-            ser_warn_enter(warnings);
+            const bool warn_owned = ser_warn_enter(warnings);
             try {
                 py::object result = SerNode::serialize_any_value(
                     value, exc_none, round_trip, mode && *mode == "json", inc, exc);
-                ser_warn_leave(false);
+                if (warn_owned) ser_warn_leave(false);
                 return result;
             } catch (...) {
-                ser_warn_leave(true);
+                if (warn_owned) ser_warn_leave(true);
                 throw;
             }
         }
 
-        ser_warn_enter(warnings);
+        const bool warn_owned = ser_warn_enter(warnings);
         try {
             py::object result = ser_->to_python(value, mode && *mode == "json", exc_none, round_trip, inc, exc, use_alias, exclude_unset, exclude_defaults, context);
-            ser_warn_leave(false);  // may emit UserWarning / raise PydanticSerializationError
+            if (warn_owned) ser_warn_leave(false);  // may emit UserWarning / raise PydanticSerializationError
             return result;
         } catch (...) {
-            ser_warn_leave(true);  // discard warnings collected before the error
+            if (warn_owned) ser_warn_leave(true);  // discard warnings collected before the error
             throw;
         }
     }
@@ -7759,13 +7777,14 @@ public:
                       bool serialize_as_any, std::optional<bool> polymorphic, py::object context) const {
         SerJsonRun run;
         py::bytes encoded;
+        bool warn_owned = true;
         try {
             // to_json_inner leaves the warning frame open when the encoding succeeded, so
             // the flush below is the only thing that closes it and it happens past this
             // mapping.
             encoded = to_json_inner(value, indent, ea, include, exclude, by_alias, exclude_unset, exclude_defaults,
                                     exc_none, exclude_computed_fields, round_trip, warnings, fallback,
-                                    serialize_as_any, polymorphic, context);
+                                    serialize_as_any, polymorphic, context, warn_owned);
         } catch (py::error_already_set& e) {
             std::string named;
             if (!ser_json_name_python_error(e, &named)) throw;
@@ -7777,7 +7796,7 @@ public:
         // not the serialization error the encoding step would have named it.  Flushing here
         // rather than inside the encoding is what keeps that difference; a run that failed
         // never reaches it, and its warnings are dropped the way Rust drops them.
-        ser_warn_leave(false);  // may emit UserWarning / raise PydanticSerializationError
+        if (warn_owned) ser_warn_leave(false);  // may emit UserWarning / raise PydanticSerializationError
         return encoded;
     }
 
@@ -7785,7 +7804,8 @@ public:
                       std::optional<py::object> include, std::optional<py::object> exclude,
                       std::optional<bool> by_alias, bool exclude_unset, bool exclude_defaults, bool exc_none,
                       bool exclude_computed_fields, bool round_trip, py::object warnings, std::optional<py::object> fallback,
-                      bool serialize_as_any, std::optional<bool> polymorphic, py::object context) const {
+                      bool serialize_as_any, std::optional<bool> polymorphic, py::object context,
+                      bool& warn_owned) const {
         
         g_exclude_computed_fields = exclude_computed_fields;
         g_polymorphic_serialization = polymorphic;  // reset per call (None -> nullopt)
@@ -7820,23 +7840,23 @@ public:
         if (serialize_as_any && !g_ser_infer_applied) {
             g_ser_infer_applied = true;
             struct InferGuard { ~InferGuard() { g_ser_infer_applied = false; } } infer_guard;
-            ser_warn_enter(warnings);
+            warn_owned = ser_warn_enter(warnings);
             try {
                 std::string json = SerNode::infer_json(value, e, -1, inc, exc);
                 if (indent.has_value()) json = json_pretty_print(json, static_cast<int>(*indent));
                 return py::bytes(std::move(json));  // the warning frame is left for the caller
             } catch (...) {
-                ser_warn_leave(true);
+                if (warn_owned) ser_warn_leave(true);
                 throw;
             }
         }
-        ser_warn_enter(warnings);
+        warn_owned = ser_warn_enter(warnings);
         try {
             std::string json = ser_->to_json(value, e, -1, round_trip, inc, exc, use_alias, exclude_unset, exclude_defaults, exc_none, context);
             if (indent.has_value()) json = json_pretty_print(json, static_cast<int>(*indent));
             return py::bytes(std::move(json));  // the warning frame is left for the caller
         } catch (...) {
-            ser_warn_leave(true);  // discard warnings collected before the error
+            if (warn_owned) ser_warn_leave(true);  // discard warnings collected before the error
             throw;
         }
     }
