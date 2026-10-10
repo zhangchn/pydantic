@@ -84,6 +84,12 @@ struct SerCallExtra {
     // Rust SerMode: "python", "json", or any other caller-supplied string.
     std::string mode = "python";
     py::object by_alias = py::none();
+    // What the caller said about warnings, kept as it was handed.  The entry point's own
+    // default is "warn" -- Rust's signature default (mod.rs:88), so forwarding this when the
+    // caller said nothing says the same thing -- and a value that brings its own serializer is
+    // delegated through that entry point, which would otherwise stop hearing a run that said
+    // "none": Rust hands such a value the very state the run collects into (infer.rs:667).
+    py::object warnings = py::str("warn");
     bool exclude_unset = false;
     bool exclude_defaults = false;
     bool exclude_none = false;
@@ -113,6 +119,7 @@ struct SerCallExtra {
     ~SerCallExtra() {
         if (!Py_IsInitialized() || !PyGILState_Check()) {
             by_alias.release();
+            warnings.release();
             fallback.release();
             context.release();
         }
@@ -166,6 +173,7 @@ static void ser_apply_delegated_extra() {
 static py::dict ser_extra_forwarded() {
     py::dict kw;
     if (!g_ser_extra.by_alias.is_none()) kw["by_alias"] = g_ser_extra.by_alias;
+    kw["warnings"] = g_ser_extra.warnings;
     kw["exclude_unset"] = g_ser_extra.exclude_unset;
     kw["exclude_defaults"] = g_ser_extra.exclude_defaults;
     kw["exclude_none"] = g_ser_extra.exclude_none;
@@ -2352,6 +2360,10 @@ struct SerNode {
     bool root_model = false;
     // For model/dataclass serializers: expected Python class (union discrimination)
     py::object class_;
+    // The serializer a finished class already carries, for a node that was answered by one
+    // instead of being built (shared.rs:227-232 -> prebuilt.rs:19).  None for every node that
+    // was built from its own schema.
+    py::object prebuilt_ser = py::none();
     // Rust NamedTupleSerializer::name - the class named in a wrong-type warning.
     std::string class_name;
     // Polymorphic serialization enabled via schema config (Rust enabled_from_config)
@@ -2425,6 +2437,38 @@ struct SerNode {
         visit_ref(visit, arg, default_factory);
         visit_ref(visit, arg, class_);
         visit_ref(visit, arg, literal_py);
+        visit_ref(visit, arg, prebuilt_ser);
+    }
+
+    // Rust's PrebuiltSerializer owns no serializer of its own: the value goes to the class's
+    // serializer whole -- root models included, since that serializer knows its own root --
+    // and only the config is swapped for the run it starts (infer.rs:662-673), so every other
+    // constant of this run travels with the value.  The same boundary infer crosses for a
+    // value that brings its own serializer, json form included: the delegated serializer
+    // prints its own JSON and this run splices the string in, indent applied at the end.
+    py::object prebuilt_to_python(const py::object& value, bool json_mode, bool exc_none,
+                                  bool round_trip, const py::object& include,
+                                  const py::object& exclude) const {
+        SerNestedCall nested;
+        py::dict kw = ser_extra_forwarded();
+        kw["exclude_none"] = exc_none;
+        kw["round_trip"] = round_trip;
+        kw["include"] = include;
+        kw["exclude"] = exclude;
+        return prebuilt_ser.attr("to_python")(value, py::arg("mode") = (json_mode ? "json" : "python"), **kw);
+    }
+
+    std::string prebuilt_to_json(const py::object& value, bool ensure_ascii, bool exc_none,
+                                 bool round_trip, const py::object& include,
+                                 const py::object& exclude) const {
+        SerNestedCall nested;
+        py::dict kw = ser_extra_forwarded();
+        kw["ensure_ascii"] = ensure_ascii;
+        kw["exclude_none"] = exc_none;
+        kw["round_trip"] = round_trip;
+        kw["include"] = include;
+        kw["exclude"] = exclude;
+        return prebuilt_ser.attr("to_json")(value, **kw).cast<std::string>();
     }
 
     // Copy content from another node into this one (preserves shared_ptr identity)
@@ -2438,6 +2482,7 @@ struct SerNode {
         field_exclude_if = other.field_exclude_if;
         field_excluded = other.field_excluded;
         computed_fields_ = other.computed_fields_;
+        prebuilt_ser = other.prebuilt_ser;
         py_func = other.py_func;
         func_name = other.func_name;
         info_arg = other.info_arg;
@@ -2962,7 +3007,8 @@ struct SerNode {
             }
         }
         // Delegate model/dataclass/typed-dict to inner serializer
-        if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
+        if ((type == "model" || type == "dataclass" || type == "typed-dict") &&
+            (!children.empty() || !prebuilt_ser.is_none())) {
             SerModelScope model_scope;
             // Only a model that keeps extras of its own hands down a tuple, and a dataclass
             // never does (dataclass.rs:140 builds the attribute dict).
@@ -3006,6 +3052,11 @@ struct SerNode {
                     return serialize_any_value(value, exc_none, round_trip, json_mode, include, exclude);
                 }
             }
+            // The compatibility test above was made inside the delegated serializer in Rust
+            // (prebuilt.rs:48 hands the value to it with this run's state), so it is the
+            // instance whole that goes over, never an attribute dict of this node's making.
+            if (!prebuilt_ser.is_none())
+                return prebuilt_to_python(value, json_mode, exc_none, round_trip, include, exclude);
             // For root models, extract the 'root' attribute before delegating.
             // model.rs:188-190 asks for it unconditionally and lets the
             // AttributeError reach the caller, so an instance the schema names but
@@ -3974,7 +4025,8 @@ struct SerNode {
             }
         }
         // Delegate model/dataclass/typed-dict to inner serializer
-        if ((type == "model" || type == "dataclass" || type == "typed-dict") && !children.empty()) {
+        if ((type == "model" || type == "dataclass" || type == "typed-dict") &&
+            (!children.empty() || !prebuilt_ser.is_none())) {
             SerModelScope model_scope;
             // Only a model that keeps extras of its own hands down a tuple, and a dataclass
             // never does (dataclass.rs:140 builds the attribute dict).
@@ -4010,6 +4062,8 @@ struct SerNode {
                     return infer_json(value, ensure_ascii, indent, include, exclude);
                 }
             }
+            if (!prebuilt_ser.is_none())
+                return prebuilt_to_json(value, ensure_ascii, exc_none, round_trip, include, exclude);
             // For root models, extract the 'root' attribute before delegating.
             // model.rs:188-190 asks for it unconditionally and lets the
             // AttributeError reach the caller, so an instance the schema names but
@@ -6140,6 +6194,58 @@ static bool ser_alias_choices(PyObject* src, std::vector<std::vector<SerPathStep
     return true;
 }
 
+// Whether this build may reuse the serializer a class already carries.  Both bindings answer
+// `_use_prebuilt=true` (mod.rs:62); pydantic says false when it rebuilds a serializer it is
+// restoring, precisely so that a stale one is not picked up (mod.rs:197).
+static thread_local bool g_ser_use_prebuilt = true;
+
+struct SerUsePrebuiltScope {
+    const bool saved = g_ser_use_prebuilt;
+    explicit SerUsePrebuiltScope(bool value) { g_ser_use_prebuilt = value; }
+    ~SerUsePrebuiltScope() { g_ser_use_prebuilt = saved; }
+    SerUsePrebuiltScope(const SerUsePrebuiltScope&) = delete;
+    SerUsePrebuiltScope& operator=(const SerUsePrebuiltScope&) = delete;
+};
+
+// Whether a serializer that stands ready on a class is one Rust declines to reuse, so that
+// the class is built from its own schema instead: prebuilt.rs:34-37 refuses a wrap serializer,
+// "don't allow wrap serializers as prebuilt serializers (leads to double wrapping)", peeking
+// through the polymorphism trampoline first.  A model whose schema overrides its own
+// serialization that way -- `@model_serializer(mode='wrap')` -- has the wrapper as its root
+// node here, and this port has no separate trampoline node to look past, so the root is asked
+// directly.  Declared here and defined below PySchemaSerializer, which is the answer's owner.
+static bool ser_prebuilt_is_wrap(const py::object& serializer);
+
+// The serializer a class pydantic finished building brings with it, or None when the class
+// answers nothing.  Rust reuses it instead of building the class's own schema (shared.rs:227)
+// and reads it out of the class `__dict__` rather than by attribute (common/prebuilt.rs:30-42):
+// getattr would find a parent's answer, and a model whose own serializer was deleted still
+// answers getattr because its metaclass builds one on demand.  `__pydantic_complete__` is what
+// says the class is finished, and prebuilt.rs:20 extracts the attribute as a SchemaSerializer,
+// an failure of which Rust lets fall through to building the class from its own schema -- so an
+// attribute that cannot be called as a serializer does not answer here either.
+static py::object ser_class_prebuilt(const py::object& cls) {
+    if (!g_ser_use_prebuilt) return py::none();
+    if (!cls.ptr() || cls.is_none()) return py::none();
+    PyObject* complete = PyObject_GetAttrString(cls.ptr(), "__pydantic_complete__");
+    if (!complete) { PyErr_Clear(); return py::none(); }
+    int truthy = PyObject_IsTrue(complete);
+    Py_DECREF(complete);
+    if (truthy != 1) return py::none();
+    try {
+        // A class hands that dict out as a proxy, so containment is asked of it.
+        py::object cd = cls.attr("__dict__");
+        if (!cd.attr("__contains__")("__pydantic_serializer__").cast<bool>()) return py::none();
+        py::object got = cd[py::str("__pydantic_serializer__")];
+        if (!py_hasattr(got, "to_python") || !py_hasattr(got, "to_json")) return py::none();
+        if (ser_prebuilt_is_wrap(got)) return py::none();
+        return got;
+    } catch (const py::error_already_set&) {
+        PyErr_Clear();
+        return py::none();
+    }
+}
+
 // The config the builder was handed.  model.rs:116-121 and dataclass.rs:102-107 both say "models
 // ignore the parent config and always use the config from this model", so a model or dataclass
 // hands its own `config` down to the serializer it builds and every other builder passes on
@@ -6261,11 +6367,10 @@ static SerRef build_ser_impl(const py::dict& schema,
     if (!kSerKnownTypes.count(type))
         throw SchemaError("Unknown serialization schema type: `" + type + "`");
 
-    // Set when a class/field builder reused the serializer its class already carries.  Rust then
-    // never reads the inner schema at all, so whatever sits in that key -- a str, the class itself,
-    // nothing -- is legal; the port has no way to run the class's own serializer yet, so it keeps
-    // building the key when the key does hold a schema, and only a key that holds no schema at all
-    // stays unbuilt.
+    // Set when a class builder reused the serializer its class already carries.  Rust then never
+    // reads the inner schema at all, so whatever sits in that key -- a str, the class itself,
+    // nothing -- is legal, and the node is built empty and hands every value to that serializer
+    // (see SerNode::prebuilt_ser).
     bool reused_prebuilt = false;
 
     // dataclass.rs:106-110 reads the args schema, builds it, and only then asks the dataclass's
@@ -6344,23 +6449,10 @@ static SerRef build_ser_impl(const py::dict& schema,
         // and forcing the flag False on a model makes the inner schema required again.
         auto prebuilt_class = [&]() -> bool {
             if (!drv.contains("cls")) return false;
-            py::object cls = drv["cls"];
-            PyObject* c = cls.ptr();
-            PyObject* complete = PyObject_GetAttrString(c, "__pydantic_complete__");
-            if (!complete) { PyErr_Clear(); return false; }
-            int truthy = PyObject_IsTrue(complete);
-            Py_DECREF(complete);
-            if (truthy != 1) return false;
-            // The serializer is looked for in the class dict rather than by attribute: a model
-            // whose `__pydantic_serializer__` was deleted still answers getattr (the metaclass
-            // builds one on demand) and is refused all the same.
-            int has_built = 0;
-            try {
-                // A class hands that dict out as a proxy, so containment is asked of it.
-                py::object cd = cls.attr("__dict__");
-                has_built = cd.attr("__contains__")("__pydantic_serializer__").cast<bool>() ? 1 : 0;
-            } catch (...) { PyErr_Clear(); has_built = 0; }
-            return has_built == 1;
+            // A parametrized dataclass names the origin it came from, and `cls` is still the
+            // unparametrized class -- whose serializer would be the wrong one (prebuilt.rs:22).
+            if (type == "dataclass" && drv.contains("generic_origin")) return false;
+            return !ser_class_prebuilt(drv["cls"]).is_none();
         };
 
         if (type == "nullable" || type == "default" || type == "custom-error") {
@@ -7325,9 +7417,16 @@ static SerRef build_ser_impl(const py::dict& schema,
                               ? schema["config"] : py::object();
             }
             SerBuildCfgScope cfg_scope(own_cfg);
-            auto c = sub();
-            if (c) {
-                node->children.push_back(c);
+            if (reused_prebuilt) {
+                // prebuilt.rs: the class's serializer stands in for this whole node, so the
+                // inner schema is not built -- and a schema below it that would be refused
+                // says nothing here, because nothing below it is ever reached.
+                node->prebuilt_ser = ser_class_prebuilt(node->class_);
+            } else {
+                auto c = sub();
+                if (c) {
+                    node->children.push_back(c);
+                }
             }
         }
         if (dataclass_fields_after_args) {
@@ -7534,11 +7633,11 @@ public:
         }
     }
 
-    // Overload that accepts _use_prebuilt (unused but needed for pydantic API)
-    explicit PySchemaSerializer(const py::dict& schema, const std::optional<py::dict>& cfg, bool)
+    explicit PySchemaSerializer(const py::dict& schema, const std::optional<py::dict>& cfg, bool use_prebuilt)
         : schema_(schema) {
         std::unordered_map<std::string, SerRef> defs;
         SerMemo memo;
+        SerUsePrebuiltScope prebuilt_scope(use_prebuilt);
         ser_ = build_ser(schema, defs, memo);
         if (cfg.has_value()) {
             try {
@@ -7581,6 +7680,10 @@ public:
         }
     }
 
+    // The node this serializer was built into, for the one question a ready serializer is
+    // asked at somebody else's build time (see ser_prebuilt_is_wrap).
+    const SerRef& root_node() const { return ser_; }
+
     py::object to_python(const py::object& value, std::optional<std::string> mode,
                          std::optional<py::object> include, std::optional<py::object> exclude,
                          std::optional<bool> by_alias, bool exclude_unset, bool exclude_defaults, bool exc_none,
@@ -7605,6 +7708,7 @@ public:
         g_ser_extra.timedelta_mode = ser_json_timedelta_;
         g_ser_extra.temporal_mode = ser_json_temporal_;
         g_ser_extra.inf_nan_mode = inf_nan_mode_;
+        g_ser_extra.warnings = warnings;
         if (!ser_) throw std::runtime_error("Serializer not initialized");
 
         // Pass include/exclude through as-is (nested dict/set filters supported)
@@ -7701,6 +7805,7 @@ public:
         g_ser_extra.timedelta_mode = ser_json_timedelta_;
         g_ser_extra.temporal_mode = ser_json_temporal_;
         g_ser_extra.inf_nan_mode = inf_nan_mode_;
+        g_ser_extra.warnings = warnings;
         if (!ser_) throw std::runtime_error("Serializer not initialized");
 
         // Pass include/exclude through as-is (nested dict/set filters supported)
@@ -7767,6 +7872,20 @@ private:
     // mode without the constructor naming it leaves the enum default, Null.
     std::string inf_nan_mode_ = "null";
 };
+
+static bool ser_prebuilt_is_wrap(const py::object& serializer) {
+    try {
+        // Only a serializer this module built has a node to ask.  Anything else -- the wheel's
+        // own SchemaSerializer on a class in a mixed run, for instance -- is left to answer
+        // for itself, which is what the reuse above already does with its to_python.
+        const PySchemaSerializer& s = py::cast<const PySchemaSerializer&>(serializer);
+        const SerRef& root = s.root_node();
+        return root && root->type == "function-wrap";
+    } catch (const py::error_already_set&) {
+        PyErr_Clear();
+    } catch (const std::exception&) {}
+    return false;
+}
 
 // ---------------------------------------------------------------------------
 // Standalone to_json
@@ -7857,6 +7976,7 @@ static py::bytes to_json_fn(const py::object& value, std::optional<size_t> inden
     g_ser_extra.fallback = fallback && !fallback->is_none() ? *fallback : py::none();
     g_ser_extra.round_trip = round_trip;
     g_ser_extra.context = context && !context->is_none() ? *context : py::none();
+    g_ser_extra.warnings = py::str("warn");   // this entry has no warnings keyword to ask
     // Reset, not inherited: this entry's Extra carries its own polymorphic flag, and the
     // thread local otherwise still answers for whoever ran last.
     g_polymorphic_serialization = polymorphic;
@@ -8408,6 +8528,7 @@ static py::object to_jsonable_fn(const py::object& value, std::optional<py::obje
     g_ser_extra.inf_nan_mode = inf_nan_mode;
     g_ser_extra.round_trip = round_trip;  // mod.rs:302 hands it to the Extra
     g_ser_extra.context = context && !context->is_none() ? *context : py::none();
+    g_ser_extra.warnings = py::str("warn");   // this entry has no warnings keyword to ask
     g_polymorphic_serialization = polymorphic;
     JsonableRun run{bytes_mode, timedelta_shape_for(temporal), temporal, inf_nan_mode, serialize_unknown, by_alias};
     return infer_jsonable_python(value, run, include ? *include : py::none(), exclude ? *exclude : py::none());
