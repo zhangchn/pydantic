@@ -6763,49 +6763,35 @@ static SerRef build_ser_impl(const py::dict& schema,
     }
 
     if (type == "definitions") {
-        try {
-            auto defs_list = schema["definitions"].cast<py::list>();
-            // Pass 1: register stub SerNodes for all definition refs
-            for (auto item : defs_list) {
-                auto d = item.cast<py::dict>();
-                std::string ref = d["ref"].cast<std::string>();
-                defs[ref] = std::make_shared<SerNode>();
-                defs[ref]->type = "__stub__";
-            }
-            // Pass 2: build each definition, copying content into stub
-            for (auto item : defs_list) {
-                auto d = item.cast<py::dict>();
-                std::string ref = d["ref"].cast<std::string>();
-                SerRef actual;
-                // A definition may carry its own "serialization" override (a
-                // model_serializer on a model, for instance). Unwrapping to
-                // d["schema"] would drop it, so in that case build from the
-                // definition itself and let the type-specific code unwrap.
-                bool def_has_ser = false;
-                try { def_has_ser = d.contains("serialization") && !d["serialization"].is_none(); } catch (...) {}
-                // Model-like definitions keep their own node: unwrapping to
-                // d["schema"] would lose class_, root_model and extra behaviour,
-                // so a definition-ref could no longer reject a foreign value.
-                std::string def_type;
-                try { def_type = d["type"].cast<std::string>(); } catch (...) {}
-                bool keep_model_wrapper = def_type == "model" || def_type == "dataclass" ||
-                                          def_type == "typed-dict";
-                if (d.contains("schema") && !def_has_ser && !keep_model_wrapper) {
-                    actual = build_ser_impl(d["schema"].cast<py::dict>(), defs, memo);
-                } else {
-                    // Definitions without inner schema (e.g. enum), model-like
-                    // definitions and those with their own serializer are built
-                    // from the definition itself.
-                    actual = build_ser_impl(d, defs, memo);
-                }
-                // Copy actual content into the stub (preserves shared_ptr identity)
-                defs[ref]->copy_from(*actual);
-            }
-        } catch (const std::exception& e) {
-            fprintf(stderr, "Error building definitions: %s\n", e.what());
+        static const std::string wrap = "` serializer:\n  ";
+        auto defs_list = schema["definitions"].cast<py::list>();
+        // Pass 1: name every ref before anything is built, so an entry that points at a
+        // later one already resolves to something.  Refs share one namespace for the whole
+        // build -- a dict whose keys and values each carry a `definitions` naming the same
+        // ref is refused -- and what refuses it is the second definition being added, which
+        // the builder reaches only after the first was built.
+        for (auto item : defs_list) {
+            py::dict d = py::reinterpret_borrow<py::dict>(item);
+            std::string ref = d["ref"].cast<std::string>();
+            if (defs.find(ref) != defs.end())
+                throw SchemaError("Error building `" + type + wrap + "SchemaError: Duplicate ref: `" + ref + "`");
+            defs[ref] = std::make_shared<SerNode>();
+            defs[ref]->type = "__stub__";
         }
-        try { return build_ser_impl(schema["schema"].cast<py::dict>(), defs, memo); } catch (...) {}
-        return node;
+        // Pass 2: build each definition into its stub.  definitions.rs:35 hands the entry
+        // itself to CombinedSerializer::build: a definition is a full schema that happens to
+        // carry a `ref`, not a wrapper around one.  So a `schema` key inside it belongs to
+        // that schema's own builder (a model reads its inner schema, a `str` has none), an
+        // entry with no `type` has no builder at all, and a `serialization` override is the
+        // entry's own -- which is what model-like definitions always needed kept.
+        for (auto item : defs_list) {
+            py::dict d = py::reinterpret_borrow<py::dict>(item);
+            std::string ref = d["ref"].cast<std::string>();
+            SerRef actual = build_ser_child(item, defs, memo, type);
+            // Copy actual content into the stub (preserves shared_ptr identity)
+            if (actual) defs[ref]->copy_from(*actual);
+        }
+        return build_ser_child(schema["schema"], defs, memo, type);
     }
     if (original_type == "definition-ref") {
         try {
