@@ -6146,6 +6146,17 @@ static std::string ser_builtin_text(const py::builtin_exception& e) {
     return tname + ": " + msg;
 }
 
+// DefinitionsBuilder::finish (definitions.rs:195-202), which the SchemaSerializer entry
+// calls once the schema is built (serializers/mod.rs:74): a name that some definition-ref
+// asked for and no definition ever wrote is refused, in the builder's own words and with no
+// "Error building" sentence in front -- nothing was building by then.
+static void ser_defs_finish(std::unordered_map<std::string, SerRef>& defs) {
+    for (auto& kv : defs) {
+        if (kv.second && kv.second->type == "__stub__")
+            throw SchemaError("Definitions error: definition `" + kv.first + "` was never filled");
+    }
+}
+
 static SerRef build_ser_child(py::handle child, std::unordered_map<std::string, SerRef>& defs,
                               SerMemo& memo, const std::string& parent,
                               const std::string& inner_prefix = std::string()) {
@@ -6773,10 +6784,11 @@ static SerRef build_ser_impl(const py::dict& schema,
         for (auto item : defs_list) {
             py::dict d = py::reinterpret_borrow<py::dict>(item);
             std::string ref = d["ref"].cast<std::string>();
-            if (defs.find(ref) != defs.end())
-                throw SchemaError("Error building `" + type + wrap + "SchemaError: Duplicate ref: `" + ref + "`");
-            defs[ref] = std::make_shared<SerNode>();
-            defs[ref]->type = "__stub__";
+            SerRef& slot = defs[ref];
+            if (!slot) {
+                slot = std::make_shared<SerNode>();
+                slot->type = "__stub__";
+            }
         }
         // Pass 2: build each definition into its stub.  definitions.rs:35 hands the entry
         // itself to CombinedSerializer::build: a definition is a full schema that happens to
@@ -6788,8 +6800,16 @@ static SerRef build_ser_impl(const py::dict& schema,
             py::dict d = py::reinterpret_borrow<py::dict>(item);
             std::string ref = d["ref"].cast<std::string>();
             SerRef actual = build_ser_child(item, defs, memo, type);
+            // add_definition (definitions.rs:172-189) is reached per entry as it finishes,
+            // and it complains only about a slot that is already *filled*: one a reference
+            // asked for and no definition wrote is filled here without a word, while a name
+            // this list already defined -- or a nested definitions defined first -- is the
+            // second definition of it, which is what Duplicate ref names.
+            SerRef& slot = defs[ref];
+            if (slot->type != "__stub__")
+                throw SchemaError("Error building `" + type + wrap + "SchemaError: Duplicate ref: `" + ref + "`");
             // Copy actual content into the stub (preserves shared_ptr identity)
-            if (actual) defs[ref]->copy_from(*actual);
+            if (actual) slot->copy_from(*actual);
         }
         return build_ser_child(schema["schema"], defs, memo, type);
     }
@@ -6841,6 +6861,21 @@ static SerRef build_ser_impl(const py::dict& schema,
                 wrapper->children.push_back(it->second);  // stub (will be populated)
                 return wrapper;
             }
+            // get_definition (definitions.rs:153-170) answers a name no definition has
+            // written yet with an unfilled slot kept under that name, so a reference that
+            // is written before -- or beside, or without -- its definition still ends up
+            // pointing at the node the definition fills in later.  It has to be the slot
+            // itself rather than a copy of it: the build caches a node per schema dict, so
+            // a reference dict that appears twice is built once and the answer it holds
+            // must be the one that changes when the definition arrives.
+            SerRef slot = std::make_shared<SerNode>();
+            slot->type = "__stub__";
+            SerRef& kept = defs[ref];
+            if (!kept) kept = slot;
+            auto wrapper = std::make_shared<SerNode>();
+            wrapper->type = "definition-ref";
+            wrapper->children.push_back(kept);
+            return wrapper;
         } catch (...) {}
         return node;
     }
@@ -7596,6 +7631,7 @@ public:
         // the constructors that take a config ask, the one that ignores `_use_prebuilt` too.
         SerBuildCfgScope cfg_scope(cfg.has_value() ? py::object(*cfg) : py::object());
         ser_ = build_ser(schema, defs, memo);
+        ser_defs_finish(defs);
         if (cfg.has_value()) {
             try {
                 py::dict c = *cfg;
@@ -7643,6 +7679,7 @@ public:
         SerMemo memo;
         SerUsePrebuiltScope prebuilt_scope(use_prebuilt);
         ser_ = build_ser(schema, defs, memo);
+        ser_defs_finish(defs);
         if (cfg.has_value()) {
             try {
                 py::dict c = *cfg;
