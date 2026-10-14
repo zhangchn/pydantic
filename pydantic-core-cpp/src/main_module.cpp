@@ -6156,7 +6156,42 @@ bool SerNode::value_matches_type(const py::object& v) const {
 // ---------------------------------------------------------------------------
 // Build serializer from schema
 // ---------------------------------------------------------------------------
-using SerMemo = std::unordered_map<const void*, SerRef>;
+// The config the builder was handed.  model.rs:116-121 and dataclass.rs:102-107 both say "models
+// ignore the parent config and always use the config from this model", so a model or dataclass
+// hands its own `config` down to the serializer it builds and every other builder passes on
+// whatever it was given (shared.rs:39); the answer reaches ExtraBehavior::from_schema_or_config
+// (build_tools.rs:180-198) as the fallback for a schema that names no `extra_behavior` of its own.
+static thread_local py::object g_ser_build_config;
+
+struct SerBuildCfgScope {
+    py::object saved;
+    explicit SerBuildCfgScope(py::object cfg) : saved(std::move(g_ser_build_config)) {
+        g_ser_build_config = std::move(cfg);
+    }
+    ~SerBuildCfgScope() { g_ser_build_config = std::move(saved); }
+};
+
+// A node is baked by the config it was built under as much as by the schema dict it came from: a
+// model rebuilds its subtree with the config its own schema carries (model.rs:116-121) and the
+// leaves print what they were given -- inf_nan (float.rs:45-56), bytes (bytes.rs:55-61),
+// timedelta and temporal (timedelta.rs, datetime_etc.rs).  So one schema dict standing under two
+// models is two nodes, exactly as Rust builds it twice; pydantic still emits a model schema once
+// and points at it from every field that uses it, so sharing happens whenever the config matches.
+struct SerMemoKey {
+    const void* schema;
+    const void* config;
+    bool operator==(const SerMemoKey& o) const {
+        return schema == o.schema && config == o.config;
+    }
+};
+struct SerMemoKeyHash {
+    size_t operator()(const SerMemoKey& k) const {
+        const size_t a = static_cast<size_t>(reinterpret_cast<uintptr_t>(k.schema)) >> 4;
+        const size_t b = static_cast<size_t>(reinterpret_cast<uintptr_t>(k.config)) >> 4;
+        return (a * 0x9E3779B97F4A7C15ull) ^ (b + 0x9E3779B9u + (a << 6) + (a >> 2));
+    }
+};
+using SerMemo = std::unordered_map<SerMemoKey, SerRef, SerMemoKeyHash>;
 
 static thread_local int _build_ser_depth = 0;
 static thread_local int _build_ser_truncated = 0;
@@ -6191,9 +6226,11 @@ static SerRef build_ser(const py::dict& schema,
     // Pydantic emits a model schema once and points at it from every field
     // that uses it, so a core schema is a DAG: building a serializer per
     // reference costs the number of paths through the schema rather than its
-    // size. A serializer depends on nothing but the node it was built from, so
-    // shared nodes share one node.
-    auto cached = memo.find(schema.ptr());
+    // size. A serializer depends on the node it was built from and on the config
+    // that node was built under, so shared nodes share one node under that config.
+    const SerMemoKey key{schema.ptr(),
+                         g_ser_build_config ? g_ser_build_config.ptr() : nullptr};
+    auto cached = memo.find(key);
     if (cached != memo.end()) return cached->second;
 
     int truncated = _build_ser_truncated;
@@ -6212,7 +6249,7 @@ static SerRef build_ser(const py::dict& schema,
     }
     // A subtree the recursion guard cut short is not the node this schema
     // describes, so it must not become the answer for that schema.
-    if (ser && _build_ser_truncated == truncated) memo[schema.ptr()] = ser;
+    if (ser && _build_ser_truncated == truncated) memo[key] = ser;
     return ser;
 }
 
@@ -6482,21 +6519,6 @@ static py::object ser_class_prebuilt(const py::object& cls) {
         return py::none();
     }
 }
-
-// The config the builder was handed.  model.rs:116-121 and dataclass.rs:102-107 both say "models
-// ignore the parent config and always use the config from this model", so a model or dataclass
-// hands its own `config` down to the serializer it builds and every other builder passes on
-// whatever it was given (shared.rs:39); the answer reaches ExtraBehavior::from_schema_or_config
-// (build_tools.rs:180-198) as the fallback for a schema that names no `extra_behavior` of its own.
-static thread_local py::object g_ser_build_config;
-
-struct SerBuildCfgScope {
-    py::object saved;
-    explicit SerBuildCfgScope(py::object cfg) : saved(std::move(g_ser_build_config)) {
-        g_ser_build_config = std::move(cfg);
-    }
-    ~SerBuildCfgScope() { g_ser_build_config = std::move(saved); }
-};
 
 // build_tools.rs:180-198 read through build_tools.rs:15-31: the schema's `extra_behavior` answers
 // first, and only a schema that names no key at all lets the config's `extra_fields_behavior`
