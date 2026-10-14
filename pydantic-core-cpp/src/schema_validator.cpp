@@ -891,11 +891,14 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
         return py::none();
     }
 
-    // Handle date/time types
+    // Handle date/time types.  An input that already was the object goes back out as *that*
+    // object -- Rust clones it in the object arm (input_python.rs:603-607, :638-642) -- so the
+    // rebuilds below answer only for a value that was parsed or coerced into being one.
     if (effective_type == "date") {
         try {
             auto* ed = static_cast<EitherDate*>(value.get());
             if (ed) {
+                if (!ed->original_obj.is_none()) return ed->original_obj;
                 auto& d = ed->value;
                 return py_date_object(d);
             }
@@ -906,6 +909,7 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
         try {
             auto* et = static_cast<EitherTime*>(value.get());
             if (et) {
+                if (!et->original_obj.is_none()) return et->original_obj;
                 auto& t = et->value;
                 return py_time_object(t);
             }
@@ -916,8 +920,7 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
         try {
             auto* edt = static_cast<EitherDateTime*>(value.get());
             if (edt) {
-                // Preserve the original Python datetime object (keeps named
-                // tzinfo like America/Los_Angeles instead of a fixed offset).
+                // Keeps a named tzinfo like America/Los_Angeles instead of a fixed offset.
                 if (!edt->original_obj.is_none()) {
                     return edt->original_obj;
                 }
@@ -931,6 +934,7 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
         try {
             auto* etd = static_cast<EitherTimedelta*>(value.get());
             if (etd) {
+                if (!etd->original_obj.is_none()) return etd->original_obj;
                 auto& td = etd->value;
                 py::object datetime_mod = py::module_::import("datetime");
                 return datetime_mod.attr("timedelta")(

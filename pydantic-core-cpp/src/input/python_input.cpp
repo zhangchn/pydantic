@@ -340,6 +340,17 @@ bool PythonInput::is_instance_of(const char* module, const char* type_name) cons
     }
 }
 
+// The temporal object arms hand the input straight back, and Rust records a subclass as a
+// *strict* match rather than an exact one -- so those arms need to know the type is the named
+// class itself, not merely an instance of it.
+static bool python_type_is(const py::object& obj, const char* module, const char* type_name) {
+    try {
+        return obj.get_type().ptr() == py::module_::import(module).attr(type_name).ptr();
+    } catch (...) {
+        return false;
+    }
+}
+
 // ============================================================================
 // Type validation implementations
 // ============================================================================
@@ -1153,7 +1164,11 @@ ValResult<ValMatch<EitherDate>> PythonInput::validate_date(bool strict, Timestam
         int year = py_date.attr("year").cast<int>();
         int month = py_date.attr("month").cast<int>();
         int day = py_date.attr("day").cast<int>();
-        return ValMatch<EitherDate>::exact(EitherDate(Date{year, month, day}));
+        EitherDate either_date(Date{year, month, day});
+        either_date.original_obj = py_date;
+        return python_type_is(py_date, "datetime", "date")
+            ? ValMatch<EitherDate>::exact(std::move(either_date))
+            : ValMatch<EitherDate>::strict(std::move(either_date));
     }
     if (!strict) {
         if (auto text = python_text_as_bytes(*this)) {
@@ -1210,7 +1225,9 @@ ValResult<ValMatch<EitherDateTime>> PythonInput::validate_datetime(
         // Preserve the original Python datetime object so its tzinfo (e.g. a
         // named zone) is kept rather than replaced by a fixed UTC offset.
         edt.original_obj = py_dt;
-        return ValMatch<EitherDateTime>::exact(std::move(edt));
+        return python_type_is(py_dt, "datetime", "datetime")
+            ? ValMatch<EitherDateTime>::exact(std::move(edt))
+            : ValMatch<EitherDateTime>::strict(std::move(edt));
     }
 
     if (!strict) {
@@ -1283,14 +1300,21 @@ ValResult<ValMatch<EitherTime>> PythonInput::validate_time(bool strict) const {
         if (py_hasattr(py_time, "tzinfo") && !py_time.attr("tzinfo").is_none()) {
             py::object tzinfo = py_time.attr("tzinfo");
             if (py_hasattr(tzinfo, "utcoffset")) {
-                py::object offset = tzinfo.attr("utcoffset")(py_time);
+                // A bare time has no date to resolve an offset against, so Rust hands
+                // utcoffset() None and only the datetime path hands the object
+                // (datetime.rs:311 -> :361-363).  CPython's own timezone.utcoffset refuses a
+                // time outright -- passing the time here raised on every aware time.
+                py::object offset = tzinfo.attr("utcoffset")(py::none());
                 if (!offset.is_none()) {
                     tz_offset = static_cast<int>(offset.attr("total_seconds")().cast<double>() / 60);
                 }
             }
         }
-        return ValMatch<EitherTime>::exact(
-            EitherTime(Time{hour, minute, second, microsecond, tz_offset}));
+        EitherTime either_time(Time{hour, minute, second, microsecond, tz_offset});
+        either_time.original_obj = py_time;
+        return python_type_is(py_time, "datetime", "time")
+            ? ValMatch<EitherTime>::exact(std::move(either_time))
+            : ValMatch<EitherTime>::strict(std::move(either_time));
     }
 
     if (!strict) {
@@ -1350,7 +1374,11 @@ ValResult<ValMatch<EitherTimedelta>> PythonInput::validate_timedelta(bool strict
         int days = py_td.attr("days").cast<int>();
         int seconds = py_td.attr("seconds").cast<int>();
         int microseconds = py_td.attr("microseconds").cast<int>();
-        return ValMatch<EitherTimedelta>::exact(EitherTimedelta(Timedelta{days, seconds, microseconds}));
+        EitherTimedelta either_td(Timedelta{days, seconds, microseconds});
+        either_td.original_obj = py_td;
+        return python_type_is(py_td, "datetime", "timedelta")
+            ? ValMatch<EitherTimedelta>::exact(std::move(either_td))
+            : ValMatch<EitherTimedelta>::strict(std::move(either_td));
     }
 
     if (is_int() && !strict) {

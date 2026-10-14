@@ -184,10 +184,17 @@ struct EitherFloat {
     double as_double() const { return value; }
 };
 
-// Either types for date/time validation results
+// Either types for date/time validation results.
+// Rust's python input hands back the object it was given whenever the input already is
+// the right type -- each object arm clones it (input_python.rs:603-607 for time,
+// :638-642 for datetime) -- and reads the fields only to answer constraints.  So
+// `original_obj` is what the value *is*; the struct fields are the working copy.  A
+// subclass goes out as the subclass too, which is why the arms also report strict rather
+// than exact for a non-exact type.
 struct EitherDate {
     Date value;
     bool is_lax = false;
+    py::object original_obj = py::none();
 
     EitherDate() : value{0, 0, 0} {}
     explicit EitherDate(Date d) : value(d) {}
@@ -198,6 +205,7 @@ struct EitherDate {
 struct EitherTime {
     Time value;
     bool is_lax = false;
+    py::object original_obj = py::none();
 
     EitherTime() : value{0, 0, 0} {}
     explicit EitherTime(Time t) : value(t) {}
@@ -222,6 +230,7 @@ struct EitherDateTime {
 struct EitherTimedelta {
     Timedelta value;
     bool is_lax = false;
+    py::object original_obj = py::none();
 
     EitherTimedelta() : value{} {}
     explicit EitherTimedelta(Timedelta td) : value(td) {}

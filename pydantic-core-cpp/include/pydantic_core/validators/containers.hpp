@@ -212,26 +212,33 @@ public:
         if (name == "dict" || name == "dict-constrained") {
             if (auto* d = static_cast<py::dict*>(value.get())) return *d;
         }
+        // A temporal child that already was the object goes back out as that object, exactly
+        // as the root node's conversion does -- this table is a second copy of it, and a
+        // subclass or a named tzinfo is what shows the difference.
         if (name == "date") {
             if (auto* ed = static_cast<EitherDate*>(value.get())) {
+                if (!ed->original_obj.is_none()) return ed->original_obj;
                 auto& d = ed->value;
                 return py_date_object(d);
             }
         }
         if (name == "time") {
             if (auto* et = static_cast<EitherTime*>(value.get())) {
+                if (!et->original_obj.is_none()) return et->original_obj;
                 auto& t = et->value;
                 return py_time_object(t);
             }
         }
         if (name == "datetime") {
             if (auto* edt = static_cast<EitherDateTime*>(value.get())) {
+                if (!edt->original_obj.is_none()) return edt->original_obj;
                 auto& dt = edt->value;
                 return py_datetime_object(dt);
             }
         }
         if (name == "timedelta") {
             if (auto* etd = static_cast<EitherTimedelta*>(value.get())) {
+                if (!etd->original_obj.is_none()) return etd->original_obj;
                 auto& td = etd->value;
                 return py::module_::import("datetime").attr("timedelta")(
                     py::arg("days") = td.days,
