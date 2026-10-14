@@ -972,19 +972,14 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
     if (try_all || matches_type("str") || effective_type == "string") {
         auto* s = static_cast<std::string*>(value.get());
         if (s) {
+            // What a str validator produced *is* the string, whatever it spells: Rust hands the
+            // PyString straight out (string.rs:88, string.rs:164-172), so "null" stays four
+            // letters and a quote-wrapped value keeps its quotes.  Re-reading the value as JSON
+            // here also refused to decode (a lone '"', '[1, 2]') silently rewrote it.
             try {
-                std::string str_val = *s;
-                // Handle JSON literals
-                if (str_val == "null") return py::none();
-                if (str_val == "true") return py::bool_(true);
-                if (str_val == "false") return py::bool_(false);
-                if (!str_val.empty() && str_val.front() == '"' && str_val.back() == '"') {
-                    py::object json_mod = py::module_::import("json");
-                    return json_mod.attr("loads")(str_val);
-                }
-                return py::str(str_val);
+                return py::str(*s);
             } catch (...) {
-                // Invalid string, fall through
+                // Not a string after all (a wrapper node holding something else), fall through
             }
         }
     }
