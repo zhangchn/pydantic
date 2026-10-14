@@ -483,6 +483,77 @@ inline std::string python_str_repr(const std::string& s) {
     return result;
 }
 
+// Rust trims `char::is_whitespace`, which is Unicode's White_Space property.  Python's own set is
+// bigger by U+001C..U+001F, so the trim cannot be handed to str.strip(); the C locale's set is
+// smaller than both.  Measured off the wheel over every code point: these twenty-five and no other.
+static const unsigned kUnicodeWhitespace[] = {
+    0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0x85, 0xA0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003,
+    0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x2028, 0x2029, 0x202F, 0x205F,
+    0x3000};
+
+static bool utf8_is_whitespace_at(const std::string& s, size_t i, size_t end, size_t& width) {
+    const unsigned char b0 = static_cast<unsigned char>(s[i]);
+    unsigned cp = 0;
+    if (b0 < 0x80) {
+        cp = b0;
+        width = 1;
+    } else if (b0 >= 0xC2 && b0 <= 0xDF) {
+        if (i + 1 >= end) return false;
+        const unsigned char b1 = static_cast<unsigned char>(s[i + 1]);
+        if ((b1 & 0xC0) != 0x80) return false;
+        cp = ((b0 & 0x1Fu) << 6) | (b1 & 0x3Fu);
+        width = 2;
+    } else if (b0 >= 0xE0 && b0 <= 0xEF) {
+        if (i + 2 >= end) return false;
+        const unsigned char b1 = static_cast<unsigned char>(s[i + 1]);
+        const unsigned char b2 = static_cast<unsigned char>(s[i + 2]);
+        if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80) return false;
+        cp = ((b0 & 0x0Fu) << 12) | ((b1 & 0x3Fu) << 6) | (b2 & 0x3Fu);
+        if (cp < 0x800 || (cp >= 0xD800 && cp <= 0xDFFF)) return false;
+        if (b0 == 0xE0 && b1 < 0xA0) return false;
+        if (b0 == 0xED && b1 >= 0xA0) return false;
+        width = 3;
+    } else if (b0 >= 0xF0 && b0 <= 0xF4) {
+        if (i + 3 >= end) return false;
+        const unsigned char b1 = static_cast<unsigned char>(s[i + 1]);
+        const unsigned char b2 = static_cast<unsigned char>(s[i + 2]);
+        const unsigned char b3 = static_cast<unsigned char>(s[i + 3]);
+        if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) return false;
+        cp = ((b0 & 0x07u) << 18) | ((b1 & 0x3Fu) << 12) | ((b2 & 0x3Fu) << 6) | (b3 & 0x3Fu);
+        if (cp < 0x10000 || cp > 0x10FFFF) return false;
+        width = 4;
+    } else {
+        // A continuation byte, an overlong lead, or a lone surrogate: not a whitespace
+        // code point, and Rust leaves such a run standing.
+        return false;
+    }
+    for (unsigned w : kUnicodeWhitespace) {
+        if (w == cp) return true;
+    }
+    return false;
+}
+
+static void trim_unicode_whitespace(std::string& str) {
+    size_t begin = 0;
+    size_t end = str.size();
+    for (;;) {
+        size_t width = 0;
+        if (begin >= end || !utf8_is_whitespace_at(str, begin, end, width)) break;
+        begin += width;
+    }
+    for (;;) {
+        if (begin >= end) break;
+        // Walk back over the continuation bytes to the lead of the last code point.
+        size_t last = end - 1;
+        while (last > begin && (static_cast<unsigned char>(str[last]) & 0xC0) == 0x80) --last;
+        size_t width = 0;
+        if (!utf8_is_whitespace_at(str, last, end, width) || last + width != end) break;
+        end = last;
+    }
+    if (begin != 0 || end != str.size()) str = str.substr(begin, end - begin);
+    else if (begin == end) str.clear();
+}
+
 // StrConstrainedValidator - validates string with min_length/max_length/pattern/strip_whitespace/to_lower/to_upper
 class StrConstrainedValidator : public Validator {
 public:
@@ -511,26 +582,23 @@ auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str,
             return result.error();
         }
         state.floor_exactness(result.value().exactness());
+        // Every check below measures the trimmed text but names the value that came in: Rust
+        // hands `input` to each error (string.rs:125-166), not the string it rewrote.
+        const std::string err_input = input.as_error_value().repr;
+        const py::object err_object = input.as_python_object();
         std::string str = result.value().value().to_string();
 
-        if (strip_whitespace) {
-            // Trim leading/trailing whitespace
-            size_t start = str.find_first_not_of(" \t\n\r\f\v");
-            if (start == std::string::npos) { str.clear(); }
-            else {
-                size_t end = str.find_last_not_of(" \t\n\r\f\v");
-                str = str.substr(start, end - start + 1);
-            }
-        }
+        if (strip_whitespace) trim_unicode_whitespace(str);
 
         // Rust checks ascii_only right after stripping and before the lengths.
         if (ascii_only) {
-            for (char c : str) {
-                if (static_cast<unsigned char>(c) > 127) {
+            for (unsigned char c : str) {
+                if (c > 127) {
                     return ValError::line_error(
                         ErrorType(ErrorType::Kind::StringNotAscii),
                         state.location(),
-                        python_str_repr(str)
+                        err_input,
+                        err_object
                     );
                 }
             }
@@ -547,7 +615,8 @@ auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str,
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::StringTooShort, "min_length", std::to_string(min_length.value()), "s", s),
                 state.location(),
-                python_str_repr(str)
+                err_input,
+                err_object
             );
         }
         if (max_length.has_value() && char_count > max_length.value()) {
@@ -555,18 +624,13 @@ auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str,
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::StringTooLong, "max_length", std::to_string(max_length.value()), "s", s),
                 state.location(),
-                python_str_repr(str)
+                err_input,
+                err_object
             );
         }
 
-        // Apply transformations
-        if (to_lower) {
-            std::transform(str.begin(), str.end(), str.begin(), [](unsigned char c){ return std::tolower(c); });
-        }
-        if (to_upper) {
-            std::transform(str.begin(), str.end(), str.begin(), [](unsigned char c){ return std::toupper(c); });
-        }
-
+        // The pattern is asked of the trimmed text before any case map, so a `^A` pattern
+        // fails on 'a' however to_upper is set (string.rs:157-166).
         // Pattern matching: python re for a compiled pattern, std::regex otherwise
         if (!pattern.empty() && pattern_re.ptr() && !pattern_re.is_none()) {
             bool matched = false;
@@ -580,7 +644,8 @@ auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str,
                 return ValError::line_error(
                     ErrorType(ErrorType::Kind::StringPatternMismatch, "pattern", pattern),
                     state.location(),
-                    python_str_repr(str)
+                    err_input,
+                    err_object
                 );
             }
         } else if (!pattern.empty()) {
@@ -590,11 +655,25 @@ auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str,
                     return ValError::line_error(
                         ErrorType(ErrorType::Kind::StringPatternMismatch, "pattern", pattern),
                         state.location(),
-                        python_str_repr(str)
+                        err_input,
+                        err_object
                     );
                 }
             } catch (const std::regex_error&) {
                 // Invalid regex, skip pattern check
+            }
+        }
+
+        // Last comes the case map, and it is Rust's `else if` chain: to_lower wins over
+        // to_upper rather than both running (string.rs:169-178).  The mapping is Unicode's
+        // full one -- 'ß' becomes "SS", 'İ' becomes "i" plus a combining dot, a final sigma
+        // gets its own letter -- which is what Python's own str.map already implements, byte
+        // for byte the same SpecialCasing table.
+        if (to_lower || to_upper) {
+            try {
+                str = py::str(str).attr(to_lower ? "lower" : "upper")().cast<std::string>();
+            } catch (const py::error_already_set&) {
+                PyErr_Clear();
             }
         }
 
