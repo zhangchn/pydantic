@@ -1367,12 +1367,22 @@ static std::string ser_warn_input_type(const py::object& value) {
     } catch (...) { return "<unknown>"; }
 }
 
+// Rust tools::truncate_safe_repr keeps a repr whole up to 50 bytes; past that it
+// splices head + "..." + tail, where both halves are half the cap rounded up and
+// each cut is snapped back (head) or forward (tail) to a UTF-8 boundary.
+static std::string ser_truncate_safe_repr(const std::string& r, size_t max_len = 50) {
+    if (r.size() <= max_len) return r;
+    const size_t mid = (max_len + 1) / 2;
+    size_t head = mid;
+    while (head > 0 && (static_cast<unsigned char>(r[head]) & 0xC0) == 0x80) --head;
+    size_t tail = r.size() - (mid - 1);
+    while (tail < r.size() && (static_cast<unsigned char>(r[tail]) & 0xC0) == 0x80) ++tail;
+    return r.substr(0, head) + "..." + r.substr(tail);
+}
+
 static std::string ser_warn_input_repr(const py::object& value) {
     try {
-        std::string r = py::repr(value).cast<std::string>();
-        // Rust truncate_safe_repr caps very long reprs at ~100 chars.
-        if (r.size() > 100) r = r.substr(0, 99) + "\u2026";
-        return r;
+        return ser_truncate_safe_repr(py::repr(value).cast<std::string>());
     } catch (...) { return "<unrepresentable>"; }
 }
 
