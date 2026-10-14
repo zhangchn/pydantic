@@ -5670,7 +5670,9 @@ private:
             if (!extra.is_none()) {
                 for (auto item : extra.cast<py::dict>()) {
                     std::string k = py::str(item.first).cast<std::string>();
-                    if (fields.find(k) != fields.end()) continue;
+                    // fields.rs:228-237 runs every extras pair through serialize_extra with no
+                    // lookup in the field table, so an extra named like a declared field is
+                    // offered a second time and the dict keeps that answer.
                     // Apply include/exclude filters to extra fields too
                     auto next = apply_ser_filter(py::str(k), include, exclude);
                     if (next.omit) continue;
@@ -5967,7 +5969,8 @@ private:
             if (!extra.is_none()) {
                 for (auto item : extra.cast<py::dict>()) {
                     std::string k = py::str(item.first).cast<std::string>();
-                    if (fields.find(k) != fields.end()) continue;
+                    // No field-table lookup here either (see the python walk above): the name
+                    // repeats in the text, as fields.rs:228-237 writes it into the map.
                     // Apply include/exclude filters to extra fields too
                     auto next = apply_ser_filter(py::str(k), include, exclude);
                     if (next.omit) continue;
