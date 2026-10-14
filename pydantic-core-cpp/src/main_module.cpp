@@ -4695,6 +4695,27 @@ private:
             }
             return inferred();
         }
+        // A missing-sentinel that has an inner serializer asks that serializer for every key but
+        // the sentinel itself, which is the node's own question (missing_sentinel.rs:70-77).
+        if (t == "missing-sentinel" && !children.empty() && !key.is(missing_sentinel_obj()))
+            return children[0]->to_json_key(key, exc_none, round_trip, by_alias, context);
+        // These nodes never take a key of any kind (shared.rs:422-435): None is refused by the
+        // node's type name and anything else is warned about in the node's own display name and
+        // handed to the infer walk.  The node's own type is no help -- a complex key at a complex
+        // node warns exactly as an int one does, because the node never said it takes keys
+        // (complex.rs:45-51, dict.rs:109-115, ellipsis.rs:54-60, typed_dict.rs:109-115).
+        if (t == "list" || t == "set" || t == "frozenset" || t == "deque" || t == "dict" ||
+            t == "frozendict" || t == "typed-dict" || t == "generator" || t == "complex" ||
+            t == "ellipsis" || t == "missing-sentinel") {
+            if (key.is_none()) {
+                std::string msg = "`" + t + "` not valid as object key";
+                if (json_text)
+                    throw PydanticSerializationError("Error serializing to JSON: TypeError: " + msg);
+                throw py::type_error(msg);
+            }
+            ser_warn_unexpected_value("", type_name_for_warning(), key);
+            return inferred();
+        }
         // A key the node's own type will not take is refused before it is asked for text:
         // the refusal is what gets reported and the text is the infer walk's, exactly as
         // warn_fallback_py then infer_json_key does (string.rs:58-70, simple.rs:140-152) and
@@ -4775,15 +4796,8 @@ private:
             }
             return py::str("None");
         }
-        // A collection cannot be a key at all, and None is the only value the type itself
-        // rules out (shared.rs:422-435); anything else is inferred and refused there.
-        if (key.is_none() && (t == "list" || t == "set" || t == "frozenset" || t == "dict" ||
-                              t == "typed-dict" || t == "generator" || t == "deque" ||
-                              t == "complex" || t == "ellipsis")) {
-            std::string msg = "`" + t + "` not valid as object key";
-            if (json_text) throw PydanticSerializationError("Error serializing to JSON: TypeError: " + msg);
-            throw py::type_error(msg);
-        }
+        // Anything the walk has no answer for is inferred and refused there, in the infer walk's
+        // own words (shared.rs:422-435).
         return inferred();
     }
 
