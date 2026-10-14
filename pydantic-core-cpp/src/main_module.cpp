@@ -331,6 +331,17 @@ static thread_local bool g_ser_attrs_with_extras = false;
 // iterator at all.  The port reaches a fields walk through the child's own dispatch, so the
 // list rides along here and the first walk that starts spends it: a fields node further down
 // the tree is nobody's declared list.
+// fields.rs:200 puts the field being serialized on the run state, so a check that fires deep
+// inside a field's value can still name the field it came from (extra.rs:301).
+static thread_local const std::string* g_ser_field_name = nullptr;
+struct SerFieldNameScope {
+    const std::string* const saved = g_ser_field_name;
+    explicit SerFieldNameScope(const std::string& name) { g_ser_field_name = &name; }
+    ~SerFieldNameScope() { g_ser_field_name = saved; }
+    SerFieldNameScope(const SerFieldNameScope&) = delete;
+    SerFieldNameScope& operator=(const SerFieldNameScope&) = delete;
+};
+
 static thread_local const std::vector<std::string>* g_ser_known_attrs = nullptr;
 
 struct SerKnownAttrsScope {
@@ -1411,13 +1422,15 @@ static void ser_warn_message(const std::string& message, const py::object& value
 static std::string ser_unexpected_value_message(const std::string& field_name,
                                                 const std::string& field_type,
                                                 const py::object& value) {
+    // The name travels on the run, so a mismatch below a field still names that field.
+    const std::string name = (field_name.empty() && g_ser_field_name) ? *g_ser_field_name : field_name;
     std::string type_name = ser_warn_input_type(value);
     std::string value_str = ser_warn_input_repr(value);
     std::string msg = "Expected `" + field_type + "` - serialized value may not be as expected";
-    if (field_name.empty()) {
+    if (name.empty()) {
         msg += " [input_value=" + value_str + ", input_type=" + type_name + "]";
     } else {
-        msg += " [field_name='" + field_name + "', input_value=" + value_str + ", input_type=" + type_name + "]";
+        msg += " [field_name='" + name + "', input_value=" + value_str + ", input_type=" + type_name + "]";
     }
     return msg;
 }
@@ -5432,6 +5445,8 @@ private:
             if (found == fields.end()) continue;  // a name this table does not have is offered
                                                  // to the extras walk below, not here
             const auto& ser = found->second;
+            // The name this run is inside, for a check that fires further down (fields.rs:200).
+            SerFieldNameScope run_field_name{k};
             // Skip internal metadata keys
             if (k == "__pydantic_fields_set__" || k == "__pydantic_defaults__") continue;
 
@@ -5741,6 +5756,8 @@ private:
             if (found == fields.end()) continue;  // a name this table does not have is offered
                                                  // to the extras walk below, not here
             const auto& ser = found->second;
+            // The name this run is inside, for a check that fires further down (fields.rs:200).
+            SerFieldNameScope run_field_name{k};
             // Skip internal metadata keys
             if (k == "__pydantic_fields_set__" || k == "__pydantic_defaults__") continue;
 
