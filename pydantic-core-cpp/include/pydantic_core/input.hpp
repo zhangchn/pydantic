@@ -100,16 +100,6 @@ struct EitherString {
     std::string as_cow() const { return to_string(); }
 };
 
-// What a str validator hands out.  Rust finishes with as_py_string on the *input*
-// (string.rs:88, string.rs:176-178), so a value that is already an exact Python str comes back
-// as the object that went in; `original` holds that object, empty whenever anything was done
-// to the text.  `text` stays at offset 0 so every layout-based cast that reads a str result as
-// a std::string keeps working.
-struct StrValue {
-    std::string text;
-    py::object original;
-};
-
 // Bytes representation
 struct EitherBytes {
     std::variant<std::vector<uint8_t>, std::string_view> data;
@@ -621,11 +611,6 @@ inline bool input_is_exact_str(const Input& input) {
     if (input.input_type() != InputType::Python) return false;
     py::object obj = input.as_python_object();
     return obj.ptr() && PyUnicode_CheckExact(obj.ptr());
-}
-
-// The object to hand back for an unmodified str value, or empty.
-inline py::object exact_str_object(const Input& input) {
-    return input_is_exact_str(input) ? input.as_python_object() : py::object();
 }
 
 

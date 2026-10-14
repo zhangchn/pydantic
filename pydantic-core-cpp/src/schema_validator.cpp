@@ -970,15 +970,6 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
     }
 
     if (try_all || matches_type("str") || effective_type == "string") {
-        // A str result that nothing rewrote carries the input object with it, and only the
-        // node's own name can vouch for the payload being one: under try_all it could be any of
-        // the scalar carriers, so there only the text is read.
-        if (!try_all) {
-            try {
-                auto* sv = static_cast<StrValue*>(value.get());
-                if (sv->original.ptr()) return sv->original;
-            } catch (...) {}
-        }
         auto* s = static_cast<std::string*>(value.get());
         if (s) {
             // What a str validator produced *is* the string, whatever it spells: Rust hands the

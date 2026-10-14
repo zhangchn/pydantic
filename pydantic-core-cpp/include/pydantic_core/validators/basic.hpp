@@ -440,8 +440,16 @@ class StringValidator : public Validator {
 public:
     bool strict = false;
     bool coerce_numbers_to_str = false;
+    mutable std::string last_type_name_;
 
     StringValidator() = default;
+
+    // The pointee differs per call -- a live py::object or the validator's own text -- so the
+    // name result conversion dispatches on has to come from the call, as WithDefaultValidator
+    // already does for the same reason.
+    std::string effective_result_name() const override {
+        return last_type_name_.empty() ? std::string("str") : last_type_name_;
+    }
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -453,10 +461,18 @@ auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str,
             return result.error();
         }
         state.floor_exactness(result.value().exactness());
-        auto out = std::make_shared<StrValue>();
-        out->text = result.value().value().to_string();
-        out->original = exact_str_object(input);
-        return ValResult<std::shared_ptr<void>>(std::move(out));
+        // Rust ends with as_py_string on the input (string.rs:88): an input that already is an
+        // exact str comes back as the object that went in, so that object -- not a copy of its
+        // text -- is what this call produced.
+        if (input_is_exact_str(input)) {
+            last_type_name_ = "py_object";
+            return ValResult<std::shared_ptr<void>>(
+                std::make_shared<py::object>(input.as_python_object()));
+        }
+        last_type_name_.clear();
+        return ValResult<std::shared_ptr<void>>(
+            std::make_shared<std::string>(result.value().value().to_string())
+        );
     }
     
     std::string name() const override { return "str"; }
@@ -570,6 +586,7 @@ public:
     bool to_lower = false;
     bool to_upper = false;
     bool ascii_only = false;
+    mutable std::string last_type_name_;
 
     StrConstrainedValidator() = default;
 
@@ -678,16 +695,23 @@ auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str,
             }
         }
 
-        auto out = std::make_shared<StrValue>();
-        out->text = std::move(str);
-        // The chain above ends in Rust's `else` arm -- no case map and no trim ran -- so the text
-        // is still the input's own, which Rust hands back as the input object (string.rs:176-178).
-        if (!to_lower && !to_upper && !strip_whitespace)
-            out->original = exact_str_object(input);
-        return ValResult<std::shared_ptr<void>>(std::move(out));
+        // Rust's chain ends in `else { either_str.as_py_string(...) }` (string.rs:176-178): when
+        // no case map and no trim ran the value is still the input's own text and comes back as
+        // the input object -- a different pointee, so a different reported name.
+        if (!to_lower && !to_upper && !strip_whitespace && input_is_exact_str(input)) {
+            last_type_name_ = "py_object";
+            return ValResult<std::shared_ptr<void>>(
+                std::make_shared<py::object>(input.as_python_object()));
+        }
+        last_type_name_.clear();
+        return ValResult<std::shared_ptr<void>>(std::make_shared<std::string>(std::move(str)));
     }
     
     std::string name() const override { return "constrained-str"; }
+
+    std::string effective_result_name() const override {
+        return last_type_name_.empty() ? std::string("constrained-str") : last_type_name_;
+    }
 
     void visit_refs(RefVisitor visit, void* arg) const override {
         visit_ref(visit, arg, pattern_re);
