@@ -1542,6 +1542,8 @@ private:
     static py::object typed_default_to_py(const std::shared_ptr<void>& value, const std::string& type) {
         if (!value) return py::none();
         if (type == "str") {
+            if (auto* sv = static_cast<StrValue*>(value.get()); sv && sv->original.ptr())
+                return sv->original;
             if (auto* s = static_cast<std::string*>(value.get())) return py::str(*s);
         } else if (type == "int") {
             if (auto* i = static_cast<int64_t*>(value.get())) return py::int_(*i);

@@ -453,9 +453,10 @@ auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str,
             return result.error();
         }
         state.floor_exactness(result.value().exactness());
-        return ValResult<std::shared_ptr<void>>(
-            std::make_shared<std::string>(result.value().value().to_string())
-        );
+        auto out = std::make_shared<StrValue>();
+        out->text = result.value().value().to_string();
+        out->original = exact_str_object(input);
+        return ValResult<std::shared_ptr<void>>(std::move(out));
     }
     
     std::string name() const override { return "str"; }
@@ -677,7 +678,13 @@ auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str,
             }
         }
 
-        return ValResult<std::shared_ptr<void>>(std::make_shared<std::string>(str));
+        auto out = std::make_shared<StrValue>();
+        out->text = std::move(str);
+        // The chain above ends in Rust's `else` arm -- no case map and no trim ran -- so the text
+        // is still the input's own, which Rust hands back as the input object (string.rs:176-178).
+        if (!to_lower && !to_upper && !strip_whitespace)
+            out->original = exact_str_object(input);
+        return ValResult<std::shared_ptr<void>>(std::move(out));
     }
     
     std::string name() const override { return "constrained-str"; }

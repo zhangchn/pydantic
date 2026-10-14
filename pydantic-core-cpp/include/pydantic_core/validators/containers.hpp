@@ -192,6 +192,8 @@ public:
             if (auto* b = static_cast<bool*>(value.get())) return py::bool_(*b);
         }
         if (name == "str" || name == "string" || name == "constr-str" || name == "str-constrained") {
+            if (auto* sv = static_cast<StrValue*>(value.get()); sv && sv->original.ptr())
+                return sv->original;
             if (auto* s = static_cast<std::string*>(value.get())) return py::str(*s);
         }
         if (name == "bytes" || name == "constrained-bytes" || name == "bytes-constrained" ||
