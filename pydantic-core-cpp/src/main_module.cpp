@@ -2263,6 +2263,9 @@ struct SerPathStep {
     long long index = 0;
 };
 
+// SerNode's own walk asks for a pyo3 extraction message below, where the helper is defined.
+static std::string ser_downcast_message(PyObject* v, const char* want);
+
 struct SerNode {
     std::string type;
     // Rust-style serializer display name, e.g. "list[int]" (warnings).
@@ -3155,6 +3158,25 @@ struct SerNode {
                     return SerNode::serialize_any_value(root_val, exc_none, round_trip, json_mode, include, exclude);
                 }
                 return children[0]->to_python(root_val, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
+            }
+            if (type == "model" && !root_model && !ser_model_as_dict(value)) {
+                // model.rs:218-252 builds the value a model's fields serializer is handed out of
+                // the instance and lets every refusal of that build reach the caller: __dict__ has
+                // to be a dict, so a class -- which answers with a mappingproxy -- is refused with
+                // a TypeError; exclude_unset asks for __pydantic_fields_set__ and extracts it as a
+                // set, which a frozenset is not; and a model that keeps extras asks for
+                // __pydantic_extra__.  In that order, so a value missing two of them is refused
+                // for the first.  Without has_extra the last ask never happens.  A dict the port
+                // licensed as its own model is that node's instance and is asked nothing.
+                py::object attrs = py::getattr(value, "__dict__");
+                if (!PyDict_Check(attrs.ptr()))
+                    throw py::type_error(ser_downcast_message(attrs.ptr(), "dict"));
+                if (exclude_unset) {
+                    py::object fields_set = py::getattr(value, "__pydantic_fields_set__");
+                    if (!PySet_Check(fields_set.ptr()))
+                        throw py::type_error(ser_downcast_message(fields_set.ptr(), "set"));
+                }
+                if (extra_allowed) py::getattr(value, "__pydantic_extra__");
             }
             if (type == "dataclass") {
                 // dataclass.rs:153-165: a fields inner is given the declared names read off the
@@ -4181,6 +4203,20 @@ struct SerNode {
                     return infer_json(root_val, ensure_ascii, indent, include, exclude);
                 }
                 return children[0]->to_json(root_val, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
+            }
+            if (type == "model" && !root_model && !ser_model_as_dict(value)) {
+                // model.rs:218-252: the same three asks in the same order -- __dict__ must be a
+                // dict, exclude_unset wants a set for __pydantic_fields_set__, and a model that
+                // keeps extras asks for __pydantic_extra__ -- each refusal reaching the caller.
+                py::object attrs = py::getattr(value, "__dict__");
+                if (!PyDict_Check(attrs.ptr()))
+                    throw py::type_error(ser_downcast_message(attrs.ptr(), "dict"));
+                if (exclude_unset) {
+                    py::object fields_set = py::getattr(value, "__pydantic_fields_set__");
+                    if (!PySet_Check(fields_set.ptr()))
+                        throw py::type_error(ser_downcast_message(fields_set.ptr(), "set"));
+                }
+                if (extra_allowed) py::getattr(value, "__pydantic_extra__");
             }
             if (type == "dataclass") {
                 // dataclass.rs:153-165 -- see the python walk: the pairs, or a dict of them, go
