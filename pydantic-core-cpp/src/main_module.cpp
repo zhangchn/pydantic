@@ -326,6 +326,21 @@ static thread_local bool g_ser_attrs_above = false;
 // above says whether the value below is the one this walk was handed.
 static thread_local bool g_ser_attrs_with_extras = false;
 
+// dataclass.rs:151-165: a dataclass node whose inner serializer is a fields one does not hand
+// it the value -- the walk is given (declared name, getattr(value, name)) pairs and no extras
+// iterator at all.  The port reaches a fields walk through the child's own dispatch, so the
+// list rides along here and the first walk that starts spends it: a fields node further down
+// the tree is nobody's declared list.
+static thread_local const std::vector<std::string>* g_ser_known_attrs = nullptr;
+
+struct SerKnownAttrsScope {
+    const std::vector<std::string>* const saved = g_ser_known_attrs;
+    explicit SerKnownAttrsScope(const std::vector<std::string>& names) { g_ser_known_attrs = &names; }
+    ~SerKnownAttrsScope() { g_ser_known_attrs = saved; }
+    SerKnownAttrsScope(const SerKnownAttrsScope&) = delete;
+    SerKnownAttrsScope& operator=(const SerKnownAttrsScope&) = delete;
+};
+
 struct SerAttrsScope {
     const bool saved = g_ser_attrs_above;
     const bool saved_extras = g_ser_attrs_with_extras;
@@ -2339,6 +2354,10 @@ struct SerNode {
     std::unordered_map<std::string, SerRef> fields;
     // Fields in declaration order (matches Rust — iterate this, not fields directly)
     std::vector<std::string> field_order;
+    // dataclass.rs:88 -- the names a dataclass node declares, in schema order.  It is these,
+    // read off the value, that a dataclass offers its fields serializer; nothing the value
+    // holds besides them is ever named.
+    std::vector<std::string> dc_names;
     // Field aliases: map from field_name -> alias (for serialization)
     std::unordered_map<std::string, std::string> field_aliases;
     // Exclude-if callables: field_name -> Python callable (for serialization)
@@ -2496,6 +2515,7 @@ struct SerNode {
         tagged = other.tagged;
         fields = other.fields;
         field_order = other.field_order;
+        dc_names = other.dc_names;
         field_aliases = other.field_aliases;
         field_exclude_if = other.field_exclude_if;
         field_excluded = other.field_excluded;
@@ -3056,6 +3076,13 @@ struct SerNode {
                     // had to give up on.  The port's own dict model is licensed
                     // separately, since for it this *is* the instance.
                     ok = py_hasattr(value, "__dict__") || ser_model_as_dict(value);
+                } else if (type == "dataclass") {
+                    // dataclass.rs:127-131: with no check open a dataclass node asks "is this a
+                    // dataclass", not "does this have an attribute dict".  A slots dataclass has
+                    // no `__dict__` and is taken; an ordinary class instance or a plain dict has
+                    // no `__dataclass_fields__` and is refused -- in the class's own name, with
+                    // inference answering for the value.
+                    ok = py_hasattr(value, "__dataclass_fields__");
                 } else {
                     ok = (py_hasattr(value, "__dict__") || py::isinstance<py::dict>(value));
                 }
@@ -3128,6 +3155,21 @@ struct SerNode {
                     return SerNode::serialize_any_value(root_val, exc_none, round_trip, json_mode, include, exclude);
                 }
                 return children[0]->to_python(root_val, json_mode, exc_none, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, context);
+            }
+            if (type == "dataclass") {
+                // dataclass.rs:153-165: a fields inner is given the declared names read off the
+                // value and no extras at all; any other inner is given a fresh dict of those same
+                // pairs (get_inner_value, :133-143), so what answers below is a dict of the
+                // dataclass's making, never the instance.
+                if (children[0]->ser_is_fields_variant()) {
+                    SerKnownAttrsScope declared(dc_names);
+                    return children[0]->to_python(value, json_mode, exc_none, round_trip, include, exclude,
+                                                  by_alias, exclude_unset, exclude_defaults, context);
+                }
+                py::dict inner;
+                for (const auto& n : dc_names) inner[py::str(n)] = py::getattr(value, py::str(n));
+                return children[0]->to_python(inner, json_mode, exc_none, round_trip, include, exclude,
+                                              by_alias, exclude_unset, exclude_defaults, context);
             }
             // Rust hands the child what get_inner_value (model.rs:203) built rather than the
             // instance itself, and for a model that keeps no extras that is a plain dict -- the
@@ -4066,6 +4108,13 @@ struct SerNode {
                     // instance dict (or the port's own marked dict model), so a
                     // plain dict is refused and inferred.
                     ok = py_hasattr(value, "__dict__") || ser_model_as_dict(value);
+                } else if (type == "dataclass") {
+                    // dataclass.rs:127-131: with no check open a dataclass node asks "is this a
+                    // dataclass", not "does this have an attribute dict".  A slots dataclass has
+                    // no `__dict__` and is taken; an ordinary class instance or a plain dict has
+                    // no `__dataclass_fields__` and is refused -- in the class's own name, with
+                    // inference answering for the value.
+                    ok = py_hasattr(value, "__dataclass_fields__");
                 } else {
                     ok = (py_hasattr(value, "__dict__") || py::isinstance<py::dict>(value));
                 }
@@ -4132,6 +4181,19 @@ struct SerNode {
                     return infer_json(root_val, ensure_ascii, indent, include, exclude);
                 }
                 return children[0]->to_json(root_val, ensure_ascii, indent, round_trip, include, exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context);
+            }
+            if (type == "dataclass") {
+                // dataclass.rs:153-165 -- see the python walk: the pairs, or a dict of them, go
+                // over rather than the instance.
+                if (children[0]->ser_is_fields_variant()) {
+                    SerKnownAttrsScope declared(dc_names);
+                    return children[0]->to_json(value, ensure_ascii, indent, round_trip, include, exclude,
+                                                by_alias, exclude_unset, exclude_defaults, exc_none, context);
+                }
+                py::dict inner;
+                for (const auto& n : dc_names) inner[py::str(n)] = py::getattr(value, py::str(n));
+                return children[0]->to_json(inner, ensure_ascii, indent, round_trip, include, exclude,
+                                            by_alias, exclude_unset, exclude_defaults, exc_none, context);
             }
             // See the python walk: the child is handed the dict Rust builds, not the instance.
             if (children[0]->ser_fields_attrs_kind_mismatch() && py_hasattr(value, "__dict__")) {
@@ -5219,6 +5281,13 @@ private:
         return true;
     }
 
+    // the variant test dataclass.rs:153 makes: model-fields (model.rs:92) and dataclass-args
+    // (dataclass.rs:80) are built as a GeneralFieldsSerializer; a typed-dict wraps one in its
+    // own serializer (typed_dict.rs:96) and is therefore not the Fields variant.
+    bool ser_is_fields_variant() const {
+        return type == "model-fields" || type == "dataclass-args";
+    }
+
     // The delegation a fields node in ModelExtra mode never got: model.rs:249 builds the
     // (attrs, extras) tuple only when the model itself keeps extras, so every other model --
     // and every dataclass -- hands down a plain dict, which extract_dicts (:145) declines to
@@ -5252,8 +5321,15 @@ private:
         // (typed_dict.rs:106/:126 sets state.model around the fields serializer it hands its
         // own value to), so a fields node below it is as well provided for.
         SerModelScope fields_model(type == "typed-dict");
+        // dataclass.rs:155 spends its list here, on the walk it was brought for.
+        const std::vector<std::string>* known = g_ser_known_attrs;
+        g_ser_known_attrs = nullptr;
         py::dict main;
-        if (ser_fields_extract(value, main)) {
+        if (known) {
+            // known_dataclass_iter (dataclass.rs:211-223) asks the value for each name and lets
+            // an attribute it does not have raise out of the run.
+            for (const auto& n : *known) main[py::str(n)] = py::getattr(value, py::str(n));
+        } else if (ser_fields_extract(value, main)) {
             if (g_ser_model_depth == 0) ser_reject_no_model();
         } else if (g_ser_attrs_above && !ser_fields_attrs_kind_mismatch() &&
                    py_hasattr(value, "__dict__")) {
@@ -5269,8 +5345,24 @@ private:
         py::object missing_obj = missing_sentinel_obj();
         ser_reject_unexpected_fields(main);
 
-        for (const auto& k : field_order) {
-            const auto& ser = fields.at(k);
+        // Rust iterates the pairs it was handed and looks each name up in this table
+        // (fields.rs:197-200), so with a dataclass's list the answer comes out in the
+        // dataclass's order, and a name it did not declare is not offered even when this
+        // table has it.  Computed fields follow both iterators (fields.rs:242-244).
+        const std::vector<std::string>* walk = &field_order;
+        std::vector<std::string> declared;
+        if (known) {
+            for (const auto& n : *known)
+                if (!computed_fields_.count(n)) declared.push_back(n);
+            for (const auto& k : field_order)
+                if (computed_fields_.count(k)) declared.push_back(k);
+            walk = &declared;
+        }
+        for (const auto& k : *walk) {
+            auto found = fields.find(k);
+            if (found == fields.end()) continue;  // a name this table does not have is offered
+                                                 // to the extras walk below, not here
+            const auto& ser = found->second;
             // Skip internal metadata keys
             if (k == "__pydantic_fields_set__" || k == "__pydantic_defaults__") continue;
 
@@ -5502,7 +5594,9 @@ private:
             }
         }
         // Extra fields - also apply include/exclude if they match by name
-        if (extra_allowed && py_hasattr(value, "__pydantic_extra__")) {
+        // extras_iter is empty for a dataclass (dataclass.rs:158): the extras a model keeps
+        // are not offered, only the declared names.
+        if (!known && extra_allowed && py_hasattr(value, "__pydantic_extra__")) {
             auto extra = py::getattr(value, "__pydantic_extra__");
             if (!extra.is_none()) {
                 for (auto item : extra.cast<py::dict>()) {
@@ -5538,8 +5632,15 @@ private:
         bool first = true;
         // See the python walk above for why the typed-dict node stands for a model here.
         SerModelScope fields_model(type == "typed-dict");
+        // dataclass.rs:155 spends its list here, on the walk it was brought for.
+        const std::vector<std::string>* known = g_ser_known_attrs;
+        g_ser_known_attrs = nullptr;
         py::dict main;
-        if (ser_fields_extract(value, main)) {
+        if (known) {
+            // known_dataclass_iter (dataclass.rs:211-223) asks the value for each name and lets
+            // an attribute it does not have raise out of the run.
+            for (const auto& n : *known) main[py::str(n)] = py::getattr(value, py::str(n));
+        } else if (ser_fields_extract(value, main)) {
             if (g_ser_model_depth == 0) ser_reject_no_model();
         } else if (g_ser_attrs_above && !ser_fields_attrs_kind_mismatch() &&
                    py_hasattr(value, "__dict__")) {
@@ -5551,8 +5652,24 @@ private:
         py::object missing_obj = missing_sentinel_obj();
         ser_reject_unexpected_fields(main);
 
-        for (const auto& k : field_order) {
-            const auto& ser = fields.at(k);
+        // Rust iterates the pairs it was handed and looks each name up in this table
+        // (fields.rs:197-200), so with a dataclass's list the answer comes out in the
+        // dataclass's order, and a name it did not declare is not offered even when this
+        // table has it.  Computed fields follow both iterators (fields.rs:242-244).
+        const std::vector<std::string>* walk = &field_order;
+        std::vector<std::string> declared;
+        if (known) {
+            for (const auto& n : *known)
+                if (!computed_fields_.count(n)) declared.push_back(n);
+            for (const auto& k : field_order)
+                if (computed_fields_.count(k)) declared.push_back(k);
+            walk = &declared;
+        }
+        for (const auto& k : *walk) {
+            auto found = fields.find(k);
+            if (found == fields.end()) continue;  // a name this table does not have is offered
+                                                 // to the extras walk below, not here
+            const auto& ser = found->second;
             // Skip internal metadata keys
             if (k == "__pydantic_fields_set__" || k == "__pydantic_defaults__") continue;
 
@@ -5774,7 +5891,9 @@ private:
                 out += json_escape(k, ensure_ascii) + ":" + field_json;
             }
         }
-        if (extra_allowed && py_hasattr(value, "__pydantic_extra__")) {
+        // extras_iter is empty for a dataclass (dataclass.rs:158): the extras a model keeps
+        // are not offered, only the declared names.
+        if (!known && extra_allowed && py_hasattr(value, "__pydantic_extra__")) {
             auto extra = py::getattr(value, "__pydantic_extra__");
             if (!extra.is_none()) {
                 for (auto item : extra.cast<py::dict>()) {
@@ -7480,6 +7599,7 @@ static SerRef build_ser_impl(const py::dict& schema,
                 // own complaint rather than the interpreter's bare TypeError
                 if (!PyUnicode_Check(item.ptr()))
                     throw SchemaError("Error building `" + type + wrap + ser_downcast_typeerror(item.ptr(), "str"));
+                node->dc_names.push_back(py::reinterpret_borrow<py::str>(item).cast<std::string>());
             }
         }
     }
