@@ -326,6 +326,23 @@ inline bool is_bare_number(const std::string& s) {
     return seen_digit;
 }
 
+// How big a duration may be, measured against the wheel:
+//   * speedate holds each component in a u32 of its own unit -- days for Y/M/W/D,
+//     seconds for H/M/S -- so a component whose value times that unit passes
+//     2**32-1 is refused as "a numeric value in the duration is too large" however
+//     small the total would have come out ('PT1193047H' fails, 'PT1193046H' does not).
+//   * the total then has to fit the 999,999,999 days a timedelta can hold.
+// Skipping either lets the components wrap (the port handed back a negative 579
+// million-day duration for 'P99999999999999999999Y') or makes the timedelta build
+// fail, which the result table's catch-all turns into None.
+inline constexpr long long TD_MAX_COMPONENT = 4294967295LL;  // 2**32 - 1
+inline constexpr long long TD_MAX_DAYS = 999999999LL;
+inline constexpr long long TD_SECONDS_IN_DAY = 86400LL;
+inline constexpr long long TD_MAX_SECONDS = (TD_MAX_DAYS + 1) * TD_SECONDS_IN_DAY;  // 1e9 days
+inline constexpr const char* TD_TOO_LARGE = "a numeric value in the duration is too large";
+inline constexpr const char* TD_TOO_MANY_DAYS = "durations may not exceed 999,999,999 days";
+inline constexpr const char* TD_NAN = "NaN values not permitted";
+
 // error_out (optional) receives speedate's own diagnosis when the input holds a
 // readable prefix followed by more characters, so callers can report that rather
 // than the generic "could not parse" text.
@@ -342,6 +359,11 @@ inline std::optional<Timedelta> try_parse_timedelta_str(const std::string& input
         long long micros = 0;
         bool parsed_any = false;
 
+        auto too_large = [&]() -> std::optional<Timedelta> {
+            if (error_out) *error_out = TD_TOO_LARGE;
+            return std::nullopt;
+        };
+
         // ISO 8601 duration: P[nY][nM][nD][T[nH][nM][nS]] / P[nW]
         if (!s.empty() && s[0] == 'P') {
             bool in_time = false;
@@ -356,14 +378,24 @@ inline std::optional<Timedelta> try_parse_timedelta_str(const std::string& input
                     num.clear();
                 } else {
                     if (num.empty()) return std::nullopt;
-                    double val = std::stod(num);
+                    double val = 0.0;
+                    try {
+                        val = std::stod(num);
+                    } catch (const std::out_of_range&) {
+                        return too_large();
+                    }
+                    // The limit is on the component in its own unit -- days for
+                    // Y/M/W/D, seconds for H/M/S -- never on the total it adds up to.
+                    auto component_over = [&](double unit) {
+                        return !(std::fabs(val * unit) <= static_cast<double>(TD_MAX_COMPONENT));
+                    };
                     switch (c) {
-                        case 'Y': if (!in_time) { total_seconds += static_cast<long long>(val * 365.0 * 86400.0); parsed_any = true; } break;
-                        case 'M': if (!in_time) { total_seconds += static_cast<long long>(val * 30.0 * 86400.0); parsed_any = true; } else { total_seconds += static_cast<long long>(val * 60.0); parsed_any = true; } break;
-                        case 'D': if (!in_time) { total_seconds += static_cast<long long>(val * 86400.0); parsed_any = true; } break;
-                        case 'H': if (in_time) { total_seconds += static_cast<long long>(val * 3600.0); parsed_any = true; } break;
-                        case 'S': if (in_time) { double whole = 0.0; double frac = std::modf(val, &whole); total_seconds += static_cast<long long>(whole); micros += std::llround(frac * 1e6); parsed_any = true; } break;
-                        case 'W': if (!in_time) { total_seconds += static_cast<long long>(val * 7.0 * 86400.0); parsed_any = true; } break;
+                        case 'Y': if (!in_time) { if (component_over(365.0)) return too_large(); total_seconds += static_cast<long long>(val * 365.0 * 86400.0); parsed_any = true; } break;
+                        case 'M': if (!in_time) { if (component_over(30.0)) return too_large(); total_seconds += static_cast<long long>(val * 30.0 * 86400.0); parsed_any = true; } else { if (component_over(60.0)) return too_large(); total_seconds += static_cast<long long>(val * 60.0); parsed_any = true; } break;
+                        case 'D': if (!in_time) { if (component_over(1.0)) return too_large(); total_seconds += static_cast<long long>(val * 86400.0); parsed_any = true; } break;
+                        case 'H': if (in_time) { if (component_over(3600.0)) return too_large(); total_seconds += static_cast<long long>(val * 3600.0); parsed_any = true; } break;
+                        case 'S': if (in_time) { if (component_over(1.0)) return too_large(); double whole = 0.0; double frac = std::modf(val, &whole); total_seconds += static_cast<long long>(whole); micros += std::llround(frac * 1e6); parsed_any = true; } break;
+                        case 'W': if (!in_time) { if (component_over(7.0)) return too_large(); total_seconds += static_cast<long long>(val * 7.0 * 86400.0); parsed_any = true; } break;
                         default: return std::nullopt;
                     }
                     num.clear();
@@ -398,8 +430,18 @@ inline std::optional<Timedelta> try_parse_timedelta_str(const std::string& input
                     bool letter_follows = after < s.size() &&
                         ((s[after] >= 'a' && s[after] <= 'z') || (s[after] >= 'A' && s[after] <= 'Z'));
                     if (letter_follows) continue;
-                    day_part = std::stoll(s.substr(0, digits_end));
-                    if (day_part > 999999999LL) return std::nullopt;
+                    // Same u32-as-days limit as the ISO date part; a digit run that
+                    // cannot be held there is refused before it reaches stoll.
+                    size_t first = 0;
+                    while (first + 1 < digits_end && s[first] == '0') first++;
+                    size_t nd = digits_end - first;
+                    if (nd > 10) return too_large();
+                    day_part = std::stoll(s.substr(first, nd));
+                    if (day_part > static_cast<long long>(TD_MAX_COMPONENT)) return too_large();
+                    if (day_part > TD_MAX_DAYS) {
+                        if (error_out) *error_out = TD_TOO_MANY_DAYS;
+                        return std::nullopt;
+                    }
                     have_days = true;
                     tail = after;
                     break;
@@ -447,6 +489,10 @@ inline std::optional<Timedelta> try_parse_timedelta_str(const std::string& input
             // borrow one second for negative microseconds
             rem -= 1;
             micros += 1000000;
+        }
+        if (days > TD_MAX_DAYS || days < -TD_MAX_DAYS) {
+            if (error_out) *error_out = TD_TOO_MANY_DAYS;
+            return std::nullopt;
         }
         return Timedelta{static_cast<int>(days), static_cast<int>(rem), static_cast<int>(micros)};
     } catch (...) {

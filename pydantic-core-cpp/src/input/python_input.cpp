@@ -1382,8 +1382,30 @@ ValResult<ValMatch<EitherTimedelta>> PythonInput::validate_timedelta(bool strict
     }
 
     if (is_int() && !strict) {
-        // Lax mode: treat int as number of seconds (Rust behavior)
-        long long seconds = py::int_(obj_).cast<long long>();
+        // Lax mode: treat int as number of seconds (Rust behavior).  A Python int has no
+        // upper bound: casting to long long either wrapped into the day field or, for an int
+        // too big for long long, threw RuntimeError straight out of the validator.
+        // At exactly +-2**63 the reference lets the day count wrap through an i32 and
+        // accepts a 579,025,220-day duration; this refuses there too, because the other
+        // magnitudes in that range (1e15 to 1e18 seconds) came back as None or a negative
+        // duration and no rule found in the wheel covers both halves.
+        int overflow = 0;
+        long long seconds = PyLong_AsLongLongAndOverflow(obj_.ptr(), &overflow);
+        if (overflow != 0 || (seconds == -1 && PyErr_Occurred())) {
+            if (PyErr_Occurred()) PyErr_Clear();
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::TimedeltaParsing, "error", TD_TOO_MANY_DAYS),
+                this->current_location(),
+                this->as_error_value().repr
+            );
+        }
+        if (seconds >= TD_MAX_SECONDS || seconds <= -TD_MAX_SECONDS) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::TimedeltaParsing, "error", TD_TOO_MANY_DAYS),
+                this->current_location(),
+                this->as_error_value().repr
+            );
+        }
         long long days = seconds / 86400;
         long long rem = seconds % 86400;
         return ValMatch<EitherTimedelta>::lax(
@@ -1394,6 +1416,23 @@ ValResult<ValMatch<EitherTimedelta>> PythonInput::validate_timedelta(bool strict
     // Fraction through extract::<f64>().
     double numeric = 0;
     if (!strict && (is_float() || is_decimal()) && as_float_via_number(&numeric)) {
+        // inf and nan used to reach static_cast<long long>, which is undefined: the port
+        // returned -1us for inf and 0 for nan, -inf and 1e30.  The wheel names both, and
+        // every finite value past the day cap gets the same text a string gets.
+        const char* refusal = nullptr;
+        if (std::isnan(numeric)) {
+            refusal = TD_NAN;
+        } else if (!std::isfinite(numeric) || numeric >= static_cast<double>(TD_MAX_SECONDS)
+                   || numeric <= -static_cast<double>(TD_MAX_SECONDS)) {
+            refusal = TD_TOO_MANY_DAYS;
+        }
+        if (refusal) {
+            return ValError::line_error(
+                ErrorType(ErrorType::Kind::TimedeltaParsing, "error", refusal),
+                this->current_location(),
+                this->as_error_value().repr
+            );
+        }
         double seconds = numeric;
         double days_f = seconds / 86400.0;
         long long days = static_cast<long long>(days_f);
