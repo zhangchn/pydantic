@@ -332,7 +332,10 @@ public:
                 push_key_loc(state.location(), key_obj, entry.key);
                 ValidationState sub_state = state.sub_copy(state.coerce_strings());
                 py::object val_obj = dict->get_value(entry.key).value_or(py::none());
-                bool skip_entry = false;
+                // A key that failed takes the entry out of the output, not out of the run:
+                // Rust keeps its answer as None (dict.rs:131-138) and still asks the value
+                // validator, so a pair with both halves wrong reports two errors.
+                bool key_failed = false;
 
                 // Validate key against keys_schema
                 if (keys_schema) {
@@ -340,35 +343,44 @@ public:
                     key_input->set_current_location(state.location());
                     auto key_result = keys_schema->validate(*key_input, sub_state);
                     if (key_result.is_err()) {
-                        // Rust skips the whole entry when the key omits.
+                        // Rust skips the whole entry when the key omits, and hands back a
+                        // failure that is not a list of line errors as the run's own error.
                         if (key_result.error().is_omit()) {
                             state.location().pop();
                             continue;
                         }
-                        if (fail_fast && !is_last_partial) {
+                        if (!key_result.error().has_line_errors()) {
                             state.location().pop();
                             return key_result.error();
                         }
-                        if (!is_last_partial && key_result.error().has_line_errors()) {
-                            const size_t key_depth =
-                                state.location().items.size() - 1;
-                            for (auto& le : key_result.error().line_errors()) {
-                                // Rust marks a failing dict key with "[key]" right
-                                // after the key itself.
-                                size_t at = std::min(key_depth + 1, le->location.items.size());
-                                le->location.items.insert(le->location.items.begin() + at,
-                                                          LocItem("[key]"));
-                                errors.push_back(le);
-                            }
+                        const size_t key_depth = state.location().items.size() - 1;
+                        for (auto& le : key_result.error().line_errors()) {
+                            // Rust marks a failing dict key with "[key]" right
+                            // after the key itself.
+                            size_t at = std::min(key_depth + 1, le->location.items.size());
+                            le->location.items.insert(le->location.items.begin() + at,
+                                                      LocItem("[key]"));
+                            errors.push_back(le);
                         }
-                        skip_entry = true;
+                        // fail_fast stops between the two halves, with the marked key error as
+                        // the only thing reported and this entry's value left unvalidated
+                        // (dict.rs:148-150).
+                        if (fail_fast && !errors.empty()) {
+                            state.location().pop();
+                            break;
+                        }
+                        key_failed = true;
                     } else {
                         auto converted = validated_to_py(key_result.value(), keys_schema->effective_result_name());
                         if (converted) key_obj = *converted;
                     }
                 }
+                if (fail_fast && !errors.empty()) {
+                    state.location().pop();
+                    break;
+                }
                 // Validate value against values_schema
-                if (values_schema && !skip_entry) {
+                if (values_schema) {
                     auto val_input = make_sub_input(val_obj);
                     val_input->set_current_location(state.location());
                     auto val_result = values_schema->validate(*val_input, sub_state);
@@ -378,22 +390,28 @@ public:
                             state.location().pop();
                             continue;
                         }
-                        if (fail_fast && !is_last_partial) {
+                        if (!val_result.error().has_line_errors()) {
                             state.location().pop();
                             return val_result.error();
                         }
-                        if (!is_last_partial && val_result.error().has_line_errors()) {
+                        if (!is_last_partial) {
                             for (auto& le : val_result.error().line_errors()) {
                                 errors.push_back(le);
                             }
                         }
-                        skip_entry = true;
-                    } else {
-                        auto converted = validated_to_py(val_result.value(), values_schema->effective_result_name());
-                        if (converted) val_obj = *converted;
+                        // Rust's `continue` here goes past the fail-fast check below, so the
+                        // next entry has its key asked before the walk stops (dict.rs:154-164).
+                        state.location().pop();
+                        continue;
                     }
+                    auto converted = validated_to_py(val_result.value(), values_schema->effective_result_name());
+                    if (converted) val_obj = *converted;
                 }
-                if (!skip_entry) {
+                if (fail_fast && !errors.empty()) {
+                    state.location().pop();
+                    break;
+                }
+                if (!key_failed) {
                     result_dict[key_obj] = val_obj;
                 }
                 state.location().pop();
