@@ -3176,7 +3176,22 @@ struct SerNode {
                     if (!PySet_Check(fields_set.ptr()))
                         throw py::type_error(ser_downcast_message(fields_set.ptr(), "set"));
                 }
-                if (extra_allowed) py::getattr(value, "__pydantic_extra__");
+                if (extra_allowed) {
+                    py::object px = py::getattr(value, "__pydantic_extra__");
+                    // model.rs:249 hands the pair down whatever that ask answered and
+                    // extract_dicts (fields.rs:145) takes a second element that is a dict or None
+                    // and nothing else.  Declined, it is the pair whole that reaches
+                    // serialize_fallback, so inference prints a two-element sequence and the
+                    // warning names the fields family with input_type=tuple.  The port hands the
+                    // instance wherever the pair is one Rust would have taken -- its own attrs
+                    // walk reads that same __dict__ and those same extras -- and hands the pair
+                    // itself only where the extract would decline, which is where the difference
+                    // is the answer.
+                    if (!px.is_none() && !PyDict_Check(px.ptr()))
+                        return children[0]->to_python(py::make_tuple(attrs, px), json_mode, exc_none,
+                                                      round_trip, include, exclude, by_alias,
+                                                      exclude_unset, exclude_defaults, context);
+                }
             }
             if (type == "dataclass") {
                 // dataclass.rs:153-165: a fields inner is given the declared names read off the
@@ -4216,7 +4231,15 @@ struct SerNode {
                     if (!PySet_Check(fields_set.ptr()))
                         throw py::type_error(ser_downcast_message(fields_set.ptr(), "set"));
                 }
-                if (extra_allowed) py::getattr(value, "__pydantic_extra__");
+                if (extra_allowed) {
+                    py::object px = py::getattr(value, "__pydantic_extra__");
+                    // model.rs:249 -- see the python walk: a pair the extract below declines is
+                    // handed over as the pair, because that is what the fallback then prints.
+                    if (!px.is_none() && !PyDict_Check(px.ptr()))
+                        return children[0]->to_json(py::make_tuple(attrs, px), ensure_ascii, indent,
+                                                    round_trip, include, exclude, by_alias,
+                                                    exclude_unset, exclude_defaults, exc_none, context);
+                }
             }
             if (type == "dataclass") {
                 // dataclass.rs:153-165 -- see the python walk: the pairs, or a dict of them, go
