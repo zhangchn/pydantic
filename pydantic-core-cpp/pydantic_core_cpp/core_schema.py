@@ -7,12 +7,12 @@ from __future__ import annotations as _annotations
 
 import sys
 import warnings
-from collections.abc import Callable, Generator, Hashable, Mapping
+from collections.abc import Callable, Generator, Mapping
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from fractions import Fraction
 from re import Pattern
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Union
 
 from typing_extensions import TypeVar, deprecated
 
@@ -281,6 +281,9 @@ def simple_ser_schema(type: ExpectedSerializationTypes) -> SimpleSerSchema:
     """
     Returns a schema for serialization with a custom type.
 
+    Note that any core schema can be used as a serialization schema, e.g. `int_schema()`
+    is equivalent to `simple_ser_schema('int')`.
+
     Args:
         type: The type to use for serialization
     """
@@ -472,6 +475,9 @@ def model_ser_schema(cls: type[Any], schema: CoreSchema) -> ModelSerSchema:
     """
     Returns a schema for serialization using a model.
 
+    Note that any core schema can be used as a serialization schema, e.g. `model_schema()`
+    can be used instead.
+
     Args:
         cls: The expected class type, used to generate warnings if the wrong type is passed
         schema: Internal schema to use to serialize the model dict
@@ -479,14 +485,9 @@ def model_ser_schema(cls: type[Any], schema: CoreSchema) -> ModelSerSchema:
     return ModelSerSchema(type='model', cls=cls, schema=schema)
 
 
-SerSchema: TypeAlias = (
-    SimpleSerSchema
-    | PlainSerializerFunctionSerSchema
-    | WrapSerializerFunctionSerSchema
-    | FormatSerSchema
-    | ToStringSerSchema
-    | ModelSerSchema
-)
+SerSchema: TypeAlias = 'SimpleSerSchema | PlainSerializerFunctionSerSchema | WrapSerializerFunctionSerSchema | FormatSerSchema | ToStringSerSchema | ModelSerSchema | CoreSchema'
+
+"""The schemas that can be used as the `serialization` key of a core schema."""
 
 
 class InvalidSchema(TypedDict, total=False):
@@ -946,6 +947,7 @@ class StringSchema(TypedDict, total=False):
     strip_whitespace: bool
     to_lower: bool
     to_upper: bool
+    ascii_only: bool
     regex_engine: Literal['rust-regex', 'python-re']  # default: 'rust-regex'
     strict: bool
     coerce_numbers_to_str: bool
@@ -962,6 +964,7 @@ def str_schema(
     strip_whitespace: bool | None = None,
     to_lower: bool | None = None,
     to_upper: bool | None = None,
+    ascii_only: bool | None = None,
     regex_engine: Literal['rust-regex', 'python-re'] | None = None,
     strict: bool | None = None,
     coerce_numbers_to_str: bool | None = None,
@@ -987,6 +990,7 @@ def str_schema(
         strip_whitespace: Whether to strip whitespace from the value
         to_lower: Whether to convert the value to lowercase
         to_upper: Whether to convert the value to uppercase
+        ascii_only: Whether the value must contain only ASCII characters
         regex_engine: The regex engine to use for pattern validation. Default is 'rust-regex'.
             - `rust-regex` uses the [`regex`](https://docs.rs/regex) Rust
               crate, which is non-backtracking and therefore more DDoS
@@ -1007,6 +1011,7 @@ def str_schema(
         strip_whitespace=strip_whitespace,
         to_lower=to_lower,
         to_upper=to_upper,
+        ascii_only=ascii_only,
         regex_engine=regex_engine,
         strict=strict,
         coerce_numbers_to_str=coerce_numbers_to_str,
@@ -1651,7 +1656,7 @@ def filter_seq_schema(*, include: set[int] | None = None, exclude: set[int] | No
     return _dict_not_none(type='include-exclude-sequence', include=include, exclude=exclude)
 
 
-IncExSeqOrElseSerSchema: TypeAlias = IncExSeqSerSchema | SerSchema
+IncExSeqOrElseSerSchema: TypeAlias = Union[IncExSeqSerSchema, SerSchema]  # noqa: UP007 (TypeError when evaluating)
 
 
 class ListSchema(TypedDict, total=False):
@@ -2119,7 +2124,7 @@ def filter_dict_schema(*, include: IncExDict | None = None, exclude: IncExDict |
     return _dict_not_none(type='include-exclude-dict', include=include, exclude=exclude)
 
 
-IncExDictOrElseSerSchema: TypeAlias = IncExDictSerSchema | SerSchema
+IncExDictOrElseSerSchema: TypeAlias = Union[IncExDictSerSchema, SerSchema]  # noqa: UP007 (TypeError when evaluating)
 
 
 class DictSchema(TypedDict, total=False):
@@ -2916,8 +2921,8 @@ def union_schema(
 
 class TaggedUnionSchema(TypedDict, total=False):
     type: Required[Literal['tagged-union']]
-    choices: Required[dict[Hashable, CoreSchema]]
-    discriminator: Required[str | list[str | int] | list[list[str | int]] | Callable[[Any], Hashable]]
+    choices: Required[dict[Any, CoreSchema]]
+    discriminator: Required[str | list[str | int] | list[list[str | int]] | Callable[[Any], Any]]
     custom_error_type: str
     custom_error_message: str
     custom_error_context: dict[str, str | int | float]
@@ -4588,10 +4593,12 @@ CoreSchemaType: TypeAlias = Literal[
     'complex',
 ]
 
-CoreSchemaFieldType: TypeAlias = Literal['model-field', 'dataclass-field', 'typed-dict-field', 'computed-field']
+CoreSchemaFieldType: TypeAlias = Literal[
+    'model-field', 'dataclass-field', 'typed-dict-field', 'named-tuple-field', 'computed-field'
+]
 
 
-# used in _pydantic_core.pyi::PydanticKnownError
+# used in _pydantic_core/__init__.pyi::PydanticKnownError
 # to update this, call `pytest -k test_all_errors` and copy the output
 ErrorType: TypeAlias = Literal[
     'no_such_attribute',
@@ -4623,6 +4630,7 @@ ErrorType: TypeAlias = Literal[
     'iterable_type',
     'iteration_error',
     'string_type',
+    'string_sub_type',
     'string_unicode',
     'string_too_short',
     'string_too_long',
