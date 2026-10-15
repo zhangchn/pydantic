@@ -98,6 +98,7 @@ from ._decorators import (
     inspect_field_serializer,
     inspect_model_serializer,
     inspect_validator,
+    mro,
 )
 from ._docs_extraction import extract_docstrings_from_cls
 from ._fields import (
@@ -317,6 +318,37 @@ GENERATE_SCHEMA_ERRORS = (
 """Errors raised during core schema generation. This does *not* include `InvalidSchemaError`, which is raised during schema cleaning."""
 
 
+def _get_typed_dict_extra_items(typed_dict_cls: type[Any]) -> tuple[bool, Any, bool]:
+    """Return whether the TypedDict class is closed, the type of its extra items and whether
+    they are read-only (as per PEP 728).
+
+    The `__closed__` and `__extra_items__` attributes only reflect the arguments passed to the class itself,
+    so the first class in the (virtual) MRO explicitly specifying one of them is used.
+    `extra_items=Never` is normalized to `closed=True`, and the `ReadOnly` qualifier is stripped.
+    """
+    for base in mro(typed_dict_cls):
+        # `__closed__` is `None` when not specified:
+        closed = base.__dict__.get('__closed__')
+        extra_items = base.__dict__.get('__extra_items__', typing_extensions.NoExtraItems)
+        if closed is not None or not typing_objects.is_noextraitems(extra_items):
+            break
+    else:
+        return False, typing_extensions.NoExtraItems, False
+
+    if closed is not None:
+        # `closed` and `extra_items` can't be used together:
+        return closed, typing_extensions.NoExtraItems, False
+
+    readonly = typing_objects.is_readonly(get_origin(extra_items))
+    if readonly:
+        extra_items = get_args(extra_items)[0]
+    # TODO: `Never` wrapped in a type alias (e.g. `type NoExtras = Never`) or in `Annotated` isn't detected here,
+    # and fails during schema generation. Unwrapping should only apply to this check (to preserve alias handling).
+    if typing_objects.is_never(extra_items):
+        return True, typing_extensions.NoExtraItems, False
+    return False, extra_items, readonly
+
+
 class InvalidSchemaError(Exception):
     """The core schema is invalid."""
 
@@ -385,9 +417,9 @@ class GenerateSchema:
         collections.abc.Generator: lambda self, obj: self._iterable_schema(obj),
         collections.abc.Mapping: lambda self, obj: self._mapping_schema(obj, Any, Any),
         collections.abc.MutableMapping: lambda self, obj: self._mapping_schema(obj, Any, Any),
-        collections.OrderedDict: lambda self, obj: self._mapping_schema(obj, Any, Any),
+        collections.OrderedDict: lambda self, obj: self._ordered_dict_schema(Any, Any),
         collections.defaultdict: lambda self, obj: self._mapping_schema(obj, Any, Any),
-        collections.Counter: lambda self, obj: self._mapping_schema(obj, Any, int),
+        collections.Counter: lambda self, obj: self._counter_schema(Any),
         collections.abc.Callable: lambda self, obj: core_schema.callable_schema(),
         collections.abc.Hashable: lambda self, obj: self._hashable_schema(),
         IPv4Address: lambda self, obj: self._ip_schema(obj),
@@ -424,15 +456,11 @@ class GenerateSchema:
         collections.abc.MutableMapping: lambda self, obj: self._mapping_schema(
             collections.abc.MutableMapping, *self._get_first_two_args_or_any(obj)
         ),
-        collections.OrderedDict: lambda self, obj: self._mapping_schema(
-            collections.OrderedDict, *self._get_first_two_args_or_any(obj)
-        ),
+        collections.OrderedDict: lambda self, obj: self._ordered_dict_schema(*self._get_first_two_args_or_any(obj)),
         collections.defaultdict: lambda self, obj: self._mapping_schema(
             collections.defaultdict, *self._get_first_two_args_or_any(obj)
         ),
-        collections.Counter: lambda self, obj: self._mapping_schema(
-            collections.Counter, self._get_first_arg_or_any(obj), int
-        ),
+        collections.Counter: lambda self, obj: self._counter_schema(self._get_first_arg_or_any(obj)),
         os.PathLike: lambda self, obj: self._path_schema(os.PathLike, self._get_first_arg_or_any(obj)),
         pathlib.Path: lambda self, obj: self._path_schema(pathlib.Path, self._get_first_arg_or_any(obj)),
         pathlib.PurePath: lambda self, obj: self._path_schema(pathlib.PurePath, self._get_first_arg_or_any(obj)),
@@ -485,6 +513,12 @@ class GenerateSchema:
 
     def _frozendict_schema(self, keys_type: Any, values_type: Any) -> CoreSchema:
         return core_schema.frozendict_schema(self.generate_schema(keys_type), self.generate_schema(values_type))
+
+    def _ordered_dict_schema(self, keys_type: Any, values_type: Any) -> CoreSchema:
+        return core_schema.ordered_dict_schema(self.generate_schema(keys_type), self.generate_schema(values_type))
+
+    def _counter_schema(self, keys_type: Any) -> CoreSchema:
+        return core_schema.counter_schema(self.generate_schema(keys_type), core_schema.int_schema())
 
     def _set_schema(self, items_type: Any) -> CoreSchema:
         return core_schema.set_schema(self.generate_schema(items_type))
@@ -1480,15 +1514,20 @@ class GenerateSchema:
                 extra_behavior: core_schema.ExtraBehavior = 'ignore'
                 extras_schema: CoreSchema | None = None  # For 'allow', equivalent to `Any` - no validation performed.
 
-                # `__closed__` is `None` when not specified (equivalent to `False`):
-                is_closed = bool(getattr(typed_dict_cls, '__closed__', False))
-                extra_items = getattr(typed_dict_cls, '__extra_items__', typing_extensions.NoExtraItems)
+                is_closed, extra_items, extra_items_readonly = _get_typed_dict_extra_items(typed_dict_cls)
                 if is_closed:
                     extra_behavior = 'forbid'
                     extras_schema = None
                 elif not typing_objects.is_noextraitems(extra_items):
                     extra_behavior = 'allow'
                     extras_schema = self.generate_schema(replace_types(extra_items, typevars_map))
+
+                if extra_items_readonly:
+                    warnings.warn(
+                        f'Extra items on TypedDict class {typed_dict_cls.__name__!r} are using the `ReadOnly` qualifier. '
+                        'Pydantic will not protect items from any mutation on dictionary instances.',
+                        UserWarning,
+                    )
 
                 if (config_extra := self._config_wrapper.extra) in ('allow', 'forbid'):
                     if is_closed and config_extra == 'allow':
@@ -2908,8 +2947,10 @@ class _FieldNameStack:
     @contextmanager
     def push(self, field_name: str) -> Iterator[None]:
         self._stack.append(field_name)
-        yield
-        self._stack.pop()
+        try:
+            yield
+        finally:
+            self._stack.pop()
 
     def get(self) -> str | None:
         if self._stack:
@@ -2927,8 +2968,10 @@ class _ModelTypeStack:
     @contextmanager
     def push(self, type_obj: type) -> Iterator[None]:
         self._stack.append(type_obj)
-        yield
-        self._stack.pop()
+        try:
+            yield
+        finally:
+            self._stack.pop()
 
     def get(self) -> type | None:
         if self._stack:

@@ -12,8 +12,10 @@ use pyo3::types::{PyByteArray, PyBytes, PyDict, PyFrozenSet, PyIterator, PyList,
 use pyo3::IntoPyObjectExt;
 use serde::ser::{Error, Serialize, SerializeSeq, Serializer};
 
+use crate::common::counter::get_counter_type;
 use crate::common::deque::{deque_maxlen, new_deque};
 use crate::common::frozendict::get_frozendict_type;
+use crate::common::ordered_dict::get_ordered_dict_type;
 use crate::input::{EitherTimedelta, Int};
 use crate::serializers::SerializationState;
 use crate::serializers::errors::unwrap_ser_error;
@@ -25,7 +27,7 @@ use crate::serializers::shared::serialize_to_python;
 use crate::serializers::type_serializers;
 use crate::serializers::type_serializers::any::AnySerializer;
 use crate::serializers::type_serializers::format::serialize_via_str;
-use crate::tools::{py_err, safe_repr};
+use crate::tools::{py_err, py_get_attrs, safe_repr};
 
 use super::SchemaSerializer;
 use super::config::InfNanMode;
@@ -157,11 +159,11 @@ pub(crate) fn infer_to_python_known<'py>(
                 let elements = serialize_seq_filter!(@iter value.len()?, value.try_iter()?);
                 PyList::new(py, elements)?.into()
             }
-            ObType::Dict => {
+            ObType::Dict | ObType::Counter => {
                 let dict = value.cast::<PyDict>()?;
                 serialize_pairs(dict.iter().map(Ok), state, serialize_to_python(py))?
             }
-            ObType::Frozendict => {
+            ObType::Frozendict | ObType::OrderedDict => {
                 let mapping = value.cast::<PyMapping>()?;
                 serialize_pairs(mapping_pairs(mapping)?, state, serialize_to_python(py))?
             }
@@ -179,7 +181,10 @@ pub(crate) fn infer_to_python_known<'py>(
             }
             ObType::Timedelta => {
                 let either_delta = EitherTimedelta::try_from(value)?;
-                state.config.temporal_mode.timedelta_to_json(value.py(), either_delta)?
+                state
+                    .config
+                    .timedelta_mode
+                    .timedelta_to_json(value.py(), either_delta)?
             }
             ObType::Url
             | ObType::MultiHostUrl
@@ -259,6 +264,16 @@ pub(crate) fn infer_to_python_known<'py>(
                 let mapping = value.cast::<PyMapping>()?;
                 let new_dict = serialize_pairs(mapping_pairs(mapping)?, state, serialize_to_python(py))?;
                 get_frozendict_type(py)?.call1((new_dict,))?.unbind()
+            }
+            ObType::OrderedDict => {
+                let mapping = value.cast::<PyMapping>()?;
+                let new_dict = serialize_pairs(mapping_pairs(mapping)?, state, serialize_to_python(py))?;
+                get_ordered_dict_type(py)?.call1((new_dict,))?.unbind()
+            }
+            ObType::Counter => {
+                let dict = value.cast::<PyDict>()?;
+                let new_dict = serialize_pairs(dict.iter().map(Ok), state, serialize_to_python(py))?;
+                get_counter_type(py)?.call1((new_dict,))?.unbind()
             }
             ObType::PydanticSerializable => serialize_pydantic_serializable(value, state, serialize_to_python(py))?,
             ObType::Dataclass => infer_serialize_dataclass(value, state, serialize_to_python(py))?,
@@ -422,11 +437,11 @@ pub(crate) fn infer_serialize_known<'py, S: Serializer>(
                 state.config.bytes_mode.serialize_bytes(bytes, serializer)
             })
         }
-        ObType::Dict => {
+        ObType::Dict | ObType::Counter => {
             let dict = value.cast::<PyDict>().map_err(py_err_se_err)?;
             serialize_pairs(dict.iter().map(Ok), state, serialize_to_json(serializer)).map_err(unwrap_ser_error)
         }
-        ObType::Frozendict => {
+        ObType::Frozendict | ObType::OrderedDict => {
             let mapping = value.cast::<PyMapping>().map_err(py_err_se_err)?;
             let pairs = mapping_pairs(mapping).map_err(py_err_se_err)?;
             serialize_pairs(pairs, state, serialize_to_json(serializer)).map_err(unwrap_ser_error)
@@ -453,7 +468,10 @@ pub(crate) fn infer_serialize_known<'py, S: Serializer>(
         }
         ObType::Timedelta => {
             let either_delta = EitherTimedelta::try_from(value).map_err(py_err_se_err)?;
-            state.config.temporal_mode.timedelta_serialize(either_delta, serializer)
+            state
+                .config
+                .timedelta_mode
+                .timedelta_serialize(either_delta, serializer)
         }
         ObType::Url
         | ObType::MultiHostUrl
@@ -579,7 +597,7 @@ pub(crate) fn infer_json_key_known<'a, 'py>(
         }
         ObType::Timedelta => {
             let either_delta = EitherTimedelta::try_from(key)?;
-            state.config.temporal_mode.timedelta_json_key(&either_delta)
+            state.config.timedelta_mode.timedelta_json_key(&either_delta)
         }
         ObType::Url
         | ObType::MultiHostUrl
@@ -604,6 +622,8 @@ pub(crate) fn infer_json_key_known<'a, 'py>(
         | ObType::Deque
         | ObType::Dict
         | ObType::Frozendict
+        | ObType::OrderedDict
+        | ObType::Counter
         | ObType::Generator => {
             py_err!(PyTypeError; "`{ob_type}` not valid as object key")
         }
@@ -640,10 +660,33 @@ pub(crate) fn infer_json_key_known<'a, 'py>(
     }
 }
 
-pub(crate) fn get_pydantic_serializer<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, SchemaSerializer>> {
+/// Get the `SchemaSerializer` stored as `__pydantic_serializer__` on `value`'s type, or `None`
+/// if there's no such attribute (e.g. for stdlib dataclasses).
+///
+/// If the type isn't fully built yet, pydantic stores a placeholder (`MockValSer`) that rebuilds the
+/// type lazily when one of its attributes is accessed from Python. Casting it from Rust bypasses that
+/// mechanism, so we explicitly call its `rebuild()` method, which rebuilds the whole type and either
+/// returns the built serializer or raises a meaningful error.
+pub(crate) fn get_pydantic_serializer<'py>(
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, SchemaSerializer>>> {
     let py = value.py();
-    let py_serializer = value.getattr(intern!(py, "__pydantic_serializer__"))?;
-    py_serializer.cast_into_exact().map_err(Into::into)
+    let Some(py_serializer) = py_get_attrs(value, intern!(py, "__pydantic_serializer__"))? else {
+        return Ok(None);
+    };
+    if let Ok(serializer) = py_serializer.cast_exact::<SchemaSerializer>() {
+        return Ok(Some(serializer.clone()));
+    }
+    if py_serializer.hasattr(intern!(py, "rebuild"))? {
+        // The call stack is unrelated to where the type was defined, so don't use a parent frame namespace:
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "parent_namespace_depth"), 0)?;
+        let rebuilt = py_serializer.call_method(intern!(py, "rebuild"), (), Some(&kwargs))?;
+        if !rebuilt.is_none() {
+            return Ok(Some(rebuilt.cast_into_exact()?));
+        }
+    }
+    Ok(Some(py_serializer.cast_into_exact()?))
 }
 
 /// Serialize `value` as if it had a `__pydantic_serializer__` attribute
@@ -654,9 +697,11 @@ fn serialize_pydantic_serializable<'py, S: DoSerialize>(
     state: &mut SerializationState<'py>,
     do_serialize: S,
 ) -> Result<S::Ok, S::Error> {
-    let py = value.py();
-    let py_serializer = value.getattr(intern!(py, "__pydantic_serializer__"))?;
-    call_pydantic_serializer(py_serializer.cast().map_err(Into::into)?, value, state, do_serialize)
+    match get_pydantic_serializer(value)? {
+        Some(serializer) => call_pydantic_serializer(&serializer, value, state, do_serialize),
+        // `ObType::PydanticSerializable` was inferred from the attribute being present
+        None => Err(unknown_type_error(value).into()),
+    }
 }
 
 pub(crate) fn call_pydantic_serializer<'py, S: DoSerialize>(
@@ -713,7 +758,9 @@ fn get_field_marker(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
 }
 
 // TODO: remove when https://github.com/PyO3/pyo3/pull/6174 gets released, and iterate
-// directly over `PyFrozenDict` in the `ObType::Frozendict` arms, like `ObType::Dict` does:
+// directly over `PyFrozenDict` in the `ObType::Frozendict` arms, like `ObType::Dict` does.
+// Note that this must still be used for `ObType::OrderedDict`, as iterating over an `OrderedDict`
+// through the `dict` C API does not account for reorderings (e.g. `move_to_end()`):
 fn mapping_pairs<'py>(
     mapping: &Bound<'py, PyMapping>,
 ) -> PyResult<impl Iterator<Item = PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)>>> {

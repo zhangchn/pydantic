@@ -202,7 +202,9 @@ impl<'py, 'data> Input<'py> for JsonValue<'data> {
                 create_decimal(&self.into_pyobject(py)?, self).map(ValidationMatch::strict)
             }
             JsonValue::Array(array) if !strict && ValidatedTuple::len(&array) == Some(3) => {
-                create_decimal(&self.into_pyobject(py)?, self).map(ValidationMatch::lax)
+                create_decimal(&self.into_pyobject(py)?, self)
+                    .map(ValidationMatch::lax)
+                    .map_err(|_| ValError::new(ErrorTypeDefaults::DecimalType, self))
             }
             _ => Err(ValError::new(ErrorTypeDefaults::DecimalType, self)),
         }
@@ -240,6 +242,22 @@ impl<'py, 'data> Input<'py> for JsonValue<'data> {
         match self {
             JsonValue::Object(dict) => Ok(ValidationMatch::strict(dict)),
             _ => Err(ValError::new(ErrorTypeDefaults::FrozenDictType, self)),
+        }
+    }
+
+    fn strict_ordered_dict(&self) -> ValMatch<Self::Dict<'_>> {
+        // we allow an object here since otherwise it would be impossible to create an OrderedDict from JSON
+        match self {
+            JsonValue::Object(dict) => Ok(ValidationMatch::strict(dict)),
+            _ => Err(ValError::new(ErrorTypeDefaults::OrderedDictType, self)),
+        }
+    }
+
+    fn strict_counter(&self) -> ValMatch<Self::Dict<'_>> {
+        // we allow an object here since otherwise it would be impossible to create a Counter from JSON
+        match self {
+            JsonValue::Object(dict) => Ok(ValidationMatch::strict(dict)),
+            _ => Err(ValError::new(ErrorTypeDefaults::CounterType, self)),
         }
     }
 
@@ -504,6 +522,16 @@ impl<'py> Input<'py> for str {
     #[cfg_attr(has_coverage_attribute, coverage(off))]
     fn strict_frozendict(&self) -> ValMatch<Never> {
         Err(ValError::new(ErrorTypeDefaults::FrozenDictType, self))
+    }
+
+    #[cfg_attr(has_coverage_attribute, coverage(off))]
+    fn strict_ordered_dict(&self) -> ValMatch<Never> {
+        Err(ValError::new(ErrorTypeDefaults::OrderedDictType, self))
+    }
+
+    #[cfg_attr(has_coverage_attribute, coverage(off))]
+    fn strict_counter(&self) -> ValMatch<Never> {
+        Err(ValError::new(ErrorTypeDefaults::CounterType, self))
     }
 
     type List<'a> = Never;

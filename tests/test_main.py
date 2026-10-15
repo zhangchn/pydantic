@@ -2137,7 +2137,7 @@ def test_class_kwargs_config_and_attr_conflict():
 
 def test_class_kwargs_custom_config():
     if platform.python_implementation() == 'PyPy':
-        msg = r"__init_subclass__\(\) got an unexpected keyword argument 'some_config'"
+        msg = r"object.__init_subclass__\(\) got an unexpected keyword argument 'some_config'"
     else:
         msg = r'__init_subclass__\(\) takes no keyword arguments'
     with pytest.raises(TypeError, match=msg):
