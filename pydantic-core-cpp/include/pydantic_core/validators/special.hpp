@@ -1300,6 +1300,61 @@ public:
     }
 };
 
+// fraction.rs:164 MAX_FRACTION_EXPONENT -- the largest exponent a fraction *string* may carry.
+// Fraction answers an exponent by computing 10**exp, so '1e4301' builds a 4301-digit integer
+// before anything has refused it: the cost of the refusal is set by the input, not by the
+// reader.  The cap is what an int input already accepts, and past it the string is refused as
+// the failed parse it is.
+inline constexpr long long FRACTION_MAX_EXPONENT = 4300;
+
+// fraction.rs:167 exponent_too_large -- whether `arg` is a string whose exponent is past that.
+// It reads only what Fraction would feed to int(), and stays quiet about anything Fraction
+// rejects on its own, so this never refuses a string the parse would have taken.
+inline bool fraction_exponent_too_large(const py::object& arg) {
+    if (!py::isinstance<py::str>(arg)) return false;
+    Py_ssize_t length = 0;
+    const char* text = PyUnicode_AsUTF8AndSize(arg.ptr(), &length);
+    if (!text) {
+        // A string holding a lone surrogate is not UTF-8; Fraction rejects it as a value.
+        PyErr_Clear();
+        return false;
+    }
+    // In a fraction string e/E can only be the exponent marker, so the last one starts it.
+    const char* marker = nullptr;
+    for (const char* p = text + length; p-- > text;) {
+        if (*p == 'e' || *p == 'E') {
+            marker = p;
+            break;
+        }
+    }
+    if (!marker) return false;
+
+    PyObject* digits_raw = PyUnicode_DecodeUTF8(marker + 1, text + length - marker - 1, nullptr);
+    if (!digits_raw) {
+        PyErr_Clear();
+        return false;
+    }
+    try {
+        py::object digits = py::reinterpret_steal<py::object>(digits_raw);
+        // int() reads the exponent, so it decides what counts as one at all: unicode
+        // digits, a sign, underscores.  Anything it refuses, Fraction refuses too.
+        static const py::object& to_int = held_python_object([] { return py::module_::import("builtins").attr("int"); });
+        py::object exponent = to_int(digits.attr("strip")());
+        int overflow = 0;
+        long long value = PyLong_AsLongLongAndOverflow(exponent.ptr(), &overflow);
+        if (overflow != 0) return true;  // no i64 holds it, let alone 4300
+        if (value == -1 && PyErr_Occurred()) {
+            PyErr_Clear();
+            return false;
+        }
+        return value > FRACTION_MAX_EXPONENT || value < -FRACTION_MAX_EXPONENT;
+    } catch (py::error_already_set& e) {
+        e.restore();
+        PyErr_Clear();
+    }
+    return false;
+}
+
 // FractionValidator - validates fraction values (mirrors Rust validators/fraction.rs)
 class FractionValidator : public Validator {
 public:
@@ -1351,6 +1406,7 @@ public:
                 if (py::isinstance<py::bool_>(value)) return fraction_error(input, state, false);
                 if (py::isinstance<py::float_>(value)) arg = py::str(value);
             }
+            if (fraction_exponent_too_large(arg)) return fraction_error(input, state, true);
             py::object fraction;
             try {
                 fraction = frac_cls(arg);

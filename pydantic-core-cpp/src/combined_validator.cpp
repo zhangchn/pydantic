@@ -2152,6 +2152,10 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             const py::object& frac_cls = py_fraction_type();
             try {
                 if (py::isinstance(val, frac_cls)) return val;
+                // A bound goes through the same coercion as a value, so it carries the same
+                // exponent cap: uncapped, the schema build is what hangs.
+                if (fraction_exponent_too_large(val))
+                    throw SchemaError(std::string("'") + key + "' must be coercible to a Fraction instance");
                 return frac_cls(val);
             } catch (py::error_already_set& e) {
                 e.restore();
