@@ -1124,6 +1124,7 @@ public:
 
     py::object cls = py::none();
     std::string tuple_name;
+    bool tuple_name_declared = false;
     std::vector<Field> fields;
     bool loc_by_alias = true;
     std::optional<bool> validate_by_alias;
@@ -1196,6 +1197,10 @@ public:
     std::string name() const override { return "named-tuple"; }
 
     std::string display_name() const override {
+        // named_tuple.rs:52-55: a cls_name the schema spells out is the name, even the empty
+        // string; only a missing key asks the class, and only a name that is then still empty
+        // falls back to the node type.
+        if (tuple_name_declared) return tuple_name;
         return tuple_name.empty() ? std::string("named-tuple") : tuple_name;
     }
 

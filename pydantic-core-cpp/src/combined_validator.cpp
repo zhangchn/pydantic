@@ -1253,12 +1253,28 @@ static std::string pyo3_downcast_text(py::handle obj, const char* target) {
            + "' object is not an instance of '" + target + "'";
 }
 
-// Helper: extract string from py::dict with optional default
+// A str slot Rust reads as Option<&str> -- the extra_behavior / extra_fields_behavior chains,
+// uuid's format: an absent key and an explicit None both leave the node at its default, but a
+// value that is neither cannot be read at all, and pyo3's words for that are not str(value).
 static std::string py_str(const py::dict& d, const char* key, const std::string& fallback = "") {
     if (!d.contains(key)) return fallback;
-    auto val = d[key];
-    if (val.is_none()) return fallback;
-    return py::str(val).cast<std::string>();
+    py::object value = d[key];
+    if (value.is_none()) return fallback;
+    if (!PyUnicode_Check(value.ptr()))
+        throw_python_error(PyExc_TypeError, pyo3_downcast_text(value, "str"));
+    return value.cast<std::string>();
+}
+
+// A str slot Rust reads as &str (sub_type at enum_.rs:63, cls_repr at is_instance.rs:87,
+// on_error at with_default.rs:107, mode at union.rs:78): the Option that get_as hands back says
+// the key was there, so only a missing key means "not declared" and None is refused the way any
+// other value that is not a str is.
+static std::optional<std::string> py_str_slot(const py::dict& d, const char* key) {
+    if (!d.contains(key)) return std::nullopt;
+    py::object value = d[key];
+    if (!PyUnicode_Check(value.ptr()))
+        throw_python_error(PyExc_TypeError, pyo3_downcast_text(value, "str"));
+    return value.cast<std::string>();
 }
 
 // Helper: extract int from py::dict
@@ -1307,16 +1323,11 @@ static std::optional<bool> strict_opt_py(const py::dict& schema, const py::dict&
     return py_bool_opt(config, "strict");
 }
 
-// Helper: an optional string from py::dict; absent or non-string means absent.
-static std::optional<std::string> py_str_opt(const py::dict& d, const char* key) {
-    if (!d.contains(key) || !py::isinstance<py::str>(d[key])) return std::nullopt;
-    return d[key].cast<std::string>();
-}
-
-// Rust's class_repr: an explicit cls_repr wins, then the qualname of a real
-// type (no module prefix), then repr() of whatever object cls turned out to be.
+// Rust's class_repr (is_instance.rs:86-93): an explicit cls_repr wins -- read as a str, so a
+// cls_repr that is not one stops the build -- then the qualname of a real type (no module
+// prefix), then repr() of whatever object cls turned out to be.
 static std::string class_repr_py(const py::dict& schema, const py::object& cls) {
-    if (auto repr = py_str_opt(schema, "cls_repr")) return *repr;
+    if (auto repr = py_str_slot(schema, "cls_repr")) return *repr;
     if (py::isinstance<py::type>(cls)) {
         try {
             return py::str(py::getattr(cls, "__qualname__")).cast<std::string>();
@@ -2293,12 +2304,6 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
                     cls_members.push_back(std::move(m));
                 }
             }
-            std::string sub_type;
-            try {
-                if (schema.contains("sub_type")) sub_type = schema["sub_type"].cast<std::string>();
-            } catch (const py::error_already_set&) {
-                PyErr_Clear();
-            }
             std::optional<bool> declared_strict = strict_opt_py(schema, config);
             py::object missing_hook = py::none();
             if (schema.contains("missing")) missing_hook = schema["missing"];
@@ -2307,6 +2312,13 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             // both the is-instance message and, qualified by the enum's flavour, the node's own
             // name -- so it is read here, before the class moves into the validator.
             std::string enum_class_repr = class_repr_py(schema, cls);
+            // enum_.rs:63-69 reads sub_type after the class is named, as a str: a slot that is
+            // there has to be one, and a word outside the four it matches is a schema error, not
+            // a request for the plain enum it would otherwise have fallen back to.
+            std::string sub_type = py_str_slot(schema, "sub_type").value_or("");
+            if (!sub_type.empty() && sub_type != "int" && sub_type != "str" && sub_type != "float") {
+                throw SchemaError("`sub_type` must be one of: 'int', 'str', 'float' or None");
+            }
             v->configure_class(std::move(cls), std::move(cls_members), std::move(sub_type),
                                EnumValidator::join_expected(value_reprs),
                                std::move(enum_class_repr), declared_strict,
@@ -2418,8 +2430,9 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         if (validate_default) {
             wd->set_validate_default(true);
         }
-        if (schema.contains("on_error") && py::isinstance<py::str>(schema["on_error"])) {
-            wd->set_on_error(schema["on_error"].cast<std::string>());
+        // with_default.rs:107 reads on_error as a str, so a slot that is there has to be one.
+        if (auto on_error = py_str_slot(schema, "on_error")) {
+            wd->set_on_error(*on_error);
         }
         return wd;
     }
@@ -2507,9 +2520,14 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         }
         auto uv = std::make_shared<UnionValidator>(std::move(choices));
         uv->set_choice_labels(std::move(labels));
-        // Rust reads the mode off the schema: "smart" (default) or "left_to_right".
-        if (py_str(schema, "mode") == "left_to_right") {
+        // union.rs:77-79 reads the mode after the choices are built: "smart" (default) or
+        // "left_to_right", a slot that is there has to be a str, and a word outside the two is a
+        // schema error (union.rs:37) rather than the smart union it would have fallen back to.
+        std::string union_mode = py_str_slot(schema, "mode").value_or("");
+        if (union_mode == "left_to_right") {
             uv->set_left_to_right(true);
+        } else if (!union_mode.empty() && union_mode != "smart") {
+            throw SchemaError("Invalid union mode: `" + union_mode + "`, expected `smart` or `left_to_right`");
         }
         if (schema.contains("custom_error_type") && !schema["custom_error_type"].is_none()) {
             std::string cmsg = schema.contains("custom_error_message") && !schema["custom_error_message"].is_none()
@@ -2683,8 +2701,12 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         auto v = std::make_shared<NamedTupleValidator>();
         // named_tuple.rs:51,57 -- the class first, then the list of field entries
         v->cls = required_class_slot(schema, "cls");
-        v->tuple_name = py_str(schema, "cls_name");
-        if (v->tuple_name.empty() && py_hasattr(v->cls, "__name__")) {
+        // named_tuple.rs:52-55: a cls_name that is there is the name, even the empty string;
+        // only a missing key asks the class.
+        if (auto declared = py_str_slot(schema, "cls_name")) {
+            v->tuple_name = *declared;
+            v->tuple_name_declared = true;
+        } else if (py_hasattr(v->cls, "__name__")) {
             v->tuple_name = v->cls.attr("__name__").cast<std::string>();
         }
         for (auto item : required_list_slot(schema, "fields")) {
@@ -2881,23 +2903,26 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         // Parse revalidate_instances from schema or the model's own config
         // (models ignore the parent config and always use the config from this model)
         RevalidateInstances revalidate = RevalidateInstances::Never;
-        std::string revalidate_str;
-        if (schema.contains("revalidate_instances")) {
-            try { revalidate_str = schema["revalidate_instances"].cast<std::string>(); } catch (...) {}
-        } else if (schema.contains("config")) {
-            try {
-                auto model_config = schema["config"].cast<py::dict>();
-                if (model_config.contains("revalidate_instances")) {
-                    revalidate_str = model_config["revalidate_instances"].cast<std::string>();
+        {
+            // model.rs:87-93 reads the key as a str -- the node's own first, then this model's
+            // config -- so a present value that is not one stops the build, and a word outside
+            // the three is the schema error model.rs:40 raises rather than the default.
+            std::optional<py::dict> model_config;
+            if (schema.contains("config")) {
+                try { model_config = schema["config"].cast<py::dict>(); } catch (...) {}
+            }
+            std::optional<std::string> word = py_str_slot(schema, "revalidate_instances");
+            if (!word && model_config) word = py_str_slot(*model_config, "revalidate_instances");
+            if (word) {
+                if (*word == "always") {
+                    revalidate = RevalidateInstances::Always;
+                } else if (*word == "subclass-instances") {
+                    revalidate = RevalidateInstances::SubclassInstances;
+                } else if (*word != "never") {
+                    throw SchemaError("Invalid revalidate_instances value: " + *word);
                 }
-            } catch (...) {}
+            }
         }
-        if (revalidate_str == "always") {
-            revalidate = RevalidateInstances::Always;
-        } else if (revalidate_str == "subclass-instances") {
-            revalidate = RevalidateInstances::SubclassInstances;
-        }
-        // Default is "never" which maps to RevalidateInstances::Never
 
         bool custom_init = py_bool_opt(schema, "custom_init").value_or(false);
         auto v = std::make_shared<ModelValidator>(inner, model_name, /*frozen=*/false, custom_init, root_model, model_cls, revalidate);
@@ -2998,11 +3023,8 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
                         // Rust keeps the WithDefault wrapper when on_error is not
                         // "raise": only the wrapper knows how to fall back to the
                         // default or omit the field entirely.
-                        std::string field_on_error = "raise";
-                        if (field_schema_dict.contains("on_error") &&
-                            py::isinstance<py::str>(field_schema_dict["on_error"])) {
-                            field_on_error = field_schema_dict["on_error"].cast<std::string>();
-                        }
+                        std::string field_on_error = py_str_slot(field_schema_dict, "on_error")
+                                                         .value_or("raise");
                         const bool keep_default_wrapper = field_on_error != "raise";
                         // Unwrap default schema: use inner validator and extract default value string
                         if (field_schema_dict.contains("default")) {
@@ -3223,7 +3245,8 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
                 py::dict arg = schema_element_dict(item);
                 ArgumentsValidator::Parameter p;
                 p.name = required_str_slot(arg, "name").cast<std::string>();
-                std::string mode = py_str(arg, "mode", "positional_or_keyword");
+                // arguments.rs:89 reads the mode as a str: a slot that is there has to be one.
+                std::string mode = py_str_slot(arg, "mode").value_or("positional_or_keyword");
                 p.positional = (mode == "positional_only" || mode == "positional_or_keyword");
                 p.positional_only = (mode == "positional_only");
                 if (arg.contains("alias") && !arg["alias"].is_none()) {
@@ -3256,7 +3279,13 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         if (schema.contains("var_args_schema")) {
             v->var_args_validator = build_from_py_dict(schema["var_args_schema"].cast<py::dict>(), config, definitions);
         }
-        v->var_kwargs_mode = py_str(schema, "var_kwargs_mode", "uniform");
+        // arguments.rs:146-150 reads the mode as a str (default "uniform") and refuses a word
+        // outside the two it knows.
+        v->var_kwargs_mode = py_str_slot(schema, "var_kwargs_mode").value_or("uniform");
+        if (v->var_kwargs_mode != "uniform" && v->var_kwargs_mode != "unpacked-typed-dict") {
+            throw SchemaError("Invalid var_kwargs mode: `" + v->var_kwargs_mode +
+                              "`, expected `uniform` or `unpacked-typed-dict`");
+        }
         if (schema.contains("var_kwargs_schema")) {
             v->var_kwargs_validator = build_from_py_dict(schema["var_kwargs_schema"].cast<py::dict>(), config, definitions);
         }
@@ -3287,7 +3316,9 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
                 if (!names.insert(p.name).second) {
                     throw SchemaError("Duplicate parameter '" + p.name + "'");
                 }
-                std::string mode = py_str(arg, "mode", "positional_or_keyword");
+                // arguments_v3.rs:110 reads the mode as a str the same way, defaulting when the
+                // key is missing but not when it is there and is not one.
+                std::string mode = py_str_slot(arg, "mode").value_or("positional_or_keyword");
                 if (mode == "positional_only") {
                     if (had_positional_or_keyword || had_var_args || had_keyword_only || had_var_kwargs) {
                         throw SchemaError("Positional only parameter '" + p.name +
@@ -3352,7 +3383,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
                 if (arg.contains("schema") && py::isinstance<py::dict>(arg["schema"])) {
                     py::dict inner = arg["schema"].cast<py::dict>();
                     has_default = py_str(inner, "type") == "default";
-                    if (has_default && py_str(inner, "on_error") == "omit") {
+                    if (has_default && py_str_slot(inner, "on_error").value_or("") == "omit") {
                         throw SchemaError("Parameter '" + p.name + "': omit_on_error cannot be used with arguments");
                     }
                 }
@@ -3479,18 +3510,17 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             }
             v->set_field_names(std::move(names));
         }
-        // revalidate_instances (Rust `schema_or_config_same`): "always",
-        // "subclass-instances", or "never" (default).
+        // revalidate_instances (dataclass.rs:503 reads it with schema_or_config_same, as the
+        // model node does): a present key has to be a str, None included, and a word outside the
+        // three is the schema error model.rs:40 raises rather than the default.
         {
-            std::string rv;
-            if (schema.contains("revalidate_instances") && py::isinstance<py::str>(schema["revalidate_instances"])) {
-                rv = schema["revalidate_instances"].cast<std::string>();
-            } else if (inner_config.contains("revalidate_instances") &&
-                       py::isinstance<py::str>(inner_config["revalidate_instances"])) {
-                rv = inner_config["revalidate_instances"].cast<std::string>();
+            std::optional<std::string> word = py_str_slot(schema, "revalidate_instances");
+            if (!word) word = py_str_slot(inner_config, "revalidate_instances");
+            if (word) {
+                if (*word == "always") v->set_revalidate(RevalidateInstances::Always);
+                else if (*word == "subclass-instances") v->set_revalidate(RevalidateInstances::SubclassInstances);
+                else if (*word != "never") throw SchemaError("Invalid revalidate_instances value: " + *word);
             }
-            if (rv == "always") v->set_revalidate(RevalidateInstances::Always);
-            else if (rv == "subclass-instances") v->set_revalidate(RevalidateInstances::SubclassInstances);
         }
         return v;
     }
