@@ -2012,6 +2012,24 @@ private:
         if (input_py) {
             PyObject* out = PyObject_CallOneArg(cls_.ptr(), input_py.ptr());
             if (!out) {
+                // enum_.rs:129-139 separates the two answers a failed class call can mean.  A
+                // ValueError is the one that says "no member for this value" -- it is what
+                // `Enum.__new__` raises, including when a `_missing_` raises one -- and becomes the
+                // enum error below.  Every other exception comes from the class author's own
+                // `_missing_`, so Rust carries it out unchanged: turning it into a refusal would
+                // report a broken class as ordinary bad input, and a caller that catches its own
+                // exception would never see it.  The port rides the same InternalErr vehicle as
+                // convert_err for user callables.
+                py::error_already_set raised;
+                if (!raised.matches(PyExc_ValueError)) {
+                    py::object exc = raised.value();
+                    raised.restore();
+                    PyErr_Clear();
+                    return ValError::internal_err(std::move(exc));
+                }
+                // Swallow the exception: restore() + PyErr_Clear() leaves the Python error
+                // indicator clear so the destructor's restore is a no-op.
+                raised.restore();
                 PyErr_Clear();
             } else {
                 py::object out_obj = py::reinterpret_steal<py::object>(out);
