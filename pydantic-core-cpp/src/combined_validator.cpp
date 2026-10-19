@@ -3663,6 +3663,23 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             required_schema_slot(schema, "schema"), inner_config, definitions));
         v->set_class(schema["cls"]);
         v->set_post_init(py_bool_opt(schema, "post_init").value_or(false));
+        // dataclass.rs:480-483 asks for cls_name and takes the class's own __name__
+        // when that read fails, so the answer always names a class -- and a schema that
+        // carries a cls_name which is not a str is not an error, it is the fallback.
+        try {
+            if (auto cls_name = py_str_slot(schema, "cls_name")) {
+                v->set_class_name(*cls_name);
+            }
+        } catch (const py::error_already_set&) {
+            PyErr_Clear();
+        }
+        if (v->class_name().empty() && schema.contains("cls")) {
+            try {
+                v->set_class_name(schema["cls"].attr("__name__").cast<std::string>());
+            } catch (const py::error_already_set&) {
+                PyErr_Clear();
+            }
+        }
         required_any_slot(schema, "fields");
         if (schema.contains("fields")) {
             std::vector<std::string> names;

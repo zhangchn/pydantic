@@ -286,3 +286,23 @@ TEST_CASE("A document is only ever asked for a dict") {
 }
 
 } // TEST_SUITE
+
+// ---------------------------------------------------------------------------
+// PyDataclassValidator: the name it reports
+// ---------------------------------------------------------------------------
+TEST_SUITE("PyDataclassValidator") {
+
+TEST_CASE("A dataclass names itself after its class") {
+    // Rust's DataclassValidator::get_name() returns the class name (dataclass.rs:617
+    // with :480-483), so a run over a dataclass titles itself
+    // `1 validation error for D` and a node above it composes `list[D]`.
+    PyDataclassValidator v;
+    CHECK(v.name() == "dataclass");
+    CHECK(v.display_name() == "dataclass");  // nothing has named the class yet
+    v.set_class_name("D");
+    CHECK(v.display_name() == "D");
+    // name() still reports the schema type: result-to-Python dispatch reads it.
+    CHECK(v.name() == "dataclass");
+}
+
+} // TEST_SUITE

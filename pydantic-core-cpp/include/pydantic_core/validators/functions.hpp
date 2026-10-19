@@ -3040,12 +3040,21 @@ public:
 
     std::string name() const override { return "dataclass"; }
 
+    // Rust's DataclassValidator::get_name() returns the class name, not the schema
+    // type (dataclass.rs:617 with :480-483), so a run over a dataclass titles itself
+    // `1 validation error for D` and a node above it composes `list[D]`.
+    std::string display_name() const override {
+        return class_name_.empty() ? name() : class_name_;
+    }
+
     const py::object& expected_class() const override { return class_; }
     bool is_dataclass_validator() const override { return true; }
     const std::vector<std::string>& dataclass_field_names() const { return field_names_; }
+    const std::string& class_name() const { return class_name_; }
 
     void set_args_validator(std::shared_ptr<Validator> v) { args_validator_ = std::move(v); }
     void set_class(py::object c) { class_ = std::move(c); }
+    void set_class_name(std::string name) { class_name_ = std::move(name); }
     void set_post_init(bool v) { post_init_ = v; }
     void set_field_names(std::vector<std::string> names) { field_names_ = std::move(names); }
     void set_revalidate(RevalidateInstances r) { revalidate_ = r; }
@@ -3058,6 +3067,7 @@ public:
 private:
     std::shared_ptr<Validator> args_validator_;
     py::object class_ = py::none();
+    std::string class_name_;
     bool post_init_ = false;
     std::vector<std::string> field_names_;
     RevalidateInstances revalidate_ = RevalidateInstances::Never;
