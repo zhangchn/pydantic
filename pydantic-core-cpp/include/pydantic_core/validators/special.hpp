@@ -244,7 +244,18 @@ static std::optional<ValError> apply_temporal_constraints(const TemporalT& resul
     auto violation = [&](ErrorType::Kind kind, const char* key, const std::string& text) {
         ErrorType err(kind);
         err.set_ctx_object(key, text, py::str(text));
-        return ValError::line_error(err, state.location(), input.as_error_value().repr);
+        // The comparison ran on the value the input was read into, but the error
+        // names the input as it arrived (time.rs:62-68 hands `input` to the
+        // error), and it names its *type* from the object: a date refused by a
+        // bound reads back from its repr as a plain string, which is a different
+        // answer.
+        auto val = ValError::line_error(err, state.location(), input.as_error_value().repr);
+#ifdef HAS_PYBIND11
+        if (!val.line_errors().empty()) {
+            val.line_errors()[0]->raw_input_obj = input.as_python_object();
+        }
+#endif
+        return val;
     };
     if (bounds.le && temporal_cmp(result, *bounds.le) > 0)
         return violation(ErrorType::Kind::LessThanEqual, "le", bounds.texts.le);

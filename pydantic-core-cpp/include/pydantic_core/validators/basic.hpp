@@ -155,9 +155,6 @@ auto result = input.validate_int(state.strict_or(strict));
             if (!value_obj) value_obj = either_int.to_python();
             return value_obj.ptr();
         };
-        auto input_text = [&]() {
-            return narrow ? std::to_string(*narrow) : py::str(value_py()).cast<std::string>();
-        };
         auto satisfies = [&](int op, const IntBound& bound) -> bool {
             if (narrow && bound.small) {
                 const int64_t v = *narrow;
@@ -177,7 +174,20 @@ auto result = input.validate_int(state.strict_or(strict));
         auto failed = [&](ErrorType::Kind kind, const char* key, const IntBound& bound) {
             ErrorType err(kind);
             err.set_ctx_object(key, bound.text(), bound.to_object());
-            return ValError::line_error(std::move(err), state.location(), input_text());
+            // A refused integer names the input it arrived as, not the integer it
+            // was read into: the reference hands `input` to the error
+            // (int.rs:132-159), so a text '3' that breaks a bound is refused as
+            // the text. Carrying the object too is what says so -- the type is
+            // read from it rather than guessed back from the repr, which cannot
+            // tell '3' from 3.
+            auto val = ValError::line_error(std::move(err), state.location(),
+                                            input.as_error_value().repr);
+#ifdef HAS_PYBIND11
+            if (!val.line_errors().empty()) {
+                val.line_errors()[0]->raw_input_obj = input.as_python_object();
+            }
+#endif
+            return val;
         };
 
         // Rust asks divisibility before the range bounds (int.rs:133-141), so a value that
