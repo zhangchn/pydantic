@@ -59,11 +59,13 @@ std::string input_type_name(const py::object& obj) {
 // error met in a JSON document talks about arrays and objects instead of the
 // Python container names.
 std::string json_message_for(const std::string& type_name, const std::string& msg) {
+    // The names here have to be the ones ErrorType::display actually produces
+    // (frozen_set_type, time_delta_*), not the Rust variant names they came from.
     if (type_name == "none_required") return "Input should be null";
     if (type_name == "list_type" || type_name == "deque_type" ||
         type_name == "tuple_type" || type_name == "iterable_type" ||
         type_name == "set_type" ||
-        type_name == "frozenset_type") {
+        type_name == "frozen_set_type") {
         return "Input should be a valid array";
     }
     if (type_name == "model_type" || type_name == "model_attributes_type" ||
@@ -73,8 +75,8 @@ std::string json_message_for(const std::string& type_name, const std::string& ms
         return "Input should be an object";
     }
     if (type_name == "named_tuple_type") return "Input should be an array or an object";
-    if (type_name == "timedelta_type") return "Input should be a valid duration";
-    if (type_name == "timedelta_parsing") {
+    if (type_name == "time_delta_type") return "Input should be a valid duration";
+    if (type_name == "time_delta_parsing") {
         const std::string prefix = "Input should be a valid timedelta, ";
         if (msg.compare(0, prefix.size(), prefix) == 0) {
             return "Input should be a valid duration, " + msg.substr(prefix.size());
