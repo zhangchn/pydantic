@@ -1449,14 +1449,16 @@ ValResult<ValMatch<EitherTimedelta>> PythonInput::validate_timedelta(bool strict
             : ValMatch<EitherTimedelta>::strict(std::move(either_td));
     }
 
-    if (is_int() && !strict) {
-        // Lax mode: treat int as number of seconds (Rust behavior).  A Python int has no
-        // upper bound: casting to long long either wrapped into the day field or, for an int
-        // too big for long long, threw RuntimeError straight out of the validator.
-        // At exactly +-2**63 the reference lets the day count wrap through an i32 and
-        // accepts a 579,025,220-day duration; this refuses there too, because the other
-        // magnitudes in that range (1e15 to 1e18 seconds) came back as None or a negative
-        // duration and no rule found in the wheel covers both halves.
+    // Lax mode: treat int as number of seconds (Rust behavior).  The test is PyLong_Check rather
+    // than is_int() because that is what pyo3's i64 extraction asks -- and a bool answers it, so
+    // True is a duration of one second here, as a value and as a bound alike (input_python.rs:741).
+    // A Python int has no upper bound: casting to long long either wrapped into the day field or,
+    // for an int too big for long long, threw RuntimeError straight out of the validator.
+    // At exactly +-2**63 the reference lets the day count wrap through an i32 and
+    // accepts a 579,025,220-day duration; this refuses there too, because the other
+    // magnitudes in that range (1e15 to 1e18 seconds) came back as None or a negative
+    // duration and no rule found in the wheel covers both halves.
+    if (PyLong_Check(obj_.ptr()) && !strict) {
         int overflow = 0;
         long long seconds = PyLong_AsLongLongAndOverflow(obj_.ptr(), &overflow);
         if (overflow != 0 || (seconds == -1 && PyErr_Occurred())) {
@@ -1480,10 +1482,12 @@ ValResult<ValMatch<EitherTimedelta>> PythonInput::validate_timedelta(bool strict
             EitherTimedelta(Timedelta{static_cast<int>(days), static_cast<int>(rem), 0}));
     }
 
-    // Lax mode: treat the number of seconds as a float; Rust reaches Decimal and
-    // Fraction through extract::<f64>().
+    // Lax mode: treat the number of seconds as a float; Rust reaches here through
+    // extract::<f64>() (input_python.rs:743), which asks the object for __float__ -- so a Fraction
+    // converts the way a float and a Decimal do.  A str or a bytes has no nb_number and falls
+    // through to the parsers below, which is where their text comes from.
     double numeric = 0;
-    if (!strict && (is_float() || is_decimal()) && as_float_via_number(&numeric)) {
+    if (!strict && as_float_via_number(&numeric)) {
         // inf and nan used to reach static_cast<long long>, which is undefined: the port
         // returned -1us for inf and 0 for nan, -inf and 1e30.  The wheel names both, and
         // every finite value past the day cap gets the same text a string gets.

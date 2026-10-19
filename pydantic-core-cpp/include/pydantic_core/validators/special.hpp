@@ -725,6 +725,13 @@ public:
         const Input& input,
         ValidationState& state
     ) override {
+        // The port validates a JSON document through the Python objects it deserialises to, and a
+        // JSON bool is not one of them: jbool is neither a string nor a number, so the reference
+        // answers the type error there (input_json.rs) while the same validator takes Python's True
+        // for one second (input_python.rs:741).
+        if (state.input_type() == InputType::Json && PyBool_Check(input.as_python_object().ptr())) {
+            return type_error(ErrorType::Kind::TimedeltaType, input, input.current_location());
+        }
         auto result = input.validate_timedelta(state.strict_or(strict_) && !json_temporal_text(input, state));
         if (result.is_err()) {
             return result.error();
