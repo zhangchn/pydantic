@@ -1970,12 +1970,33 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             py::object p = schema["pattern"];
             if (py::isinstance<py::str>(p)) {
                 pattern_str = p.cast<std::string>();
-            } else if (py::hasattr(p, "pattern")) {
+            } else {
+                // string.rs:280-288 takes anything that is not a str for a compiled pattern by
+                // its `.pattern` attribute and reads that as a str; a value with no such
+                // attribute -- None, a list, a bytes -- is the schema error, spelled with str()
+                // of the value the schema named.
+                py::object text;
+                try {
+                    text = py::getattr(p, "pattern");
+                } catch (py::error_already_set& e) {
+                    e.restore();
+                    PyErr_Clear();
+                    throw SchemaError("Invalid pattern, must be str or re.Pattern: " +
+                                      py::str(p).cast<std::string>());
+                }
+                if (!PyUnicode_Check(text.ptr()))
+                    throw SchemaError("Invalid pattern, must be str or re.Pattern: " +
+                                      py::str(p).cast<std::string>());
                 pattern_obj = p;
                 pattern_compiled = true;
-                pattern_str = py::getattr(p, "pattern").cast<std::string>();
+                pattern_str = text.cast<std::string>();
             }
         }
+        // string.rs:196 reads regex_engine through schema_or_config as a str, so a slot that is
+        // there on either side has to be one (pydantic puts it in the config).  Which engine it
+        // names is a separate question -- the port matches a plain string with std::regex and
+        // python re for a compiled pattern.
+        if (!py_str_slot(schema, "regex_engine").has_value()) py_str_slot(config, "regex_engine");
         bool has_pattern = pattern_str.has_value();
         if (min_len || max_len || has_pattern || strip_ws || to_lower || to_upper ||
             ascii_only.value_or(false)) {
@@ -2343,6 +2364,15 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             // is and lets Python's isinstance decide, so typing aliases such as
             // Sequence work as well as real types.
             py::object cls = required_any_slot(schema, "cls");
+            // is_instance.rs:36 asks whether the interned key itself is an instance of the value,
+            // which is only an error when the value would not do as isinstance()'s second
+            // argument.  Nothing matches a str there -- isinstance() wants a type -- so None, 5 and
+            // "x" all refuse, while a typing alias such as Sequence answers no and builds.
+            py::object probe = py::str("cls");
+            if (PyObject_IsInstance(probe.ptr(), cls.ptr()) < 0) {
+                PyErr_Clear();
+                throw SchemaError("'cls' must be valid as the first argument to 'isinstance'");
+            }
             if (py::isinstance<py::str>(cls)) {
                 v->set_class_name(cls.cast<std::string>());
             } else {
@@ -2385,6 +2415,17 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
 
     // --- WithDefault ---
     if (type == "default") {
+        // with_default.rs:31-47 reads the pair before anything else, and get_as tracks the *key*,
+        // so default=None beside default_factory is two written defaults, not one.  The sub-schema
+        // is not built until after the pair and on_error are settled (with_default.rs:107-125), so
+        // these refusals are what a schema carrying them answers with.
+        const bool default_declared = schema.contains("default");
+        const bool factory_declared = schema.contains("default_factory");
+        if (default_declared && factory_declared)
+            throw SchemaError("'default' and 'default_factory' cannot be used together");
+        std::optional<std::string> on_error = py_str_slot(schema, "on_error");
+        if (on_error.has_value() && *on_error == "default" && !default_declared && !factory_declared)
+            throw SchemaError("'on_error = default' requires a `default` or `default_factory`");
         // with_default.rs:128
         std::shared_ptr<Validator> inner =
             build_from_py_dict(required_schema_slot(schema, "schema"), config, definitions);
@@ -2427,10 +2468,14 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             // default_value() returns None instead of omitting the field
             wd->set_default_is_none(true);
         }
-        if (schema.contains("default_factory") && !schema["default_factory"].is_none()) {
-            wd->set_default_factory(schema["default_factory"]);
-            wd->set_default_factory_takes_data(
-                py_bool_opt(schema, "default_factory_takes_data").value_or(false));
+        if (factory_declared) {
+            // with_default.rs:39-44: taking a factory branch is the *key*'s doing, and the branch
+            // reads default_factory_takes_data whether or not the factory itself can be called.
+            bool takes_data = py_bool_opt(schema, "default_factory_takes_data").value_or(false);
+            if (!schema["default_factory"].is_none()) {
+                wd->set_default_factory(schema["default_factory"]);
+                wd->set_default_factory_takes_data(takes_data);
+            }
         }
         // with_default.rs:139 reads validate_default with schema_or_config_same, so the field's
         // own key wins over the model's ConfigDict(validate_default=...).
@@ -2439,7 +2484,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             wd->set_validate_default(true);
         }
         // with_default.rs:107 reads on_error as a str, so a slot that is there has to be one.
-        if (auto on_error = py_str_slot(schema, "on_error")) {
+        if (on_error.has_value()) {
             wd->set_on_error(*on_error);
         }
         return wd;
@@ -3002,6 +3047,15 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
                     // Extract default from inner "default" type schema
                     if (field_schema_dict.contains("type") &&
                         py::str(field_schema_dict["type"]).cast<std::string>() == "default") {
+                        // A field whose default node writes both defaults is refused the way a
+                        // bare one is (with_default.rs:37), and the refusal has to name the node
+                        // as a child schema does -- so it goes through the wrapper build, which is
+                        // also what the field does when it keeps the wrapper below.
+                        if (field_schema_dict.contains("default") &&
+                            field_schema_dict.contains("default_factory")) {
+                            field_validator = build_field_schema_from_py(
+                                field_schema_dict, inner_config, definitions, field_name);
+                        }
                         // Rust keeps the WithDefault wrapper when on_error is not
                         // "raise": only the wrapper knows how to fall back to the
                         // default or omit the field entirely.
