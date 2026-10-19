@@ -67,6 +67,9 @@ struct FieldInfo {
     std::vector<std::vector<std::string>> validation_paths;
     bool has_alias = false;                     // Whether an alias is set (true even if "")
     py::object default_factory = py::none();   // Python callable for default_factory
+    // The slot was written, whatever it holds: `default_factory=None` is a
+    // factory the reference calls and lets raise, not an absent default.
+    bool default_factory_declared = false;
     py::object default_py_obj = py::none();    // Complex Python object default (callables, etc.)
     bool default_factory_takes_data = false;   // Whether factory receives validated data dict
     // Rust: defaults are used raw unless validate_default is set (field or
@@ -651,7 +654,7 @@ public:
                 et, state.location(), "PydanticUndefined"));
             return;
         }
-        if (!field.default_factory.is_none()) {
+        if (field.default_factory_declared) {
             try {
                 py::object raw;
                 if (field.default_factory_takes_data) {
@@ -666,17 +669,11 @@ public:
                     raw = field.default_factory();
                 }
                 apply_field_default(raw, field, state, fv, combined_errors);
-            } catch (py::error_already_set& e) {
-                if (field.default_factory_takes_data) {
-                    // Let exceptions from data-aware factories propagate (e.g. KeyError)
-                    throw;
-                }
-                auto err = ValError::line_error(
-                    ErrorType(ErrorType::Kind::CustomError),
-                    state.location(),
-                    std::string("default_factory failed: ") + e.what()
-                );
-                combined_errors.merge(std::move(err));
+            } catch (py::error_already_set&) {
+                // `default_factory.call0(py)?` (with_default.rs:52-59): whatever the
+                // factory raises is the caller's exception, not a validation error,
+                // whether or not it was given the data dict.
+                throw;
             }
             return;
         }

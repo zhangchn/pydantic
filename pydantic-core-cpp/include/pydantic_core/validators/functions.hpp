@@ -1417,7 +1417,7 @@ public:
         if (default_is_none_) {
             raw = py::none();
             has_raw = true;
-        } else if (!default_factory_.is_none()) {
+        } else if (default_factory_declared_) {
             // The flag is checked here rather than by whoever asks for the
             // default, because Rust checks it inside WithDefaultValidator itself
             // (with_default.rs:184). A dataclass field's default comes straight
@@ -1440,21 +1440,15 @@ public:
                     raw = default_factory_();
                 }
                 has_raw = true;
-            } catch (py::error_already_set& e) {
-                if (default_factory_takes_data_) {
-                    // Rust lets a factory's own exception out of default_value
-                    // (`result?`) instead of turning it into custom_error, and a
-                    // data-aware factory failing on incomplete data is a
-                    // developer error the caller has to see.
-                    throw;
-                }
-                e.restore();
-                PyErr_Clear();
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::CustomError),
-                    state.location(),
-                    "Default factory failed: " + std::string(e.what())
-                );
+            } catch (py::error_already_set&) {
+                // `default_factory.call0(py)?` (with_default.rs:52-59): whatever the
+                // factory raises leaves validation as that exception. It is not a
+                // validation failure -- a factory that is not callable
+                // (`default_factory=None` included, since the reference reads the
+                // slot by key, not by nullness) is a programming error the caller
+                // has to see as a TypeError, not as a field error about a value
+                // that was never supplied.
+                throw;
             }
         } else if (default_value_) {
             raw = typed_default_to_py(default_value_, default_type_);
@@ -1509,9 +1503,16 @@ public:
 
     void set_default_is_none(bool v) { default_is_none_ = v; }
     bool has_none_default() const { return default_is_none_; }
-    void set_default_factory(py::object f) { default_factory_ = std::move(f); }
+    // Called when the schema *has* the slot: `default_factory=None` is a declared
+    // factory the reference calls anyway (tools.rs:26-34 reads a key, and a key
+    // holding None is present), so what decides "is there a factory" is the
+    // declaration, never the nullness of what was put in it.
+    void set_default_factory(py::object f) {
+        default_factory_ = std::move(f);
+        default_factory_declared_ = true;
+    }
     void set_default_factory_takes_data(bool v) { default_factory_takes_data_ = v; }
-    bool has_default_factory() const { return !default_factory_.is_none(); }
+    bool has_default_factory() const { return default_factory_declared_; }
     void set_default_type(const std::string& t) { default_type_ = t; }
     void set_validate_default(bool v) { validate_default_ = v; }
     bool validate_default() const { return validate_default_; }
@@ -1543,6 +1544,7 @@ private:
     std::string default_type_;
     bool default_is_none_ = false;
     bool default_factory_takes_data_ = false;
+    bool default_factory_declared_ = false;
     bool validate_default_ = false;
     bool copy_default_ = false;
     std::string on_error_;

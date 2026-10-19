@@ -2607,12 +2607,11 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         }
         if (factory_declared) {
             // with_default.rs:39-44: taking a factory branch is the *key*'s doing, and the branch
-            // reads default_factory_takes_data whether or not the factory itself can be called.
+            // reads default_factory_takes_data whether or not the factory itself can be called --
+            // a key holding None is still the key, so the None is stored and called.
             bool takes_data = py_bool_opt(schema, "default_factory_takes_data").value_or(false);
-            if (!schema["default_factory"].is_none()) {
-                wd->set_default_factory(schema["default_factory"]);
-                wd->set_default_factory_takes_data(takes_data);
-            }
+            wd->set_default_factory(schema["default_factory"]);
+            wd->set_default_factory_takes_data(takes_data);
         }
         // with_default.rs:139 reads validate_default with schema_or_config_same, so the field's
         // own key wins over the model's ConfigDict(validate_default=...).
@@ -3250,8 +3249,13 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
                 // Extract default_factory and callable defaults from the field schema
                 if (field_def.contains("schema")) {
                     auto fsd = field_def["schema"].cast<py::dict>();
-                    if (fsd.contains("default_factory") && !fsd["default_factory"].is_none()) {
+                    if (fsd.contains("default_factory")) {
+                        // The key is what makes a field have a default
+                        // (with_default.rs:33-44): the value it holds is only what
+                        // gets called, so a None there is an uncallable factory the
+                        // caller will hear about, not a missing default.
                         info.default_factory = fsd["default_factory"];
+                        info.default_factory_declared = true;
                         info.required = false;
                         if (auto declared = py_bool_opt(fsd, "default_factory_takes_data")) {
                             info.default_factory_takes_data = *declared;
