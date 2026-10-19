@@ -227,7 +227,16 @@ public:
         
         // Get dict - if from_attributes is true, extract only known field attributes
         // (only for non-dict inputs; dicts are already in the right format)
-        if (use_from_attributes) {
+        //
+        // A JSON run never reads attributes.  Rust's model-fields validator answers the JSON
+        // input with a branch that asks for an object before from_attributes is consulted
+        // (model_fields.rs:267-276), and the branch that does consult it remaps only a
+        // dict_type error into model_type (model_fields.rs:280-295) -- so a document that is
+        // not an object reports model_type carrying the class name, and model_attributes_type
+        // is an error a document can never raise.  The port runs a materialized document
+        // through PythonInput, so falling through to the dict question below is what Rust's
+        // JSON branch does; a typed dict overrides this validation and asks dict_type.
+        if (use_from_attributes && state.input_type() != InputType::Json) {
             auto* py_input = dynamic_cast<const PythonInput*>(&input);
             if (py_input && !py::isinstance<py::dict>(py_input->py_object())) {
                 const py::object& obj = py_input->py_object();

@@ -893,6 +893,46 @@ TEST_SUITE("Programmatic Validator Construction") {
         CHECK(!validator->root_model());
     }
 
+    TEST_CASE("A JSON run asks a model for an object, never for attributes") {
+        // Rust answers a JSON input in model_fields.rs:267-276, before from_attributes is
+        // read at all, and the Python branch below it remaps only a dict_type error into
+        // model_type (model_fields.rs:280-295) -- so model_attributes_type is an error a
+        // document cannot raise.  The port runs a materialized document through PythonInput,
+        // so the run kind is the only thing keeping it from asking attributes of a number.
+        std::unordered_map<std::string, FieldInfo> fields;
+        fields["a"] = FieldInfo{"a", std::make_shared<IntValidator>(), true};
+
+        auto mfv = std::make_shared<ModelFieldsValidator>(
+            std::move(fields), ExtraBehavior::Ignore, nullptr, "Person"
+        );
+        mfv->set_from_attributes(true);
+
+        PythonInput number(py::int_(1));
+        ValidationState json_state;
+        json_state.set_input_type(InputType::Json);
+        auto json_result = mfv->validate(number, json_state);
+        REQUIRE(json_result.is_err());
+        CHECK(json_result.error().line_errors()[0]->error_type.type_name() == "model_type");
+        CHECK(json_result.error().line_errors()[0]->error_type.context().at("class_name") == "Person");
+
+        // On a Python run the attribute answer stands.
+        ValidationState py_state;
+        auto py_result = mfv->validate(number, py_state);
+        REQUIRE(py_result.is_err());
+        CHECK(py_result.error().line_errors()[0]->error_type.type_name() == "model_attributes_type");
+
+        // A typed dict asks the dict question either way (typed_dict.rs:153 ignores
+        // from_attributes entirely).
+        std::unordered_map<std::string, FieldInfo> td_fields;
+        td_fields["a"] = FieldInfo{"a", std::make_shared<IntValidator>(), true};
+        auto td = std::make_shared<TypedDictValidator>(
+            std::move(td_fields), ExtraBehavior::Ignore, true
+        );
+        auto td_result = td->validate(number, json_state);
+        REQUIRE(td_result.is_err());
+        CHECK(td_result.error().line_errors()[0]->error_type.type_name() == "dict_type");
+    }
+
     TEST_CASE("Build DataclassValidator programmatically") {
         std::vector<DataclassFieldInfo> fields;
 
