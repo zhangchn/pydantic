@@ -556,15 +556,8 @@ static std::shared_ptr<Validator> build_from_element(
                     reprs.push_back(s);
                 }
             }
-            std::string expected_repr;
-            if (!reprs.empty()) {
-                expected_repr = reprs[0];
-                for (size_t i = 1; i < reprs.size(); ++i) {
-                    expected_repr += " or ";
-                    expected_repr += reprs[i];
-                }
-            }
-            return std::make_shared<LiteralValidator>(std::move(values), std::move(expected_repr));
+            return std::make_shared<LiteralValidator>(
+                std::move(values), expected_repr_joined(reprs), expected_name_joined(reprs, "literal"));
         }
         return std::make_shared<LiteralValidator>();
     }
@@ -2422,16 +2415,8 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         for (auto item : expected_obj.cast<py::list>()) {
             reprs.push_back(py::repr(item).cast<std::string>());
         }
-        std::string expected_repr;
-        // Build expected_repr like "repr1 or repr2"
-        if (!reprs.empty()) {
-            expected_repr = reprs[0];
-            for (size_t i = 1; i < reprs.size(); ++i) {
-                expected_repr += " or ";
-                expected_repr += reprs[i];
-            }
-        }
-        return std::make_shared<LiteralValidator>(expected_obj, std::move(expected_repr));
+        return std::make_shared<LiteralValidator>(
+            expected_obj, expected_repr_joined(reprs), expected_name_joined(reprs, "literal"));
     }
 
     // --- Enum ---

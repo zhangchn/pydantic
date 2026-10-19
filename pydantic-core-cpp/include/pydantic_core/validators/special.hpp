@@ -1722,6 +1722,34 @@ public:
     std::string name() const override { return "uuid"; }
 };
 
+// Rust's `validators::literal::expected_repr`, the join every node that lists expected values
+// spells the same way (literal.rs:337 builds the literal's context, enum_.rs:44 its own):
+// ", " between the items and " or " immediately before the last one -- `'A', 1 or None`.
+inline std::string expected_repr_joined(const std::vector<std::string>& reprs) {
+    std::string out;
+    for (size_t i = 0; i + 1 < reprs.size(); ++i) {
+        if (i) out += ", ";
+        out += reprs[i];
+    }
+    if (reprs.size() > 1) out += " or ";
+    if (!reprs.empty()) out += reprs.back();
+    return out;
+}
+
+// Rust's `validators::literal::expected_name` (literal.rs:301), the other shape of the same list:
+// `base[repr1,repr2]`, commas and no spaces.  It is what makes a run's title say
+// `default[literal['A']]` rather than `default[literal]`.
+inline std::string expected_name_joined(const std::vector<std::string>& reprs,
+                                        const std::string& base_name) {
+    if (reprs.empty()) return std::string();
+    std::string out = base_name + "[";
+    for (size_t i = 0; i < reprs.size(); ++i) {
+        if (i) out += ",";
+        out += reprs[i];
+    }
+    return out + "]";
+}
+
 // LiteralValidator - validates literal values
 class LiteralValidator : public Validator {
 public:
@@ -1735,8 +1763,9 @@ public:
     // exact bool/int/str maps plus a hash-based dict for everything else
     // (enum members hash-equal their underlying value, so a plain-string
     // input matches a StrEnum literal and yields the MEMBER back).
-    explicit LiteralValidator(py::sequence expected, std::string expected_repr = "")
-        : expected_repr_(std::move(expected_repr)) {
+    explicit LiteralValidator(py::sequence expected, std::string expected_repr = "",
+                              std::string composed_name = "")
+        : expected_repr_(std::move(expected_repr)), display_name_(std::move(composed_name)) {
         size_t id = 0;
         for (auto handle : expected) {
             py::object k = py::reinterpret_borrow<py::object>(handle);
@@ -1761,11 +1790,12 @@ public:
     }
 
     // Legacy convenience ctor (JSON-schema path): wrap plain strings.
-    explicit LiteralValidator(std::vector<std::string> values, std::string expected_repr = "")
-        : expected_repr_(std::move(expected_repr)) {
+    explicit LiteralValidator(std::vector<std::string> values, std::string expected_repr = "",
+                              std::string display_name = "")
+        : expected_repr_(std::move(expected_repr)), display_name_(std::move(display_name)) {
         py::list items;
         for (const auto& v : values) items.append(py::str(v));
-        *this = LiteralValidator(items, expected_repr_);
+        *this = LiteralValidator(items, expected_repr_, display_name_);
     }
 
     ValResult<std::shared_ptr<void>> validate(
@@ -1844,6 +1874,12 @@ public:
 
     std::string name() const override { return "literal"; }
 
+    // The name says which values were allowed (literal.rs:260 builds it from the same reprs the
+    // error context carries), so a literal is not the one node that answers by its type alone.
+    std::string display_name() const override {
+        return display_name_.empty() ? name() : display_name_;
+    }
+
     void visit_refs(RefVisitor visit, void* arg) const override {
         for (const auto& expected : values_) visit_ref(visit, arg, expected);
         visit_ref(visit, arg, expected_dict_);
@@ -1856,6 +1892,7 @@ private:
     py::dict expected_dict_;
     std::vector<size_t> eq_ids_;
     std::string expected_repr_;
+    std::string display_name_;
 };
 
 // EnumValidator - validates enum values
@@ -1931,17 +1968,9 @@ public:
         return cls_.ptr() ? "py_object" : "enum";
     }
 
-    // Rust's validators::literal::expected_repr: all but the last joined with
-    // ", ", and " or " immediately before the last one.
+    // Rust's validators::literal::expected_repr, which url.rs:818 reaches for too.
     static std::string join_expected(const std::vector<std::string>& reprs) {
-        std::string out;
-        for (size_t i = 0; i + 1 < reprs.size(); ++i) {
-            if (i) out += ", ";
-            out += reprs[i];
-        }
-        if (reprs.size() > 1) out += " or ";
-        if (!reprs.empty()) out += reprs.back();
-        return out;
+        return expected_repr_joined(reprs);
     }
 
     static std::string value_repr(const py::object& o) {
