@@ -840,6 +840,34 @@ static void reraise_if_internal(const ValError& err) {
 }
 
 // Helper: convert shared_ptr<void> to Python object using type name
+// What a fields node answers with.  The reference's fields validator hands on
+// `(fields, extra, fields_set)` and it is the model node above it that turns the triple into an
+// instance (model_fields.rs:139-140), so a fields node with nothing above it -- and every node that
+// merely passes its variant through, like a list item or an after-function -- answers with the
+// triple.  `extra` is a dict only when extra='allow' (an empty one counts, which is what leaves
+// `__pydantic_extra__` a dict rather than None on a model built from it); the set holds the names
+// that *arrived*, extras included, so a field filled by a default is not in it.
+static py::object model_fields_triple(const ValidatedModelFieldsOutput& output) {
+    py::dict fields_dict;
+    for (const auto& key : output.field_order) {
+        const auto& fv = output.fields.at(key);
+        fields_dict[py::str(key)] = value_to_python_with_type(fv.value, fv.type_name);
+    }
+    py::object extra = output.extra_allowed ? py::object(py::dict()) : py::object(py::none());
+    if (!output.extra.empty()) {
+        py::dict extra_dict;
+        for (const auto& [key, fv] : output.extra) {
+            extra_dict[py::str(key)] = value_to_python_with_type(fv.value, fv.type_name);
+        }
+        extra = std::move(extra_dict);
+    }
+    py::set fields_set;
+    for (const auto& name : output.fields_set) {
+        fields_set.add(py::str(name));
+    }
+    return py::make_tuple(std::move(fields_dict), std::move(extra), std::move(fields_set));
+}
+
 py::object value_to_python_with_type(const std::shared_ptr<void>& value, const std::string& type_name) {
     if (!value) {
         return py::none();
@@ -1055,6 +1083,8 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
         try {
             auto* mfo = static_cast<ValidatedModelFieldsOutput*>(value.get());
             if (mfo) {
+                if (effective_type == "model-fields" && !mfo->owned_by_model)
+                    return model_fields_triple(*mfo);
                 py::dict out;
                 for (const auto& key : mfo->field_order) {
                     const auto& fv = mfo->fields.at(key);
@@ -1252,6 +1282,8 @@ py::object SchemaValidator::result_to_python(const std::shared_ptr<void>& result
         try {
             auto* mfo = static_cast<ValidatedModelFieldsOutput*>(result.get());
             if (mfo) {
+                if (effective_vname == "model-fields" && !mfo->owned_by_model)
+                    return model_fields_triple(*mfo);
                 py::dict out;
                 for (const auto& key : mfo->field_order) {
                     const auto& fv = mfo->fields.at(key);

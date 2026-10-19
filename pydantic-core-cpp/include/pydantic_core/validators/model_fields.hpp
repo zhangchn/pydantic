@@ -95,9 +95,43 @@ struct ValidatedModelFieldsOutput : public TypedResult {
     std::vector<std::pair<std::string, FieldValue>> extra; // Extra fields (if allow), insertion order
     std::set<std::string> fields_set;                    // Names of fields that were in input
     bool extra_allowed = false;                          // extra='allow': __pydantic_extra__ is a dict even when empty
+    // Set by the model node this output came out of.  A model turns the fields
+    // output into an instance, so the conversion of a model's result has to
+    // produce the flat dict the model shim rebuilds that instance from, while a
+    // fields node with nothing above it hands on the
+    // `(fields, extra, fields_set)` triple (model_fields.rs:139-140).  Names
+    // cannot tell the two apart -- a model reports its inner node's name, and a
+    // root model or a `model_validator(mode='before')` composes it further --
+    // so the output says who owns it.
+    bool owned_by_model = false;
 
     const char* result_type() const override { return "model_fields"; }
 };
+
+// Does this validator store a fields output as its value?  Structural, because
+// the validated value travels as an untyped shared_ptr and the alternative is a
+// virtual call on an object that may not be a TypedResult at all (a
+// `model_validator(mode='after')` stores the py::object its callable returned).
+inline bool stores_fields_output(const std::shared_ptr<Validator>& v) {
+    if (!v) return false;
+    std::string n = v->name();
+    if (n == "model-fields" || n == "typed-dict") return true;
+    if (n == "function-before") return stores_fields_output(v->inner_validator());
+    return false;
+}
+
+// Says who owns a fields output: see ValidatedModelFieldsOutput::owned_by_model.
+inline void mark_model_owned(ValResult<std::shared_ptr<void>>& result) {
+    if (result.is_err()) return;
+    const auto& value = result.value();
+    if (!value) return;
+    try {
+        auto* typed = static_cast<TypedResult*>(value.get());
+        if (typed && std::string(typed->result_type()) == "model_fields") {
+            static_cast<ValidatedModelFieldsOutput*>(typed)->owned_by_model = true;
+        }
+    } catch (...) {}
+}
 
 // ============================================================================
 // ModelFieldsValidator - validates dict input against a set of typed fields
@@ -1370,7 +1404,9 @@ public:
                         py::object inner = model_data_dict(obj);
                         if (!inner.is_none()) {
                             PythonInput inner_input(inner);
-                            return fields_validator_->validate(inner_input, state);
+                            auto r = fields_validator_->validate(inner_input, state);
+                            if (stores_fields_output(fields_validator_)) mark_model_owned(r);
+                            return r;
                         }
                     }
                     // Input is a model instance of a different class — reject with model_type error
@@ -1426,7 +1462,12 @@ public:
             }
         }
 
-        return fields_validator_->validate(input, state);
+        auto r = fields_validator_->validate(input, state);
+        // Whatever a model node hands back is its own, not a bare fields node's:
+        // the conversion above this point builds the flat dict the instance is
+        // rebuilt from, not the triple the reference's fields validator hands on.
+        if (stores_fields_output(fields_validator_)) mark_model_owned(r);
+        return r;
     }
 
     // Rust ModelValidator::validate_assignment: re-validate the whole model
@@ -1452,6 +1493,10 @@ public:
             auto r = fields_validator_->validate(py_in, state);
             state.set_field_name_opt(std::nullopt);
             if (r.is_err()) return r.error();
+            // Converted below this point by this model's own result name, which
+            // for a root model over a fields node is that node's name: say who
+            // owns the output so the conversion reads it as a model's.
+            if (stores_fields_output(fields_validator_)) mark_model_owned(r);
             py::object out = value_to_python_with_type(r.value(), effective_result_name());
             py::module_::import("builtins").attr("object").attr("__setattr__")(
                 obj, py::str("root"), out);
