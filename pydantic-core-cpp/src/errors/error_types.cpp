@@ -339,7 +339,7 @@ std::string ErrorType::message_template() const {
         {Kind::DatetimeFuture, "Input should be in the future"},
         {Kind::TimezoneAware, "Input should have timezone info"},
         {Kind::TimezoneNaive, "Input should not have timezone info"},
-        {Kind::TimezoneOffset, "Datetime should have timezone offset {tz_expected}, got {tz_actual}"},
+        {Kind::TimezoneOffset, "Timezone offset of {tz_expected} required, got {tz_actual}"},
         {Kind::TimedeltaType, "Input should be a valid timedelta"},
         {Kind::TimedeltaParsing, "Input should be a valid timedelta, {error}"},
 

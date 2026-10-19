@@ -471,6 +471,40 @@ struct TZConstraint {
     int offset = 0;
 };
 
+// TZConstraint::tz_check (datetime.rs:316-346): a value that has to be aware -- whether or not an
+// offset is named with it -- has to *have* an offset; one with an offset named has to equal it; and
+// a naive one has to have none at all.  The offset asked about is the one the input reports, so a
+// tzinfo that answers None -- a ZoneInfo behind a bare time, a hand-written class that declines --
+// is a value without an offset rather than one at an offset nobody measured.
+inline std::optional<ValError> tz_constraint_violation(const TZConstraint& tz,
+                                                       const std::optional<int>& tz_offset,
+                                                       const Input& input,
+                                                       ValidationState& state) {
+    using Shape = TZConstraint::Kind;
+    if (tz.kind == Shape::None) return std::nullopt;
+    if (tz.kind == Shape::Naive) {
+        if (!tz_offset.has_value()) return std::nullopt;
+        return ValError::line_error(ErrorType(ErrorType::Kind::TimezoneNaive),
+            state.location(), input.as_error_value().repr);
+    }
+    if (!tz_offset.has_value()) {
+        return ValError::line_error(ErrorType(ErrorType::Kind::TimezoneAware),
+            state.location(), input.as_error_value().repr);
+    }
+    // This port holds an offset in minutes east of UTC (speedate.hpp:25) where the reference holds
+    // it in seconds, so the schema's seconds meet the value's seconds rather than its minutes.  An
+    // offset that is not a whole minute cannot be held here at all, which is a limit of the field,
+    // not of this comparison.
+    const int actual_seconds = *tz_offset * 60;
+    if (tz.kind == Shape::Offset && tz.offset != actual_seconds) {
+        return ValError::line_error(
+            ErrorType(ErrorType::Kind::TimezoneOffset, "tz_expected", std::to_string(tz.offset),
+                      "tz_actual", std::to_string(actual_seconds)),
+            state.location(), input.as_error_value().repr);
+    }
+    return std::nullopt;
+}
+
 // TimeValidator - validates time values
 class TimeValidator : public Validator {
 public:
@@ -498,6 +532,7 @@ public:
             py::object py_time = time_to_python_obj(t);
             auto err = apply_temporal_constraints(py_time, gt, lt, ge, le, "time", input, state);
             if (err) return *err;
+            if (auto tz_err = tz_constraint_violation(tz, t.tz_offset, input, state)) return *tz_err;
         } catch (py::error_already_set& e) {
             e.restore();
             PyErr_Clear();
@@ -577,18 +612,10 @@ public:
             auto err = apply_temporal_constraints(py_dt, gt, lt, ge, le, "datetime", input, state);
             if (err) return *err;
 
-            // Apply tz_constraint (aware/naive)
-            bool is_aware = dt.time.tz_offset.has_value();
-            if (tz.kind == TZConstraint::Kind::Aware && !is_aware) {
-                return ValError::line_error(ErrorType(ErrorType::Kind::TimezoneAware),
-                    state.location(), input.as_error_value().repr);
-            }
-            if (tz.kind == TZConstraint::Kind::Naive && is_aware) {
-                return ValError::line_error(ErrorType(ErrorType::Kind::TimezoneNaive),
-                    state.location(), input.as_error_value().repr);
-            }
-
-            // Apply now_op (past/future) check
+            // Apply now_op (past/future) check, then tz_constraint: the reference reads the clock
+            // before it asks about the offset (datetime.rs:115-135), so a datetime that is both in
+            // the wrong direction and the wrong timezone shape is named by its direction.
+            const bool is_aware = dt.time.tz_offset.has_value();
             if (!now_op.empty()) {
                 py::object datetime_mod = py::module_::import("datetime");
                 py::object now;
@@ -606,6 +633,10 @@ public:
                     return ValError::line_error(ErrorType(ErrorType::Kind::DatetimeFuture),
                         state.location(), input.as_error_value().repr);
                 }
+            }
+
+            if (auto tz_err = tz_constraint_violation(tz, dt.time.tz_offset, input, state)) {
+                return *tz_err;
             }
         } catch (py::error_already_set& e) {
             e.restore();
