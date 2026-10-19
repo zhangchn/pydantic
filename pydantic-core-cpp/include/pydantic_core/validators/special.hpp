@@ -651,9 +651,11 @@ static std::string timedelta_human_readable(const py::object& td) {
     return out;
 }
 
-// Divisibility needs the duration as one number, and a duration whose microseconds do not
-// fit an i64 has no answer to give: the reference reports the constraint rather than
-// wrapping (timedelta.rs map_or(true, ...)).
+// Divisibility needs the duration as one number.  Rust totals seconds and microseconds as
+// i128 (timedelta.rs:44-45); a Python timedelta is built from days, seconds and
+// microseconds whose total always fits an int64, so the narrow is a formality and nullopt
+// here only means "this object has no duration fields" -- answered as the constraint not
+// holding, which is the answer the reference has for a duration it cannot divide.
 static std::optional<long long> timedelta_total_micros(const py::object& td) {
     try {
         const long long days = td.attr("days").cast<long long>();
@@ -671,7 +673,7 @@ static std::optional<long long> timedelta_total_micros(const py::object& td) {
 
 // Rust checks multiple_of first and then the four constraints in le/lt/ge/gt order, against
 // the timedelta it just produced, and names that timedelta -- not the raw input -- as the
-// input of the error (timedelta.rs:80-104).
+// input of the error (timedelta.rs:99-133).
 static std::optional<ValError> apply_timedelta_constraints(
     const py::object& py_td,
     const py::object& multiple_of,
@@ -1488,9 +1490,12 @@ public:
             Py_DECREF(r);
             return out;
         };
-        // fraction.rs:107 -- divisibility is asked before the range bounds, and it is asked
-        // of Python, whose Fraction remainder is exact.  What raises (a bound Fraction
-        // cannot be divided by) is the constraint not holding, as in the reference.
+        // fraction.rs:94-104 -- divisibility is asked before the range bounds, and it is
+        // asked of Python, whose Fraction remainder is exact.  The bound is a positive
+        // Fraction by the time the schema is built, so a remainder that raises means only
+        // that the value refused to answer, which is answered here as the constraint not
+        // holding; the reference propagates that raise instead, and neither answer is a
+        // pass.
         if (!multiple_of.is_none()) {
             bool divides = false;
             PyObject* rem = PyNumber_Remainder(fraction.ptr(), multiple_of.ptr());

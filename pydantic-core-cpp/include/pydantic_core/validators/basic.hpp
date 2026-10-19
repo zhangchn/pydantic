@@ -103,15 +103,37 @@ auto result = input.validate_int(state.strict_or(strict));
 // ConstrainedIntValidator - validates int with gt/lt/ge/le/multiple_of constraints
 class ConstrainedIntValidator : public Validator {
 public:
+    // Rust types every int constraint as Int = I64 | Big (int.rs:88-95) and reads the value
+    // with the same type (int.rs:131), so 2**64 is a bound it compares exactly and an int
+    // past i64 is a value it compares.  A bound that fits an int64 keeps it in `small` and
+    // needs no Python at all; one that does not is kept whole rather than narrowed, which
+    // is what let `gt=2**64` build at all.
+    struct IntBound {
+        std::optional<int64_t> small;
+        py::object whole = py::none();
+
+        IntBound() = default;
+        IntBound(int64_t value) : small(value) {}
+
+        bool present() const { return small.has_value() || !whole.is_none(); }
+
+        py::object to_object() const {
+            if (!whole.is_none()) return whole;
+            return py::int_(*small);
+        }
+
+        std::string text() const {
+            if (!whole.is_none()) return py::str(whole).cast<std::string>();
+            return std::to_string(*small);
+        }
+    };
+
     bool strict = false;
-    std::optional<int64_t> gt;
-    std::optional<int64_t> ge;
-    std::optional<int64_t> lt;
-    std::optional<int64_t> le;
-    std::optional<int64_t> multiple_of;
-    // A bound past the i64 range is legal (the reference renders it and refuses everything
-    // it meets), so it is kept as the Python number rather than forced into an int64.
-    py::object multiple_of_big = py::none();
+    IntBound gt;
+    IntBound ge;
+    IntBound lt;
+    IntBound le;
+    IntBound multiple_of;
 
     ConstrainedIntValidator() = default;
 
@@ -125,63 +147,67 @@ auto result = input.validate_int(state.strict_or(strict));
         }
         state.floor_exactness(result.value().exactness());
         auto& either_int = result.value().value();
-        int64_t int_value = either_int.as_i64().value_or(0);
-
-        // Rust applies multiple_of before the range bounds, so a value that breaks both
-        // reports the divisibility it failed first (constraint.rs MultipleOf::apply).
-        if (!multiple_of_big.is_none()) {
-            bool divides = false;
-            PyObject* value = PyLong_FromLongLong(int_value);
-            PyObject* rem = PyNumber_Remainder(value, multiple_of_big.ptr());
-            Py_XDECREF(value);
-            if (rem) {
-                divides = PyObject_IsTrue(rem) == 0;
-                Py_DECREF(rem);
-            } else {
+        const std::optional<int64_t> narrow = either_int.as_i64();
+        // An int that does not fit an int64 is only talkable-to about in Python, and only
+        // then: the common comparison below never asks for it.
+        py::object value_obj;
+        auto value_py = [&]() -> PyObject* {
+            if (!value_obj) value_obj = either_int.to_python();
+            return value_obj.ptr();
+        };
+        auto input_text = [&]() {
+            return narrow ? std::to_string(*narrow) : py::str(value_py()).cast<std::string>();
+        };
+        auto satisfies = [&](int op, const IntBound& bound) -> bool {
+            if (narrow && bound.small) {
+                const int64_t v = *narrow;
+                const int64_t b = *bound.small;
+                if (op == Py_GT) return v > b;
+                if (op == Py_GE) return v >= b;
+                if (op == Py_LT) return v < b;
+                return v <= b;
+            }
+            int r = PyObject_RichCompareBool(value_py(), bound.to_object().ptr(), op);
+            if (r < 0) {
                 PyErr_Clear();
+                return false;
             }
-            if (!divides) {
-                ErrorType err(ErrorType::Kind::MultipleOf);
-                err.set_ctx_object("multiple_of", py::str(multiple_of_big).cast<std::string>(), multiple_of_big);
-                return ValError::line_error(std::move(err), state.location(), std::to_string(int_value));
-            }
-        } else if (multiple_of.has_value() && multiple_of.value() != 0) {
-            if (int_value % multiple_of.value() != 0) {
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::MultipleOf, "multiple_of", std::to_string(multiple_of.value())),
-                    state.location(),
-                    std::to_string(int_value)
-                );
-            }
-        }
+            return r == 1;
+        };
+        auto failed = [&](ErrorType::Kind kind, const char* key, const IntBound& bound) {
+            ErrorType err(kind);
+            err.set_ctx_object(key, bound.text(), bound.to_object());
+            return ValError::line_error(std::move(err), state.location(), input_text());
+        };
 
-        if (gt.has_value() && int_value <= gt.value()) {
-            return ValError::line_error(
-                ErrorType(ErrorType::Kind::GreaterThan, "gt", std::to_string(gt.value())),
-                state.location(),
-                std::to_string(int_value)
-            );
+        // Rust asks divisibility before the range bounds (int.rs:133-141), so a value that
+        // breaks both reports the divisibility it failed first.
+        if (multiple_of.present()) {
+            bool divides = false;
+            if (narrow && multiple_of.small) {
+                divides = *multiple_of.small != 0 && *narrow % *multiple_of.small == 0;
+            } else {
+                PyObject* rem = PyNumber_Remainder(value_py(), multiple_of.to_object().ptr());
+                if (rem) {
+                    divides = PyObject_IsTrue(rem) == 0;
+                    Py_DECREF(rem);
+                } else {
+                    PyErr_Clear();
+                }
+            }
+            if (!divides) return failed(ErrorType::Kind::MultipleOf, "multiple_of", multiple_of);
         }
-        if (ge.has_value() && int_value < ge.value()) {
-            return ValError::line_error(
-                ErrorType(ErrorType::Kind::GreaterThanEqual, "ge", std::to_string(ge.value())),
-                state.location(),
-                std::to_string(int_value)
-            );
+        if (gt.present() && !satisfies(Py_GT, gt)) {
+            return failed(ErrorType::Kind::GreaterThan, "gt", gt);
         }
-        if (lt.has_value() && int_value >= lt.value()) {
-            return ValError::line_error(
-                ErrorType(ErrorType::Kind::LessThan, "lt", std::to_string(lt.value())),
-                state.location(),
-                std::to_string(int_value)
-            );
+        if (ge.present() && !satisfies(Py_GE, ge)) {
+            return failed(ErrorType::Kind::GreaterThanEqual, "ge", ge);
         }
-        if (le.has_value() && int_value > le.value()) {
-            return ValError::line_error(
-                ErrorType(ErrorType::Kind::LessThanEqual, "le", std::to_string(le.value())),
-                state.location(),
-                std::to_string(int_value)
-            );
+        if (lt.present() && !satisfies(Py_LT, lt)) {
+            return failed(ErrorType::Kind::LessThan, "lt", lt);
+        }
+        if (le.present() && !satisfies(Py_LE, le)) {
+            return failed(ErrorType::Kind::LessThanEqual, "le", le);
         }
 
         // Return the full validated integer (supports the uint64 range as well).

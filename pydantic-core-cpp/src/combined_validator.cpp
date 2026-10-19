@@ -1764,42 +1764,38 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
                 if (exact != 1) throw py::value_error(message);
                 return coerced;
             };
-            auto get_i64 = [&](const char* k) -> std::optional<int64_t> {
-                auto bound = coerce_bound(k);
-                if (!bound) return std::nullopt;
+            auto get_bound = [&](const char* k) -> ConstrainedIntValidator::IntBound {
+                ConstrainedIntValidator::IntBound bound;
+                auto coerced = coerce_bound(k);
+                if (!coerced) return bound;
                 int overflow = 0;
-                long long small = PyLong_AsLongLongAndOverflow(bound->ptr(), &overflow);
+                long long small = PyLong_AsLongLongAndOverflow(coerced->ptr(), &overflow);
                 if (overflow != 0 || (small == -1 && PyErr_Occurred())) {
                     if (PyErr_Occurred()) PyErr_Clear();
-                    // The range bounds keep an i64 and nothing else, so a bound past it is
-                    // not a bound at all (constraint.rs:58 try_i64).
-                    throw py::value_error(std::string("'") + k + "' must be coercible to an integer");
-                }
-                return small;
-            };
-            v->gt = get_i64("gt");
-            v->ge = get_i64("ge");
-            v->lt = get_i64("lt");
-            v->le = get_i64("le");
-            // A multiple_of bound no i64 holds is kept whole: the reference builds with it,
-            // renders it in full, and refuses every input it meets.  What it refuses is a
-            // bound that can never be satisfied -- zero or a negative (constraint.rs:97-110,
-            // pydantic#13860).
-            if (auto bound = coerce_bound("multiple_of")) {
-                int overflow = 0;
-                long long small = PyLong_AsLongLongAndOverflow(bound->ptr(), &overflow);
-                if (overflow != 0 || (small == -1 && PyErr_Occurred())) {
-                    if (PyErr_Occurred()) PyErr_Clear();
-                    int positive = PyObject_RichCompareBool(bound->ptr(), py::int_(0).ptr(), Py_GT);
-                    if (positive < 0) PyErr_Clear();
-                    if (positive != 1)
-                        throw py::value_error("'multiple_of' must be a finite number greater than 0");
-                    v->multiple_of_big = *bound;
-                } else if (small <= 0) {
-                    throw py::value_error("'multiple_of' must be a finite number greater than 0");
+                    // int.rs:88-95 types the bound as Int = I64 | Big, so 2**64 is held and
+                    // compared exactly rather than refused as too wide for an int64.
+                    bound.whole = *coerced;
                 } else {
-                    v->multiple_of = small;
+                    bound.small = small;
                 }
+                return bound;
+            };
+            v->gt = get_bound("gt");
+            v->ge = get_bound("ge");
+            v->lt = get_bound("lt");
+            v->le = get_bound("le");
+            // Zero divides nothing and a negative bound is the same rule written backwards,
+            // so a schema carrying one is refused where it is built (int.rs:101-107).  A
+            // bound past i64 is no such thing: it is a bound the reference keeps whole, and
+            // refuses everything it meets against exactly.
+            auto mo_bound = get_bound("multiple_of");
+            if (mo_bound.present()) {
+                int positive = PyObject_RichCompareBool(mo_bound.to_object().ptr(),
+                                                        py::int_(0).ptr(), Py_GT);
+                if (positive < 0) PyErr_Clear();
+                if (positive != 1)
+                    throw py::value_error("'multiple_of' must be a finite number greater than 0");
+                v->multiple_of = mo_bound;
             }
             return v;
         }
@@ -1836,7 +1832,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             v->ge = get_f("ge");
             v->lt = get_f("lt");
             v->le = get_f("le");
-            // A float bound is read as a float and nothing else (constraint.rs:72): a
+            // A float bound is read as a float and nothing else (float.rs:187): a
             // string is a TypeError rather than a parse, and a NaN or an infinity is a
             // bound no input can ever satisfy, so the schema is refused where it is built.
             if (schema.contains("multiple_of") && !schema["multiple_of"].is_none()) {
@@ -2054,7 +2050,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
                 else if (std::string(k) == "le") v->le = c;
                 else {
                     // No duration divides into zero, and a negative bound is the same rule
-                    // written backwards (constraint.rs:85), so the schema is refused here.
+                    // written backwards (timedelta.rs:57-61), so the schema is refused here.
                     py::object zero = py::module_::import("datetime").attr("timedelta")();
                     if (PyObject_RichCompareBool(c.ptr(), zero.ptr(), Py_GT) != 1)
                         throw py::value_error("'multiple_of' must be greater than 0");
@@ -2200,8 +2196,8 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         v->ge = get_decimal("ge");
         v->le = get_decimal("le");
         v->multiple_of = get_decimal("multiple_of");
-        // Zero divides nothing, and a NaN or an infinity never divides anything either
-        // (constraint.rs:80), so those bounds are a broken schema rather than a rule.
+        // Zero divides nothing, and a NaN or an infinity never divides anything either.
+        // is_finite() is asked first because comparing a NaN decimal raises (decimal.rs:79-86).
         if (!v->multiple_of.is_none() &&
             (v->multiple_of.attr("is_finite")().cast<bool>() == false ||
              PyObject_RichCompareBool(v->multiple_of.ptr(), py::int_(0).ptr(), Py_GT) != 1))
@@ -2240,7 +2236,8 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         v->gt = get_fraction("gt");
         v->multiple_of = get_fraction("multiple_of");
         // A bound of zero divides nothing and a negative one is the same rule written
-        // backwards (constraint.rs:85), so neither makes a schema.
+        // backwards (fraction.rs:58-62), so neither makes a schema.  There is no finiteness
+        // to check: a bound that is not a Fraction failed coercion just above.
         if (!v->multiple_of.is_none() &&
             PyObject_RichCompareBool(v->multiple_of.ptr(), py::int_(0).ptr(), Py_GT) != 1)
             throw py::value_error("'multiple_of' must be greater than 0");
