@@ -1719,33 +1719,32 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             schema.contains("lt") || schema.contains("gt")) {
             auto v = std::make_shared<ConstrainedIntValidator>();
             v->strict = is_strict_py(schema, config);
-            auto get_i64 = [&](const char* k) -> std::optional<int64_t> {
+            // Rust hands every bound to the same lax int validation a value gets
+            // (int.rs:16-31), so an integral float, a Decimal or an integer string all
+            // give a bound and anything else fails the build.  A bound that is merely not
+            // an int_ was dropped here, so `ge=0.0` on an int validated the values it was
+            // written to refuse -- and said nothing about it.
+            auto coerce_bound = [&](const char* k) -> std::optional<py::object> {
                 if (!schema.contains(k) || schema[k].is_none()) return std::nullopt;
                 py::object val = schema[k];
-                if (py::isinstance<py::int_>(val)) return val.cast<int64_t>();
-                // Rust hands a bound to the same lax int validation a value gets
-                // (int.rs:16-31), so an integral float, a Decimal or an integer
-                // string all give a bound and anything else fails the build. A
-                // bound that is merely not an int_ was dropped here, so
-                // `ge=0.0` on an int validated the values it was written to
-                // refuse -- and said nothing about it.
                 std::string message = std::string("'") + k + "' must be coercible to an integer";
+                if (py::isinstance<py::int_>(val)) return val;
                 if (py::isinstance<py::str>(val)) {
-                    // The lax string form also reads "1.0", but only where it is
-                    // still exactly an integer: "0.0" is 0, while "0.5" and "1e3"
-                    // are refused rather than truncated.
+                    // The lax string form also reads "1.0", but only where it is still
+                    // exactly an integer: "0.0" is 0, while "0.5" and "1e3" are refused
+                    // rather than truncated.
                     if (py::cast<std::string>(val).find('.') != std::string::npos) {
                         try {
                             double d = py::cast<double>(py::float_(val));
                             if (d > -9.2e18 && d < 9.2e18 && std::floor(d) == d) {
-                                return static_cast<int64_t>(d);
+                                return py::int_(static_cast<long long>(d));
                             }
                         } catch (py::error_already_set&) {
                             PyErr_Clear();
                         }
                     }
                     try {
-                        return py::int_(val).cast<int64_t>();
+                        return py::int_(val);
                     } catch (py::error_already_set&) {
                         PyErr_Clear();
                         throw py::value_error(message);
@@ -1758,18 +1757,50 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
                     PyErr_Clear();
                     throw py::value_error(message);
                 }
-                // int() truncates and Rust's coercion does not: 0.5 is not a
-                // bound of 0, it is a schema error.
+                // int() truncates and Rust's coercion does not: 0.5 is not a bound of 0,
+                // it is a schema error.
                 int exact = PyObject_RichCompareBool(val.ptr(), coerced.ptr(), Py_EQ);
                 if (exact < 0) PyErr_Clear();
                 if (exact != 1) throw py::value_error(message);
-                return coerced.cast<int64_t>();
+                return coerced;
+            };
+            auto get_i64 = [&](const char* k) -> std::optional<int64_t> {
+                auto bound = coerce_bound(k);
+                if (!bound) return std::nullopt;
+                int overflow = 0;
+                long long small = PyLong_AsLongLongAndOverflow(bound->ptr(), &overflow);
+                if (overflow != 0 || (small == -1 && PyErr_Occurred())) {
+                    if (PyErr_Occurred()) PyErr_Clear();
+                    // The range bounds keep an i64 and nothing else, so a bound past it is
+                    // not a bound at all (constraint.rs:58 try_i64).
+                    throw py::value_error(std::string("'") + k + "' must be coercible to an integer");
+                }
+                return small;
             };
             v->gt = get_i64("gt");
             v->ge = get_i64("ge");
             v->lt = get_i64("lt");
             v->le = get_i64("le");
-            v->multiple_of = get_i64("multiple_of");
+            // A multiple_of bound no i64 holds is kept whole: the reference builds with it,
+            // renders it in full, and refuses every input it meets.  What it refuses is a
+            // bound that can never be satisfied -- zero or a negative (constraint.rs:97-110,
+            // pydantic#13860).
+            if (auto bound = coerce_bound("multiple_of")) {
+                int overflow = 0;
+                long long small = PyLong_AsLongLongAndOverflow(bound->ptr(), &overflow);
+                if (overflow != 0 || (small == -1 && PyErr_Occurred())) {
+                    if (PyErr_Occurred()) PyErr_Clear();
+                    int positive = PyObject_RichCompareBool(bound->ptr(), py::int_(0).ptr(), Py_GT);
+                    if (positive < 0) PyErr_Clear();
+                    if (positive != 1)
+                        throw py::value_error("'multiple_of' must be a finite number greater than 0");
+                    v->multiple_of_big = *bound;
+                } else if (small <= 0) {
+                    throw py::value_error("'multiple_of' must be a finite number greater than 0");
+                } else {
+                    v->multiple_of = small;
+                }
+            }
             return v;
         }
         auto v = std::make_shared<IntValidator>();
@@ -1805,7 +1836,33 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             v->ge = get_f("ge");
             v->lt = get_f("lt");
             v->le = get_f("le");
-            v->multiple_of = get_f("multiple_of");
+            // A float bound is read as a float and nothing else (constraint.rs:72): a
+            // string is a TypeError rather than a parse, and a NaN or an infinity is a
+            // bound no input can ever satisfy, so the schema is refused where it is built.
+            if (schema.contains("multiple_of") && !schema["multiple_of"].is_none()) {
+                py::object val = schema["multiple_of"];
+                double bound = PyFloat_AsDouble(val.ptr());
+                if (bound == -1.0 && PyErr_Occurred()) {
+                    PyObject* type = nullptr;
+                    PyObject* value = nullptr;
+                    PyObject* tb = nullptr;
+                    PyErr_Fetch(&type, &value, &tb);
+                    PyErr_NormalizeException(&type, &value, &tb);
+                    std::string message = "must be real number";
+                    if (value) {
+                        py::object value_obj = py::reinterpret_steal<py::object>(value);
+                        message = py::str(value_obj).cast<std::string>();
+                    }
+                    Py_XDECREF(type);
+                    Py_XDECREF(tb);
+                    // pyo3 reads a float bound the way float() does, so a string is turned
+                    // down by CPython's own words, not by a message written here.
+                    throw py::type_error(message);
+                }
+                if (!std::isfinite(bound) || bound <= 0.0)
+                    throw py::value_error("'multiple_of' must be a finite number greater than 0");
+                v->multiple_of = bound;
+            }
             return v;
         }
         auto v = std::make_shared<FloatValidator>();
@@ -1988,13 +2045,21 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
     }
     if (type == "timedelta") {
         auto v = std::make_shared<TimedeltaValidator>(is_strict_py(schema, config));
-        for (const char* k : {"gt", "lt", "ge", "le"}) {
+        for (const char* k : {"multiple_of", "gt", "lt", "ge", "le"}) {
             if (schema.contains(k) && !schema[k].is_none()) {
                 py::object c = timedelta_constraint_from_schema(schema[k], k);
                 if (std::string(k) == "gt") v->gt = c;
                 else if (std::string(k) == "lt") v->lt = c;
                 else if (std::string(k) == "ge") v->ge = c;
-                else v->le = c;
+                else if (std::string(k) == "le") v->le = c;
+                else {
+                    // No duration divides into zero, and a negative bound is the same rule
+                    // written backwards (constraint.rs:85), so the schema is refused here.
+                    py::object zero = py::module_::import("datetime").attr("timedelta")();
+                    if (PyObject_RichCompareBool(c.ptr(), zero.ptr(), Py_GT) != 1)
+                        throw py::value_error("'multiple_of' must be greater than 0");
+                    v->multiple_of = c;
+                }
             }
         }
         return v;
@@ -2135,6 +2200,12 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         v->ge = get_decimal("ge");
         v->le = get_decimal("le");
         v->multiple_of = get_decimal("multiple_of");
+        // Zero divides nothing, and a NaN or an infinity never divides anything either
+        // (constraint.rs:80), so those bounds are a broken schema rather than a rule.
+        if (!v->multiple_of.is_none() &&
+            (v->multiple_of.attr("is_finite")().cast<bool>() == false ||
+             PyObject_RichCompareBool(v->multiple_of.ptr(), py::int_(0).ptr(), Py_GT) != 1))
+            throw py::value_error("'multiple_of' must be a finite number greater than 0");
         return v;
     }
 
@@ -2167,6 +2238,12 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         v->lt = get_fraction("lt");
         v->ge = get_fraction("ge");
         v->gt = get_fraction("gt");
+        v->multiple_of = get_fraction("multiple_of");
+        // A bound of zero divides nothing and a negative one is the same rule written
+        // backwards (constraint.rs:85), so neither makes a schema.
+        if (!v->multiple_of.is_none() &&
+            PyObject_RichCompareBool(v->multiple_of.ptr(), py::int_(0).ptr(), Py_GT) != 1)
+            throw py::value_error("'multiple_of' must be greater than 0");
         return v;
     }
 

@@ -109,6 +109,9 @@ public:
     std::optional<int64_t> lt;
     std::optional<int64_t> le;
     std::optional<int64_t> multiple_of;
+    // A bound past the i64 range is legal (the reference renders it and refuses everything
+    // it meets), so it is kept as the Python number rather than forced into an int64.
+    py::object multiple_of_big = py::none();
 
     ConstrainedIntValidator() = default;
 
@@ -123,6 +126,34 @@ auto result = input.validate_int(state.strict_or(strict));
         state.floor_exactness(result.value().exactness());
         auto& either_int = result.value().value();
         int64_t int_value = either_int.as_i64().value_or(0);
+
+        // Rust applies multiple_of before the range bounds, so a value that breaks both
+        // reports the divisibility it failed first (constraint.rs MultipleOf::apply).
+        if (!multiple_of_big.is_none()) {
+            bool divides = false;
+            PyObject* value = PyLong_FromLongLong(int_value);
+            PyObject* rem = PyNumber_Remainder(value, multiple_of_big.ptr());
+            Py_XDECREF(value);
+            if (rem) {
+                divides = PyObject_IsTrue(rem) == 0;
+                Py_DECREF(rem);
+            } else {
+                PyErr_Clear();
+            }
+            if (!divides) {
+                ErrorType err(ErrorType::Kind::MultipleOf);
+                err.set_ctx_object("multiple_of", py::str(multiple_of_big).cast<std::string>(), multiple_of_big);
+                return ValError::line_error(std::move(err), state.location(), std::to_string(int_value));
+            }
+        } else if (multiple_of.has_value() && multiple_of.value() != 0) {
+            if (int_value % multiple_of.value() != 0) {
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::MultipleOf, "multiple_of", std::to_string(multiple_of.value())),
+                    state.location(),
+                    std::to_string(int_value)
+                );
+            }
+        }
 
         if (gt.has_value() && int_value <= gt.value()) {
             return ValError::line_error(
@@ -151,15 +182,6 @@ auto result = input.validate_int(state.strict_or(strict));
                 state.location(),
                 std::to_string(int_value)
             );
-        }
-        if (multiple_of.has_value() && multiple_of.value() != 0) {
-            if (int_value % multiple_of.value() != 0) {
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::MultipleOf, "multiple_of", std::to_string(multiple_of.value())),
-                    state.location(),
-                    std::to_string(int_value)
-                );
-            }
         }
 
         // Return the full validated integer (supports the uint64 range as well).
@@ -241,6 +263,20 @@ auto result = input.validate_float(state.strict_or(strict));
             err.set_ctx_object(key, format_double(value), py::float_(value));
             return err;
         };
+        // Rust applies multiple_of before the range bounds.
+        if (multiple_of.has_value() && multiple_of.value() != 0.0) {
+            double tolerance = 1e-9;
+            double rounded_div = std::round(f / multiple_of.value());
+            double diff = std::abs(f - (rounded_div * multiple_of.value()));
+            if (diff > tolerance) {
+                ErrorType err(ErrorType::Kind::MultipleOf);
+                err.set_ctx_object("multiple_of", format_double(multiple_of.value()),
+                                   py::float_(multiple_of.value()));
+                return ValError::line_error(
+                    std::move(err), state.location(), input.as_error_value().repr
+                );
+            }
+        }
         if (gt.has_value() && f <= gt.value()) {
             return ValError::line_error(
                 float_ctx(ErrorType::Kind::GreaterThan, "gt", gt.value()),
@@ -268,19 +304,6 @@ auto result = input.validate_float(state.strict_or(strict));
                 state.location(),
                 input.as_error_value().repr
             );
-        }
-        if (multiple_of.has_value() && multiple_of.value() != 0.0) {
-            double tolerance = 1e-9;
-            double rounded_div = std::round(f / multiple_of.value());
-            double diff = std::abs(f - (rounded_div * multiple_of.value()));
-            if (diff > tolerance) {
-                ErrorType err(ErrorType::Kind::MultipleOf);
-                err.set_ctx_object("multiple_of", format_double(multiple_of.value()),
-                                   py::float_(multiple_of.value()));
-                return ValError::line_error(
-                    std::move(err), state.location(), input.as_error_value().repr
-                );
-            }
         }
 
         return ValResult<std::shared_ptr<void>>(std::make_shared<double>(f));

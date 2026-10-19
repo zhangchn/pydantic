@@ -651,11 +651,30 @@ static std::string timedelta_human_readable(const py::object& td) {
     return out;
 }
 
-// Rust checks the four constraints in le/lt/ge/gt order against the timedelta it
-// just produced, and names that timedelta -- not the raw input -- as the input
-// of the error (timedelta.rs:80-104).
+// Divisibility needs the duration as one number, and a duration whose microseconds do not
+// fit an i64 has no answer to give: the reference reports the constraint rather than
+// wrapping (timedelta.rs map_or(true, ...)).
+static std::optional<long long> timedelta_total_micros(const py::object& td) {
+    try {
+        const long long days = td.attr("days").cast<long long>();
+        const long long seconds = td.attr("seconds").cast<long long>();
+        const long long micros = td.attr("microseconds").cast<long long>();
+        const __int128 total = ((__int128)days * 86400 + seconds) * 1000000 + micros;
+        if (total > ((__int128)1 << 63) - 1 || total < -((__int128)1 << 63)) return std::nullopt;
+        return (long long)total;
+    } catch (py::error_already_set& e) {
+        e.restore();
+        PyErr_Clear();
+        return std::nullopt;
+    }
+}
+
+// Rust checks multiple_of first and then the four constraints in le/lt/ge/gt order, against
+// the timedelta it just produced, and names that timedelta -- not the raw input -- as the
+// input of the error (timedelta.rs:80-104).
 static std::optional<ValError> apply_timedelta_constraints(
     const py::object& py_td,
+    const py::object& multiple_of,
     const py::object& gt, const py::object& lt,
     const py::object& ge, const py::object& le,
     ValidationState& state) {
@@ -673,6 +692,15 @@ static std::optional<ValError> apply_timedelta_constraints(
         ErrorType err(kind, key, timedelta_human_readable(bound));
         return ValError::line_error(err, state.location(), py::repr(py_td).cast<std::string>(), py_td);
     };
+    if (!multiple_of.is_none()) {
+        // The bound is a positive duration by the time the schema is built, so the test is
+        // whether the value divides without remainder -- sign of the value notwithstanding.
+        auto value_us = timedelta_total_micros(py_td);
+        auto bound_us = timedelta_total_micros(multiple_of);
+        if (!value_us || !bound_us || *bound_us == 0 || *value_us % *bound_us != 0) {
+            return failed(ErrorType::Kind::MultipleOf, "multiple_of", multiple_of);
+        }
+    }
     if (!le.is_none() && !py_cmp(py_td, le, Py_LE)) return failed(ErrorType::Kind::LessThanEqual, "le", le);
     if (!lt.is_none() && !py_cmp(py_td, lt, Py_LT)) return failed(ErrorType::Kind::LessThan, "lt", lt);
     if (!ge.is_none() && !py_cmp(py_td, ge, Py_GE)) return failed(ErrorType::Kind::GreaterThanEqual, "ge", ge);
@@ -685,6 +713,7 @@ class TimedeltaValidator : public Validator {
 public:
     explicit TimedeltaValidator(bool strict = false) : strict_(strict) {}
 
+    py::object multiple_of = py::none();
     py::object gt = py::none();
     py::object lt = py::none();
     py::object ge = py::none();
@@ -701,10 +730,10 @@ public:
         state.floor_exactness(result.value().exactness());
         auto match = std::move(result.value());
 
-        if (!gt.is_none() || !lt.is_none() || !ge.is_none() || !le.is_none()) {
+        if (!multiple_of.is_none() || !gt.is_none() || !lt.is_none() || !ge.is_none() || !le.is_none()) {
             try {
                 auto err = apply_timedelta_constraints(py_timedelta_object(match.value().as_raw()),
-                                                      gt, lt, ge, le, state);
+                                                      multiple_of, gt, lt, ge, le, state);
                 if (err) return *err;
             } catch (py::error_already_set& e) {
                 e.restore();
@@ -720,6 +749,7 @@ public:
     std::string name() const override { return "timedelta"; }
 
     void visit_refs(RefVisitor visit, void* arg) const override {
+        visit_ref(visit, arg, multiple_of);
         visit_ref(visit, arg, gt);
         visit_ref(visit, arg, lt);
         visit_ref(visit, arg, ge);
@@ -1215,19 +1245,24 @@ public:
         }
 
         if (!multiple_of.is_none()) {
+            auto refused = [&]() {
+                ErrorType err(ErrorType::Kind::MultipleOf);
+                err.set_ctx_object("multiple_of", py::str(multiple_of).cast<std::string>(), multiple_of);
+                return ValError::line_error(err, state.location(), input.as_error_value().repr);
+            };
             try {
                 py::object fraction = decimal.attr("__truediv__")(multiple_of).attr("__mod__")(py::int_(1));
                 py::object zero = py::int_(0);
                 int is_zero = PyObject_RichCompareBool(fraction.ptr(), zero.ptr(), Py_EQ);
                 if (is_zero < 0) PyErr_Clear();
-                if (is_zero == 0) {
-                    ErrorType err(ErrorType::Kind::MultipleOf);
-                    err.set_ctx_object("multiple_of", py::str(multiple_of).cast<std::string>(), multiple_of);
-                    return ValError::line_error(err, state.location(), input.as_error_value().repr);
-                }
+                if (is_zero == 0) return refused();
             } catch (py::error_already_set& e) {
                 e.restore();
                 PyErr_Clear();
+                // A quotient the decimal context cannot hold -- '1e30' by 3, '1e999999' by
+                // 0.01 -- raises instead of answering, and Rust reads that as the constraint
+                // not holding rather than as nothing to report.
+                return refused();
             }
         }
 
@@ -1359,6 +1394,7 @@ inline bool fraction_exponent_too_large(const py::object& arg) {
 class FractionValidator : public Validator {
 public:
     bool strict = false;
+    py::object multiple_of = py::none();
     py::object gt = py::none();
     py::object lt = py::none();
     py::object ge = py::none();
@@ -1452,6 +1488,24 @@ public:
             Py_DECREF(r);
             return out;
         };
+        // fraction.rs:107 -- divisibility is asked before the range bounds, and it is asked
+        // of Python, whose Fraction remainder is exact.  What raises (a bound Fraction
+        // cannot be divided by) is the constraint not holding, as in the reference.
+        if (!multiple_of.is_none()) {
+            bool divides = false;
+            PyObject* rem = PyNumber_Remainder(fraction.ptr(), multiple_of.ptr());
+            if (rem) {
+                divides = PyObject_IsTrue(rem) == 0;
+                Py_DECREF(rem);
+            } else {
+                PyErr_Clear();
+            }
+            if (!divides) {
+                ErrorType err(ErrorType::Kind::MultipleOf);
+                err.set_ctx_object("multiple_of", py::str(multiple_of).cast<std::string>(), multiple_of);
+                return ValError::line_error(err, state.location(), input.as_error_value().repr);
+            }
+        }
         struct Bound {
             const py::object& value;
             ErrorType::Kind kind;
@@ -1478,6 +1532,7 @@ public:
     std::string effective_result_name() const override { return "py_object"; }
 
     void visit_refs(RefVisitor visit, void* arg) const override {
+        visit_ref(visit, arg, multiple_of);
         visit_ref(visit, arg, gt);
         visit_ref(visit, arg, lt);
         visit_ref(visit, arg, ge);
