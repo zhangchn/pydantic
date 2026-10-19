@@ -4041,3 +4041,37 @@ def test_a_fields_node_lets_inference_answer_for_a_value_it_cannot_extract():
     assert [" ".join(str(w.message).split()) for w in caught] == [
         expected_warning("x", "dict[str, general-fields]")]
 
+
+
+def test_a_typed_dict_holds_its_models_as_objects():
+    # Rust builds a model where its field validator returns it (model.rs:302-343) and the typed
+    # dict stores whatever it was handed (typed_dict.rs:223-225), so the finished object is what
+    # lands in the output dict.  The port keeps the validated fields in a dict until the Python
+    # boundary, so the walk that rebuilds them has to visit a typed dict's fields and its extras
+    # even though the typed dict itself stays a plain dict -- and a typed dict's extras sit beside
+    # its fields there, not under __pydantic_extra__ the way a model's do.
+    class M:
+        pass
+
+    model = core_schema.model_schema(
+        M, core_schema.model_fields_schema({'a': core_schema.model_field(core_schema.int_schema())})
+    )
+    v = SchemaValidator(core_schema.typed_dict_schema(
+        {
+            'm': core_schema.typed_dict_field(model),
+            'opt': core_schema.typed_dict_field(core_schema.nullable_schema(model)),
+            'many': core_schema.typed_dict_field(core_schema.list_schema(model)),
+        },
+        extra_behavior='allow',
+        extras_schema=model,
+    ))
+
+    for run in (lambda data: v.validate_python(data), lambda data: v.validate_json(json.dumps(data))):
+        out = run({'m': {'a': 1}, 'opt': None, 'many': [{'a': 2}], 'x': {'a': 3}})
+        assert type(out) is dict  # the typed dict stays a dict
+        assert isinstance(out['m'], M) and out['m'].a == 1
+        assert out['opt'] is None
+        assert isinstance(out['many'][0], M) and out['many'][0].a == 2
+        assert isinstance(out['x'], M) and out['x'].a == 3  # an extra, validated by extras_schema
+        assert sorted(out) == ['m', 'many', 'opt', 'x']  # no __pydantic_* key leaked beside them
+        assert out['m'].__pydantic_fields_set__ == {'a'}

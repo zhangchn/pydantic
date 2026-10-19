@@ -1658,6 +1658,26 @@ class SchemaValidator:
         if schema.get("type") == "model-fields":
             return self._process_model_fields(data, schema)
 
+        if schema.get("type") == "typed-dict":
+            # A typed dict ends its run as a plain dict, but Rust builds each field value where
+            # it stores it (typed_dict.rs:223-225), so the dict it hands back holds model
+            # instances.  The port keeps those values as the flat field dicts this walk exists to
+            # rebuild, and a typed dict is a dict all the way up, so the rebuild has to happen
+            # here: falling through would leave every model child a dict.
+            out = self._process_model_fields(data, schema)
+            extras_schema = schema.get("extras_schema")
+            if isinstance(extras_schema, dict) and isinstance(out, dict):
+                # A typed dict's extras are merged beside its fields (schema_validator.cpp:1094)
+                # rather than kept under __pydantic_extra__ as a model's are, so they are
+                # converted from the keys the declared fields do not claim.
+                declared = schema.get("fields") or {}
+                converted = {key: self._dict_to_model(val, extras_schema)
+                             for key, val in out.items() if key not in declared}
+                if converted and out is data:
+                    out = dict(out)
+                out.update(converted)
+            return out
+
         return data
 
     def _fields_schema(self, schema, _depth=0):
