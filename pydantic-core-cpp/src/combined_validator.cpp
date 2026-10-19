@@ -27,18 +27,71 @@ static py::object timedelta_constraint_from_schema(const py::object& value, cons
     return py_timedelta_object(parsed.value().value().as_raw());
 }
 
-// A temporal bound slot that is in the schema is read whether or not it holds anything: the
-// reference feeds the value straight to the same coercion a value gets, so an explicit None
-// names a bound that cannot coerce and the schema is refused (date.rs:186-197, time.rs:111-122,
-// datetime.rs:195-206).  `keys` is in the order the reference reads them, which is the key the
-// message names when several slots are empty.
-static void refuse_empty_temporal_bounds(const py::dict& schema,
-                                         const std::initializer_list<const char*>& keys,
-                                         const char* word) {
-    for (const char* key : keys) {
-        if (schema.contains(key) && schema[key].is_none()) {
-            throw py::value_error(std::string("'") + key + "' must be coercible to a " + word + " instance");
+// A temporal bound slot that is in the schema goes through the same lax coercion a value gets,
+// while the schema is still being built (date.rs:186-197, time.rs:111-122, datetime.rs:215-228), so
+// what a validator holds is the date, time or datetime the slot named, in the same form it
+// validates a value into.  Reading the bound there is what makes `gt=5` on a datetime mean
+// 1970-01-01T00:00:05Z and `gt='2026-13-01'` a refused schema rather than a bound that quietly
+// never fires: the fallbacks that let a *value* be a date-only string or a number of days belong to
+// the validator, and a bound never reaches them.  A slot holding None is read too, which is why an
+// explicit None names its own key in the message.  `text` comes back as the reference names the
+// bound afterwards -- speedate's rendering, which is what both the sentence and `ctx` carry.
+[[noreturn]] static void refuse_temporal_bound(const char* key, const char* word) {
+    throw py::value_error(std::string("'") + key + "' must be coercible to a " + word +
+                          " instance");
+}
+
+template <class BoundT>
+static BoundT temporal_bound_from_schema(const py::object& value, const char* key,
+                                         std::string& text) {
+    PythonInput input(value);
+    if constexpr (std::is_same_v<BoundT, Date>) {
+        auto parsed = input.validate_date(false, TimestampUnit::Infer);
+        if (parsed.is_err()) refuse_temporal_bound(key, "date");
+        Date d = parsed.value().value().as_raw();
+        text = display_date(d);
+        return d;
+    } else if constexpr (std::is_same_v<BoundT, Time>) {
+        auto parsed = input.validate_time(false);
+        if (parsed.is_err()) refuse_temporal_bound(key, "time");
+        Time t = parsed.value().value().as_raw();
+        text = display_time(t);
+        return t;
+    } else {
+        // A text bound is read with the question the reference asks of a *text* datetime input
+        // (input_python.rs -> bytes_as_datetime -> parse_bytes_rfc3339), which wants the time in the
+        // text: the bare date a datetime value gets as midnight comes from the validator's date
+        // fallback (datetime.rs:73-79), a step a bound never reaches.
+        if (input.is_str() || input.is_bytes()) {
+            std::string s = input.is_str() ? input.as_str()
+                                           : py::bytes(input.as_python_object()).cast<std::string>();
+            auto textbound = parse_datetime_bytes(s.data(), s.size(), TimestampUnit::Infer,
+                                                 /*require_time=*/true);
+            if (!textbound.ok) refuse_temporal_bound(key, "datetime");
+            text = display_datetime(textbound.value);
+            return textbound.value;
         }
+        auto parsed = input.validate_datetime(false, TimestampUnit::Infer);
+        if (parsed.is_err()) refuse_temporal_bound(key, "datetime");
+        DateTime dt = parsed.value().value().as_raw();
+        text = display_datetime(dt);
+        return dt;
+    }
+}
+
+// `le`, `lt`, `ge`, `gt`: the order the reference reads them in, which decides which slot a schema
+// holding several unreadable bounds names.
+template <class ValidatorT>
+static void read_temporal_bounds(const py::dict& schema, const std::shared_ptr<ValidatorT>& v) {
+    using BoundT = typename ValidatorT::bound_type;
+    for (const char* key : {"le", "lt", "ge", "gt"}) {
+        if (!schema.contains(key)) continue;
+        std::string text;
+        BoundT bound = temporal_bound_from_schema<BoundT>(schema[key], key, text);
+        if (std::string(key) == "le") { v->bounds.le = bound; v->bounds.texts.le = text; }
+        else if (std::string(key) == "lt") { v->bounds.lt = bound; v->bounds.texts.lt = text; }
+        else if (std::string(key) == "ge") { v->bounds.ge = bound; v->bounds.texts.ge = text; }
+        else { v->bounds.gt = bound; v->bounds.texts.gt = text; }
     }
 }
 
@@ -2157,15 +2210,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
     // --- Date/time validators ---
     if (type == "date") {
         auto v = std::make_shared<DateValidator>(is_strict_py(schema, config));
-        refuse_empty_temporal_bounds(schema, {"le", "lt", "ge", "gt"}, "date");
-        for (const char* k : {"gt", "lt", "ge", "le"}) {
-            if (schema.contains(k) && !schema[k].is_none()) {
-                if (std::string(k) == "gt") v->gt = schema[k];
-                else if (std::string(k) == "lt") v->lt = schema[k];
-                else if (std::string(k) == "ge") v->ge = schema[k];
-                else v->le = schema[k];
-            }
-        }
+        read_temporal_bounds(schema, v);
         if (schema.contains("now_op") && py::isinstance<py::str>(schema["now_op"])) {
             v->now_op = schema["now_op"].cast<std::string>();
         }
@@ -2173,29 +2218,13 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
     }
     if (type == "time") {
         auto v = std::make_shared<TimeValidator>(is_strict_py(schema, config));
-        refuse_empty_temporal_bounds(schema, {"le", "lt", "ge", "gt"}, "time");
-        for (const char* k : {"gt", "lt", "ge", "le"}) {
-            if (schema.contains(k) && !schema[k].is_none()) {
-                if (std::string(k) == "gt") v->gt = schema[k];
-                else if (std::string(k) == "lt") v->lt = schema[k];
-                else if (std::string(k) == "ge") v->ge = schema[k];
-                else v->le = schema[k];
-            }
-        }
+        read_temporal_bounds(schema, v);
         read_tz_constraint(schema, v->tz);
         return v;
     }
     if (type == "datetime") {
         auto v = std::make_shared<DatetimeValidator>(is_strict_py(schema, config));
-        refuse_empty_temporal_bounds(schema, {"le", "lt", "ge", "gt"}, "datetime");
-        for (const char* k : {"gt", "lt", "ge", "le"}) {
-            if (schema.contains(k) && !schema[k].is_none()) {
-                if (std::string(k) == "gt") v->gt = schema[k];
-                else if (std::string(k) == "lt") v->lt = schema[k];
-                else if (std::string(k) == "ge") v->ge = schema[k];
-                else v->le = schema[k];
-            }
-        }
+        read_temporal_bounds(schema, v);
         if (schema.contains("now_op") && py::isinstance<py::str>(schema["now_op"])) {
             v->now_op = schema["now_op"].cast<std::string>();
         }

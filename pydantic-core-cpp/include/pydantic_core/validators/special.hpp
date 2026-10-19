@@ -205,72 +205,55 @@ static py::object time_to_python_obj(const Time& t) {
     return py_time_object(t);
 }
 
-// Parse a constraint value (ISO string or already a Python object) into a
-// comparable Python object of the given kind ("date"/"datetime"/"time").
-static py::object parse_temporal_constraint(const py::object& val, const std::string& kind) {
-    if (py::isinstance<py::str>(val)) {
-        std::string s = val.cast<std::string>();
-        py::object datetime_mod = py::module_::import("datetime");
-        if (kind == "date") return datetime_mod.attr("date").attr("fromisoformat")(s);
-        if (kind == "datetime") return datetime_mod.attr("datetime").attr("fromisoformat")(s);
-        if (kind == "time") return datetime_mod.attr("time").attr("fromisoformat")(s);
-    }
-    return val;
-}
+// How the reference names a violated temporal bound.  A bound is read when the schema is built
+// (see `temporal_bound_from_schema` in combined_validator.cpp), and what a violated one then
+// carries -- in the sentence and in `ctx` alike -- is speedate's rendering of the value it named,
+// which is not Python's: speedate writes `2026-05-01T12:00:00Z` where `str()` writes
+// `2026-05-01 12:00:00+00:00`.  Written once per bound so the error path renders nothing.
+struct TemporalBoundTexts {
+    std::string gt;
+    std::string lt;
+    std::string ge;
+    std::string le;
+};
 
-// Apply gt/lt/ge/le constraints to a Python temporal object. Returns a
-// ValError on the first violated constraint, or nullopt if all pass.
-static std::optional<ValError> apply_temporal_constraints(
-    const py::object& result,
-    const py::object& gt, const py::object& lt,
-    const py::object& ge, const py::object& le,
-    const std::string& kind,
-    const Input& input,
-    ValidationState& state) {
-    auto py_cmp = [](const py::object& a, const py::object& b, int op) -> bool {
-        PyObject* r = PyObject_RichCompare(a.ptr(), b.ptr(), op);
-        if (!r) return false;
-        bool out = (r != Py_False);
-        Py_DECREF(r);
-        return out;
+// The four slots as the schema left them. A bound is read while the schema is built (see
+// `temporal_bound_from_schema` in combined_validator.cpp), so what a validator holds is the date,
+// time or datetime the slot named, in the same type it validates a value into -- the comparison is
+// speedate's (`temporal_cmp`), and a Python object on either side would only invite Python's, which
+// refuses a naive/aware pair outright.
+template <class TemporalT>
+struct TemporalBounds {
+    std::optional<TemporalT> gt;
+    std::optional<TemporalT> lt;
+    std::optional<TemporalT> ge;
+    std::optional<TemporalT> le;
+    TemporalBoundTexts texts;
+};
+
+// The reference's four bound checks, in the order it makes them: le, lt, ge, gt (the
+// `check_constraint!` invocations at datetime.rs:110-113, date.rs:81-84, time.rs:74-77), which
+// decides which violation a value that breaks two of them gets named for. A violated one carries
+// speedate's rendering of the bound -- `texts`, written when the bound was read -- as a plain string
+// in the sentence and in `ctx` alike, because that is what the reference interpolates and hands out.
+template <class TemporalT>
+static std::optional<ValError> apply_temporal_constraints(const TemporalT& result,
+                                                         const TemporalBounds<TemporalT>& bounds,
+                                                         const Input& input,
+                                                         ValidationState& state) {
+    auto violation = [&](ErrorType::Kind kind, const char* key, const std::string& text) {
+        ErrorType err(kind);
+        err.set_ctx_object(key, text, py::str(text));
+        return ValError::line_error(err, state.location(), input.as_error_value().repr);
     };
-    try {
-        if (!gt.is_none()) {
-            auto c = parse_temporal_constraint(gt, kind);
-            if (!py_cmp(result, c, Py_GT)) {
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::GreaterThan, "gt", py::str(gt).cast<std::string>()),
-                    state.location(), input.as_error_value().repr);
-            }
-        }
-        if (!lt.is_none()) {
-            auto c = parse_temporal_constraint(lt, kind);
-            if (!py_cmp(result, c, Py_LT)) {
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::LessThan, "lt", py::str(lt).cast<std::string>()),
-                    state.location(), input.as_error_value().repr);
-            }
-        }
-        if (!ge.is_none()) {
-            auto c = parse_temporal_constraint(ge, kind);
-            if (!py_cmp(result, c, Py_GE)) {
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::GreaterThanEqual, "ge", py::str(ge).cast<std::string>()),
-                    state.location(), input.as_error_value().repr);
-            }
-        }
-        if (!le.is_none()) {
-            auto c = parse_temporal_constraint(le, kind);
-            if (!py_cmp(result, c, Py_LE)) {
-                return ValError::line_error(
-                    ErrorType(ErrorType::Kind::LessThanEqual, "le", py::str(le).cast<std::string>()),
-                    state.location(), input.as_error_value().repr);
-            }
-        }
-    } catch (py::error_already_set& e) {
-        e.restore();
-        PyErr_Clear();
-    }
+    if (bounds.le && temporal_cmp(result, *bounds.le) > 0)
+        return violation(ErrorType::Kind::LessThanEqual, "le", bounds.texts.le);
+    if (bounds.lt && temporal_cmp(result, *bounds.lt) >= 0)
+        return violation(ErrorType::Kind::LessThan, "lt", bounds.texts.lt);
+    if (bounds.ge && temporal_cmp(result, *bounds.ge) < 0)
+        return violation(ErrorType::Kind::GreaterThanEqual, "ge", bounds.texts.ge);
+    if (bounds.gt && temporal_cmp(result, *bounds.gt) <= 0)
+        return violation(ErrorType::Kind::GreaterThan, "gt", bounds.texts.gt);
     return std::nullopt;
 }
 
@@ -373,10 +356,8 @@ class DateValidator : public Validator {
 public:
     explicit DateValidator(bool strict = false) : strict_(strict) {}
 
-    py::object gt = py::none();
-    py::object lt = py::none();
-    py::object ge = py::none();
-    py::object le = py::none();
+    using bound_type = Date;
+    TemporalBounds<Date> bounds;
     std::string now_op;  // "", "past", "future"
 
     ValResult<std::shared_ptr<void>> validate(
@@ -415,7 +396,7 @@ public:
         // Apply gt/lt/ge/le constraints
         try {
             py::object py_date = date_to_python_obj(d);
-            auto err = apply_temporal_constraints(py_date, gt, lt, ge, le, "date", input, state);
+            auto err = apply_temporal_constraints(d, bounds, input, state);
             if (err) return *err;
 
             // Apply now_op (past/future) check
@@ -451,12 +432,6 @@ public:
 
     std::string name() const override { return "date"; }
 
-    void visit_refs(RefVisitor visit, void* arg) const override {
-        visit_ref(visit, arg, gt);
-        visit_ref(visit, arg, lt);
-        visit_ref(visit, arg, ge);
-        visit_ref(visit, arg, le);
-    }
 private:
     bool strict_ = false;
 };
@@ -510,10 +485,8 @@ class TimeValidator : public Validator {
 public:
     explicit TimeValidator(bool strict = false) : strict_(strict) {}
 
-    py::object gt = py::none();
-    py::object lt = py::none();
-    py::object ge = py::none();
-    py::object le = py::none();
+    using bound_type = Time;
+    TemporalBounds<Time> bounds;
     TZConstraint tz;
 
     ValResult<std::shared_ptr<void>> validate(
@@ -530,7 +503,7 @@ public:
 
         try {
             py::object py_time = time_to_python_obj(t);
-            auto err = apply_temporal_constraints(py_time, gt, lt, ge, le, "time", input, state);
+            auto err = apply_temporal_constraints(t, bounds, input, state);
             if (err) return *err;
             if (auto tz_err = tz_constraint_violation(tz, t.tz_offset, input, state)) return *tz_err;
         } catch (py::error_already_set& e) {
@@ -545,12 +518,6 @@ public:
 
     std::string name() const override { return "time"; }
 
-    void visit_refs(RefVisitor visit, void* arg) const override {
-        visit_ref(visit, arg, gt);
-        visit_ref(visit, arg, lt);
-        visit_ref(visit, arg, ge);
-        visit_ref(visit, arg, le);
-    }
 private:
     bool strict_ = false;
 };
@@ -560,10 +527,8 @@ class DatetimeValidator : public Validator {
 public:
     explicit DatetimeValidator(bool strict = false) : strict_(strict) {}
 
-    py::object gt = py::none();
-    py::object lt = py::none();
-    py::object ge = py::none();
-    py::object le = py::none();
+    using bound_type = DateTime;
+    TemporalBounds<DateTime> bounds;
     std::string now_op;        // "", "past", "future"
     TZConstraint tz;
 
@@ -609,7 +574,7 @@ public:
             };
 
             // Apply gt/lt/ge/le constraints
-            auto err = apply_temporal_constraints(py_dt, gt, lt, ge, le, "datetime", input, state);
+            auto err = apply_temporal_constraints(dt, bounds, input, state);
             if (err) return *err;
 
             // Apply now_op (past/future) check, then tz_constraint: the reference reads the clock
@@ -650,12 +615,6 @@ public:
 
     std::string name() const override { return "datetime"; }
 
-    void visit_refs(RefVisitor visit, void* arg) const override {
-        visit_ref(visit, arg, gt);
-        visit_ref(visit, arg, lt);
-        visit_ref(visit, arg, ge);
-        visit_ref(visit, arg, le);
-    }
 private:
     bool strict_ = false;
 };

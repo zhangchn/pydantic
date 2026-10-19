@@ -365,7 +365,8 @@ TimestampUnit timestamp_unit_from_string(std::string_view name, bool* ok) {
     return TimestampUnit::Infer;
 }
 
-ParseOutcome<DateTime> parse_datetime_bytes(const char* data, size_t len, TimestampUnit unit) {
+ParseOutcome<DateTime> parse_datetime_bytes(const char* data, size_t len, TimestampUnit unit,
+                                           bool require_time) {
     // Try the string form first. If it fails but the input reads as a number,
     // use the timestamp reading; if both fail, the string-form error is the
     // one speedate reports.
@@ -373,8 +374,10 @@ ParseOutcome<DateTime> parse_datetime_bytes(const char* data, size_t len, Timest
     DateTime dt;
     size_t i = 0;
     bool str_ok = parse_date_part(data, len, i, dt.date, str_err);
+    bool saw_time = false;
 
     if (str_ok && i < len) {
+        saw_time = true;
         std::string local_err;
         char sep = data[i];
         if (sep != 'T' && sep != 't' && sep != '_' && sep != ' ') {
@@ -395,6 +398,9 @@ ParseOutcome<DateTime> parse_datetime_bytes(const char* data, size_t len, Timest
         }
     }
 
+    if (str_ok && require_time && !saw_time) {
+        return ParseOutcome<DateTime>::failure("expected a time after the date");
+    }
     if (str_ok) return ParseOutcome<DateTime>::success(dt);
 
     NumberToken num;
@@ -404,8 +410,9 @@ ParseOutcome<DateTime> parse_datetime_bytes(const char* data, size_t len, Timest
     return ParseOutcome<DateTime>::failure(str_err);
 }
 
-ParseOutcome<DateTime> parse_datetime_string(std::string_view s, TimestampUnit unit) {
-    return parse_datetime_bytes(s.data(), s.size(), unit);
+ParseOutcome<DateTime> parse_datetime_string(std::string_view s, TimestampUnit unit,
+                                             bool require_time) {
+    return parse_datetime_bytes(s.data(), s.size(), unit, require_time);
 }
 
 // speedate's Date::parse_bytes reads the date portion and then requires the
