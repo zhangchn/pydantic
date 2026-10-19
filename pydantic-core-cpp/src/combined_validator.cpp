@@ -1238,6 +1238,21 @@ std::shared_ptr<CombinedValidator> SchemaBuilder::build_from_dict(
 // Python dict-based builder (like Rust — no JSON round-trip)
 // ============================================================================
 
+// A build failure that pyo3 would raise as a Python error is thrown that way here too, so
+// the node above can name its class and Python still gets it when nothing catches it.
+static void throw_python_error(PyObject* type, const std::string& message) {
+    PyErr_SetString(type, message.c_str());
+    throw py::error_already_set();
+}
+
+// pyo3's DowncastError text -- what a failed cast::<PyString> hands to its caller.  None is
+// spelled without the "object" word.
+static std::string pyo3_downcast_text(py::handle obj, const char* target) {
+    if (obj.is_none()) return std::string("'None' is not an instance of '") + target + "'";
+    return "'" + obj.get_type().attr("__name__").cast<std::string>()
+           + "' object is not an instance of '" + target + "'";
+}
+
 // Helper: extract string from py::dict with optional default
 static std::string py_str(const py::dict& d, const char* key, const std::string& fallback = "") {
     if (!d.contains(key)) return fallback;
@@ -1252,20 +1267,38 @@ static int64_t py_int(const py::dict& d, const char* key, int64_t fallback = 0) 
     return d[key].cast<int64_t>();
 }
 
-// Helper: extract an optional bool from py::dict; absent means "not declared"
+// Rust reads every bool slot with get_as::<bool> (is_strict at build_tools.rs:44, fail_fast
+// at list.rs:113, strip_whitespace in str.rs, host_required at url.rs:122): the Option that
+// comes back tracks whether the *key* was in the dict, not whether its value is None.  An
+// absent key means the node's default; a present key has to hold a bool, and None -- or 'x',
+// or 1 -- is a value that isn't one, so the build stops with pyo3's own TypeError.
 static std::optional<bool> py_bool_opt(const py::dict& d, const char* key) {
     if (!d.contains(key)) return std::nullopt;
-    auto val = d[key];
-    if (py::isinstance<py::bool_>(val)) return val.cast<bool>();
-    return std::nullopt;
+    py::object value = d[key];
+    if (!PyBool_Check(value.ptr()))
+        throw_python_error(PyExc_TypeError, pyo3_downcast_text(value, "bool"));
+    return value.ptr() == Py_True;
 }
 
-// Helper: extract bool from py::dict
+// The same key read where the node wants a plain value rather than "declared or not".
 static bool py_bool(const py::dict& d, const char* key, bool fallback = false) {
-    if (!d.contains(key)) return fallback;
-    auto val = d[key];
-    if (py::isinstance<py::bool_>(val)) return val.cast<bool>();
-    return false;
+    if (auto declared = py_bool_opt(d, key)) return *declared;
+    return fallback;
+}
+
+// schema_or_config (build_tools.rs): the node's own key wins when it is present, then the
+// config's under its own name, and either value has to be a bool.  url.rs:99 keeps the config
+// key under a "url_" prefix, which is why the two names are separate.
+static bool bool_slot_pair(const py::dict& schema, const py::dict& config, const char* schema_key,
+                           const char* config_key, bool fallback) {
+    if (auto declared = py_bool_opt(schema, schema_key)) return *declared;
+    if (auto declared = py_bool_opt(config, config_key)) return *declared;
+    return fallback;
+}
+
+// schema_or_config_same (build_tools.rs:33): the same key on both sides.
+static bool bool_slot_same(const py::dict& schema, const py::dict& config, const char* key, bool fallback) {
+    return bool_slot_pair(schema, config, key, key, fallback);
 }
 
 // Same lookup for validators that keep strict as "not declared" rather than false.
@@ -1367,21 +1400,6 @@ static std::string build_error_render(const std::exception& err) {
         return python_error_render(*builtin);
     }
     return err.what();
-}
-
-// A build failure that pyo3 would raise as a Python error is thrown that way here too, so
-// the node above can name its class and Python still gets it when nothing catches it.
-static void throw_python_error(PyObject* type, const std::string& message) {
-    PyErr_SetString(type, message.c_str());
-    throw py::error_already_set();
-}
-
-// pyo3's DowncastError text -- what a failed cast::<PyString> hands to its caller.  None is
-// spelled without the "object" word.
-static std::string pyo3_downcast_text(py::handle obj, const char* target) {
-    if (obj.is_none()) return std::string("'None' is not an instance of '") + target + "'";
-    return "'" + obj.get_type().attr("__name__").cast<std::string>()
-           + "' object is not an instance of '" + target + "'";
 }
 
 // Rust reads each of a node's sub-slots through a typed downcast inside the builder that
@@ -1809,15 +1827,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
     if (type == "float" || type == "float-constrained" || type == "constr-float") {
         // Rust reads allow_inf_nan with schema_or_config_same, so a model with
         // ConfigDict(allow_inf_nan=False) constrains plain float fields too.
-        auto allow_inf_nan = [&schema, &config]() -> bool {
-            if (schema.contains("allow_inf_nan") && !schema["allow_inf_nan"].is_none()) {
-                return schema["allow_inf_nan"].cast<bool>();
-            }
-            if (config.contains("allow_inf_nan") && !config["allow_inf_nan"].is_none()) {
-                return config["allow_inf_nan"].cast<bool>();
-            }
-            return true;
-        }();
+        bool allow_inf_nan = bool_slot_same(schema, config, "allow_inf_nan", true);
         if (schema.contains("multiple_of") || schema.contains("le") || schema.contains("ge") ||
             schema.contains("lt") || schema.contains("gt")) {
             auto v = std::make_shared<ConstrainedFloatValidator>();
@@ -1888,11 +1898,10 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             }
             return std::nullopt;
         };
+        // string.rs:213 reads the bool slots with schema_or_config, so a present value that is
+        // not a bool stops the build; only an absent key means "not declared".
         auto cfg_bool = [&](const char* cfg_key) -> std::optional<bool> {
-            if (!config.contains(cfg_key)) return std::nullopt;
-            py::object val = config[cfg_key];
-            if (py::isinstance<py::bool_>(val)) return val.cast<bool>();
-            return std::nullopt;
+            return py_bool_opt(config, cfg_key);
         };
         auto sch_int = [&](const char* k) -> std::optional<size_t> {
             if (!schema.contains(k)) return std::nullopt;
@@ -1904,10 +1913,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             return std::nullopt;
         };
         auto sch_bool = [&](const char* k) -> std::optional<bool> {
-            if (!schema.contains(k)) return std::nullopt;
-            py::object val = schema[k];
-            if (py::isinstance<py::bool_>(val)) return val.cast<bool>();
-            return std::nullopt;
+            return py_bool_opt(schema, k);
         };
         std::optional<size_t> min_len = sch_int("min_length");
         if (!min_len) min_len = cfg_int("str_min_length");
@@ -2079,14 +2085,9 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
                 }
             }
         }
-        if (schema.contains("host_required") && py::isinstance<py::bool_>(schema["host_required"])) {
-            v->host_required = schema["host_required"].cast<bool>();
-        }
-        if (schema.contains("preserve_empty_path") && py::isinstance<py::bool_>(schema["preserve_empty_path"])) {
-            v->preserve_empty_path = schema["preserve_empty_path"].cast<bool>();
-        } else if (config.contains("url_preserve_empty_path") && py::isinstance<py::bool_>(config["url_preserve_empty_path"])) {
-            v->preserve_empty_path = config["url_preserve_empty_path"].cast<bool>();
-        }
+        if (auto declared = py_bool_opt(schema, "host_required")) v->host_required = *declared;
+        v->preserve_empty_path =
+            bool_slot_pair(schema, config, "preserve_empty_path", "url_preserve_empty_path", v->preserve_empty_path);
         if (schema.contains("default_host") && !schema["default_host"].is_none()) {
             v->default_host = schema["default_host"].cast<std::string>();
         }
@@ -2114,14 +2115,9 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
                 }
             }
         }
-        if (schema.contains("host_required") && py::isinstance<py::bool_>(schema["host_required"])) {
-            v->host_required = schema["host_required"].cast<bool>();
-        }
-        if (schema.contains("preserve_empty_path") && py::isinstance<py::bool_>(schema["preserve_empty_path"])) {
-            v->preserve_empty_path = schema["preserve_empty_path"].cast<bool>();
-        } else if (config.contains("url_preserve_empty_path") && py::isinstance<py::bool_>(config["url_preserve_empty_path"])) {
-            v->preserve_empty_path = config["url_preserve_empty_path"].cast<bool>();
-        }
+        if (auto declared = py_bool_opt(schema, "host_required")) v->host_required = *declared;
+        v->preserve_empty_path =
+            bool_slot_pair(schema, config, "preserve_empty_path", "url_preserve_empty_path", v->preserve_empty_path);
         if (schema.contains("default_host") && !schema["default_host"].is_none()) {
             v->default_host = schema["default_host"].cast<std::string>();
         }
@@ -2161,12 +2157,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         v->decimal_places = get_u64("decimal_places");
         v->max_digits = get_u64("max_digits");
 
-        bool allow_inf_nan = false;
-        if (schema.contains("allow_inf_nan") && !schema["allow_inf_nan"].is_none()) {
-            allow_inf_nan = schema["allow_inf_nan"].cast<bool>();
-        } else if (config.contains("allow_inf_nan") && !config["allow_inf_nan"].is_none()) {
-            allow_inf_nan = config["allow_inf_nan"].cast<bool>();
-        }
+        bool allow_inf_nan = bool_slot_same(schema, config, "allow_inf_nan", false);
         if (allow_inf_nan && (v->decimal_places.has_value() || v->max_digits.has_value())) {
             throw SchemaError("allow_inf_nan=True cannot be used with max_digits or decimal_places");
         }
@@ -2418,19 +2409,12 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         }
         if (schema.contains("default_factory") && !schema["default_factory"].is_none()) {
             wd->set_default_factory(schema["default_factory"]);
-            if (schema.contains("default_factory_takes_data") &&
-                py::isinstance<py::bool_>(schema["default_factory_takes_data"])) {
-                wd->set_default_factory_takes_data(schema["default_factory_takes_data"].cast<bool>());
-            }
+            wd->set_default_factory_takes_data(
+                py_bool_opt(schema, "default_factory_takes_data").value_or(false));
         }
-        // validate_default comes from the schema or the top-level config
-        bool validate_default = false;
-        if (schema.contains("validate_default") && py::isinstance<py::bool_>(schema["validate_default"])) {
-            validate_default = schema["validate_default"].cast<bool>();
-        }
-        if (config.contains("validate_default") && py::isinstance<py::bool_>(config["validate_default"])) {
-            validate_default = config["validate_default"].cast<bool>();
-        }
+        // with_default.rs:139 reads validate_default with schema_or_config_same, so the field's
+        // own key wins over the model's ConfigDict(validate_default=...).
+        bool validate_default = bool_slot_same(schema, config, "validate_default", false);
         if (validate_default) {
             wd->set_validate_default(true);
         }
@@ -2859,12 +2843,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         }
         // Propagate from_attributes to inner ModelFieldsValidator
         {
-            bool fa = false;
-            if (schema.contains("from_attributes") && !schema["from_attributes"].is_none()) {
-                fa = schema["from_attributes"].cast<bool>();
-            } else if (inner_config.contains("from_attributes") && py::isinstance<py::bool_>(inner_config["from_attributes"])) {
-                fa = inner_config["from_attributes"].cast<bool>();
-            }
+            bool fa = bool_slot_same(schema, inner_config, "from_attributes", false);
             if (fa) {
                 if (auto mfv = std::dynamic_pointer_cast<ModelFieldsValidator>(inner)) {
                     mfv->set_from_attributes(true);
@@ -2876,21 +2855,18 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         // Read from inner_config (parent + this model's own config merged).
         {
             if (auto mfv = std::dynamic_pointer_cast<ModelFieldsValidator>(inner)) {
-                if (inner_config.contains("validate_by_name") && py::isinstance<py::bool_>(inner_config["validate_by_name"])) {
-                    mfv->set_validate_by_name(inner_config["validate_by_name"].cast<bool>());
+                if (auto declared = py_bool_opt(inner_config, "validate_by_name")) {
+                    mfv->set_validate_by_name(*declared);
                 }
-                if (inner_config.contains("validate_by_alias") && py::isinstance<py::bool_>(inner_config["validate_by_alias"])) {
-                    mfv->set_validate_by_alias(inner_config["validate_by_alias"].cast<bool>());
+                if (auto declared = py_bool_opt(inner_config, "validate_by_alias")) {
+                    mfv->set_validate_by_alias(*declared);
                 }
-                if (inner_config.contains("loc_by_alias") && py::isinstance<py::bool_>(inner_config["loc_by_alias"])) {
-                    mfv->set_loc_by_alias(inner_config["loc_by_alias"].cast<bool>());
+                if (auto declared = py_bool_opt(inner_config, "loc_by_alias")) {
+                    mfv->set_loc_by_alias(*declared);
                 }
             }
         }
-        bool root_model = false;
-        if (schema.contains("root_model")) {
-            root_model = schema["root_model"].cast<bool>();
-        }
+        bool root_model = py_bool_opt(schema, "root_model").value_or(false);
         py::object model_cls = py::none();
         if (schema.contains("cls")) {
             try { model_cls = schema["cls"].cast<py::object>(); } catch (...) {}
@@ -2923,10 +2899,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         }
         // Default is "never" which maps to RevalidateInstances::Never
 
-        bool custom_init = false;
-        if (schema.contains("custom_init") && py::isinstance<py::bool_>(schema["custom_init"])) {
-            custom_init = schema["custom_init"].cast<bool>();
-        }
+        bool custom_init = py_bool_opt(schema, "custom_init").value_or(false);
         auto v = std::make_shared<ModelValidator>(inner, model_name, /*frozen=*/false, custom_init, root_model, model_cls, revalidate);
         v->set_generic_origin(generic_origin);
         return v;
@@ -3012,10 +2985,9 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
                 py::object field_default_py_obj = py::none();
                 bool required = true;
 
-                // typed-dict fields declare requiredness explicitly
-                if (field_def.contains("required") && py::isinstance<py::bool_>(field_def["required"])) {
-                    required = field_def["required"].cast<bool>();
-                }
+                // typed-dict fields declare requiredness explicitly (typed_dict.rs:95 extracts
+                // the key as a bool, so a present value that is not one stops the build)
+                if (auto declared = py_bool_opt(field_def, "required")) required = *declared;
 
                 if (field_def.contains("schema")) {
                     field_schema_dict = field_def["schema"].cast<py::dict>();
@@ -3068,16 +3040,17 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
                 info.default_value_str = default_val_str;
                 info.frozen = false;
                 // validate_default: per-field flag on the with-default schema
-                // or the top-level config (Rust reads both).
+                // or the top-level config (Rust reads both, and the field's key wins).
                 if (field_def.contains("schema")) {
-                    auto fsd_vd = field_def["schema"];
-                    if (fsd_vd.contains("validate_default") && py::isinstance<py::bool_>(fsd_vd["validate_default"])) {
-                        info.validate_default = fsd_vd["validate_default"].cast<bool>();
+                    auto fsd_vd = field_def["schema"].cast<py::dict>();
+                    if (auto declared = py_bool_opt(fsd_vd, "validate_default")) {
+                        info.validate_default = *declared;
                     }
                 }
-                if (!info.validate_default && inner_config.contains("validate_default") &&
-                    py::isinstance<py::bool_>(inner_config["validate_default"])) {
-                    info.validate_default = inner_config["validate_default"].cast<bool>();
+                if (!info.validate_default) {
+                    if (auto declared = py_bool_opt(inner_config, "validate_default")) {
+                        info.validate_default = *declared;
+                    }
                 }
                 // Extract default_factory and callable defaults from the field schema
                 if (field_def.contains("schema")) {
@@ -3085,9 +3058,8 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
                     if (fsd.contains("default_factory") && !fsd["default_factory"].is_none()) {
                         info.default_factory = fsd["default_factory"];
                         info.required = false;
-                        if (fsd.contains("default_factory_takes_data") &&
-                            py::isinstance<py::bool_>(fsd["default_factory_takes_data"])) {
-                            info.default_factory_takes_data = fsd["default_factory_takes_data"].cast<bool>();
+                        if (auto declared = py_bool_opt(fsd, "default_factory_takes_data")) {
+                            info.default_factory_takes_data = *declared;
                         }
                     } else if (fsd.contains("default")) {
                         auto py_default = fsd["default"];
@@ -3175,13 +3147,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         v->set_extra_behavior(extra);
 
         // Extract from_attributes from schema or config
-        bool from_attributes = false;
-        if (schema.contains("from_attributes")) {
-            from_attributes = schema["from_attributes"].cast<bool>();
-        } else if (inner_config.contains("from_attributes")) {
-            from_attributes = inner_config["from_attributes"].cast<bool>();
-        }
-        v->set_from_attributes(from_attributes);
+        v->set_from_attributes(bool_slot_same(schema, inner_config, "from_attributes", false));
 
         // Extract extras_schema (value validator applied to extra fields)
         if (schema.contains("extras_schema")) {
@@ -3295,12 +3261,8 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             v->var_kwargs_validator = build_from_py_dict(schema["var_kwargs_schema"].cast<py::dict>(), config, definitions);
         }
         // Keyword lookup mode (default: by alias only)
-        if (schema.contains("validate_by_alias") && py::isinstance<py::bool_>(schema["validate_by_alias"])) {
-            v->validate_by_alias = schema["validate_by_alias"].cast<bool>();
-        }
-        if (schema.contains("validate_by_name") && py::isinstance<py::bool_>(schema["validate_by_name"])) {
-            v->validate_by_name = schema["validate_by_name"].cast<bool>();
-        }
+        if (auto declared = py_bool_opt(schema, "validate_by_alias")) v->validate_by_alias = *declared;
+        if (auto declared = py_bool_opt(schema, "validate_by_name")) v->validate_by_name = *declared;
         std::string extra_str = py_str(schema, "extra",
             py_str(config, "extra_fields_behavior",
                 py_str(config, "extra_behavior", py_str(config, "extra", "forbid"))));
@@ -3409,9 +3371,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         for (const auto& p : v->parameters) {
             if (ArgumentsV3Validator::is_positional(p.mode)) v->positional_params_count++;
         }
-        if (config.contains("loc_by_alias") && py::isinstance<py::bool_>(config["loc_by_alias"])) {
-            v->loc_by_alias = config["loc_by_alias"].cast<bool>();
-        }
+        if (auto declared = py_bool_opt(config, "loc_by_alias")) v->loc_by_alias = *declared;
         v->extra = extra_behavior_from_string(py_str(schema, "extra",
             py_str(config, "extra_fields_behavior",
                 py_str(config, "extra_behavior", py_str(config, "extra", "forbid")))));
@@ -3445,12 +3405,8 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
                 py::dict f = schema_element_dict(item);
                 ArgumentsValidator::Parameter p;
                 p.name = required_str_slot(f, "name").cast<std::string>();
-                if (f.contains("init") && py::isinstance<py::bool_>(f["init"])) {
-                    p.init = f["init"].cast<bool>();
-                }
-                if (f.contains("init_only") && py::isinstance<py::bool_>(f["init_only"])) {
-                    p.init_only = f["init_only"].cast<bool>();
-                }
+                if (auto declared = py_bool_opt(f, "init")) p.init = *declared;
+                if (auto declared = py_bool_opt(f, "init_only")) p.init_only = *declared;
                 // validation_alias: plain string, or AliasChoices as a nested
                 // list of strings. Lookup uses the alias first, then the name.
                 if (f.contains("validation_alias") && !f["validation_alias"].is_none()) {
@@ -3469,13 +3425,10 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
                         }
                     }
                 }
-                // Rust: `kw_only.unwrap_or(true)` — missing/None means
-                // kw_only; only an explicit false is positional.
-                bool kw_only = true;
-                if (f.contains("kw_only") && !f["kw_only"].is_none() &&
-                    py::isinstance<py::bool_>(f["kw_only"])) {
-                    kw_only = f["kw_only"].cast<bool>();
-                }
+                // dataclass.rs:94 -- kw_only defaults to true when the key is absent, but a
+                // key that is present has to hold a bool, so None stops the build like any
+                // other value that is not one.
+                bool kw_only = py_bool_opt(f, "kw_only").value_or(true);
                 p.positional = !kw_only;
                 p.positional_only = false;
                 // dataclass.rs:81-85 -- a failed field build names the field
@@ -3497,15 +3450,9 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         // Rust reads the lookup rules from the config (dataclass.rs:130), so a
         // dataclass that validates by field name only keeps its __init__
         // signature working when every field carries an alias.
-        if (config.contains("validate_by_alias") && !config["validate_by_alias"].is_none()) {
-            try { v->validate_by_alias = config["validate_by_alias"].cast<bool>(); } catch (...) {}
-        }
-        if (config.contains("validate_by_name") && !config["validate_by_name"].is_none()) {
-            try { v->validate_by_name = config["validate_by_name"].cast<bool>(); } catch (...) {}
-        }
-        if (schema.contains("collect_init_only") && py::isinstance<py::bool_>(schema["collect_init_only"])) {
-            v->collect_init_only_ = schema["collect_init_only"].cast<bool>();
-        }
+        if (auto declared = py_bool_opt(config, "validate_by_alias")) v->validate_by_alias = *declared;
+        if (auto declared = py_bool_opt(config, "validate_by_name")) v->validate_by_name = *declared;
+        v->collect_init_only_ = py_bool_opt(schema, "collect_init_only").value_or(false);
         return v;
     }
 
@@ -3523,9 +3470,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         v->set_args_validator(build_from_py_dict(
             required_schema_slot(schema, "schema"), inner_config, definitions));
         v->set_class(schema["cls"]);
-        if (schema.contains("post_init")) {
-            try { v->set_post_init(schema["post_init"].cast<bool>()); } catch (...) {}
-        }
+        v->set_post_init(py_bool_opt(schema, "post_init").value_or(false));
         required_any_slot(schema, "fields");
         if (schema.contains("fields")) {
             std::vector<std::string> names;
