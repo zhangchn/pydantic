@@ -256,7 +256,13 @@ struct NumberToken {
 
 // `[+-]? digits+ [ '.' digits* ]`, consuming the whole input. Rejects exponents
 // ("1e3" is not a number to speedate) and overflows.
-bool parse_number_token(const char* d, size_t n, NumberToken& out) {
+//
+// With `integral` the decimal point is not offered, which makes this speedate's
+// `int_parse_bytes`: `[+-]? digits+`, whole input. It is a separate reading rather
+// than a trimmed caller because the two fallbacks differ by type -- a date text
+// reaches `int_parse_bytes`, a datetime text reaches `float_parse_bytes` -- so a
+// dotted number is a timestamp for a datetime and not for a date.
+bool parse_number_token(const char* d, size_t n, NumberToken& out, bool integral = false) {
     size_t i = 0;
     bool negative = false;
     if (i < n && (d[i] == '+' || d[i] == '-')) {
@@ -272,7 +278,7 @@ bool parse_number_token(const char* d, size_t n, NumberToken& out) {
         value = value * 10 + digit;
         ++i;
     }
-    if (i < n && (d[i] == '.' || d[i] == ',')) {
+    if (!integral && i < n && (d[i] == '.' || d[i] == ',')) {
         ++i;
         while (i < n && is_digit(d[i])) out.frac.push_back(d[i++]);
     }
@@ -421,15 +427,19 @@ ParseOutcome<DateTime> parse_datetime_string(std::string_view s, TimestampUnit u
 
 // speedate's Date::parse_bytes reads the date portion and then requires the
 // input to be exhausted, so every time form is rejected here and accepted only
-// by the date validator's datetime retry. A bare number is read as a timestamp
-// only when it lands exactly on midnight.
+// by the date validator's datetime retry. Its numeric fallback is the integer
+// one, so a bare number is read as a timestamp only when it lands exactly on
+// midnight and a *dotted* number is not a timestamp at all -- the number that
+// never reaches the timestamp reading keeps the date reading's error, which is
+// why `1700000000.5` into a date is refused as `invalid date separator` while
+// `1700000000` is refused as `Timestamp is not an exact date`.
 ParseOutcome<Date> parse_date_bytes(const char* data, size_t len, TimestampUnit unit) {
     size_t i = 0;
     Date date;
     std::string err;
     if (!parse_date_part(data, len, i, date, err)) {
         NumberToken num;
-        if (parse_number_token(data, len, num)) {
+        if (parse_number_token(data, len, num, /*integral=*/true)) {
             auto dt = from_number(num, unit);
             if (!dt.ok) return ParseOutcome<Date>::failure(std::move(dt.error));
             if (!dt.value.time.is_midnight()) {

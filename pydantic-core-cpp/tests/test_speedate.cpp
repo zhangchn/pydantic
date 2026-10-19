@@ -168,6 +168,31 @@ TEST_CASE("date strings: date-portion documents") {
     CHECK(parse_date_string("1234567890").error == not_exact);
 }
 
+TEST_CASE("date strings: only an integer text is a timestamp") {
+    // A date's numeric fallback is speedate's `int_parse_bytes`, so a number with a decimal
+    // point never reaches the timestamp reading and keeps the date reading's document instead
+    // -- even when the value it spells is an exact midnight. `1700000000` reads as a number and
+    // is refused for being inexact; `1700000000.5` is not read as a number at all.
+    const char* sep = "invalid date separator, expected `-`";
+    const char* year = "invalid character in year";
+    CHECK(parse_date_string("1700000000.5").error == sep);
+    CHECK(parse_date_string("1701302400.0").error == sep);  // exact midnight, still not an integer
+    CHECK(parse_date_string("1701302400.").error == sep);
+    CHECK(parse_date_string("1701302400000.0").error == sep);
+    CHECK(parse_date_string("-1701302400.5").error == year);  // the sign fails the year reading
+    CHECK(parse_date_string("1701302400").value == Date{2023, 11, 30});
+    CHECK(parse_date_string("+1701302400").value == Date{2023, 11, 30});
+    CHECK(parse_date_string("1701302400e3").error == sep);   // exponent: neither reading takes it
+
+    // A datetime takes the float fallback, so the same dotted text is a value there -- at the
+    // unix offset, which is what a numeric reading always lands on (`unix_timestamp_offset:
+    // Some(0)`), not the offset-less time a text datetime without a zone gets.
+    CHECK(parse_datetime_string("1701302400.5").value ==
+          DateTime{Date{2023, 11, 30}, Time{0, 0, 0, 500000, 0}});
+    CHECK(parse_datetime_string("1701302400.0").value ==
+          DateTime{Date{2023, 11, 30}, Time{0, 0, 0, 0, 0}});
+}
+
 TEST_CASE("date strings: error documents") {
     // Documents below are speedate's ParseError documentation strings, which
     // pydantic-core interpolates into "{error}" and ctx["error"].
