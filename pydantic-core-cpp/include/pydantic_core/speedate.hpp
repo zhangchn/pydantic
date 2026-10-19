@@ -185,17 +185,15 @@ inline constexpr int64_t kInferWatershed = 20000000000LL;
 // Full date-time: `YYYY-MM-DD[T|t|_| ]HH:MM[:SS[.frac]][Z|±HH[:MM]]`.
 // A bare number (or a numeric string) is interpreted as a unix timestamp in
 // `unit`; when both readings fail, the string-form error is reported.
-// `require_time` asks the stricter question pydantic-core asks of a *text* datetime input
-// (bytes_as_datetime → parse_bytes_rfc3339): the time has to be in the text, so a bare
-// `2026-05-01` is refused. It changes nothing for a datetime *value*, which is accepted as
-// midnight a step later, by the validator's date fallback (datetime.rs:73-79) -- only a caller
-// that cannot reach that fallback, such as the reader of a `gt` bound, asks it.
+// The text form has to carry the time: speedate reads a datetime with parse_bytes_rfc3339, which
+// refuses a bare `2026-05-01` the moment the date runs out. A date *value* still becomes midnight
+// -- one step later, in the validator's lax date fallback (datetime.rs:73-79) -- so no caller has
+// to ask for the stricter reading; the one that cannot reach that fallback (the reader of a `gt`
+// bound) gets the refusal like everyone else.
 ParseOutcome<DateTime> parse_datetime_bytes(const char* data, size_t len,
-                                            TimestampUnit unit = TimestampUnit::Infer,
-                                            bool require_time = false);
+                                            TimestampUnit unit = TimestampUnit::Infer);
 ParseOutcome<DateTime> parse_datetime_string(std::string_view s,
-                                             TimestampUnit unit = TimestampUnit::Infer,
-                                             bool require_time = false);
+                                             TimestampUnit unit = TimestampUnit::Infer);
 
 // Date-only convenience over parse_datetime_bytes: returns the date component.
 // Callers that must distinguish "not an exact date" should use

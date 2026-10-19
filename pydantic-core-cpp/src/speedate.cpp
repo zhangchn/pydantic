@@ -365,8 +365,7 @@ TimestampUnit timestamp_unit_from_string(std::string_view name, bool* ok) {
     return TimestampUnit::Infer;
 }
 
-ParseOutcome<DateTime> parse_datetime_bytes(const char* data, size_t len, TimestampUnit unit,
-                                           bool require_time) {
+ParseOutcome<DateTime> parse_datetime_bytes(const char* data, size_t len, TimestampUnit unit) {
     // Try the string form first. If it fails but the input reads as a number,
     // use the timestamp reading; if both fail, the string-form error is the
     // one speedate reports.
@@ -398,8 +397,14 @@ ParseOutcome<DateTime> parse_datetime_bytes(const char* data, size_t len, Timest
         }
     }
 
-    if (str_ok && require_time && !saw_time) {
-        return ParseOutcome<DateTime>::failure("expected a time after the date");
+    // There is no date-only reading of a text datetime: speedate's
+    // `DateTime::parse_bytes_with_config` wants the separator and the time, and reports the
+    // missing separator as soon as the date runs out.  A bare date becomes a datetime one step
+    // later, in the validator's lax fallback (datetime.rs:73-79), which is why a *caller* that
+    // cannot reach that step -- the reader of a bound -- still gets the refusal.
+    if (str_ok && !saw_time) {
+        return ParseOutcome<DateTime>::failure(
+            "invalid datetime separator, expected `T`, `t`, `_` or space");
     }
     if (str_ok) return ParseOutcome<DateTime>::success(dt);
 
@@ -410,9 +415,8 @@ ParseOutcome<DateTime> parse_datetime_bytes(const char* data, size_t len, Timest
     return ParseOutcome<DateTime>::failure(str_err);
 }
 
-ParseOutcome<DateTime> parse_datetime_string(std::string_view s, TimestampUnit unit,
-                                             bool require_time) {
-    return parse_datetime_bytes(s.data(), s.size(), unit, require_time);
+ParseOutcome<DateTime> parse_datetime_string(std::string_view s, TimestampUnit unit) {
+    return parse_datetime_bytes(s.data(), s.size(), unit);
 }
 
 // speedate's Date::parse_bytes reads the date portion and then requires the

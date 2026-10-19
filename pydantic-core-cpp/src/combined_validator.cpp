@@ -58,15 +58,14 @@ static BoundT temporal_bound_from_schema(const py::object& value, const char* ke
         text = display_time(t);
         return t;
     } else {
-        // A text bound is read with the question the reference asks of a *text* datetime input
-        // (input_python.rs -> bytes_as_datetime -> parse_bytes_rfc3339), which wants the time in the
-        // text: the bare date a datetime value gets as midnight comes from the validator's date
+        // A text bound is read the way the reference reads a text datetime input
+        // (input_python.rs -> bytes_as_datetime -> parse_bytes_rfc3339), which wants the time in
+        // the text: the midnight a bare date becomes for a *value* comes from the validator's date
         // fallback (datetime.rs:73-79), a step a bound never reaches.
         if (input.is_str() || input.is_bytes()) {
             std::string s = input.is_str() ? input.as_str()
                                            : py::bytes(input.as_python_object()).cast<std::string>();
-            auto textbound = parse_datetime_bytes(s.data(), s.size(), TimestampUnit::Infer,
-                                                 /*require_time=*/true);
+            auto textbound = parse_datetime_bytes(s.data(), s.size(), TimestampUnit::Infer);
             if (!textbound.ok) refuse_temporal_bound(key, "datetime");
             text = display_datetime(textbound.value);
             return textbound.value;
