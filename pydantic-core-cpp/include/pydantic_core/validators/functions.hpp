@@ -1489,6 +1489,13 @@ public:
         return "with-default";
     }
 
+    // The name a run is titled by is composed at build (with_default.rs:133), so the wrapper
+    // stays visible in the title and in whatever name encloses it -- `default[int]`, and
+    // `list[default[int]]` one level out.  Only the result-dispatch name above delegates.
+    std::string display_name() const override {
+        return "default[" + (inner_ ? inner_->display_name() : std::string("any")) + "]";
+    }
+
     // Same delegation for the result-dispatch name: the union/branch inside
     // may report "py_object" etc. via its own effective_result_name().
     std::string effective_result_name() const override {
