@@ -238,104 +238,16 @@ struct EitherTimedelta {
     Timedelta as_raw() const { return value; }
 };
 
-namespace timedelta_detail {
 
-inline bool all_digits(const std::string& s, size_t b, size_t e) {
-    if (b >= e) return false;
-    for (size_t i = b; i < e; ++i) {
-        if (s[i] < '0' || s[i] > '9') return false;
-    }
-    return true;
-}
-
-// speedate's time tail: "HH:MM" or "HH:MM:SS[.ffffff]". The two-field form
-// needs a two-digit hour, a fraction only belongs to the third field, extra
-// fraction digits are truncated rather than rejected, and hours are capped at
-// 23 once a days prefix has already carried the date part.
-inline bool parse_time_tail(const std::string& t, bool hours_capped,
-                            long long* seconds, long long* micros,
-                            bool* extra_characters = nullptr) {
-    size_t c1 = t.find(':');
-    if (c1 == std::string::npos) return false;
-    size_t c2 = t.find(':', c1 + 1);
-    if (c2 == std::string::npos) {
-        if (c1 < 2 || !all_digits(t, 0, c1)) return false;
-        if (t.size() - (c1 + 1) < 2 || !all_digits(t, c1 + 1, c1 + 3)) return false;
-        long long h = std::stoll(t.substr(0, c1));
-        long long m = std::stoll(t.substr(c1 + 1, 2));
-        if (m > 59 || h > 999999999LL || (hours_capped && h > 23)) return false;
-        if (t.size() > c1 + 3) {
-            // speedate stops after the minutes field and reports what is left
-            // over, so "15:30.0001broken" is extra characters rather than a
-            // duration it could not read at all.
-            if (extra_characters) *extra_characters = true;
-            return false;
-        }
-        *seconds = h * 3600 + m * 60;
-        *micros = 0;
-        return true;
-    }
-    if (t.find(':', c2 + 1) != std::string::npos) return false;
-    if (!all_digits(t, 0, c1)) return false;
-    if (c2 - (c1 + 1) != 2 || !all_digits(t, c1 + 1, c2)) return false;
-    std::string sec_field = t.substr(c2 + 1);
-    size_t dot = sec_field.find('.');
-    std::string whole = dot == std::string::npos ? sec_field : sec_field.substr(0, dot);
-    if (whole.size() != 2 || !all_digits(whole, 0, whole.size())) return false;
-    long long h = std::stoll(t.substr(0, c1));
-    long long m = std::stoll(t.substr(c1 + 1, 2));
-    long long sec = std::stoll(whole);
-    if (m > 59 || sec > 59 || h > 999999999LL || (hours_capped && h > 23)) return false;
-    long long micro = 0;
-    if (dot != std::string::npos) {
-        std::string frac = sec_field.substr(dot + 1);
-        if (!all_digits(frac, 0, frac.size())) return false;
-        if (frac.size() > 6) frac = frac.substr(0, 6);
-        while (frac.size() < 6) frac += '0';
-        micro = std::stoll(frac);
-    }
-    *seconds = h * 3600 + m * 60 + sec;
-    *micros = micro;
-    return true;
-}
-
-} // namespace timedelta_detail
-
-// Parse a timedelta string: ISO 8601 duration (P4Y/P4M/P4W/P4D/P0.5D/PT5H...),
-// HH:MM:SS[.frac] with optional "[Nd,]HH:MM:SS" days prefix, or either form
-// with a leading '-'. Returns nullopt when the string is not a valid duration.
-// Returns true if the string is a bare number (optional sign, digits,
-// optional fractional part) with no other characters — e.g. "30", "-5", "1.5".
-inline bool is_bare_number(const std::string& s) {
-    if (s.empty()) return false;
-    size_t i = 0;
-    if (s[0] == '-' || s[0] == '+') i = 1;
-    if (i >= s.size()) return false;
-    bool seen_digit = false;
-    bool seen_dot = false;
-    for (; i < s.size(); ++i) {
-        char c = s[i];
-        if (c >= '0' && c <= '9') {
-            seen_digit = true;
-        } else if (c == '.' && !seen_dot) {
-            seen_dot = true;
-        } else {
-            return false;
-        }
-    }
-    return seen_digit;
-}
-
-// How big a duration may be, measured against the wheel:
-//   * speedate holds each component in a u32 of its own unit -- days for Y/M/W/D,
-//     seconds for H/M/S -- so a component whose value times that unit passes
-//     2**32-1 is refused as "a numeric value in the duration is too large" however
-//     small the total would have come out ('PT1193047H' fails, 'PT1193046H' does not).
+// How big a duration may be, measured against speedate 0.17.0:
+//   * every quantity is held in a u32 of its own unit -- days for Y/M/W/D, seconds for H/M/S --
+//     so a component whose value times that unit passes 2**32-1 is refused as "a numeric value in
+//     the duration is too large" however small the total would have come out ('PT1193047H' fails,
+//     'PT1193046H' does not).
 //   * the total then has to fit the 999,999,999 days a timedelta can hold.
-// Skipping either lets the components wrap (the port handed back a negative 579
-// million-day duration for 'P99999999999999999999Y') or makes the timedelta build
-// fail, which the result table's catch-all turns into None.
-inline constexpr long long TD_MAX_COMPONENT = 4294967295LL;  // 2**32 - 1
+// Skipping either lets the components wrap (the port handed back a negative 579 million-day
+// duration for 'P99999999999999999999Y') or makes the timedelta build fail, which the result
+// table's catch-all turns into None.
 inline constexpr long long TD_MAX_DAYS = 999999999LL;
 inline constexpr long long TD_SECONDS_IN_DAY = 86400LL;
 inline constexpr long long TD_MAX_SECONDS = (TD_MAX_DAYS + 1) * TD_SECONDS_IN_DAY;  // 1e9 days
@@ -343,161 +255,426 @@ inline constexpr const char* TD_TOO_LARGE = "a numeric value in the duration is 
 inline constexpr const char* TD_TOO_MANY_DAYS = "durations may not exceed 999,999,999 days";
 inline constexpr const char* TD_NAN = "NaN values not permitted";
 
-// error_out (optional) receives speedate's own diagnosis when the input holds a
-// readable prefix followed by more characters, so callers can report that rather
-// than the generic "could not parse" text.
-inline std::optional<Timedelta> try_parse_timedelta_str(const std::string& input,
-                                                        std::string* error_out = nullptr) {
-    std::string s = input;
-    bool negative = false;
-    if (!s.empty() && s[0] == '-') {
-        negative = true;
-        s = s.substr(1);
+namespace timedelta_detail {
+
+// speedate's DurationParseError descriptions (lib.rs:67-150), which map_timedelta_err
+// (input/datetime.rs:684) drops into the "{error}" slot of "Input should be a valid timedelta,
+// {error}".  Each one names the step the reader stopped at, so the refusal of 'P1D2' is not the
+// refusal of 'P1D ', and a port that collapses them answers with a sentence the reference never
+// produces.
+inline constexpr const char* TD_TOO_SHORT = "input is too short";
+inline constexpr const char* TD_EXTRA_CHARS = "unexpected extra characters at the end of the input";
+inline constexpr const char* TD_INVALID_NUMBER = "invalid digit in duration";
+inline constexpr const char* TD_T_REPEATED = "`t` character repeated in duration";
+inline constexpr const char* TD_INVALID_FRACTION = "quantity fraction invalid in duration";
+inline constexpr const char* TD_INVALID_TIME_UNIT = "quantity invalid in time part of duration";
+inline constexpr const char* TD_INVALID_DATE_UNIT = "quantity invalid in date part of duration";
+inline constexpr const char* TD_INVALID_DAYS =
+    "\"day\" identifier in duration not correctly formatted";
+inline constexpr const char* TD_HOURS_TOO_LARGE = "durations may not exceed 999,999,999 hours";
+inline constexpr const char* TD_CHAR_HOUR = "invalid character in hour";
+inline constexpr const char* TD_CHAR_MINUTE = "invalid character in minute";
+inline constexpr const char* TD_CHAR_SECOND = "invalid character in second";
+inline constexpr const char* TD_CHAR_TIME_SEP = "invalid time separator, expected `:`";
+inline constexpr const char* TD_HOUR_RANGE = "hour value is outside expected range of 0-23";
+inline constexpr const char* TD_MINUTE_RANGE = "minute value is outside expected range of 0-59";
+inline constexpr const char* TD_SECOND_RANGE = "second value is outside expected range of 0-59";
+inline constexpr const char* TD_FRACTION_MISSING = "second fraction digits missing after `.`";
+
+// speedate's `checked!` macro: the u32 arithmetic above, refusing rather than wrapping.
+inline bool u32_add(unsigned& total, unsigned add, const char** err) {
+    if (add > 0xFFFFFFFFu - total) {
+        *err = TD_TOO_LARGE;
+        return false;
     }
-    try {
-        long long total_seconds = 0;
-        long long micros = 0;
-        bool parsed_any = false;
+    total += add;
+    return true;
+}
 
-        auto too_large = [&]() -> std::optional<Timedelta> {
-            if (error_out) *error_out = TD_TOO_LARGE;
-            return std::nullopt;
-        };
+inline bool u32_mul(unsigned a, unsigned b, unsigned& out, const char** err) {
+    if (b != 0 && a > 0xFFFFFFFFu / b) {
+        *err = TD_TOO_LARGE;
+        return false;
+    }
+    out = a * b;
+    return true;
+}
 
-        // ISO 8601 duration: P[nY][nM][nD][T[nH][nM][nS]] / P[nW]
-        if (!s.empty() && s[0] == 'P') {
-            bool in_time = false;
-            std::string num;
-            size_t i = 1;
-            while (i < s.size()) {
-                char c = s[i];
-                if ((c >= '0' && c <= '9') || c == '.') {
-                    num += c;
-                } else if (c == 'T') {
-                    in_time = true;
-                    num.clear();
-                } else {
-                    if (num.empty()) return std::nullopt;
-                    double val = 0.0;
-                    try {
-                        val = std::stod(num);
-                    } catch (const std::out_of_range&) {
-                        return too_large();
-                    }
-                    // The limit is on the component in its own unit -- days for
-                    // Y/M/W/D, seconds for H/M/S -- never on the total it adds up to.
-                    auto component_over = [&](double unit) {
-                        return !(std::fabs(val * unit) <= static_cast<double>(TD_MAX_COMPONENT));
-                    };
-                    switch (c) {
-                        case 'Y': if (!in_time) { if (component_over(365.0)) return too_large(); total_seconds += static_cast<long long>(val * 365.0 * 86400.0); parsed_any = true; } break;
-                        case 'M': if (!in_time) { if (component_over(30.0)) return too_large(); total_seconds += static_cast<long long>(val * 30.0 * 86400.0); parsed_any = true; } else { if (component_over(60.0)) return too_large(); total_seconds += static_cast<long long>(val * 60.0); parsed_any = true; } break;
-                        case 'D': if (!in_time) { if (component_over(1.0)) return too_large(); total_seconds += static_cast<long long>(val * 86400.0); parsed_any = true; } break;
-                        case 'H': if (in_time) { if (component_over(3600.0)) return too_large(); total_seconds += static_cast<long long>(val * 3600.0); parsed_any = true; } break;
-                        case 'S': if (in_time) { if (component_over(1.0)) return too_large(); double whole = 0.0; double frac = std::modf(val, &whole); total_seconds += static_cast<long long>(whole); micros += std::llround(frac * 1e6); parsed_any = true; } break;
-                        case 'W': if (!in_time) { if (component_over(7.0)) return too_large(); total_seconds += static_cast<long long>(val * 7.0 * 86400.0); parsed_any = true; } break;
-                        default: return std::nullopt;
-                    }
-                    num.clear();
-                }
-                i++;
+// speedate's parse_number: a digit run in a u32, with `pos` left on the first byte that is not a
+// digit -- the designator the caller has to find there is what says which part went wrong.
+inline bool read_number(const std::string& b, size_t& pos, unsigned& value, const char** err) {
+    if (pos >= b.size()) {
+        *err = TD_TOO_SHORT;
+        return false;
+    }
+    if (b[pos] < '0' || b[pos] > '9') {
+        *err = TD_INVALID_NUMBER;
+        return false;
+    }
+    value = static_cast<unsigned>(b[pos] - '0');
+    ++pos;
+    for (;;) {
+        if (pos >= b.size() || b[pos] < '0' || b[pos] > '9') return true;
+        unsigned shifted = 0;
+        if (!u32_mul(value, 10, shifted, err)) return false;
+        value = shifted;
+        if (!u32_add(value, static_cast<unsigned>(b[pos] - '0'), err)) return false;
+        ++pos;
+    }
+}
+
+// speedate's parse_number_frac: the quantity in front of a designator and the one '.' (or ',')
+// that may follow it.  'PT1.S' carries a fraction of nothing, which is why it reads as a second
+// while 'PT.5S' is the digit that never arrived.
+inline bool read_number_frac(const std::string& b, size_t& pos, unsigned& value,
+                             bool& has_fraction, double& fraction, const char** err) {
+    if (!read_number(b, pos, value, err)) return false;
+    has_fraction = false;
+    fraction = 0.0;
+    if (pos < b.size() && (b[pos] == '.' || b[pos] == ',')) {
+        double decimal = 0.0;
+        double denominator = 1.0;
+        for (;;) {
+            ++pos;
+            if (pos >= b.size() || b[pos] < '0' || b[pos] > '9') break;
+            decimal = decimal * 10.0 + static_cast<double>(b[pos] - '0');
+            denominator *= 10.0;
+        }
+        has_fraction = true;
+        fraction = decimal / denominator;
+    }
+    return true;
+}
+
+// speedate's PureTime::parse (time.rs:492): two digits per field, the fraction belonging to the
+// third field only and truncated past the sixth -- pydantic-core asks for Truncate -- with
+// `position` left where the read stopped so the caller can call whatever follows extra.
+inline bool parse_pure_time(const std::string& b, size_t offset,
+                            unsigned& hour, unsigned& minute, unsigned& second, unsigned& micro,
+                            size_t& position, const char** err) {
+    auto digit = [&](size_t i, const char* which, unsigned& out) -> bool {
+        if (i >= b.size()) {
+            *err = which;
+            return false;
+        }
+        const char c = b[i];
+        if (c < '0' || c > '9') {
+            *err = which;
+            return false;
+        }
+        out = static_cast<unsigned>(c - '0');
+        return true;
+    };
+    if (b.size() < offset + 5) {
+        *err = TD_TOO_SHORT;
+        return false;
+    }
+    unsigned h1 = 0, h2 = 0, m1 = 0, m2 = 0;
+    if (!digit(offset, TD_CHAR_HOUR, h1)) return false;
+    if (!digit(offset + 1, TD_CHAR_HOUR, h2)) return false;
+    hour = h1 * 10 + h2;
+    if (b[offset + 2] != ':') {
+        *err = TD_CHAR_TIME_SEP;
+        return false;
+    }
+    if (!digit(offset + 3, TD_CHAR_MINUTE, m1)) return false;
+    if (!digit(offset + 4, TD_CHAR_MINUTE, m2)) return false;
+    minute = m1 * 10 + m2;
+    if (hour > 23) {
+        *err = TD_HOUR_RANGE;
+        return false;
+    }
+    if (minute > 59) {
+        *err = TD_MINUTE_RANGE;
+        return false;
+    }
+
+    size_t length = 5;
+    second = 0;
+    micro = 0;
+    if (offset + 5 < b.size() && b[offset + 5] == ':') {
+        unsigned s1 = 0, s2 = 0;
+        if (!digit(offset + 6, TD_CHAR_SECOND, s1)) return false;
+        if (!digit(offset + 7, TD_CHAR_SECOND, s2)) return false;
+        second = s1 * 10 + s2;
+        if (second > 59) {
+            *err = TD_SECOND_RANGE;
+            return false;
+        }
+        length = 8;
+        const char sep = offset + 8 < b.size() ? b[offset + 8] : '\0';
+        if (sep == '.' || sep == ',') {
+            length = 9;
+            size_t digits = 0;
+            for (;;) {
+                const size_t i = offset + length + digits;
+                if (i >= b.size() || b[i] < '0' || b[i] > '9') break;
+                if (digits < 6) micro = micro * 10 + static_cast<unsigned>(b[i] - '0');
+                ++digits;
             }
-            if (!parsed_any) return std::nullopt;
+            if (digits == 0) {
+                *err = TD_FRACTION_MISSING;
+                return false;
+            }
+            for (size_t i = digits; i < 6; ++i) micro *= 10;
+            length += digits;
+        }
+    }
+    position = offset + length;
+    return true;
+}
+
+// speedate's parse_time (duration.rs:395): everything up to the first ':' is the hour -- so
+// '123:00:00' is five days and three hours, and an hour of ten digits is still a duration -- and
+// what follows is read as a time with '00:' put in front of it, which is how '10:10' comes to ten
+// hours ten minutes while '1:23:4.5' blames the second field.
+inline bool parse_time_form(const std::string& b, unsigned& day, unsigned& second,
+                            unsigned& micro, const char** err) {
+    if (b.size() < 5) {
+        *err = TD_TOO_SHORT;
+        return false;
+    }
+    const size_t colon = b.find(':');
+    if (colon == std::string::npos) {
+        *err = TD_CHAR_HOUR;
+        return false;
+    }
+    if (colon > 10) {
+        *err = TD_HOURS_TOO_LARGE;
+        return false;
+    }
+    long long hour = 0;
+    for (size_t i = 0; i < colon; ++i) {
+        if (b[i] < '0' || b[i] > '9') {
+            *err = TD_CHAR_HOUR;
+            return false;
+        }
+        hour = hour * 10 + (b[i] - '0');
+    }
+    if (hour > 2400000000LL) {
+        *err = TD_HOURS_TOO_LARGE;
+        return false;
+    }
+    const std::string buf = "00:" + b.substr(colon + 1);
+    unsigned h = 0, m = 0, s = 0, mu = 0;
+    size_t position = 0;
+    if (!parse_pure_time(buf, 0, h, m, s, mu, position, err)) return false;
+    if (buf.size() > position) {
+        *err = TD_EXTRA_CHARS;
+        return false;
+    }
+    day = static_cast<unsigned>(hour) / 24;
+    second = h * 3600 + m * 60 + s + (static_cast<unsigned>(hour) % 24) * 3600;
+    micro = mu;
+    return true;
+}
+
+// The reference spells the day unit's tail exactly, in either case: 'ays', 'ay', 'AYS', 'AY'.
+inline bool has_word(const std::string& b, size_t at, const char* word) {
+    const size_t n = std::strlen(word);
+    if (at + n > b.size()) return false;
+    for (size_t i = 0; i < n; ++i) {
+        if (b[at + i] != word[i]) return false;
+    }
+    return true;
+}
+
+// speedate's parse_days_time (duration.rs:344): "<n> d[ay|ays]" with at most one space before the
+// unit and one ',' or ' ' after it, and a time that may be left off entirely.  A bare '1' is
+// refused here, by the day identifier it never got.
+inline bool parse_days_time(const std::string& b, unsigned& day, unsigned& second,
+                            unsigned& micro, const char** err) {
+    size_t pos = 0;
+    if (!read_number(b, pos, day, err)) return false;
+    size_t after = pos;
+    if (after < b.size() && b[after] == ' ') ++after;
+    if (after >= b.size() || (b[after] != 'd' && b[after] != 'D')) {
+        *err = TD_INVALID_DAYS;
+        return false;
+    }
+    ++after;
+    if (has_word(b, after, "ays")) {
+        after += 3;
+    } else if (has_word(b, after, "ay")) {
+        after += 2;
+    } else if (has_word(b, after, "AYS")) {
+        after += 3;
+    } else if (has_word(b, after, "AY")) {
+        after += 2;
+    } else if (after < b.size() && (b[after] == 'a' || b[after] == 'A')) {
+        *err = TD_INVALID_DAYS;
+        return false;
+    }
+    if (after + 1 < b.size() && b[after] == ',' && b[after + 1] == ' ') {
+        after += 2;
+    } else if (after < b.size() && (b[after] == ',' || b[after] == ' ')) {
+        after += 1;
+    }
+    if (after >= b.size()) {
+        second = 0;
+        micro = 0;
+        return true;
+    }
+    unsigned tail_day = 0;
+    if (!parse_time_form(b.substr(after), tail_day, second, micro, err)) return false;
+    if (tail_day > 0) {
+        // The time after a days prefix carries hours only: '1d,24:00:00' is not two days.
+        *err = TD_HOURS_TOO_LARGE;
+        return false;
+    }
+    return true;
+}
+
+// speedate's parse_iso_duration (duration.rs:275) over the bytes behind the 'P': one designator
+// per component, one 'T' splitting the date part from the time part, a fraction only on the last
+// quantity, and at least one component to have earned the name.
+inline bool parse_iso(const std::string& b, unsigned& day, unsigned& second, unsigned& micro,
+                      const char** err) {
+    bool got_t = false;
+    bool last_had_fraction = false;
+    size_t position = 0;
+    day = 0;
+    second = 0;
+    micro = 0;
+    for (;;) {
+        if (position >= b.size()) break;
+        const char c = b[position];
+        if (c == 'T') {
+            if (got_t) {
+                *err = TD_T_REPEATED;
+                return false;
+            }
+            got_t = true;
         } else {
-            // speedate's human form: "[<int> [ws] d|day|days [,] [ws]] <time tail>".
-            // At most one space is tolerated either side of the comma, and the
-            // days unit may be omitted entirely ("10:10").
-            size_t digits_end = 0;
-            while (digits_end < s.size() && s[digits_end] >= '0' && s[digits_end] <= '9') digits_end++;
-            bool have_days = false;
-            long long day_part = 0;
-            size_t tail = 0;
-            if (digits_end > 0) {
-                size_t j = digits_end;
-                if (j < s.size() && s[j] == ' ') j++;
-                static const char* const units[] = {"days", "day", "d"};
-                for (const char* u : units) {
-                    size_t n = std::strlen(u);
-                    if (j + n > s.size()) continue;
-                    bool match = true;
-                    for (size_t k = 0; k < n; ++k) {
-                        char a = s[j + k];
-                        if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
-                        if (a != u[k]) { match = false; break; }
-                    }
-                    if (!match) continue;
-                    size_t after = j + n;
-                    bool letter_follows = after < s.size() &&
-                        ((s[after] >= 'a' && s[after] <= 'z') || (s[after] >= 'A' && s[after] <= 'Z'));
-                    if (letter_follows) continue;
-                    // Same u32-as-days limit as the ISO date part; a digit run that
-                    // cannot be held there is refused before it reaches stoll.
-                    size_t first = 0;
-                    while (first + 1 < digits_end && s[first] == '0') first++;
-                    size_t nd = digits_end - first;
-                    if (nd > 10) return too_large();
-                    day_part = std::stoll(s.substr(first, nd));
-                    if (day_part > static_cast<long long>(TD_MAX_COMPONENT)) return too_large();
-                    if (day_part > TD_MAX_DAYS) {
-                        if (error_out) *error_out = TD_TOO_MANY_DAYS;
-                        return std::nullopt;
-                    }
-                    have_days = true;
-                    tail = after;
-                    break;
-                }
+            unsigned value = 0;
+            bool has_fraction = false;
+            double fraction = 0.0;
+            if (!read_number_frac(b, position, value, has_fraction, fraction, err)) return false;
+            if (last_had_fraction) {
+                *err = TD_INVALID_FRACTION;
+                return false;
             }
-            if (have_days) {
-                if (tail < s.size() && s[tail] == ',') tail++;
-                if (tail < s.size() && s[tail] == ' ') tail++;
-                if (tail >= s.size()) {
-                    total_seconds = day_part * 86400LL;
-                    parsed_any = true;
-                } else {
-                    long long tsec = 0, tmicro = 0;
-                    bool extra = false;
-                    if (!timedelta_detail::parse_time_tail(s.substr(tail), true, &tsec, &tmicro, &extra)) {
-                        if (extra && error_out) *error_out = "unexpected extra characters at the end of the input";
-                        return std::nullopt;
-                    }
-                    total_seconds = day_part * 86400LL + tsec;
-                    micros = tmicro;
-                    parsed_any = true;
+            if (has_fraction) last_had_fraction = true;
+            const char unit = position < b.size() ? b[position] : '\0';
+            if (got_t) {
+                unsigned mult = 0;
+                switch (unit) {
+                    case 'H': mult = 3600; break;
+                    case 'M': mult = 60; break;
+                    case 'S': mult = 1; break;
+                    default:
+                        *err = TD_INVALID_TIME_UNIT;
+                        return false;
+                }
+                unsigned scaled = 0;
+                if (!u32_mul(mult, value, scaled, err)) return false;
+                if (!u32_add(second, scaled, err)) return false;
+                if (has_fraction) {
+                    const double extra = fraction * static_cast<double>(mult);
+                    const double whole = std::trunc(extra);
+                    if (!u32_add(second, static_cast<unsigned>(whole), err)) return false;
+                    const unsigned micro_extra =
+                        static_cast<unsigned>(std::round((extra - whole) * 1000000.0));
+                    if (!u32_add(micro, micro_extra, err)) return false;
                 }
             } else {
-                long long tsec = 0, tmicro = 0;
-                bool extra = false;
-                if (!timedelta_detail::parse_time_tail(s, false, &tsec, &tmicro, &extra)) {
-                    if (extra && error_out) *error_out = "unexpected extra characters at the end of the input";
-                    return std::nullopt;
+                unsigned mult = 0;
+                switch (unit) {
+                    case 'Y': mult = 365; break;
+                    case 'M': mult = 30; break;
+                    case 'W': mult = 7; break;
+                    case 'D': mult = 1; break;
+                    default:
+                        *err = TD_INVALID_DATE_UNIT;
+                        return false;
                 }
-                total_seconds = tsec;
-                micros = tmicro;
-                parsed_any = true;
+                unsigned scaled = 0;
+                if (!u32_mul(mult, value, scaled, err)) return false;
+                if (!u32_add(day, scaled, err)) return false;
+                if (has_fraction) {
+                    const double extra_days = fraction * static_cast<double>(mult);
+                    const double whole_days = std::trunc(extra_days);
+                    if (!u32_add(day, static_cast<unsigned>(whole_days), err)) return false;
+                    const double extra_seconds = (extra_days - whole_days) * 86400.0;
+                    const double whole_sec = std::trunc(extra_seconds);
+                    if (!u32_add(second, static_cast<unsigned>(whole_sec), err)) return false;
+                    // speedate leaves this one addition unchecked.
+                    micro += static_cast<unsigned>(
+                        std::round((extra_seconds - whole_sec) * 1000000.0));
+                }
             }
         }
+        ++position;
+    }
+    if (position < 2) {
+        *err = TD_TOO_SHORT;
+        return false;
+    }
+    return true;
+}
 
-        if (!parsed_any) return std::nullopt;
-        if (negative) {
-            total_seconds = -total_seconds;
-            micros = -micros;
-        }
-        // Normalize into days/seconds/microseconds
-        long long days = total_seconds / 86400;
-        long long rem = total_seconds % 86400;
-        if (micros < 0) {
-            // borrow one second for negative microseconds
-            rem -= 1;
-            micros += 1000000;
-        }
-        if (days > TD_MAX_DAYS || days < -TD_MAX_DAYS) {
-            if (error_out) *error_out = TD_TOO_MANY_DAYS;
-            return std::nullopt;
-        }
-        return Timedelta{static_cast<int>(days), static_cast<int>(rem), static_cast<int>(micros)};
-    } catch (...) {
+} // namespace timedelta_detail
+
+// Parse a timedelta string the way speedate 0.17.0 does: an ISO 8601 duration behind a 'P', the
+// human "<n>d, HH:MM:SS" form, or a bare "HH:MM[:SS[.ffffff]]", each of them able to carry a
+// leading '+' or '-'.  A plain number is *not* seconds on this path -- that is the numeric input's
+// job -- which is why '1' is refused for the day identifier it never got.  error_out receives the
+// reference's own words for the step that failed.
+inline std::optional<Timedelta> try_parse_timedelta_str(const std::string& input,
+                                                        std::string* error_out = nullptr) {
+    const char* err = timedelta_detail::TD_TOO_SHORT;
+    bool negative = false;
+    size_t start = 0;
+    if (!input.empty() && (input[0] == '-' || input[0] == '+')) {
+        negative = input[0] == '-';
+        start = 1;
+    }
+    const std::string b = input.substr(start);
+
+    unsigned day = 0, second = 0, micro = 0;
+    bool ok;
+    if (b.empty()) {
+        ok = false;
+    } else if (b[0] == 'P') {
+        ok = timedelta_detail::parse_iso(b.substr(1), day, second, micro, &err);
+    } else if (b.find('d') != std::string::npos || b.find('D') != std::string::npos ||
+               b.size() < 5) {
+        // speedate's is_duration_date_format: any d or D anywhere sends the string to the days
+        // reader, and anything shorter than five bytes cannot be a time anyway.
+        ok = timedelta_detail::parse_days_time(b, day, second, micro, &err);
+    } else {
+        ok = timedelta_detail::parse_time_form(b, day, second, micro, &err);
+    }
+    if (!ok) {
+        if (error_out) *error_out = err;
         return std::nullopt;
     }
+
+    // speedate's normalize: microseconds into seconds, seconds into days, and the day count is
+    // what a timedelta can actually hold.
+    const long long abs_total = static_cast<long long>(day) * TD_SECONDS_IN_DAY +
+                                static_cast<long long>(second) +
+                                static_cast<long long>(micro) / 1000000LL;
+    const long long abs_micro = static_cast<long long>(micro) % 1000000LL;
+    const long long abs_days = abs_total / TD_SECONDS_IN_DAY;
+    long long rem = abs_total % TD_SECONDS_IN_DAY;
+    long long micros = abs_micro;
+    if (abs_days > TD_MAX_DAYS) {
+        if (error_out) *error_out = TD_TOO_MANY_DAYS;
+        return std::nullopt;
+    }
+    long long days = abs_days;
+    if (negative) {
+        days = -days;
+        rem = -rem;
+        micros = -micros;
+    }
+    if (micros < 0) {
+        // borrow one second for negative microseconds
+        rem -= 1;
+        micros += 1000000;
+    }
+    return Timedelta{static_cast<int>(days), static_cast<int>(rem), static_cast<int>(micros)};
 }
 
 // Dict iterator interface

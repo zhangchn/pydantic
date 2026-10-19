@@ -1453,11 +1453,12 @@ ValResult<ValMatch<EitherTimedelta>> PythonInput::validate_timedelta(bool strict
     // than is_int() because that is what pyo3's i64 extraction asks -- and a bool answers it, so
     // True is a duration of one second here, as a value and as a bound alike (input_python.rs:741).
     // A Python int has no upper bound: casting to long long either wrapped into the day field or,
-    // for an int too big for long long, threw RuntimeError straight out of the validator.
-    // At exactly +-2**63 the reference lets the day count wrap through an i32 and
-    // accepts a 579,025,220-day duration; this refuses there too, because the other
-    // magnitudes in that range (1e15 to 1e18 seconds) came back as None or a negative
-    // duration and no rule found in the wheel covers both halves.
+    // for an int too big for long long, threw RuntimeError straight out of the validator.  The
+    // wheel's cap is not a magnitude limit either: speedate truncates the day count into the u32
+    // it holds it in *before* the 999,999,999-day check, so 1e15 seconds is refused while 2**63-1
+    // is accepted as a 579,025,220-day duration, and 86400*(2**32+5e8) comes back as 500,000,000
+    // days.  An int that does not fit i64 leaves this arm through f64 extraction, where the cast
+    // saturates rather than wrapping, so the wheel refuses it -- hence the refusal of overflow.
     if (PyLong_Check(obj_.ptr()) && !strict) {
         int overflow = 0;
         long long seconds = PyLong_AsLongLongAndOverflow(obj_.ptr(), &overflow);
@@ -1469,15 +1470,22 @@ ValResult<ValMatch<EitherTimedelta>> PythonInput::validate_timedelta(bool strict
                 this->as_error_value().repr
             );
         }
-        if (seconds >= TD_MAX_SECONDS || seconds <= -TD_MAX_SECONDS) {
+        const unsigned long long abs_seconds =
+            seconds < 0 ? 0ULL - static_cast<unsigned long long>(seconds)
+                        : static_cast<unsigned long long>(seconds);
+        const unsigned long long day_count = (abs_seconds / 86400ULL) & 0xFFFFFFFFULL;
+        const unsigned long long rest = abs_seconds % 86400ULL;
+        if (day_count > static_cast<unsigned long long>(TD_MAX_DAYS)) {
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::TimedeltaParsing, "error", TD_TOO_MANY_DAYS),
                 this->current_location(),
                 this->as_error_value().repr
             );
         }
-        long long days = seconds / 86400;
-        long long rem = seconds % 86400;
+        const long long days = seconds < 0 ? -static_cast<long long>(day_count)
+                                           : static_cast<long long>(day_count);
+        const long long rem = seconds < 0 ? -static_cast<long long>(rest)
+                                          : static_cast<long long>(rest);
         return ValMatch<EitherTimedelta>::lax(
             EitherTimedelta(Timedelta{static_cast<int>(days), static_cast<int>(rem), 0}));
     }
@@ -1516,18 +1524,15 @@ ValResult<ValMatch<EitherTimedelta>> PythonInput::validate_timedelta(bool strict
     }
 
     if (is_str() && !strict) {
-        // Lax mode: try to parse ISO 8601 duration string
+        // Lax mode: try to parse a duration string (ISO, "<n>d HH:MM:SS", or "HH:MM:SS")
         std::string s = as_str();
         std::string parse_error;
         auto parsed = try_parse_timedelta_str(s, &parse_error);
         if (parsed) {
             return ValMatch<EitherTimedelta>::lax(EitherTimedelta(*parsed));
         }
-        // A bare number (e.g. "30") expects a "day" identifier (e.g. "30d").
-        std::string err_msg = parse_error.empty() ? "unable to parse string as an ISO 8601 duration" : parse_error;
-        if (is_bare_number(s)) err_msg = "\"day\" identifier";
         return ValError::line_error(
-            ErrorType(ErrorType::Kind::TimedeltaParsing, "error", err_msg),
+            ErrorType(ErrorType::Kind::TimedeltaParsing, "error", parse_error),
             this->current_location(),
             this->as_error_value().repr
         );
@@ -1541,10 +1546,8 @@ ValResult<ValMatch<EitherTimedelta>> PythonInput::validate_timedelta(bool strict
         if (parsed) {
             return ValMatch<EitherTimedelta>::lax(EitherTimedelta(*parsed));
         }
-        std::string err_msg = parse_error.empty() ? "unable to parse string as an ISO 8601 duration" : parse_error;
-        if (is_bare_number(s)) err_msg = "\"day\" identifier";
         return ValError::line_error(
-            ErrorType(ErrorType::Kind::TimedeltaParsing, "error", err_msg),
+            ErrorType(ErrorType::Kind::TimedeltaParsing, "error", parse_error),
             this->current_location(),
             this->as_error_value().repr
         );

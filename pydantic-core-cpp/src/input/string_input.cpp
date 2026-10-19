@@ -284,7 +284,6 @@ ValResult<ValMatch<EitherTimedelta>> StringInput::validate_timedelta(bool strict
     if (parsed) {
         return ValMatch<EitherTimedelta>::lax(EitherTimedelta(*parsed));
     }
-    if (parse_error.empty()) parse_error = "unable to parse string as an ISO 8601 duration";
     return ValError::line_error(
         ErrorType(ErrorType::Kind::TimedeltaParsing, "error", parse_error),
         this->current_location(),
