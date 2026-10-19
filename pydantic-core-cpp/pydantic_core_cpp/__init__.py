@@ -2215,6 +2215,16 @@ def _schema_copy_clean(schema, _memo=None):
             # schema node, never from a field mapping that happens to name a field "cls".
             if k == "cls" and is_schema_node and not keep_cls:
                 continue
+            if k == "default" and schema.get("type") == "default":
+                # A default is user data, not schema structure: Rust keeps the object it
+                # was given (with_default.rs:127) and answers a missing field with it, so
+                # rebuilding a container here would hand back the wrong object -- an
+                # OrderedDict, Counter or list-subclass default would come out a plain
+                # dict/list.  A field genuinely named ``default`` is safe: its schema sits
+                # under a ``fields`` mapping, which is not a schema node and so is not this
+                # branch.
+                result[k] = v
+                continue
             result[k] = _schema_copy_clean(v, _memo)
         if schema.get("type") == "typed-dict" and "cls_name" not in result:
             # Rust names a TypedDict validator after the TypedDict class itself, so a

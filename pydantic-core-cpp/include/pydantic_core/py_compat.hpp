@@ -113,6 +113,22 @@ inline const pybind11::object& py_fraction_type() {
     return *fraction_type;
 }
 
+// The two mapping classes ordered-dict.rs / counter.rs import at build time and
+// never let go of (Rust's common::ordered_dict::get_ordered_dict_type and
+// common::counter::get_counter_type).  Both are asked with isinstance(), so a
+// subclass passes; the answer is always built from the library class.
+inline const pybind11::object& py_ordered_dict_type() {
+    static pybind11::object* ordered_dict_type = new pybind11::object(
+        pybind11::module_::import("collections").attr("OrderedDict"));
+    return *ordered_dict_type;
+}
+
+inline const pybind11::object& py_counter_type() {
+    static pybind11::object* counter_type = new pybind11::object(
+        pybind11::module_::import("collections").attr("Counter"));
+    return *counter_type;
+}
+
 // `frozendict` became a builtin on Python 3.15; below that there is no type
 // to validate against (Rust's common::frozendict::get_frozendict_type).
 inline bool py_has_frozendict() {

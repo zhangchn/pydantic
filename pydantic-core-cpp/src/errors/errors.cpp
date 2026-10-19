@@ -68,6 +68,7 @@ std::string json_message_for(const std::string& type_name, const std::string& ms
     }
     if (type_name == "model_type" || type_name == "model_attributes_type" ||
         type_name == "dict_type" || type_name == "frozen_dict_type" ||
+        type_name == "ordered_dict_type" || type_name == "counter_type" ||
         type_name == "dataclass_type") {
         return "Input should be an object";
     }

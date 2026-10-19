@@ -46,6 +46,8 @@ public:
     ValResult<ValMatch<EitherTimedelta>> validate_timedelta(bool strict) const override;
     
     ValResult<std::unique_ptr<ValidatedDict>> validate_dict(bool strict) const override;
+    ValResult<std::unique_ptr<ValidatedDict>> validate_ordered_dict(bool strict) const override;
+    ValResult<std::unique_ptr<ValidatedDict>> validate_counter(bool strict) const override;
     ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_list(bool strict) const override;
     ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> validate_tuple(bool strict) const override;
     

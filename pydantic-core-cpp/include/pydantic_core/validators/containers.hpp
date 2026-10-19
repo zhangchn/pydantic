@@ -212,6 +212,12 @@ public:
         if (name == "dict" || name == "dict-constrained") {
             if (auto* d = static_cast<py::dict*>(value.get())) return *d;
         }
+        // The two subclass mapping nodes hand over the object they built -- an OrderedDict or a
+        // Counter, never a plain dict -- so they read back through the py::object arm rather
+        // than the py::dict arm above.
+        if (name == "ordered-dict" || name == "counter") {
+            if (auto* o = static_cast<py::object*>(value.get())) return *o;
+        }
         // A temporal child that already was the object goes back out as that object, exactly
         // as the root node's conversion does -- this table is a second copy of it, and a
         // subclass or a named tzinfo is what shows the difference.
@@ -305,7 +311,38 @@ public:
             );
         }
 
+        // The dict node keeps its own string-keyed walk -- the entries it validates are the
+        // ones its accessors return, exactly as before the subclass nodes existed.
         auto entries = dict->entries();
+        std::vector<ValidatedDict::Pair> pairs;
+        pairs.reserve(entries.size());
+        for (const auto& entry : entries) {
+            ValidatedDict::Pair p;
+            p.key = dict->get_key(entry.key).value_or(py::str(entry.key));
+            p.value = dict->get_value(entry.key).value_or(py::none());
+            p.key_text = entry.key;
+            pairs.push_back(std::move(p));
+        }
+
+        auto built = validate_pairs(input, pairs, state);
+        if (built.is_err()) {
+            return built.error();
+        }
+        return ValResult<std::shared_ptr<void>>(
+            std::make_shared<py::dict>(std::move(built.value())));
+    }
+
+    // The walk every mapping node shares: dict.rs:115-173 is also what ordered_dict.rs and
+    // counter.rs run -- a failing key takes the entry out of the output but not out of the run,
+    // "[key]" marks the key's own errors after the key, fail_fast stops between the two halves,
+    // and in partial mode the last entry's value errors vanish.  What differs between the three
+    // nodes is who is asked for the input and what the dict is handed to afterwards, so both
+    // live in the caller.
+    ValResult<py::dict> validate_pairs(
+        const Input& input,
+        const std::vector<ValidatedDict::Pair>& pairs,
+        ValidationState& state
+    ) const {
         InputType src_type = input.input_type();
 
         // Build a sub-input for a key/value from the source dict.
@@ -331,14 +368,14 @@ public:
             // enumerate_last_partial — the last item is omitted from the output
             // when its value validation fails).
             bool last_entry = false;
-            for (size_t ei = 0; ei < entries.size(); ei++) {
-                const auto& entry = entries[ei];
-                last_entry = (ei == entries.size() - 1);
+            for (size_t ei = 0; ei < pairs.size(); ei++) {
+                const auto& pair = pairs[ei];
+                last_entry = (ei == pairs.size() - 1);
                 bool is_last_partial = state.is_partial() && last_entry;
-                py::object key_obj = dict->get_key(entry.key).value_or(py::str(entry.key));
-                push_key_loc(state.location(), key_obj, entry.key);
+                py::object key_obj = pair.key;
+                push_key_loc(state.location(), key_obj, pair.key_text);
                 ValidationState sub_state = state.sub_copy(state.coerce_strings());
-                py::object val_obj = dict->get_value(entry.key).value_or(py::none());
+                py::object val_obj = pair.value;
                 // A key that failed takes the entry out of the output, not out of the run:
                 // Rust keeps its answer as None (dict.rs:131-138) and still asks the value
                 // validator, so a pair with both halves wrong reports two errors.
@@ -426,19 +463,42 @@ public:
             if (!errors.empty()) {
                 return ValError::line_errors(std::move(errors));
             }
-            return ValResult<std::shared_ptr<void>>(std::make_shared<py::dict>(std::move(result_dict)));
+            return ValResult<py::dict>(std::move(result_dict));
         }
 
-        // No key/value schemas: build a dict from the original entries
+        // No key/value schemas: build a dict from the pairs as they came in
         {
-            py::dict result_dict;
-            for (const auto& entry : entries) {
-                py::object key_obj = dict->get_key(entry.key).value_or(py::str(entry.key));
-                py::object val_obj = dict->get_value(entry.key).value_or(py::none());
-                result_dict[key_obj] = val_obj;
+            py::dict copy_dict;
+            for (const auto& pair : pairs) {
+                copy_dict[pair.key] = pair.value;
             }
-            return ValResult<std::shared_ptr<void>>(std::make_shared<py::dict>(std::move(result_dict)));
+            return ValResult<py::dict>(std::move(copy_dict));
         }
+    }
+
+    // too_short / too_long as list.rs:41-70 renders them for the mapping nodes: the generic
+    // kinds, with the class the node is named for in ctx.  The dict node has its own copy of
+    // this pair above, asked of the input before the walk -- see OrderedDictValidator for where
+    // the reference asks it instead.
+    std::optional<ValError> length_refused(const Input& input, ValidationState& state,
+                                           size_t actual, const char* field_type) const {
+        if (min_length.has_value() && actual < min_length.value()) {
+            ErrorType err(ErrorType::Kind::TooShort);
+            err.context()["field_type"] = field_type;
+            err.context()["min_length"] = std::to_string(min_length.value());
+            err.context()["actual_length"] = std::to_string(actual);
+            return ValError::line_error(std::move(err), state.location(),
+                                        input.as_error_value().repr);
+        }
+        if (max_length.has_value() && actual > max_length.value()) {
+            ErrorType err(ErrorType::Kind::TooLong);
+            err.context()["field_type"] = field_type;
+            err.context()["max_length"] = std::to_string(max_length.value());
+            err.context()["actual_length"] = std::to_string(actual);
+            return ValError::line_error(std::move(err), state.location(),
+                                        input.as_error_value().repr);
+        }
+        return std::nullopt;
     }
 
     // Rust builds the location item straight from the key object, so a dict with
@@ -477,6 +537,97 @@ public:
         if (!gc_detail::enter_node(this)) return;
         if (keys_schema) keys_schema->visit_refs(visit, arg);
         if (values_schema) values_schema->visit_refs(visit, arg);
+    }
+};
+
+// OrderedDictValidator -- the mapping node that answers as collections.OrderedDict.
+// ordered_dict.rs is dict.rs plus three differences, and this port puts each one where Rust
+// puts it: which value the input layer accepts (including *how* an OrderedDict is walked, so a
+// move_to_end() reordering survives), the shared entry walk, and the tail below.
+class OrderedDictValidator : public DictValidator {
+public:
+    ValResult<std::shared_ptr<void>> validate(
+        const Input& input,
+        ValidationState& state
+    ) override {
+        auto result = input.validate_ordered_dict(state.container_strict(strict));
+        if (result.is_err()) {
+            return result.error();
+        }
+        auto& dict = result.value();
+        auto built = validate_pairs(input, dict->pairs(), state);
+        if (built.is_err()) {
+            return built.error();
+        }
+        py::dict out = std::move(built.value());
+
+        // ordered_dict.rs:174-177 asks the length question once the entries are in and nothing
+        // failed, of the built dict -- not of the input.  Keys that validate onto one another
+        // have collapsed by then, and the count the reference reports is the one the output
+        // holds (an input of {"1": 1, 1: 2} under keys=int is one item, not two).
+        if (auto refused = length_refused(input, state, static_cast<size_t>(out.size()), "OrderedDict")) {
+            return *refused;
+        }
+
+        // Always the library's OrderedDict, even when the input was a subclass
+        // (ordered_dict.rs:177 calls collections.OrderedDict on the built dict itself).
+        return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(
+            py_ordered_dict_type()(out)));
+    }
+
+    std::string name() const override { return "ordered-dict"; }
+
+    std::string display_name() const override {
+        if (display_name_cache_) return *display_name_cache_;
+        std::string k = keys_schema ? keys_schema->display_name() : std::string("any");
+        std::string v = values_schema ? values_schema->display_name() : std::string("any");
+        display_name_cache_ = "ordered-dict[" + k + "," + v + "]";
+        return *display_name_cache_;
+    }
+};
+
+// CounterValidator -- the same node answering as collections.Counter.  counter.rs is
+// OrderedDictValidator with collections.Counter in its two constants, plus one input-layer
+// difference: a Counter is walked through the dict C API rather than the mapping protocol,
+// which input_python.rs:491-499 says is safe for a Counter in a way it says it is not for an
+// OrderedDict (the reason is the reference's to give, and it does not).
+class CounterValidator : public DictValidator {
+public:
+    ValResult<std::shared_ptr<void>> validate(
+        const Input& input,
+        ValidationState& state
+    ) override {
+        auto result = input.validate_counter(state.container_strict(strict));
+        if (result.is_err()) {
+            return result.error();
+        }
+        auto& dict = result.value();
+        auto built = validate_pairs(input, dict->pairs(), state);
+        if (built.is_err()) {
+            return built.error();
+        }
+        py::dict out = std::move(built.value());
+
+        if (auto refused = length_refused(input, state, static_cast<size_t>(out.size()), "Counter")) {
+            return *refused;
+        }
+
+        // Counter(mapping) on an empty instance copies the mapping rather than summing into it
+        // -- the fast path counter.rs:117-118 says it is calling -- which is what keeps a zero or
+        // a negative count in the result; Counter.update() would have deleted them.  The call
+        // itself is counter.rs:177.
+        return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(
+            py_counter_type()(out)));
+    }
+
+    std::string name() const override { return "counter"; }
+
+    std::string display_name() const override {
+        if (display_name_cache_) return *display_name_cache_;
+        std::string k = keys_schema ? keys_schema->display_name() : std::string("any");
+        std::string v = values_schema ? values_schema->display_name() : std::string("any");
+        display_name_cache_ = "counter[" + k + "," + v + "]";
+        return *display_name_cache_;
     }
 };
 

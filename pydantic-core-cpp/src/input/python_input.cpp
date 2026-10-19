@@ -78,6 +78,19 @@ std::optional<py::object> PythonValidatedDict::get_key(const std::string& key) c
     return std::nullopt;
 }
 
+std::vector<ValidatedDict::Pair> PythonValidatedDict::pairs() const {
+    std::vector<Pair> out;
+    out.reserve(dict_.size());
+    for (auto item : dict_) {
+        Pair p;
+        p.key = py::reinterpret_borrow<py::object>(item.first);
+        p.value = py::reinterpret_borrow<py::object>(item.second);
+        p.key_text = py::str(p.key).cast<std::string>();
+        out.push_back(std::move(p));
+    }
+    return out;
+}
+
 // ============================================================================
 // PythonValidatedList implementation
 // ============================================================================
@@ -742,6 +755,44 @@ ValResult<ValMatch<EitherFloat>> PythonInput::validate_float(bool strict) const 
     return type_error(ErrorType::Kind::FloatType, *this, this->current_location());
 }
 
+// Lax mode reads the abstract Mapping protocol through .items(); an
+// exception raised by the mapping methods is a mapping_type error carrying
+// that exception as its context (Rust: iterate_mapping_items).
+static ValResult<py::dict> mapping_items_as_dict(const PythonInput& self, const py::object& obj) {
+    try {
+        py::dict collected;
+        for (py::handle item : obj.attr("items")()) {
+            PyObject* key = nullptr;
+            PyObject* value = nullptr;
+            if (PyArg_UnpackTuple(item.ptr(), "items", 2, 2, &key, &value) == 0) {
+                PyErr_Clear();
+                return ValError::line_error(
+                    ErrorType(ErrorType::Kind::MappingType, "error",
+                              "Mapping items must be tuples of (key, value) pairs"),
+                    self.current_location(), self.as_error_value().repr);
+            }
+            collected[py::reinterpret_borrow<py::object>(key)] =
+                py::reinterpret_borrow<py::object>(value);
+        }
+        return collected;
+    } catch (const py::error_already_set& err) {
+        return ValError::line_error(
+            ErrorType(ErrorType::Kind::MappingType, "error", py_caught_exception_string(err)),
+            self.current_location(), self.as_error_value().repr);
+    }
+}
+
+// The walk every mapping node shares, including the refusal a raising Mapping earns:
+// input_python.rs keeps that one mapping_type whichever node asked, and saves the node's own
+// type name for input that is not a mapping at all.
+static ValResult<std::unique_ptr<ValidatedDict>>
+mapping_as_validated_dict(const PythonInput& self, const py::object& obj) {
+    auto items = mapping_items_as_dict(self, obj);
+    if (items.is_err()) return items.error();
+    return ValResult<std::unique_ptr<ValidatedDict>>(
+        std::make_unique<PythonValidatedDict>(items.value()));
+}
+
 ValResult<std::unique_ptr<ValidatedDict>> PythonInput::validate_dict(bool strict) const {
     if (is_dict()) {
         auto dict = as_dict();
@@ -756,35 +807,52 @@ ValResult<std::unique_ptr<ValidatedDict>> PythonInput::validate_dict(bool strict
         return result;
     }
 
-    // Lax mode reads the abstract Mapping protocol through .items(); an
-    // exception raised by the mapping methods is a mapping_type error carrying
-    // that exception as its context (Rust: iterate_mapping_items).
+    // Lax mode reads the abstract Mapping protocol through .items().
     if (!strict && py_is_mapping_instance(obj_)) {
-        try {
-            py::dict collected;
-            for (py::handle item : obj_.attr("items")()) {
-                PyObject* key = nullptr;
-                PyObject* value = nullptr;
-                if (PyArg_UnpackTuple(item.ptr(), "items", 2, 2, &key, &value) == 0) {
-                    PyErr_Clear();
-                    return ValError::line_error(
-                        ErrorType(ErrorType::Kind::MappingType, "error",
-                                  "Mapping items must be tuples of (key, value) pairs"),
-                        this->current_location(), this->as_error_value().repr);
-                }
-                collected[py::reinterpret_borrow<py::object>(key)] =
-                    py::reinterpret_borrow<py::object>(value);
-            }
-            std::unique_ptr<ValidatedDict> result = std::make_unique<PythonValidatedDict>(collected);
-            return result;
-        } catch (const py::error_already_set& err) {
-            return ValError::line_error(
-                ErrorType(ErrorType::Kind::MappingType, "error", py_caught_exception_string(err)),
-                this->current_location(), this->as_error_value().repr);
-        }
+        return mapping_as_validated_dict(*this, obj_);
     }
 
     return type_error(ErrorType::Kind::DictType, *this, this->current_location());
+}
+
+// input_python.rs:465-489.  Strict wants an instance of collections.OrderedDict; lax falls
+// back to an exact dict and then to any Mapping.  The instance goes through the mapping
+// protocol, not PyDict_Next: an OrderedDict keeps its own order, and the reference iterates it
+// that way because "the dict C API does not account for reorderings (e.g. move_to_end())".
+ValResult<std::unique_ptr<ValidatedDict>> PythonInput::validate_ordered_dict(bool strict) const {
+    if (py::isinstance(obj_, py_ordered_dict_type())) {
+        return mapping_as_validated_dict(*this, obj_);
+    }
+    if (!strict) {
+        if (PyDict_CheckExact(obj_.ptr())) {
+            return ValResult<std::unique_ptr<ValidatedDict>>(
+                std::make_unique<PythonValidatedDict>(as_dict()));
+        }
+        if (py_is_mapping_instance(obj_)) {
+            return mapping_as_validated_dict(*this, obj_);
+        }
+    }
+    return type_error(ErrorType::Kind::OrderedDictType, *this, this->current_location());
+}
+
+// input_python.rs:491-511.  The same three questions with collections.Counter, except that a
+// Counter -- unlike an OrderedDict -- is read through the dict C API, which input_python.rs:493-494
+// says is safe to do without saying why; the port follows the reference rather than the reason.
+ValResult<std::unique_ptr<ValidatedDict>> PythonInput::validate_counter(bool strict) const {
+    if (py::isinstance(obj_, py_counter_type())) {
+        return ValResult<std::unique_ptr<ValidatedDict>>(
+            std::make_unique<PythonValidatedDict>(as_dict()));
+    }
+    if (!strict) {
+        if (PyDict_CheckExact(obj_.ptr())) {
+            return ValResult<std::unique_ptr<ValidatedDict>>(
+                std::make_unique<PythonValidatedDict>(as_dict()));
+        }
+        if (py_is_mapping_instance(obj_)) {
+            return mapping_as_validated_dict(*this, obj_);
+        }
+    }
+    return type_error(ErrorType::Kind::CounterType, *this, this->current_location());
 }
 
 ValResult<std::unique_ptr<ValidatedDict>> PythonInput::validate_dict_from_attributes(bool strict) const {

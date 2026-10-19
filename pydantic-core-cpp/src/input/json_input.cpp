@@ -298,6 +298,27 @@ ValResult<std::unique_ptr<ValidatedDict>> JsonInput::validate_dict(bool strict) 
                                Location(), as_error_value().repr);
 }
 
+// A JSON object is the only way to spell either subclass mapping out of a document, so both
+// nodes ask the object question even in strict mode and only differ in the name they refuse
+// under (input_json.rs:248-261).  validate_dict already ignores strict for exactly this reason.
+ValResult<std::unique_ptr<ValidatedDict>> JsonInput::validate_ordered_dict(bool strict) const {
+    auto dict = validate_dict(strict);
+    if (dict.is_err()) {
+        return ValError::line_error(PydanticKnownError::ordered_dict_type(),
+                                   Location(), as_error_value().repr);
+    }
+    return dict;
+}
+
+ValResult<std::unique_ptr<ValidatedDict>> JsonInput::validate_counter(bool strict) const {
+    auto dict = validate_dict(strict);
+    if (dict.is_err()) {
+        return ValError::line_error(PydanticKnownError::counter_type(),
+                                   Location(), as_error_value().repr);
+    }
+    return dict;
+}
+
 ValResult<ValMatch<std::unique_ptr<ValidatedList>>> JsonInput::validate_list(bool strict) const {
     if (element_.type() == simdjson::dom::element_type::ARRAY) {
         auto arr = element_.get_array();

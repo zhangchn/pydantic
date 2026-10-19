@@ -113,6 +113,8 @@ static std::shared_ptr<Validator> build_from_flat_dict(
     if (type == "bytes") return std::make_shared<BytesValidator>();
     if (type == "list") return std::make_shared<ListValidator>();
     if (type == "dict") return std::make_shared<DictValidator>();
+    if (type == "ordered-dict") return std::make_shared<OrderedDictValidator>();
+    if (type == "counter") return std::make_shared<CounterValidator>();
     if (type == "frozendict") throw SchemaError(frozendict_build_blocker());
     if (type == "set") return std::make_shared<SetValidator>();
     if (type == "frozenset") return std::make_shared<FrozenSetValidator>();
@@ -2760,6 +2762,33 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         }
         // Rust builds the dict with is_strict(schema, config); without the
         // schema flag a strict dict would still accept Mapping inputs.
+        v->strict = strict_opt_py(schema, config);
+        v->fail_fast = py_bool(schema, "fail_fast");
+        return v;
+    }
+
+    // --- OrderedDict / Counter ---
+    // ordered_dict.rs:37-62 and counter.rs:37-62 read the same six parts a dict reads and
+    // differ only in the class the answer wears, which is the validator's business rather than
+    // the schema's.
+    if (type == "ordered-dict" || type == "counter") {
+        std::shared_ptr<DictValidator> v;
+        if (type == "ordered-dict") v = std::make_shared<OrderedDictValidator>();
+        else v = std::make_shared<CounterValidator>();
+        // ordered_dict.rs:40-49 -- either half is optional; a half that is there must be a
+        // schema dict, which the cast below is what says so.
+        if (py::object keys_schema = optional_schema_slot(schema, "keys_schema")) {
+            v->keys_schema = build_from_py_dict(keys_schema.cast<py::dict>(), config, definitions);
+        }
+        if (py::object values_schema = optional_schema_slot(schema, "values_schema")) {
+            v->values_schema = build_from_py_dict(values_schema.cast<py::dict>(), config, definitions);
+        }
+        if (schema.contains("min_length")) {
+            v->min_length = schema["min_length"].cast<size_t>();
+        }
+        if (schema.contains("max_length")) {
+            v->max_length = schema["max_length"].cast<size_t>();
+        }
         v->strict = strict_opt_py(schema, config);
         v->fail_fast = py_bool(schema, "fail_fast");
         return v;

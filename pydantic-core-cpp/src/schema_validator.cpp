@@ -1189,7 +1189,10 @@ py::object value_to_python_with_type(const std::shared_ptr<void>& value, const s
                              effective_type == "arguments-v3" ||
                              effective_type == "dataclass" ||
                              effective_type == "callable" || effective_type == "set" || effective_type == "frozenset" ||
-                             effective_type == "deque" || effective_type == "tuple");
+                             effective_type == "deque" || effective_type == "tuple" ||
+                             // The subclass mapping nodes store the OrderedDict / Counter they
+                             // built (containers.hpp), not a py::dict, so they read that arm.
+                             effective_type == "ordered-dict" || effective_type == "counter");
     if (is_function_type) {
         try {
             auto* obj = static_cast<py::object*>(value.get());

@@ -2314,6 +2314,33 @@ struct SerNode {
         }
         return item;
     }
+
+    // The pairs of a mapping in the order the mapping itself reports them.  Only the
+    // ordered-dict node needs this walk: type_serializers/ordered_dict.rs:96-99 asks an
+    // OrderedDict for its items() rather than reading the storage, because the dict C API
+    // reports the order things were last inserted into the dict, which is not necessarily the
+    // order the mapping holds.
+    static std::vector<std::pair<py::object, py::object>> mapping_pairs_in_order(const py::object& value) {
+        std::vector<std::pair<py::object, py::object>> out;
+        py::object view = value.attr("items")();
+        PyObject* pairs = PySequence_List(view.ptr());
+        if (!pairs) throw py::error_already_set();
+        const Py_ssize_t n = PyList_GET_SIZE(pairs);
+        for (Py_ssize_t i = 0; i < n; i++) {
+            PyObject* raw = PyList_GET_ITEM(pairs, i);
+            PyObject* k = PySequence_GetItem(raw, 0);
+            PyObject* v = PySequence_GetItem(raw, 1);
+            if (!k || !v) {
+                Py_XDECREF(k);
+                Py_XDECREF(v);
+                Py_DECREF(pairs);
+                throw py::error_already_set();
+            }
+            out.emplace_back(py::reinterpret_steal<py::object>(k), py::reinterpret_steal<py::object>(v));
+        }
+        Py_DECREF(pairs);
+        return out;
+    }
     // Rust locates a discriminator on a dict key, an object attribute, or
     // __pydantic_extra__: a validated value is a model instance, not a dict.
     static bool lookup_discriminator(const py::object& value, const std::vector<SerPathStep>& path, py::object* out) {
@@ -2662,6 +2689,17 @@ struct SerNode {
         if (node_type == "dict") {
             if (Py_TYPE(v) == &PyDict_Type) return 1;
             return PyDict_Check(v) ? 0 : -1;
+        }
+        // The two subclass mapping nodes are asked of their own class, the way the deque and
+        // fraction nodes above are: an instance of it is the node's own answer, a subclass of it
+        // is the granted one, and a plain dict is the mismatch ordered_dict.rs:118 reports.
+        if (node_type == "ordered-dict") {
+            if (reinterpret_cast<PyObject*>(Py_TYPE(v)) == py_ordered_dict_type().ptr()) return 1;
+            return py::isinstance(v, py_ordered_dict_type()) ? 0 : -1;
+        }
+        if (node_type == "counter") {
+            if (reinterpret_cast<PyObject*>(Py_TYPE(v)) == py_counter_type().ptr()) return 1;
+            return py::isinstance(v, py_counter_type()) ? 0 : -1;
         }
         return 1;
     }
@@ -3463,16 +3501,18 @@ struct SerNode {
                 return std::move(result);
             }
         }
-        if (type == "dict" && !children.empty()) {
+        if ((type == "dict" || type == "ordered-dict" || type == "counter") && !children.empty()) {
             py::dict result;
-            auto d = value.cast<py::dict>();
-            for (auto item : d) {
-                auto k = py::reinterpret_borrow<py::object>(item.first);
-                auto v = py::reinterpret_borrow<py::object>(item.second);
+            // dict.rs:83-101 serializes in the order the mapping gives, and ordered_dict.rs:96-99
+            // asks an OrderedDict that question through the mapping protocol -- the dict C API
+            // reports storage order, which is not necessarily the order the mapping holds.
+            auto emit = [&](py::handle key_h, py::handle value_h) {
+                auto k = py::reinterpret_borrow<py::object>(key_h);
+                auto v = py::reinterpret_borrow<py::object>(value_h);
                 auto next = apply_ser_filter(k, include, exclude,
                                              ser_key_include ? &ser_key_include : nullptr,
                                              ser_key_exclude ? &ser_key_exclude : nullptr);
-                if (next.omit) continue;
+                if (next.omit) return;
                 // In json mode the key is asked for its text, not its serialized value
                 // (dict.rs:90-93), which is why a float key leaves the run as "1.5".
                 auto out_k = json_mode
@@ -3480,6 +3520,19 @@ struct SerNode {
                     : children[0]->to_python(check_item_type(children[0], k), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context);
                 auto out_v = children.size() > 1 ? children[1]->to_python(check_item_type(children[1], v), json_mode, exc_none, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, context) : v;
                 result[out_k] = out_v;
+            };
+            if (type == "ordered-dict") {
+                for (const auto& kv : mapping_pairs_in_order(value)) emit(kv.first.ptr(), kv.second.ptr());
+            } else {
+                auto d = value.cast<py::dict>();
+                for (auto item : d) emit(item.first, item.second);
+            }
+            // ordered_dict.rs:114-117 and counter.rs:115-118 hand the finished dict to the node's
+            // own class in python mode and leave it a dict in json mode -- which is what makes
+            // model_dump() keep an OrderedDict while model_dump(mode='json') holds a plain dict.
+            if (!json_mode && type != "dict") {
+                const py::object& cls = type == "ordered-dict" ? py_ordered_dict_type() : py_counter_type();
+                return cls(result);
             }
             return std::move(result);
         }
@@ -3737,17 +3790,16 @@ struct SerNode {
                                         exclude_unset, exclude_defaults, context);
             return infer_json(picked ? *picked : value, ensure_ascii, indent, py::none(), py::none());
         }
-        if (type == "dict" && !children.empty()) {
+        if ((type == "dict" || type == "ordered-dict" || type == "counter") && !children.empty()) {
             std::string out = "{";
             bool first = true;
-            auto d = value.cast<py::dict>();
-            for (auto item : d) {
-                auto k = py::reinterpret_borrow<py::object>(item.first);
-                auto v = py::reinterpret_borrow<py::object>(item.second);
+            auto emit = [&](py::handle key_h, py::handle value_h) {
+                auto k = py::reinterpret_borrow<py::object>(key_h);
+                auto v = py::reinterpret_borrow<py::object>(value_h);
                 auto next = apply_ser_filter(k, include, exclude,
                                              ser_key_include ? &ser_key_include : nullptr,
                                              ser_key_exclude ? &ser_key_exclude : nullptr);
-                if (next.omit) continue;
+                if (next.omit) return;
                 py::object out_k = children[0]->to_json_key(k, exc_none, round_trip, by_alias, context);
                 std::string val_json = children.size() > 1
                     ? children[1]->to_json(check_item_type(children[1], v), ensure_ascii, -1, round_trip, next.include, next.exclude, by_alias, exclude_unset, exclude_defaults, exc_none, context)
@@ -3756,6 +3808,13 @@ struct SerNode {
                 first = false;
                 std::string key_str = out_k.cast<std::string>();
                 out += json_escape(key_str, ensure_ascii) + ":" + val_json;
+            };
+            // Same walk as the python-mode branch: an OrderedDict answers for its own order.
+            if (type == "ordered-dict") {
+                for (const auto& kv : mapping_pairs_in_order(value)) emit(kv.first.ptr(), kv.second.ptr());
+            } else {
+                auto d = value.cast<py::dict>();
+                for (auto item : d) emit(item.first, item.second);
             }
             out += "}";
             return out;
@@ -4706,6 +4765,9 @@ private:
         // (complex.rs:45-51, dict.rs:109-115, ellipsis.rs:54-60, typed_dict.rs:109-115).
         if (t == "list" || t == "set" || t == "frozenset" || t == "deque" || t == "dict" ||
             t == "frozendict" || t == "typed-dict" || t == "generator" || t == "complex" ||
+            // ordered_dict.rs:127-130 and counter.rs:125-130 answer a key with
+            // invalid_as_json_key(EXPECTED_TYPE), the same refusal the dict node has.
+            t == "ordered-dict" || t == "counter" ||
             t == "ellipsis" || t == "missing-sentinel") {
             if (key.is_none()) {
                 std::string msg = "`" + t + "` not valid as object key";
@@ -5115,33 +5177,53 @@ private:
             }
             return std::move(out);
         }
-        if (py::isinstance<py::dict>(v)) {
+        // Rust's infer gives the two mapping classes an arm of their own (ob_type.rs:267-270,
+        // with the isinstance fallback at 363-368 deliberately ahead of the `dict` one), and it
+        // walks them differently: the OrderedDict arm goes through the mapping protocol because
+        // iterating an OrderedDict through the dict C API ignores move_to_end reorderings
+        // (infer.rs:762-763), while the Counter arm uses the dict C API.  A python-mode answer is
+        // wrapped in the library class -- never in the input's subclass -- and every other dict
+        // subclass answers ObType::Dict, whose arm builds a plain dict (infer.rs:259-261).
+        const bool infer_ordered = py::isinstance(v, py_ordered_dict_type());
+        const bool infer_counter = !infer_ordered && py::isinstance(v, py_counter_type());
+        if (py::isinstance<py::dict>(v) || infer_ordered || infer_counter) {
             py::dict out;
-            auto d = v.cast<py::dict>();
-            for (auto item : d) {
-                auto k = py::reinterpret_borrow<py::object>(item.first);
-                auto val = py::reinterpret_borrow<py::object>(item.second);
-                // serialize_pairs (infer.rs:729-741) asks AnyFilter::key_filter about every key of
-                // an inferred mapping and hands the value the pair that answer names, with the key
-                // asked exactly as written -- it is the entry's *key* that is turned afterwards.
+            // serialize_pairs (infer.rs:729-741) asks AnyFilter::key_filter about every key of
+            // an inferred mapping and hands the value the pair that answer names, with the key
+            // asked exactly as written -- it is the entry's *key* that is turned afterwards.
+            //
+            // serialize_entry (infer.rs:734-741) hands the key and the value to the *same*
+            // any serializer, so a key is inferred too rather than passed through: in json
+            // mode that is the json_key question -- an int key leaves as "1" and a tuple key
+            // as "1,2" while the values keep their Python forms -- and in python mode it is
+            // the very same walk the value takes, which is what turns a Fraction key into
+            // '3/2', a namedtuple key into a plain tuple, and a frozenset key into a rebuilt
+            // frozenset, and rebuilds a frozen-dataclass key until the dict refuses it as
+            // unhashable.  A key the python walk would hand back unchanged -- a str, an int,
+            // a Decimal (the python arm of infer.rs has no Decimal case to stringify) --
+            // answers for itself either way, so only those forms change here.
+            auto emit = [&](py::object k, const py::object& val) {
                 auto next = apply_ser_filter(k, include, exclude);
-                if (next.omit) continue;
-                // serialize_entry (infer.rs:734-741) hands the key and the value to the *same*
-                // any serializer, so a key is inferred too rather than passed through: in json
-                // mode that is the json_key question -- an int key leaves as "1" and a tuple key
-                // as "1,2" while the values keep their Python forms -- and in python mode it is
-                // the very same walk the value takes, which is what turns a Fraction key into
-                // '3/2', a namedtuple key into a plain tuple, and a frozenset key into a rebuilt
-                // frozenset, and rebuilds a frozen-dataclass key until the dict refuses it as
-                // unhashable.  A key the python walk would hand back unchanged -- a str, an int,
-                // a Decimal (the python arm of infer.rs has no Decimal case to stringify) --
-                // answers for itself either way, so only those forms change here.
+                if (next.omit) return;
                 if (json_mode)
                     k = infer_json_key(k, false);
                 else
                     k = serialize_any_value(k, exc_none, round_trip, json_mode,
                                             next.include, next.exclude);
                 out[k] = serialize_any_value(val, exc_none, round_trip, json_mode, next.include, next.exclude);
+            };
+            if (infer_ordered) {
+                for (const auto& kv : mapping_pairs_in_order(v)) emit(kv.first, kv.second);
+            } else {
+                auto d = v.cast<py::dict>();
+                for (auto item : d) {
+                    emit(py::reinterpret_borrow<py::object>(item.first),
+                         py::reinterpret_borrow<py::object>(item.second));
+                }
+            }
+            if (!json_mode && (infer_ordered || infer_counter)) {
+                const py::object& cls = infer_ordered ? py_ordered_dict_type() : py_counter_type();
+                return cls(out);
             }
             return std::move(out);
         }
@@ -6064,10 +6146,13 @@ std::string SerNode::type_name_for_warning() const {
         return out + "]";
     }
     if (t == "named-tuple") return class_name.empty() ? std::string("named-tuple") : class_name;
-    if (t == "dict") {
+    if (t == "dict" || t == "ordered-dict" || t == "counter") {
+        // dict.rs:57-62, ordered_dict.rs:57-62 and counter.rs:57-62 name themselves the same
+        // way: the node's type, then the two child names split by ", " -- with the space, which
+        // is what tells a serializer name apart from a validator's dict[str,int].
         std::string keyn = children.size() > 0 ? type_name_for_warning(children[0]) : "any";
         std::string valn = children.size() > 1 ? type_name_for_warning(children[1]) : "any";
-        return "dict[" + keyn + ", " + valn + "]";
+        return t + "[" + keyn + ", " + valn + "]";
     }
     // simple.rs:25-39 keeps NoneSerializer's name as its EXPECTED_TYPE, so a bare node says
     // Expected `none` and a container composes list[none], dict[none, any], tuple[none].
@@ -6125,6 +6210,11 @@ bool SerNode::value_matches_type(const py::object& v) const {
     // class itself is only compared while a union checks its choices.
     if (t == "named-tuple") return py::isinstance<py::tuple>(v);
     if (t == "dict") return py::isinstance<py::dict>(v);
+    // ordered_dict.rs:118-121 / counter.rs:79-85: each node only serializes a value that *is*
+    // an instance of its class -- anything else earns "Expected `ordered-dict[str, int]` ..." and
+    // the inference walk, which is what the gate above arranges.
+    if (t == "ordered-dict") return ser_matches_class(py_ordered_dict_type(), v);
+    if (t == "counter") return ser_matches_class(py_counter_type(), v);
     // The rest of Rust's leaf serializers refuse a value that is not of their own type --
     // or of a subclass of it, which ob_type.rs's ancestor walk grants -- warn in that
     // type's name, and print what inference makes of the value instead.
@@ -6580,13 +6670,13 @@ static SerRef build_ser_impl(const py::dict& schema,
     // to answer for the value, no matter what the rest of the schema holds.
     static const std::unordered_set<std::string> kSerKnownTypes = {
         "any", "arguments", "bool", "bytes", "call", "callable", "chain", "complex",
-        "custom-error", "dataclass", "dataclass-args", "date", "datetime", "decimal",
+        "counter", "custom-error", "dataclass", "dataclass-args", "date", "datetime", "decimal",
         "default", "definition-ref", "definitions", "deque", "dict", "ellipsis", "enum",
         "float", "format", "fraction", "frozendict", "frozenset", "function-after",
         "function-before", "function-plain", "function-wrap", "generator", "int",
         "is-instance", "is-subclass", "json", "json-or-python", "lax-or-strict", "list",
         "literal", "missing-sentinel", "model", "model-fields", "multi-host-url",
-        "named-tuple", "none", "nullable", "set", "str", "tagged-union", "time",
+        "named-tuple", "none", "nullable", "ordered-dict", "set", "str", "tagged-union", "time",
         "timedelta", "to-string", "tuple", "typed-dict", "union", "url", "uuid"};
     // What the schema names itself, read loosely: only a schema that keeps its own name
     // gets the required-str read below, and the replaced one has the key looked at again
@@ -7152,7 +7242,7 @@ static SerRef build_ser_impl(const py::dict& schema,
         }
     }
 
-    if (type == "dict") {
+    if (type == "dict" || type == "ordered-dict" || type == "counter") {
         auto ks = [&](const char* k) -> SerRef {
             if (!schema.contains(k)) return nullptr;
             return build_ser_child(schema[k], defs, memo, type);
@@ -7178,7 +7268,9 @@ static SerRef build_ser_impl(const py::dict& schema,
                 py::object v = ser_dict[which];
                 if (v.is_none()) return std::nullopt;
                 if (!py::isinstance<py::set>(v))
-                    throw SchemaError(std::string("Error building `dict` serializer:\n  TypeError: '")
+                    // dict.rs:48-52, and ordered_dict.rs:53-58 / counter.rs:53-58 read the same
+                    // pair, so the node that complains is the node the schema named.
+                    throw SchemaError("Error building `" + type + "` serializer:\n  TypeError: '"
                                       + v.ptr()->ob_type->tp_name + "' object is not an instance of 'set'");
                 std::unordered_set<int64_t> hs;
                 for (py::handle item : py::set(v)) {

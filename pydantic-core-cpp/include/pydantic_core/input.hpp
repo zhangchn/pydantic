@@ -524,6 +524,29 @@ public:
 
     // Get the actual key object (for key validation; JSON keys are strings)
     virtual std::optional<py::object> get_key(const std::string& key) const = 0;
+
+    // One entry of a mapping, both halves as objects.  A dict node keeps walking entries() and
+    // looking each half up by its text; the two subclass mapping nodes ask for the objects, so
+    // an int key stays an int in an error location and two keys that spell the same text stay
+    // two entries rather than overwriting each other in the result.
+    struct Pair {
+        py::object key;
+        py::object value;
+        std::string key_text;  // the str() the string-keyed accessors use
+    };
+
+    // The read a document with no key objects (JSON, a string mapping) can offer.
+    virtual std::vector<Pair> pairs() const {
+        std::vector<Pair> out;
+        for (const auto& entry : entries()) {
+            Pair p;
+            p.key = get_key(entry.key).value_or(py::str(entry.key));
+            p.value = get_value(entry.key).value_or(py::none());
+            p.key_text = entry.key;
+            out.push_back(std::move(p));
+        }
+        return out;
+    }
 };
 
 // List iterator interface
@@ -615,6 +638,13 @@ public:
 
     // Container validation
     virtual ValResult<std::unique_ptr<ValidatedDict>> validate_dict(bool strict) const = 0;
+    // The two subclass mapping nodes ask an input question of their own
+    // (input_abstract.rs:151-176).  Delegating to validate_dict would hand back a refusal in
+    // dict_type's name, while Rust refuses a list handed to an ordered-dict as
+    // ordered_dict_type -- the name a JSON document also speaks under the "Input should be an
+    // object" wording (types.rs:648-654).
+    virtual ValResult<std::unique_ptr<ValidatedDict>> validate_ordered_dict(bool strict) const = 0;
+    virtual ValResult<std::unique_ptr<ValidatedDict>> validate_counter(bool strict) const = 0;
     virtual ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_list(bool strict) const = 0;
     virtual ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> validate_tuple(bool strict) const = 0;
 

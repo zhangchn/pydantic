@@ -116,6 +116,10 @@ public:
     std::optional<py::object> get_value(const std::string& key) const override;
     std::optional<py::object> get_key(const std::string& key) const override;
 
+    // The dict holds the objects, so hand them over in its own order instead of round-tripping
+    // through each key's text.
+    std::vector<Pair> pairs() const override;
+
     // Access underlying dict
     const py::dict& dict() const { return dict_; }
 
@@ -188,6 +192,8 @@ public:
 
     // Container validation
     ValResult<std::unique_ptr<ValidatedDict>> validate_dict(bool strict) const override;
+    ValResult<std::unique_ptr<ValidatedDict>> validate_ordered_dict(bool strict) const override;
+    ValResult<std::unique_ptr<ValidatedDict>> validate_counter(bool strict) const override;
     ValResult<std::unique_ptr<ValidatedDict>> validate_dict_from_attributes(bool strict) const;
     ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_list(bool strict) const override;
     ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> validate_tuple(bool strict) const override;

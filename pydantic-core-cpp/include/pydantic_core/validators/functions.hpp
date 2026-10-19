@@ -1372,7 +1372,7 @@ public:
             if (default_py_obj_.ptr()) {
                 last_type_name_ = "py_object";
                 return ValResult<std::shared_ptr<void>>(
-                    std::make_shared<py::object>(default_py_obj_));
+                    std::make_shared<py::object>(stored_default()));
             }
         }
         if (inner_) {
@@ -1404,7 +1404,7 @@ public:
         if (default_py_obj_.ptr()) {
             last_type_name_ = "py_object";
             return ValResult<std::shared_ptr<void>>(
-                std::make_shared<py::object>(default_py_obj_));
+                std::make_shared<py::object>(stored_default()));
         }
         return ValResult<std::shared_ptr<void>>(default_value_);
     }
@@ -1461,8 +1461,9 @@ public:
             has_raw = true;
         } else if (default_py_obj_.ptr()) {
             // Callable/complex default stored as a live Python object (e.g. a
-            // function used as a default value) — return it as-is.
-            raw = default_py_obj_;
+            // function used as a default value) — copied only when it cannot be
+            // hashed, which is Rust's rule for a stored default.
+            raw = stored_default();
             has_raw = true;
         } else if (!default_value_str_.empty()) {
             auto parse_result = parse_json(default_value_str_);
@@ -1514,7 +1515,17 @@ public:
     void set_default_type(const std::string& t) { default_type_ = t; }
     void set_validate_default(bool v) { validate_default_ = v; }
     bool validate_default() const { return validate_default_; }
-    void set_default_py_obj(py::object o) { default_py_obj_ = std::move(o); }
+    void set_default_py_obj(py::object o) {
+        default_py_obj_ = std::move(o);
+        // Rust decides at build time whether the stored default is copied every time it
+        // answers, and the answer is yes whenever the object cannot be hashed
+        // (with_default.rs:127-131, 194-198).  That copy is what keeps two models from
+        // sharing one mutable default.
+        if (default_py_obj_.ptr()) {
+            copy_default_ = PyObject_Hash(default_py_obj_.ptr()) == -1;
+            PyErr_Clear();
+        }
+    }
     // Rust's OnError: "raise" (default), "omit" or "default".
     void set_on_error(const std::string& v) { on_error_ = v; }
     bool omit_on_error() const { return on_error_ == "omit"; }
@@ -1533,11 +1544,27 @@ private:
     bool default_is_none_ = false;
     bool default_factory_takes_data_ = false;
     bool validate_default_ = false;
+    bool copy_default_ = false;
     std::string on_error_;
     py::object default_factory_ = py::none();
     py::object default_py_obj_;
     // Type name of the value the most recent validate() call produced.
     std::string last_type_name_;
+
+    // The stored default as Rust hands it out: shared when it was hashable, otherwise a
+    // fresh copy.deepcopy.  The deepcopy matters for the class as much as for the sharing --
+    // rebuilding a mapping default through the dict C API would drop the OrderedDict or
+    // Counter the caller asked for.
+    py::object stored_default() const {
+        if (!copy_default_) return default_py_obj_;
+        try {
+            return py::module_::import("copy").attr("deepcopy")(default_py_obj_);
+        } catch (py::error_already_set& e) {
+            e.restore();
+            PyErr_Clear();
+            return default_py_obj_;
+        }
+    }
 
     static py::object typed_default_to_py(const std::shared_ptr<void>& value, const std::string& type) {
         if (!value) return py::none();

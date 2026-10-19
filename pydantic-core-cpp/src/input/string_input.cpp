@@ -146,6 +146,27 @@ ValResult<std::unique_ptr<ValidatedDict>> StringInput::validate_dict(bool strict
                                Location(), as_error_value().repr);
 }
 
+// A string-input document holds a mapping or a bare string (input_string.rs:186-199); the
+// mapping answers all three node questions and a bare string is refused in the asking node's
+// own name.
+ValResult<std::unique_ptr<ValidatedDict>> StringInput::validate_ordered_dict(bool strict) const {
+    auto dict = validate_dict(strict);
+    if (dict.is_err()) {
+        return ValError::line_error(PydanticKnownError::ordered_dict_type(),
+                                   Location(), as_error_value().repr);
+    }
+    return dict;
+}
+
+ValResult<std::unique_ptr<ValidatedDict>> StringInput::validate_counter(bool strict) const {
+    auto dict = validate_dict(strict);
+    if (dict.is_err()) {
+        return ValError::line_error(PydanticKnownError::counter_type(),
+                                   Location(), as_error_value().repr);
+    }
+    return dict;
+}
+
 ValResult<ValMatch<std::unique_ptr<ValidatedList>>> StringInput::validate_list(bool strict) const {
     // String input can't be a list
     return ValError::line_error(PydanticKnownError::list_type(),
