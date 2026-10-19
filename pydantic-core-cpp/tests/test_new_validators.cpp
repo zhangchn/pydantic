@@ -6,6 +6,7 @@
 #include "pydantic_core/errors.hpp"
 #include "pydantic_core/validation_state.hpp"
 #include "pydantic_core/validators/basic.hpp"
+#include "pydantic_core/validators/complex.hpp"
 #include "pydantic_core/validators/special.hpp"
 
 #include <pybind11/pybind11.h>
@@ -230,6 +231,58 @@ TEST_CASE("Definition-ref resolves in serializer build") {
     // The SchemaBuilder should not throw
     auto v = SchemaBuilder::build(schema);
     CHECK(v != nullptr);
+}
+
+} // TEST_SUITE
+
+// ---------------------------------------------------------------------------
+// TaggedUnionValidator: which question the tag lookup asks
+// ---------------------------------------------------------------------------
+TEST_SUITE("TaggedUnionValidator") {
+
+// The error type the union reports when it cannot read its tag, or the error it
+// reports once the tag is read ("<ok>" for a matched choice).
+static std::string tag_union_error(const py::object& input, bool json_run, bool from_attributes) {
+    TaggedUnionValidator::PathStep key;
+    key.key = "t";
+    std::vector<TaggedUnionValidator::PathStep> path{key};
+    std::vector<TaggedUnionValidator::Choice> choices{
+        TaggedUnionValidator::Choice{py::str("A"),
+                                     std::make_shared<LiteralValidator>(py::list{py::str("A")})}};
+    TaggedUnionValidator union_v({path}, std::move(choices));
+    union_v.set_from_attributes(from_attributes);
+    ValidationState state;
+    if (json_run) state.set_input_type(InputType::Json);
+    PythonInput py_input(input);
+    auto result = union_v.validate(py_input, state);
+    if (result.is_ok()) return "<ok>";
+    return result.error().line_errors()[0]->error_type.type_name();
+}
+
+TEST_CASE("A document is only ever asked for a dict") {
+    // Rust's validate_model_fields drops from_attributes for every input but
+    // Python's (input_abstract.rs:177-179) and JSON's validate_dict drops strict
+    // with it (input_json.rs:230-235), so whatever the schema asked for, a
+    // document that is not an object reports dict_type.  The port runs a JSON
+    // document through PythonInput once it is materialized, so the run kind held
+    // by the state is the only thing keeping it from asking attributes of a
+    // number and reporting model_attributes_type.
+    for (bool from_attributes : {false, true}) {
+        CHECK(tag_union_error(py::int_(1), true, from_attributes) == "dict_type");
+        CHECK(tag_union_error(py::list{}, true, from_attributes) == "dict_type");
+        CHECK(tag_union_error(py::str("A"), true, from_attributes) == "dict_type");
+        CHECK(tag_union_error(py::none(), true, from_attributes) == "dict_type");
+    }
+
+    // A Python run keeps the two questions apart.
+    CHECK(tag_union_error(py::int_(1), false, true) == "model_attributes_type");
+    CHECK(tag_union_error(py::int_(1), false, false) == "dict_type");
+
+    // An object still gives up its tag in a JSON run.
+    py::dict doc;
+    doc["t"] = py::str("B");
+    CHECK(tag_union_error(doc, true, true) == "union_tag_invalid");
+    CHECK(tag_union_error(doc, true, false) == "union_tag_invalid");
 }
 
 } // TEST_SUITE

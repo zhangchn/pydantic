@@ -581,10 +581,26 @@ private:
     // of them reporting dict_type when neither fits.  Whether an input is a Mapping is
     // decided by the abstract class (pyo3 casts to PyMapping through it), not by
     // PyMapping_Check, which is true of every class that spells __getitem__ and of a str.
-    // A JSON input ignores from_attributes (input_abstract.rs:151-153) and fails as
-    // dict_type too (input_json.rs:228-233).
+    //
+    // Only Python asks that question at all: the trait's validate_model_fields drops
+    // from_attributes for every other input (input_abstract.rs:177-179) and JSON's
+    // validate_dict drops strict with it (input_json.rs:230-235), so a document answers the
+    // dict question and nothing else.  The port reads a JSON document as Python objects --
+    // SchemaValidator.validate_json materializes it -- so the run kind held by the state is
+    // what tells this function it is not looking at a Python object.
     bool fields_source(const Input& input, ValidationState& state, bool from_attributes,
                        TagSource* out, ErrorType::Kind* unreadable) const {
+        if (state.input_type() == InputType::Json) {
+            if (auto* py_input = dynamic_cast<const PythonInput*>(&input)) {
+                const py::object& doc = py_input->py_object();
+                if (Py_TYPE(doc.ptr()) == &PyDict_Type) {
+                    out->value = doc;
+                    return true;
+                }
+            }
+            *unreadable = ErrorType::Kind::DictType;
+            return false;
+        }
         if (auto* py_input = dynamic_cast<const PythonInput*>(&input)) {
             const py::object& obj = py_input->py_object();
             const bool exact_dict = Py_TYPE(obj.ptr()) == &PyDict_Type;
