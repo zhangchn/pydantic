@@ -280,6 +280,31 @@ def test_entry_points_refuse_positional_arguments():
         from_json(b'[1]', data=b'[2]')
 
 
+def test_validate_json_answers_to_the_keywords_its_signature_declares():
+    # Rust's validate_json (validators/mod.rs:263) names the payload `input` and takes strict,
+    # extra, context, allow_partial, by_alias and by_name -- and no from_attributes, because a
+    # document has no attributes to read.  validate_python (:187) does take that one, so the two
+    # entry points answer to different keyword sets and a keyword accepted by the wrong one is a
+    # silently dropped instruction rather than a refusal.
+    v = SchemaValidator(
+        core_schema.typed_dict_schema({'a': core_schema.typed_dict_field(core_schema.int_schema())})
+    )
+
+    assert v.validate_json('{"a": 1}') == {'a': 1}
+    assert v.validate_json(input='{"a": 1}') == {'a': 1}
+    for kw in ({'strict': True}, {'extra': 'allow'}, {'context': None}, {'allow_partial': False},
+               {'by_alias': True}, {'by_name': True}):
+        assert v.validate_json('{"a": 1}', **kw) == {'a': 1}
+
+    for name in ('json_data', 'from_attributes', 'not_real'):
+        with pytest.raises(TypeError, match=re.escape(
+                f"SchemaValidator.validate_json() got an unexpected keyword argument '{name}'")):
+            v.validate_json('{"a": 1}', **{name: 1})
+
+    # the python run is the entry point that can be told to read attributes
+    assert v.validate_python({'a': 1}, from_attributes=True) == {'a': 1}
+
+
 def test_to_json_fallback():
     with pytest.raises(PydanticSerializationError, match=r'Unable to serialize unknown type: <.+\.Foobar'):
         to_json(Foobar())
