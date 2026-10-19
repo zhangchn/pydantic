@@ -1260,6 +1260,115 @@ static void throw_python_error(PyObject* type, const std::string& message) {
     throw py::error_already_set();
 }
 
+// rust prints a codepoint bare when it prints at all and cannot extend a grapheme.  CPython answers
+// both questions from the same Unicode tables the reference's tables came from -- str.isprintable()
+// is "not Other, not Separator, ASCII space aside", unicodedata.combining() is the combining class
+// -- and a schema key this wrong is not a hot path, so they are asked rather than restated here as
+// ranges.  A zero combining class is not exactly Grapheme_Extend: a spacing mark that rust escapes
+// prints bare here.
+static bool rust_debug_bares_cp(Py_UCS4 cp) {
+    if (cp < 0x80) return cp >= 0x20 && cp != 0x7f;
+    try {
+        py::object ch = py::reinterpret_steal<py::object>(PyUnicode_FromOrdinal(static_cast<int>(cp)));
+        if (!ch) throw py::error_already_set();
+        if (!ch.attr("isprintable")().cast<bool>()) return false;
+        return py::module_::import("unicodedata").attr("combining")(ch).cast<int>() == 0;
+    } catch (py::error_already_set&) {
+        PyErr_Clear();
+        return true;
+    }
+}
+
+// rust's `{:?}` of a &str -- what the reference prints for a tz_constraint it did not recognise
+// (datetime.rs:299).  escape_debug's specials, then `\u{..}` (lowercase, no padding) for a char it
+// would not print bare.
+static std::string rust_debug_quote(PyObject* text) {
+    std::string out = "\"";
+    const Py_ssize_t len = PyUnicode_GetLength(text);
+    if (len < 0) {
+        PyErr_Clear();
+        return out + '"';
+    }
+    for (Py_ssize_t i = 0; i < len; ++i) {
+        const Py_UCS4 cp = PyUnicode_ReadChar(text, i);
+        switch (cp) {
+            case 0:    out += "\\0";  continue;
+            case '\t': out += "\\t";  continue;
+            case '\r': out += "\\r";  continue;
+            case '\n': out += "\\n";  continue;
+            case '\\': out += "\\\\"; continue;
+            case '"':  out += "\\\""; continue;
+            default: break;
+        }
+        char buf[16];
+        if (rust_debug_bares_cp(cp)) {
+            if (cp < 0x80) {
+                out += static_cast<char>(cp);
+            } else if (cp < 0x800) {
+                out += static_cast<char>(0xc0 | (cp >> 6));
+                out += static_cast<char>(0x80 | (cp & 0x3f));
+            } else if (cp < 0x10000) {
+                out += static_cast<char>(0xe0 | (cp >> 12));
+                out += static_cast<char>(0x80 | ((cp >> 6) & 0x3f));
+                out += static_cast<char>(0x80 | (cp & 0x3f));
+            } else {
+                out += static_cast<char>(0xf0 | (cp >> 18));
+                out += static_cast<char>(0x80 | ((cp >> 12) & 0x3f));
+                out += static_cast<char>(0x80 | ((cp >> 6) & 0x3f));
+                out += static_cast<char>(0x80 | (cp & 0x3f));
+            }
+        } else {
+            std::snprintf(buf, sizeof(buf), "\\u{%x}", static_cast<unsigned>(cp));
+            out += buf;
+        }
+    }
+    out += '"';
+    return out;
+}
+
+// datetime.rs:303-318 reads tz_constraint as a name ("naive"/"aware", anything else refused by
+// name) or, for a value that is not a str at all, an i32 -- so the check reaches through the same
+// __index__ protocol pyo3's extract() asks for, and reports what CPython reports: a float, None,
+// bytes or a Decimal get PyNumber_Index's TypeError, a value too big for a C long gets its
+// OverflowError, and a value that fits a C long but not an i32 gets rust's conversion message.
+static TZConstraint tz_constraint_from_value(const py::object& value) {
+    TZConstraint out;
+    if (PyUnicode_Check(value.ptr())) {
+        // to_str(), not a cast: text holding a surrogate refuses to be UTF-8, and the reference
+        // hands that UnicodeEncodeError out rather than a conversion failure of its own.
+        Py_ssize_t size = 0;
+        const char* text = PyUnicode_AsUTF8AndSize(value.ptr(), &size);
+        if (!text) throw py::error_already_set();
+        const std::string name(text, static_cast<size_t>(size));
+        if (name == "naive") {
+            out.kind = TZConstraint::Kind::Naive;
+            return out;
+        }
+        if (name == "aware") {
+            out.kind = TZConstraint::Kind::Aware;
+            return out;
+        }
+        throw SchemaError("Invalid tz_constraint " + rust_debug_quote(value.ptr()));
+    }
+    PyObject* indexed = PyNumber_Index(value.ptr());
+    if (!indexed) throw py::error_already_set();
+    py::object held = py::reinterpret_steal<py::object>(indexed);
+    const long as_long = PyLong_AsLong(indexed);
+    if (as_long == -1 && PyErr_Occurred()) throw py::error_already_set();
+    if (as_long > 2147483647L)
+        throw_python_error(PyExc_OverflowError, "number too large to fit in target type");
+    if (as_long < -2147483648L)
+        throw_python_error(PyExc_OverflowError, "number too small to fit in target type");
+    out.kind = TZConstraint::Kind::Offset;
+    out.offset = static_cast<int>(as_long);
+    return out;
+}
+
+// The key is read whether or not its value makes sense; only its absence means "no constraint".
+static void read_tz_constraint(const py::dict& schema, TZConstraint& out) {
+    if (schema.contains("tz_constraint")) out = tz_constraint_from_value(schema["tz_constraint"]);
+}
+
 // pyo3's DowncastError text -- what a failed cast::<PyString> hands to its caller.  None is
 // spelled without the "object" word.
 static std::string pyo3_downcast_text(py::handle obj, const char* target) {
@@ -2073,6 +2182,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
                 else v->le = schema[k];
             }
         }
+        read_tz_constraint(schema, v->tz);
         return v;
     }
     if (type == "datetime") {
@@ -2089,9 +2199,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         if (schema.contains("now_op") && py::isinstance<py::str>(schema["now_op"])) {
             v->now_op = schema["now_op"].cast<std::string>();
         }
-        if (schema.contains("tz_constraint") && py::isinstance<py::str>(schema["tz_constraint"])) {
-            v->tz_constraint = schema["tz_constraint"].cast<std::string>();
-        }
+        read_tz_constraint(schema, v->tz);
         return v;
     }
     if (type == "timedelta") {

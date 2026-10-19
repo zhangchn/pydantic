@@ -461,6 +461,16 @@ private:
     bool strict_ = false;
 };
 
+// The reference reads a tz_constraint into one of three shapes and nothing else
+// (datetime.rs:290-318): the name "naive", the name "aware", or an int the input's UTC offset has
+// to equal.  A value of any other shape is refused while the schema builds, so the shapes below are
+// the whole set a validator can ever hold.
+struct TZConstraint {
+    enum class Kind { None, Naive, Aware, Offset };
+    Kind kind = Kind::None;
+    int offset = 0;
+};
+
 // TimeValidator - validates time values
 class TimeValidator : public Validator {
 public:
@@ -470,6 +480,7 @@ public:
     py::object lt = py::none();
     py::object ge = py::none();
     py::object le = py::none();
+    TZConstraint tz;
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -519,7 +530,7 @@ public:
     py::object ge = py::none();
     py::object le = py::none();
     std::string now_op;        // "", "past", "future"
-    std::string tz_constraint; // "", "aware", "naive"
+    TZConstraint tz;
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -568,11 +579,11 @@ public:
 
             // Apply tz_constraint (aware/naive)
             bool is_aware = dt.time.tz_offset.has_value();
-            if (tz_constraint == "aware" && !is_aware) {
+            if (tz.kind == TZConstraint::Kind::Aware && !is_aware) {
                 return ValError::line_error(ErrorType(ErrorType::Kind::TimezoneAware),
                     state.location(), input.as_error_value().repr);
             }
-            if (tz_constraint == "naive" && is_aware) {
+            if (tz.kind == TZConstraint::Kind::Naive && is_aware) {
                 return ValError::line_error(ErrorType(ErrorType::Kind::TimezoneNaive),
                     state.location(), input.as_error_value().repr);
             }
