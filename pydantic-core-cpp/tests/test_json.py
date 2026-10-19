@@ -1037,13 +1037,21 @@ def test_to_json_temporal_mode():
     assert to_json([dt], temporal_mode='seconds') == b'[1704164645.0]'
     assert to_json([dt], temporal_mode='milliseconds') == b'[1704164645000.0]'
     assert to_json([dtc], temporal_mode='seconds') == b'[1704157445.123456]'
-    # timedelta_mode="float" is the same switch with a delta's name on it: one mode answers
-    # for every temporal kind (config.rs:58-74), so a datetime goes to seconds with it too.
-    assert to_json([dt], timedelta_mode='float') == b'[1704164645.0]'
-    assert to_json([dt], timedelta_mode='float', temporal_mode='iso8601') == b'[1704164645.0]'
+    # Two knobs, not one (config.rs:53-68): timedelta_mode answers only for a delta, so a
+    # datetime keeps its ISO form under it, and only a temporal mode that left its default
+    # reaches across to answer for the delta too.
+    assert to_json([dt], timedelta_mode='float') == b'["2024-01-02T03:04:05"]'
+    assert to_json([dt], timedelta_mode='float', temporal_mode='iso8601') == b'["2024-01-02T03:04:05"]'
     assert to_json([dt], temporal_mode='seconds', timedelta_mode='iso8601') == b'[1704164645.0]'
+    assert to_json([td], timedelta_mode='float') == b'[3630.0]'
+    assert to_jsonable_python([dt], timedelta_mode='float') == ['2024-01-02T03:04:05']
+    assert to_jsonable_python([td], timedelta_mode='float') == [3630.0]
     assert to_jsonable_python([dt], temporal_mode='seconds') == [1704164645.0]
     assert to_jsonable_python([dt]) == ['2024-01-02T03:04:05']
+    # A key takes the same shape as the value, so the leak shows there too: the delta's knob
+    # moves the delta's key and leaves the datetime's key spelled.
+    assert to_json({dt: 'x'}, timedelta_mode='float') == b'{"2024-01-02T03:04:05":"x"}'
+    assert to_json({td: 'x'}, timedelta_mode='float') == b'{"3630":"x"}'
     # The mode does not stop at a datetime: a date, a time and a delta all follow it.
     assert to_json([d], temporal_mode='seconds') == b'[1704153600.0]'
     assert to_json([d], temporal_mode='milliseconds') == b'[1704153600000.0]'

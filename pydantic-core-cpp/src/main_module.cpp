@@ -781,26 +781,34 @@ static void check_inf_nan_mode(const std::string& mode) {
                           "`, expected null or constants or strings or ");
 }
 
-// SerializationConfig::from_args (config.rs:58-74).  One mode answers for every temporal
-// kind, so timedelta_mode="float" -- which has no milliseconds of its own to ask for --
-// becomes seconds for a datetime too, and is never even read when temporal_mode says
-// something else: with temporal_mode="seconds" a timedelta_mode="bogus" goes unanswered.
-static std::string resolve_temporal_mode(const std::string& timedelta_mode,
-                                         const std::string& temporal_mode) {
-    if (temporal_mode != "iso8601") {
-        check_temporal_mode(temporal_mode);
-        return temporal_mode;
-    }
-    check_timedelta_mode(timedelta_mode);
-    return timedelta_mode == "float" ? "seconds" : "iso8601";
-}
-
 // What a resolved temporal mode means for the one kind that has a second name for its
 // shape: seconds is "float" and milliseconds is "milliseconds" to the timedelta leaf.
 static std::string timedelta_shape_for(const std::string& temporal_mode) {
     if (temporal_mode == "seconds") return "float";
     if (temporal_mode == "milliseconds") return "milliseconds";
     return "iso8601";
+}
+
+// SerializationConfig::from_args (config.rs:53-68) answers two questions, not one:
+// `temporal_mode` says what a date, datetime or time becomes, `timedelta_mode` what a timedelta
+// becomes.  They meet in one direction only -- a temporal mode that left its default answers for
+// the delta too, which is why a timedelta_mode="bogus" goes unparsed when temporal_mode already
+// said seconds -- and a delta mode never reaches a datetime: TimedeltaMode is its own enum
+// (config.rs:118-124) with no path into the temporal field, so timedelta_mode="float" cannot move
+// a datetime to the epoch.  Rust parses the temporal mode first, so whoever is wrong first is the
+// only one named.
+static void resolve_temporal_modes(const std::string& timedelta_mode,
+                                   const std::string& temporal_mode,
+                                   std::string& temporal_out,
+                                   std::string& timedelta_out) {
+    check_temporal_mode(temporal_mode);
+    temporal_out = temporal_mode;
+    if (temporal_mode == "iso8601") {
+        check_timedelta_mode(timedelta_mode);
+        timedelta_out = timedelta_mode;  // "iso8601" | "float", already the delta leaf's words
+    } else {
+        timedelta_out = timedelta_shape_for(temporal_mode);
+    }
 }
 
 // Convert one typed leaf value for JSON-mode serialization (SchemaSerializer
@@ -8335,15 +8343,16 @@ static py::bytes to_json_fn(const py::object& value, std::optional<size_t> inden
     // handed them someone else's.
     SerCallExtraScope ser_scope;
     ser_apply_delegated_extra();
-    // SerializationConfig::from_args, asked in Rust's own order: the temporal mode (which
-    // may be the timedelta mode wearing its hat), then bytes, then inf_nan.  Whoever is
-    // wrong first is the only one named, so the order is part of what is reproduced.
-    std::string temporal = resolve_temporal_mode(timedelta_mode, temporal_mode);
+    // SerializationConfig::from_args, asked in Rust's own order: the temporal mode and whatever
+    // it leaves the timedelta mode to answer for, then bytes, then inf_nan.  Whoever is wrong
+    // first is the only one named, so the order is part of what is reproduced.
+    std::string temporal, delta_shape;
+    resolve_temporal_modes(timedelta_mode, temporal_mode, temporal, delta_shape);
     check_bytes_mode(bytes_mode);
     check_inf_nan_mode(inf_nan_mode);
     g_ser_extra.mode = "json";
     g_ser_extra.temporal_mode = temporal;
-    g_ser_extra.timedelta_mode = timedelta_shape_for(temporal);
+    g_ser_extra.timedelta_mode = delta_shape;
     g_ser_extra.inf_nan_mode = inf_nan_mode;
     // ...which now includes the caller's bytes mode: it was dropped, so every byte
     // string in the value was written as utf8 text however the caller asked for it.
@@ -8886,7 +8895,8 @@ static py::object to_jsonable_fn(const py::object& value, std::optional<py::obje
     std::optional<py::object> fallback, bool serialize_as_any, std::optional<bool> polymorphic, std::optional<py::object> context) {
     // The same from_args, in the same order, as the JSON entry point: nothing below is
     // asked before the modes have been read, so a refused call mutates no run state.
-    std::string temporal = resolve_temporal_mode(timedelta_mode, temporal_mode);
+    std::string temporal, delta_shape;
+    resolve_temporal_modes(timedelta_mode, temporal_mode, temporal, delta_shape);
     check_bytes_mode(bytes_mode);
     check_inf_nan_mode(inf_nan_mode);
     // Rust builds the same Extra for this entry that to_python(mode="json") gets, and
@@ -8904,13 +8914,13 @@ static py::object to_jsonable_fn(const py::object& value, std::optional<py::obje
     g_ser_extra.fallback = fallback && !fallback->is_none() ? *fallback : py::none();
     g_ser_extra.bytes_mode = bytes_mode;
     g_ser_extra.temporal_mode = temporal;
-    g_ser_extra.timedelta_mode = timedelta_shape_for(temporal);
+    g_ser_extra.timedelta_mode = delta_shape;
     g_ser_extra.inf_nan_mode = inf_nan_mode;
     g_ser_extra.round_trip = round_trip;  // mod.rs:302 hands it to the Extra
     g_ser_extra.context = context && !context->is_none() ? *context : py::none();
     g_ser_extra.warnings = py::str("warn");   // this entry has no warnings keyword to ask
     g_polymorphic_serialization = polymorphic;
-    JsonableRun run{bytes_mode, timedelta_shape_for(temporal), temporal, inf_nan_mode, serialize_unknown, by_alias};
+    JsonableRun run{bytes_mode, delta_shape, temporal, inf_nan_mode, serialize_unknown, by_alias};
     return infer_jsonable_python(value, run, include ? *include : py::none(), exclude ? *exclude : py::none());
 }
 
