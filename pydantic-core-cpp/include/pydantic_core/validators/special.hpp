@@ -1876,6 +1876,19 @@ public:
 
     std::string name() const override { return "enum"; }
 
+    // enum_.rs:57 builds one name per flavour around the class's repr -- "enum[Color]",
+    // "int-enum[Color]", ... -- and Rust has a single name per validator, so that string is also
+    // what a bare enum node titles its ValidationError with (validators/mod.rs:165-168).  The
+    // legacy shape has no class to name, and Rust has no such shape either.
+    std::string display_name() const override {
+        if (class_repr_.empty()) return name();
+        std::string prefix = "enum";
+        if (sub_type_ == "int") prefix = "int-enum";
+        else if (sub_type_ == "str") prefix = "str-enum";
+        else if (sub_type_ == "float") prefix = "float-enum";
+        return prefix + "[" + class_repr_ + "]";
+    }
+
     // Rust's EnumValidator Debug says whether the class supplied a _missing_
     // hook; this port looks the hook up on the class when it needs it, which is
     // the same question answered at repr time.
@@ -1919,21 +1932,6 @@ public:
             return std::string();
         }
         return py::reinterpret_steal<py::str>(r).cast<std::string>();
-    }
-
-    // PyType::name() in Rust reads __qualname__, which is what the is-instance
-    // message shows (e.g. "test_strict_enum.<locals>.Demo").
-    static std::string type_qualname(PyObject* t) {
-        PyObject* q = PyObject_GetAttrString(t, "__qualname__");
-        if (!q) {
-            PyErr_Clear();
-            q = PyObject_GetAttrString(t, "__name__");
-        }
-        if (!q) {
-            PyErr_Clear();
-            return std::string();
-        }
-        return py::reinterpret_steal<py::str>(q).cast<std::string>();
     }
 
     ValResult<std::shared_ptr<void>> validate(

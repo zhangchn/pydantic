@@ -32,12 +32,15 @@ SchemaValidator::SchemaValidator(const py::dict& schema,
                                 const py::dict& config,
                                 bool use_prebuilt)
     : schema_json_(""), config_json_("") {
-    // Extract title from schema
-    if (schema.contains("title")) {
-        title_ = py::str(schema["title"]).cast<std::string>();
-    } else {
-        title_ = "Schema";
+    // validators/mod.rs:161-168 titles a run from the config's title, and otherwise from the
+    // validator that answers it.  A ``title`` written in the *schema* is not consulted: pydantic
+    // puts a node's title there for the JSON schema, where it never reaches an error, and a model
+    // node is named by its class (model.rs:83) rather than by anything the schema says.
+    std::string config_title;
+    if (config.contains("title") && !config["title"].is_none()) {
+        config_title = py::str(config["title"]).cast<std::string>();
     }
+    title_ = "Schema";
 
     // Extract post_init method name from schema
     if (schema.contains("post_init")) {
@@ -47,6 +50,12 @@ SchemaValidator::SchemaValidator(const py::dict& schema,
     // The build names the node that failed, once per node between it and here, so the
     // exception goes to Python exactly as the build left it.
     validator_ = SchemaBuilder::build_from_py(schema, config, use_prebuilt);
+    if (!config_title.empty()) {
+        title_ = std::move(config_title);
+    } else if (validator_) {
+        std::string name = validator_->display_name();
+        if (!name.empty()) title_ = std::move(name);
+    }
 
     // Set up config defaults
     config_.strict = std::nullopt;

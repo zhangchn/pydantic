@@ -2311,9 +2311,14 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             std::optional<bool> declared_strict = strict_opt_py(schema, config);
             py::object missing_hook = py::none();
             if (schema.contains("missing")) missing_hook = schema["missing"];
+            // enum_.rs:46 takes the class through class_repr(), the same helper is-instance and
+            // is-subclass use: an explicit cls_repr wins, the qualname is the fallback.  It names
+            // both the is-instance message and, qualified by the enum's flavour, the node's own
+            // name -- so it is read here, before the class moves into the validator.
+            std::string enum_class_repr = class_repr_py(schema, cls);
             v->configure_class(std::move(cls), std::move(cls_members), std::move(sub_type),
                                EnumValidator::join_expected(value_reprs),
-                               EnumValidator::type_qualname(schema["cls"].ptr()), declared_strict,
+                               std::move(enum_class_repr), declared_strict,
                                missing_hook);
         }
         return v;
@@ -2839,23 +2844,17 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         required_class_slot(schema, "cls");
         std::shared_ptr<Validator> inner =
             build_from_py_dict(required_schema_slot(schema, "schema"), inner_config, definitions);
+        // model.rs:83 takes the name from the class and nowhere else.  A ``title`` written in the
+        // schema is not one of its sources -- Rust consults a title only in the config, when it
+        // titles a run (validators/mod.rs:161-168) -- and a ``model_name`` belongs to the fields
+        // node, where it names the model_type error rather than the validator (model_fields.rs:79).
         std::string model_name;
-        if (schema.contains("title") && !schema["title"].is_none()) {
-            model_name = py::str(schema["title"]).cast<std::string>();
-        } else if (schema.contains("model_name") && !schema["model_name"].is_none()) {
-            model_name = py::str(schema["model_name"]).cast<std::string>();
-        } else if (schema.contains("cls") && !schema["cls"].is_none()) {
+        if (schema.contains("cls") && !schema["cls"].is_none()) {
             auto cls = schema["cls"];
             if (py_hasattr(cls, "__name__")) {
                 model_name = cls.attr("__name__").cast<std::string>();
             } else {
                 model_name = py::str(cls).cast<std::string>();
-            }
-        }
-        // Propagate model name to inner ModelFieldsValidator (JSON path defaults to "Model")
-        if (!model_name.empty()) {
-            if (auto mfv = std::dynamic_pointer_cast<ModelFieldsValidator>(inner)) {
-                mfv->set_model_name(model_name);
             }
         }
         // Propagate from_attributes to inner ModelFieldsValidator
@@ -2988,6 +2987,11 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             v = tdv;
         } else {
             v = std::make_shared<ModelFieldsValidator>();
+            // model_fields.rs:79-81 -- the fields node names its own model_type error, falling
+            // back to "Model".  Nothing is inherited from the model node around it.
+            if (schema.contains("model_name") && py::isinstance<py::str>(schema["model_name"])) {
+                v->set_model_name(schema["model_name"].cast<std::string>());
+            }
         }
         // Rust reads is_strict(schema, config) for the fields validator itself, so the
         // model-wide strict config also decides how the input container is read.

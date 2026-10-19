@@ -823,43 +823,6 @@ def _apply_model_post_init(instance, original_input) -> None:
         ) from None
 
 
-def _get_model_name(schema: dict | None) -> str:
-    """Extract the model name from a pydantic schema dict."""
-    if not isinstance(schema, dict):
-        return ''
-    title = schema.get('title', '')
-    if title:
-        return title
-    ref = schema.get('ref', '')
-    if ref:
-        # ref format: 'module.ClassName:hex_id' — extract just ClassName
-        name = ref.split(':')[0].rsplit('.', 1)[-1]
-        if name:
-            return name
-        return ref
-    cls = schema.get('cls')
-    if cls is not None:
-        return getattr(cls, '__name__', '')
-    # Check definitions wrapper
-    if schema.get('type') == 'definitions':
-        inner = schema.get('schema', {})
-        if isinstance(inner, dict):
-            return _get_model_name(inner)
-        defs = schema.get('definitions', [])
-        if defs:
-            first = defs[0]
-            title = first.get('title', '')
-            if title:
-                return title
-            ref = first.get('ref', '')
-            if ref:
-                return ref
-            cls = first.get('cls')
-            if cls is not None:
-                return getattr(cls, '__name__', '')
-    return ''
-
-
 # Rust renders the documentation link into str(ValidationError) as well as into
 # errors(): validation_exception.rs:237 derives the prefix from pydantic's own
 # version -- major and minor only, "latest" when pydantic cannot be asked -- and
@@ -1868,24 +1831,15 @@ class SchemaValidator:
         return result
 
     def _schema_title(self) -> str:
-        # Rust titles a validator after the thing it validates: the config title
-        # wins, then the model named by the schema, then the root validator's own
-        # display name (a bare list[int] is titled after the list).
-        config = getattr(self, "_config", None)
-        config_title = config.get('title') if isinstance(config, dict) else None
-        if isinstance(config_title, str) and config_title:
-            return config_title
-        name = _get_model_name(self._schema) if hasattr(self, '_schema') else ''
-        if not name:
-            name = getattr(self._base, 'validator_display_name', '') or ''
-        return name
+        # validators/mod.rs:161-168 titles a run from the config's title, and otherwise from the
+        # validator that answers it -- so an enum node says ``int-enum[Color]`` (enum_.rs:57) and a
+        # model node says the class name (model.rs:83).  The C++ validator makes that decision and
+        # exposes it as ``title``; a title, ref or cls written in the schema is not part of it.
+        return self._base.title
 
     @property
     def title(self):
-        base = self._base.title
-        if isinstance(base, str) and base and base != 'Schema':
-            return base
-        return self._schema_title() or base
+        return self._schema_title()
 
     def _get_field_defaults(self, schema):
         """Extract default values for fields from schema."""
@@ -1940,9 +1894,8 @@ class SchemaValidator:
         return result
 
     def _attach_error_context(self, e) -> None:
-        # The C++ error renders the generic "Schema" title; the Python formatter
-        # needs the untranslated message plus the model name taken from the
-        # schema, whatever entry point raised the error.
+        # The Python formatter wants the untranslated message, so keep what C++
+        # rendered before it gets re-formatted with pydantic's own wording.
         if not hasattr(e, '_cpp_msg'):
             e._cpp_msg = _orig_str(e)
         # Rust uses the config's title when it carries one; that is how
