@@ -27,6 +27,21 @@ static py::object timedelta_constraint_from_schema(const py::object& value, cons
     return py_timedelta_object(parsed.value().value().as_raw());
 }
 
+// A temporal bound slot that is in the schema is read whether or not it holds anything: the
+// reference feeds the value straight to the same coercion a value gets, so an explicit None
+// names a bound that cannot coerce and the schema is refused (date.rs:186-197, time.rs:111-122,
+// datetime.rs:195-206).  `keys` is in the order the reference reads them, which is the key the
+// message names when several slots are empty.
+static void refuse_empty_temporal_bounds(const py::dict& schema,
+                                         const std::initializer_list<const char*>& keys,
+                                         const char* word) {
+    for (const char* key : keys) {
+        if (schema.contains(key) && schema[key].is_none()) {
+            throw py::value_error(std::string("'") + key + "' must be coercible to a " + word + " instance");
+        }
+    }
+}
+
 // Helper: convert string to ExtraBehavior
 static ExtraBehavior extra_behavior_from_string(const std::string& s) {
     if (s == "allow") return ExtraBehavior::Allow;
@@ -1277,10 +1292,24 @@ static std::optional<std::string> py_str_slot(const py::dict& d, const char* key
     return value.cast<std::string>();
 }
 
-// Helper: extract int from py::dict
-static int64_t py_int(const py::dict& d, const char* key, int64_t fallback = 0) {
-    if (!d.contains(key)) return fallback;
-    return d[key].cast<int64_t>();
+// A count slot -- min_length, max_length, decimal_places -- is get_as::<usize> in Rust
+// (list.rs:107, string.rs:206, decimal.rs:66), and pyo3's usize extraction is CPython's
+// PyLong_AsSize_t: it asks the object for __index__ and hands back CPython's own words for every
+// way a value can fail, so "'str' object cannot be interpreted as an integer", "can't convert
+// negative int to unsigned" and "int too big to convert" are all Python's, not a cast's.  A bool
+// is an int to __index__, which is why min_length=True is a count of 1 rather than a refusal.
+static std::optional<size_t> count_slot(const py::dict& d, const char* key) {
+    if (!d.contains(key)) return std::nullopt;
+    py::object value = d[key];
+    // Asking for __index__ first is what gives the refusal its words: "'str' object cannot be
+    // interpreted as an integer" is PyNumber_Index's, and PyLong_AsSize_t on a non-int says
+    // "an integer is required" instead.
+    PyObject* index = PyNumber_Index(value.ptr());
+    if (!index) throw py::error_already_set();
+    py::object held = py::reinterpret_steal<py::object>(index);
+    size_t parsed = PyLong_AsSize_t(held.ptr());
+    if (parsed == static_cast<size_t>(-1) && PyErr_Occurred()) throw py::error_already_set();
+    return parsed;
 }
 
 // Rust reads every bool slot with get_as::<bool> (is_strict at build_tools.rs:44, fail_fast
@@ -1756,7 +1785,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             // an int_ was dropped here, so `ge=0.0` on an int validated the values it was
             // written to refuse -- and said nothing about it.
             auto coerce_bound = [&](const char* k) -> std::optional<py::object> {
-                if (!schema.contains(k) || schema[k].is_none()) return std::nullopt;
+                if (!schema.contains(k)) return std::nullopt;
                 py::object val = schema[k];
                 std::string message = std::string("'") + k + "' must be coercible to an integer";
                 if (py::isinstance<py::int_>(val)) return val;
@@ -1846,10 +1875,11 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             v->strict = is_strict_py(schema, config);
             auto get_f = [&](const char* k) -> std::optional<double> {
                 if (!schema.contains(k)) return std::nullopt;
-                py::object val = schema[k];
-                if (py::isinstance<py::int_>(val)) return val.cast<double>();
-                if (py::isinstance<py::float_>(val)) return val.cast<double>();
-                return std::nullopt;
+                // A bound that is there is read as a real number, so the refusal is CPython's
+                // own -- "must be real number, not NoneType" -- rather than "no bound".
+                double bound = PyFloat_AsDouble(schema[k].ptr());
+                if (bound == -1.0 && PyErr_Occurred()) throw py::error_already_set();
+                return bound;
             };
             v->gt = get_f("gt");
             v->ge = get_f("ge");
@@ -1858,7 +1888,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             // A float bound is read as a float and nothing else (float.rs:187): a
             // string is a TypeError rather than a parse, and a NaN or an infinity is a
             // bound no input can ever satisfy, so the schema is refused where it is built.
-            if (schema.contains("multiple_of") && !schema["multiple_of"].is_none()) {
+            if (schema.contains("multiple_of")) {
                 py::object val = schema["multiple_of"];
                 double bound = PyFloat_AsDouble(val.ptr());
                 if (bound == -1.0 && PyErr_Occurred()) {
@@ -1901,13 +1931,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         // falling back to the config key (str_min_length, str_max_length,
         // str_strip_whitespace, str_to_lower, str_to_upper).
         auto cfg_int = [&](const char* cfg_key) -> std::optional<size_t> {
-            if (!config.contains(cfg_key)) return std::nullopt;
-            py::object val = config[cfg_key];
-            if (py::isinstance<py::int_>(val)) {
-                long long i = val.cast<long long>();
-                if (i >= 0) return static_cast<size_t>(i);
-            }
-            return std::nullopt;
+            return count_slot(config, cfg_key);
         };
         // string.rs:213 reads the bool slots with schema_or_config, so a present value that is
         // not a bool stops the build; only an absent key means "not declared".
@@ -1915,13 +1939,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             return py_bool_opt(config, cfg_key);
         };
         auto sch_int = [&](const char* k) -> std::optional<size_t> {
-            if (!schema.contains(k)) return std::nullopt;
-            py::object val = schema[k];
-            if (py::isinstance<py::int_>(val)) {
-                long long i = val.cast<long long>();
-                if (i >= 0) return static_cast<size_t>(i);
-            }
-            return std::nullopt;
+            return count_slot(schema, k);
         };
         auto sch_bool = [&](const char* k) -> std::optional<bool> {
             return py_bool_opt(schema, k);
@@ -1994,13 +2012,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             v->strict = strict_opt_py(schema, config);
             v->val_json_bytes = val_json_bytes;
             auto ps = [&](const char* k) -> std::optional<size_t> {
-                if (!schema.contains(k)) return std::nullopt;
-                py::object val = schema[k];
-                if (py::isinstance<py::int_>(val)) {
-                    long long i = val.cast<long long>();
-                    if (i >= 0) return static_cast<size_t>(i);
-                }
-                return std::nullopt;
+                return count_slot(schema, k);
             };
             if (auto mv = ps("min_length")) v->min_length = *mv;
             if (auto mv = ps("max_length")) v->max_length = *mv;
@@ -2015,6 +2027,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
     // --- Date/time validators ---
     if (type == "date") {
         auto v = std::make_shared<DateValidator>(is_strict_py(schema, config));
+        refuse_empty_temporal_bounds(schema, {"le", "lt", "ge", "gt"}, "date");
         for (const char* k : {"gt", "lt", "ge", "le"}) {
             if (schema.contains(k) && !schema[k].is_none()) {
                 if (std::string(k) == "gt") v->gt = schema[k];
@@ -2030,6 +2043,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
     }
     if (type == "time") {
         auto v = std::make_shared<TimeValidator>(is_strict_py(schema, config));
+        refuse_empty_temporal_bounds(schema, {"le", "lt", "ge", "gt"}, "time");
         for (const char* k : {"gt", "lt", "ge", "le"}) {
             if (schema.contains(k) && !schema[k].is_none()) {
                 if (std::string(k) == "gt") v->gt = schema[k];
@@ -2042,6 +2056,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
     }
     if (type == "datetime") {
         auto v = std::make_shared<DatetimeValidator>(is_strict_py(schema, config));
+        refuse_empty_temporal_bounds(schema, {"le", "lt", "ge", "gt"}, "datetime");
         for (const char* k : {"gt", "lt", "ge", "le"}) {
             if (schema.contains(k) && !schema[k].is_none()) {
                 if (std::string(k) == "gt") v->gt = schema[k];
@@ -2060,8 +2075,11 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
     }
     if (type == "timedelta") {
         auto v = std::make_shared<TimedeltaValidator>(is_strict_py(schema, config));
-        for (const char* k : {"multiple_of", "gt", "lt", "ge", "le"}) {
-            if (schema.contains(k) && !schema[k].is_none()) {
+        // The reference reads multiple_of first and then le, lt, ge, gt (timedelta.rs:57-68),
+        // and a slot holding None goes through the same coercion as any other bound, so it is
+        // refused rather than taken to mean "no bound".
+        for (const char* k : {"multiple_of", "le", "lt", "ge", "gt"}) {
+            if (schema.contains(k)) {
                 py::object c = timedelta_constraint_from_schema(schema[k], k);
                 if (std::string(k) == "gt") v->gt = c;
                 else if (std::string(k) == "lt") v->lt = c;
@@ -2083,10 +2101,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
     // --- URL validators ---
     if (type == "url") {
         auto v = std::make_shared<UrlValidator>();
-        if (schema.contains("max_length") && py::isinstance<py::int_>(schema["max_length"])) {
-            long long ml = schema["max_length"].cast<long long>();
-            if (ml >= 0) v->max_length = static_cast<size_t>(ml);
-        }
+        v->max_length = count_slot(schema, "max_length");
         if (schema.contains("allowed_schemes") &&
             (py::isinstance<py::list>(schema["allowed_schemes"]) ||
              py::isinstance<py::tuple>(schema["allowed_schemes"]))) {
@@ -2113,10 +2128,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
     }
     if (type == "multi-host-url") {
         auto v = std::make_shared<MultiHostUrlValidator>();
-        if (schema.contains("max_length") && py::isinstance<py::int_>(schema["max_length"])) {
-            long long ml = schema["max_length"].cast<long long>();
-            if (ml >= 0) v->max_length = static_cast<size_t>(ml);
-        }
+        v->max_length = count_slot(schema, "max_length");
         if (schema.contains("allowed_schemes") &&
             (py::isinstance<py::list>(schema["allowed_schemes"]) ||
              py::isinstance<py::tuple>(schema["allowed_schemes"]))) {
@@ -2156,14 +2168,12 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
     if (type == "decimal" || type == "decimal-constrained") {
         auto v = std::make_shared<DecimalValidator>();
         v->strict = is_strict_py(schema, config);
+        // decimal.rs:66-67 reads both counts with get_as::<u64>, so a value that is not an
+        // integer -- None included, a bool included -- answers in Python's own words.
         auto get_u64 = [&](const char* key) -> std::optional<int64_t> {
-            if (!schema.contains(key)) return std::nullopt;
-            py::object val = schema[key];
-            if (val.is_none() || py::isinstance<py::bool_>(val)) return std::nullopt;
-            if (!py::isinstance<py::int_>(val)) {
-                throw SchemaError(std::string("Invalid '") + key + "' value: must be an integer");
-            }
-            return val.cast<int64_t>();
+            auto count = count_slot(schema, key);
+            if (!count) return std::nullopt;
+            return static_cast<int64_t>(*count);
         };
         v->decimal_places = get_u64("decimal_places");
         v->max_digits = get_u64("max_digits");
@@ -2179,7 +2189,6 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         auto get_decimal = [&](const char* key) -> py::object {
             if (!schema.contains(key)) return py::none();
             py::object val = schema[key];
-            if (val.is_none()) return py::none();
             py::object decimal_cls = py::module_::import("decimal").attr("Decimal");
             try {
                 if (py::type::of(val).ptr() == decimal_cls.ptr()) return val;
@@ -2191,9 +2200,9 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             } catch (py::error_already_set& e) {
                 e.restore();
                 PyErr_Clear();
-                throw SchemaError(std::string("'") + key + "' must be coercible to a Decimal instance");
+                throw py::value_error(std::string("'") + key + "' must be coercible to a Decimal instance");
             }
-            throw SchemaError(std::string("'") + key + "' must be coercible to a Decimal instance");
+            throw py::value_error(std::string("'") + key + "' must be coercible to a Decimal instance");
         };
         v->gt = get_decimal("gt");
         v->lt = get_decimal("lt");
@@ -2219,19 +2228,18 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         auto get_fraction = [&](const char* key) -> py::object {
             if (!schema.contains(key)) return py::none();
             py::object val = schema[key];
-            if (val.is_none()) return py::none();
             const py::object& frac_cls = py_fraction_type();
             try {
                 if (py::isinstance(val, frac_cls)) return val;
                 // A bound goes through the same coercion as a value, so it carries the same
                 // exponent cap: uncapped, the schema build is what hangs.
                 if (fraction_exponent_too_large(val))
-                    throw SchemaError(std::string("'") + key + "' must be coercible to a Fraction instance");
+                    throw py::value_error(std::string("'") + key + "' must be coercible to a Fraction instance");
                 return frac_cls(val);
             } catch (py::error_already_set& e) {
                 e.restore();
                 PyErr_Clear();
-                throw SchemaError(std::string("'") + key + "' must be coercible to a Fraction instance");
+                throw py::value_error(std::string("'") + key + "' must be coercible to a Fraction instance");
             }
         };
         v->le = get_fraction("le");
@@ -2618,12 +2626,8 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         } else if (schema.contains("items")) {
             v->items_schema = build_from_py_dict(schema["items"].cast<py::dict>(), config, definitions);
         }
-        if (schema.contains("min_length")) {
-            v->min_length = schema["min_length"].cast<size_t>();
-        }
-        if (schema.contains("max_length")) {
-            v->max_length = schema["max_length"].cast<size_t>();
-        }
+        v->min_length = count_slot(schema, "min_length");
+        v->max_length = count_slot(schema, "max_length");
         v->strict = strict_opt_py(schema, config);
         v->fail_fast = py_bool(schema, "fail_fast");
         return v;
@@ -2635,12 +2639,8 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         if (py::object items_schema = optional_schema_slot(schema, "items_schema")) {
             v->items_schema = build_from_py_dict(items_schema.cast<py::dict>(), config, definitions);
         }
-        if (schema.contains("min_length")) {
-            v->min_length = schema["min_length"].cast<size_t>();
-        }
-        if (schema.contains("max_length")) {
-            v->max_length = schema["max_length"].cast<size_t>();
-        }
+        v->min_length = count_slot(schema, "min_length");
+        v->max_length = count_slot(schema, "max_length");
         v->strict = strict_opt_py(schema, config);
         v->fail_fast = py_bool(schema, "fail_fast");
         return v;
@@ -2652,10 +2652,8 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         if (py::object items_schema = optional_schema_slot(schema, "items_schema")) {
             v->items_schema = build_from_py_dict(items_schema.cast<py::dict>(), config, definitions);
         }
-        if (schema.contains("min_length"))
-            v->min_length = schema["min_length"].cast<size_t>();
-        if (schema.contains("max_length"))
-            v->max_length = schema["max_length"].cast<size_t>();
+        v->min_length = count_slot(schema, "min_length");
+        v->max_length = count_slot(schema, "max_length");
         return v;
     }
 
@@ -2689,8 +2687,8 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             tv->variadic = true;
         }
         tv->fixed = !schema.contains("variadic_item_index");
-        if (schema.contains("min_length")) tv->min_length = schema["min_length"].cast<size_t>();
-        if (schema.contains("max_length")) tv->max_length = schema["max_length"].cast<size_t>();
+        tv->min_length = count_slot(schema, "min_length");
+        tv->max_length = count_slot(schema, "max_length");
         tv->strict = strict_opt_py(schema, config);
         tv->fail_fast = py_bool(schema, "fail_fast");
         return tv;
@@ -2765,12 +2763,8 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         if (py::object values_schema = optional_schema_slot(schema, "values_schema")) {
             v->values_schema = build_from_py_dict(values_schema.cast<py::dict>(), config, definitions);
         }
-        if (schema.contains("min_length")) {
-            v->min_length = schema["min_length"].cast<size_t>();
-        }
-        if (schema.contains("max_length")) {
-            v->max_length = schema["max_length"].cast<size_t>();
-        }
+        v->min_length = count_slot(schema, "min_length");
+        v->max_length = count_slot(schema, "max_length");
         // Rust builds the dict with is_strict(schema, config); without the
         // schema flag a strict dict would still accept Mapping inputs.
         v->strict = strict_opt_py(schema, config);
@@ -2794,12 +2788,8 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         if (py::object values_schema = optional_schema_slot(schema, "values_schema")) {
             v->values_schema = build_from_py_dict(values_schema.cast<py::dict>(), config, definitions);
         }
-        if (schema.contains("min_length")) {
-            v->min_length = schema["min_length"].cast<size_t>();
-        }
-        if (schema.contains("max_length")) {
-            v->max_length = schema["max_length"].cast<size_t>();
-        }
+        v->min_length = count_slot(schema, "min_length");
+        v->max_length = count_slot(schema, "max_length");
         v->strict = strict_opt_py(schema, config);
         v->fail_fast = py_bool(schema, "fail_fast");
         return v;
@@ -2812,12 +2802,8 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         if (py::object items_schema = optional_schema_slot(schema, "items_schema")) {
             v->items_schema = build_from_py_dict(items_schema.cast<py::dict>(), config, definitions);
         }
-        if (schema.contains("min_length")) {
-            v->min_length = schema["min_length"].cast<size_t>();
-        }
-        if (schema.contains("max_length")) {
-            v->max_length = schema["max_length"].cast<size_t>();
-        }
+        v->min_length = count_slot(schema, "min_length");
+        v->max_length = count_slot(schema, "max_length");
         v->fail_fast = py_bool(schema, "fail_fast");
         return v;
     }
@@ -2827,12 +2813,8 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
         if (py::object items_schema = optional_schema_slot(schema, "items_schema")) {
             v->items_schema = build_from_py_dict(items_schema.cast<py::dict>(), config, definitions);
         }
-        if (schema.contains("min_length")) {
-            v->min_length = schema["min_length"].cast<size_t>();
-        }
-        if (schema.contains("max_length")) {
-            v->max_length = schema["max_length"].cast<size_t>();
-        }
+        v->min_length = count_slot(schema, "min_length");
+        v->max_length = count_slot(schema, "max_length");
         v->fail_fast = py_bool(schema, "fail_fast");
         return v;
     }
