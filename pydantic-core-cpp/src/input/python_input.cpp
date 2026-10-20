@@ -1267,26 +1267,11 @@ ValResult<ValMatch<EitherDateTime>> PythonInput::validate_datetime(
         int microsecond = py_dt.attr("microsecond").cast<int>();
 
         std::optional<int> tz_offset;
-        if (py_hasattr(py_dt, "tzinfo") && !py_dt.attr("tzinfo").is_none()) {
-            py::object tzinfo = py_dt.attr("tzinfo");
-            if (py_hasattr(tzinfo, "utcoffset")) {
-                // Rust reads utcoffset() while converting and turns a raising
-                // tzinfo into a datetime_object_invalid error rather than
-                // letting the exception escape.
-                try {
-                    py::object offset = tzinfo.attr("utcoffset")(py_dt);
-                    if (!offset.is_none()) {
-                        tz_offset = static_cast<int>(offset.attr("total_seconds")().cast<double>() / 60);
-                    }
-                } catch (py::error_already_set& e) {
-                    ErrorType et(ErrorType::Kind::DatetimeObjectInvalid);
-                    et.context()["error"] = py_caught_exception_string(e);
-                    PyErr_Clear();
-                    return ValError::line_error(
-                        et, this->current_location(), this->as_error_value().repr);
-                }
-            }
-        }
+        // The offset stays unread here.  Rust reads it where a constraint forces the value into a
+        // speedate datetime (datetime.rs:83), not while it reads the object's fields, so a run with
+        // nothing to compare against never calls utcoffset() and a tzinfo that raises is heard from
+        // there -- see DatetimeValidator, which asks and wraps a raise as datetime_object_invalid
+        // (datetime.rs:85-91).  The object itself travels along for the answer to be asked of.
 
         DateTime dt = {Date{year, month, day}, Time{hour, minute, second, microsecond, tz_offset}};
         EitherDateTime edt(dt);
@@ -1365,19 +1350,9 @@ ValResult<ValMatch<EitherTime>> PythonInput::validate_time(bool strict) const {
         int second = py_time.attr("second").cast<int>();
         int microsecond = py_time.attr("microsecond").cast<int>();
         std::optional<int> tz_offset;
-        if (py_hasattr(py_time, "tzinfo") && !py_time.attr("tzinfo").is_none()) {
-            py::object tzinfo = py_time.attr("tzinfo");
-            if (py_hasattr(tzinfo, "utcoffset")) {
-                // A bare time has no date to resolve an offset against, so Rust hands
-                // utcoffset() None and only the datetime path hands the object
-                // (datetime.rs:311 -> :361-363).  CPython's own timezone.utcoffset refuses a
-                // time outright -- passing the time here raised on every aware time.
-                py::object offset = tzinfo.attr("utcoffset")(py::none());
-                if (!offset.is_none()) {
-                    tz_offset = static_cast<int>(offset.attr("total_seconds")().cast<double>() / 60);
-                }
-            }
-        }
+        // Read like the datetime path above and for the same reason: time.rs:56 asks for the offset
+        // where a constraint turns the value into a speedate time, and a tzinfo that raises there
+        // escapes with its own exception (`?`), not the wrapped form the datetime validator builds.
         EitherTime either_time(Time{hour, minute, second, microsecond, tz_offset});
         either_time.original_obj = py_time;
         return python_type_is(py_time, "datetime", "time")

@@ -334,7 +334,7 @@ std::string ErrorType::message_template() const {
         {Kind::DateTimeType, "Input should be a valid datetime"},
         {Kind::DateTimeParsing, "Input should be a valid datetime, {error}"},
         {Kind::DatetimeFromDateParsing, "Input should be a valid datetime or date, {error}"},
-        {Kind::DatetimeObjectInvalid, "Invalid datetime object"},
+        {Kind::DatetimeObjectInvalid, "Invalid datetime object, got {error}"},
         {Kind::DatetimePast, "Input should be in the past"},
         {Kind::DatetimeFuture, "Input should be in the future"},
         {Kind::TimezoneAware, "Input should have timezone info"},

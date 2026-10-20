@@ -4505,6 +4505,62 @@ def test_a_title_written_empty_titles_the_run_empty():
         assert str(exc).splitlines()[0] == '1 validation error for ', str(exc)
 
 
+def test_a_temporal_run_asks_the_tzinfo_only_when_something_needs_the_offset():
+    # Nothing about a tzinfo is asked while a temporal object is being read: the reference reads the
+    # UTC offset where a constraint forces the value into a speedate temporal value
+    # (datetime.rs:83, time.rs:56), so an unconstrained run hands the object back unread.  Where it
+    # does ask, a tzinfo that raises is reported by the datetime validator as its own
+    # datetime_object_invalid (datetime.rs:85-91) and escapes through the time and date routes,
+    # which read the conversion with `?`.
+    calls = []
+
+    class RaisingTz(datetime.tzinfo):
+        def utcoffset(self, dt):
+            calls.append(type(dt).__name__)
+            raise RuntimeError('no offset for you')
+
+        def tzname(self, dt):
+            return 'RAISE'
+
+        def dst(self, dt):
+            return None
+
+    loud_dt = datetime.datetime(2024, 1, 1, 3, 4, tzinfo=RaisingTz())
+    loud_time = datetime.time(1, 2, tzinfo=RaisingTz())
+
+    for word, validator, value in (
+        ('datetime', SchemaValidator(core_schema.datetime_schema()), loud_dt),
+        ('time', SchemaValidator(core_schema.time_schema()), loud_time),
+    ):
+        calls.clear()
+        assert validator.validate_python(value) is value, word
+        assert calls == [], (word, calls)
+
+    calls.clear()
+    try:
+        SchemaValidator(core_schema.datetime_schema(tz_constraint='aware')).validate_python(loud_dt)
+        raise AssertionError('a datetime whose tzinfo raises was accepted as aware')
+    except ValidationError as exc:
+        err = exc.errors()[0]
+        assert err['type'] == 'datetime_object_invalid', err
+        assert err['msg'] == 'Invalid datetime object, got RuntimeError: no offset for you', err['msg']
+        assert err['ctx'] == {'error': 'RuntimeError: no offset for you'}, err['ctx']
+    assert calls == ['datetime'], calls
+
+    for label, validator, value, asked in (
+        ('time', SchemaValidator(core_schema.time_schema(le=datetime.time(0, 1))), loud_time,
+         ['NoneType']),
+        ('date', SchemaValidator(core_schema.date_schema()), loud_dt, ['datetime']),
+    ):
+        calls.clear()
+        try:
+            validator.validate_python(value)
+            raise AssertionError('a %s run swallowed what its tzinfo raised' % label)
+        except RuntimeError as exc:
+            assert str(exc) == 'no offset for you', exc
+        assert calls == asked, calls
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_') and callable(fn):

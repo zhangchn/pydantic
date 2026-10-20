@@ -3,8 +3,11 @@
 #include <Python.h>
 #include <datetime.h>
 
+#include <optional>
+
 #include <pybind11/pybind11.h>
 
+#include "pydantic_core/py_compat.hpp"
 #include "pydantic_core/speedate.hpp"
 
 namespace py = pybind11;
@@ -73,6 +76,23 @@ inline py::object py_datetime_object(const DateTime& dt) {
         throw py::error_already_set();
     }
     return py::reinterpret_steal<py::object>(obj);
+}
+
+// validators/datetime.rs:83 and time.rs:56 read a value's UTC offset only where a constraint forces
+// it into a speedate temporal value, not while the object is being read -- which is why a run with
+// no constraint never calls utcoffset() at all, and why a tzinfo that raises is heard from at that
+// moment rather than at the start of validation.  ``argument`` is what the reference hands
+// utcoffset(): the datetime itself on the datetime path, None on the time path
+// (datetime.rs:311 -> :361-363).  The answer is minutes, the unit this port holds offsets in
+// (speedate.hpp:25); an exception the tzinfo throws travels on as the exception it is.
+inline std::optional<int> python_tz_offset_minutes(const py::object& obj,
+                                                   const py::object& argument) {
+    if (obj.is_none() || !py_hasattr(obj, "tzinfo")) return std::nullopt;
+    py::object tzinfo = obj.attr("tzinfo");
+    if (tzinfo.is_none() || !py_hasattr(tzinfo, "utcoffset")) return std::nullopt;
+    py::object offset = tzinfo.attr("utcoffset")(argument);
+    if (offset.is_none()) return std::nullopt;
+    return static_cast<int>(offset.attr("total_seconds")().cast<double>() / 60);
 }
 
 }  // namespace pydantic_core

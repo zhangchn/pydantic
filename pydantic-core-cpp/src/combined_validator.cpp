@@ -55,6 +55,12 @@ static BoundT temporal_bound_from_schema(const py::object& value, const char* ke
         auto parsed = input.validate_time(false);
         if (parsed.is_err()) refuse_temporal_bound(key, "time");
         Time t = parsed.value().value().as_raw();
+        // A bound is read through as_raw() the way convert_pytime (time.rs:92-100) reads it, which
+        // is where a bound written as a Python time carrying a tzinfo gets the offset that its text
+        // and its comparison are both built from.
+        if (!parsed.value().value().original_obj.is_none()) {
+            t.tz_offset = python_tz_offset_minutes(parsed.value().value().original_obj, py::none());
+        }
         text = display_time(t);
         return t;
     } else {
@@ -73,6 +79,12 @@ static BoundT temporal_bound_from_schema(const py::object& value, const char* ke
         auto parsed = input.validate_datetime(false, TimestampUnit::Infer);
         if (parsed.is_err()) refuse_temporal_bound(key, "datetime");
         DateTime dt = parsed.value().value().as_raw();
+        // Read like the time bound above (convert_pydatetime, datetime.rs:470-485): the offset a
+        // Python datetime's tzinfo answers is part of the bound, both its text and its order.
+        if (!parsed.value().value().original_obj.is_none()) {
+            const py::object& src = parsed.value().value().original_obj;
+            dt.time.tz_offset = python_tz_offset_minutes(src, src);
+        }
         text = display_datetime(dt);
         return dt;
     }

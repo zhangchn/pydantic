@@ -2,6 +2,7 @@
 
 #include "pydantic_core/validator.hpp"
 #include "pydantic_core/py_compat.hpp"
+#include "pydantic_core/python_input.hpp"
 #include "pydantic_core/url_types.hpp"
 #include "pydantic_core/py_time.hpp"
 #include <memory>
@@ -314,6 +315,13 @@ inline CrossRetry<EitherDate> date_from_datetime(const Input& input, TimestampUn
         return out;
     }
     DateTime dt = dt_result.value().value().value;
+    // date.rs reads the datetime through as_raw() before it asks whether the time is midnight, and
+    // `?` lets a tzinfo that raises on the way out escape to the caller rather than becoming a
+    // date_type refusal.
+    if (!dt_result.value().value().original_obj.is_none()) {
+        const py::object& src = dt_result.value().value().original_obj;
+        dt.time.tz_offset = python_tz_offset_minutes(src, src);
+    }
     Time zero{0, 0, 0, 0, dt.time.tz_offset};
     if (dt.time == zero) {
         EitherDate either_date(dt.date);
@@ -457,6 +465,17 @@ struct TZConstraint {
     int offset = 0;
 };
 
+// Whether the validator holds anything that forces the value into a speedate temporal value: that
+// is where the reference reads a Python object's UTC offset (datetime.rs:83, time.rs:56), and a run
+// holding none of these asks the value's tzinfo nothing at all.
+template <class TemporalT>
+static bool temporal_constraints_present(const TemporalBounds<TemporalT>& bounds,
+                                         const TZConstraint& tz,
+                                         const std::string& now_op = std::string()) {
+    return bounds.gt.has_value() || bounds.lt.has_value() || bounds.ge.has_value() ||
+           bounds.le.has_value() || tz.kind != TZConstraint::Kind::None || !now_op.empty();
+}
+
 // TZConstraint::tz_check (datetime.rs:316-346): a value that has to be aware -- whether or not an
 // offset is named with it -- has to *have* an offset; one with an offset named has to equal it; and
 // a naive one has to have none at all.  The offset asked about is the one the input reports, so a
@@ -511,6 +530,14 @@ public:
         state.floor_exactness(result.value().exactness());
         auto match = std::move(result.value());
         Time t = match.value().value;
+
+        // A bare time has no date to resolve an offset against, so the reference hands utcoffset()
+        // None here and only the datetime path hands the object (datetime.rs:311 -> :361-363);
+        // CPython's own timezone.utcoffset refuses a time outright.  time.rs:56 reads the offset
+        // with `?`, so a tzinfo that raises is the caller's exception, not a validation error.
+        if (temporal_constraints_present(bounds, tz) && !match.value().original_obj.is_none()) {
+            t.tz_offset = python_tz_offset_minutes(match.value().original_obj, py::none());
+        }
 
         try {
             py::object py_time = time_to_python_obj(t);
@@ -572,6 +599,24 @@ public:
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::DateTimeParsing, "error", "year 0 is out of range"),
                 input.current_location(), input.as_error_value().repr);
+        }
+
+        // datetime.rs:83 asks the value for its UTC offset only once a constraint forces it into a
+        // speedate datetime, and datetime.rs:85-91 turns a conversion that fails there -- an invalid
+        // tzinfo -- into datetime_object_invalid rather than letting it escape.  With no constraint
+        // the object keeps its tzinfo unread.
+        if (temporal_constraints_present(bounds, tz, now_op) &&
+            !match.value().original_obj.is_none()) {
+            try {
+                dt.time.tz_offset = python_tz_offset_minutes(match.value().original_obj,
+                                                             match.value().original_obj);
+            } catch (py::error_already_set& e) {
+                ErrorType et(ErrorType::Kind::DatetimeObjectInvalid);
+                et.context()["error"] = py_caught_exception_string(e);
+                PyErr_Clear();
+                return ValError::line_error(
+                    et, input.current_location(), input.as_error_value().repr);
+            }
         }
 
         try {
