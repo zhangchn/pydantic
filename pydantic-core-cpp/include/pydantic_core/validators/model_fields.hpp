@@ -1308,10 +1308,16 @@ public:
     // cls_name), so a composed label reads list[User] rather than
     // list[typed-dict].
     std::string display_name() const override {
-        return cls_name_.empty() ? name_ : cls_name_;
+        // typed_dict.rs:76-81 reads cls_name as an Option: the class name answers when the schema
+        // named a class -- empty included -- and only a schema with no class at all falls back to
+        // the validator's type name (typed_dict.rs:390).
+        return cls_named_ ? cls_name_ : name_;
     }
 
-    void set_cls_name(std::string n) { cls_name_ = std::move(n); }
+    void set_cls_name(std::string n) {
+        cls_name_ = std::move(n);
+        cls_named_ = true;
+    }
 
     bool total() const { return total_; }
     void set_total(bool t) { total_ = t; }
@@ -1319,6 +1325,7 @@ public:
 private:
     std::string name_ = "typed-dict";
     std::string cls_name_;
+    bool cls_named_ = false;
     bool total_ = true;
 };
 
@@ -1728,7 +1735,11 @@ public:
     // Rust names a model validator after the model itself, so a union that
     // reports each choice's name shows the class, not the validator type.
     std::string display_name() const override {
-        return class_name_.empty() ? std::string("model") : class_name_;
+        // model.rs:83 names a model after ``cls.__name__`` and has no fallback at all: a class
+        // whose name is empty is named empty to Rust, which is what titles a run of it empty
+        // (validators/mod.rs:167).  The word "model" answers only a validator that was never
+        // given a class, which the build cannot produce (cls is required).
+        return class_name_;
     }
 
     // The wrapped fields validator (for reaches_fields_result traversal).

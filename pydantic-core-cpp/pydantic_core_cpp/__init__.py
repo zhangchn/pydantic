@@ -884,10 +884,13 @@ def _format_rust_error(msg: str, model_name: str = '') -> str:
     label = 'validation error' if count == 1 else 'validation errors'
     # The C++ header already names what was validated, which for an error
     # raised after validation ended (a lazy iterator's item) is no model at all.
-    cpp_title = ''
-    if (m_title := re.match(r'\d+ validation error(?:\(s\))? for (.+)$', header)):
+    # An empty name is an answer and not a missing one: validators/mod.rs:167 titles a run from
+    # whatever the config or the validator answers, empty included (a model's name comes straight
+    # from ``cls.__name__``, model.rs:83), and Rust prints the header exactly as it was titled.
+    cpp_title = None
+    if (m_title := re.match(r'\d+ validation error(?:\(s\))? for\s*(.*)$', header)):
         cpp_title = m_title.group(1).strip()
-    name = model_name or cpp_title or 'Schema'
+    name = model_name or (cpp_title if cpp_title is not None else 'Schema')
 
     # Build the Rust-style header
     result = [f'{count} {label} for {name}']

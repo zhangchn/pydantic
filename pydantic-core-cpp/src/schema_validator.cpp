@@ -36,9 +36,16 @@ SchemaValidator::SchemaValidator(const py::dict& schema,
     // validator that answers it.  A ``title`` written in the *schema* is not consulted: pydantic
     // puts a node's title there for the JSON schema, where it never reaches an error, and a model
     // node is named by its class (model.rs:83) rather than by anything the schema says.
+    // An empty string is still an answer.  Rust takes the config's title whenever that key holds
+    // something (mod.rs:161-168 `match config_title { Some(t) => t, None => get_name() }`), so a
+    // caller who writes title='' is titled '', and a validator that answers with an empty name --
+    // a class whose __name__ is empty -- titles the run with that empty name rather than falling
+    // back to the word "Schema".
+    bool config_title_given = false;
     std::string config_title;
     if (config.contains("title") && !config["title"].is_none()) {
         config_title = py::str(config["title"]).cast<std::string>();
+        config_title_given = true;
     }
     title_ = "Schema";
 
@@ -50,11 +57,10 @@ SchemaValidator::SchemaValidator(const py::dict& schema,
     // The build names the node that failed, once per node between it and here, so the
     // exception goes to Python exactly as the build left it.
     validator_ = SchemaBuilder::build_from_py(schema, config, use_prebuilt);
-    if (!config_title.empty()) {
+    if (config_title_given) {
         title_ = std::move(config_title);
     } else if (validator_) {
-        std::string name = validator_->display_name();
-        if (!name.empty()) title_ = std::move(name);
+        title_ = validator_->display_name();
     }
 
     // Set up config defaults

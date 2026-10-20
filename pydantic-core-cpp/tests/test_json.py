@@ -4463,6 +4463,48 @@ def test_an_error_context_keeps_the_order_its_error_declares():
         assert list(err['ctx']) == ['field_type', 'min_length', 'actual_length'], err['ctx']
 
 
+def test_a_title_written_empty_titles_the_run_empty():
+    # validators/mod.rs:161-167 titles a run from the config's title whenever that slot holds
+    # something, so a caller who writes title='' is titled '' rather than falling back to the
+    # validator's name.  model.rs:83 takes a model's name from ``cls.__name__`` and has no fallback
+    # of its own, so a class whose name is empty titles a run of it empty for the same reason.
+    # typed_dict.rs:76-81 is the one validator that can hold no class at all, and only then does
+    # the validator's own type name answer (typed_dict.rs:390).
+    nameless = type('', (), {})
+    named = type('Named', (), {})
+    fields = {'a': core_schema.model_field(core_schema.int_schema())}
+
+    titled = [
+        ('', SchemaValidator(core_schema.int_schema(), {'title': ''}), 'x'),
+        ('', SchemaValidator(core_schema.model_schema(
+            nameless, core_schema.model_fields_schema(fields))), {'a': 'x'}),
+        ('', SchemaValidator(core_schema.typed_dict_schema({}, cls_name='')), 5),
+        ('typed-dict', SchemaValidator(core_schema.typed_dict_schema({})), 5),
+        ('Named', SchemaValidator(core_schema.model_schema(
+            named, core_schema.model_fields_schema(fields))), {'a': 'x'}),
+        # A composed label spells the empty name out rather than hiding it.
+        ('list[]', SchemaValidator(core_schema.list_schema(core_schema.model_schema(
+            nameless, core_schema.model_fields_schema(fields)))), [{'a': 'x'}]),
+        ('list[typed-dict]', SchemaValidator(core_schema.list_schema(
+            core_schema.typed_dict_schema({}))), [5]),
+    ]
+    for expected, validator, value in titled:
+        try:
+            validator.validate_python(value)
+            raise AssertionError('a run titled %r accepted %r' % (expected, value))
+        except ValidationError as exc:
+            assert exc.title == expected, exc.title
+            assert str(exc).splitlines()[0] == '1 validation error for %s' % expected, str(exc)
+
+    # A json run is titled the same way a python run is.
+    try:
+        SchemaValidator(core_schema.int_schema(), {'title': ''}).validate_json('"x"')
+        raise AssertionError('a run titled by an empty config title parsed a string as an int')
+    except ValidationError as exc:
+        assert exc.title == '', exc.title
+        assert str(exc).splitlines()[0] == '1 validation error for ', str(exc)
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_') and callable(fn):
