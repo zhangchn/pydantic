@@ -2025,9 +2025,12 @@ public:
 
         // Rust resolves the lookup rules once per call: the call's own
         // by_alias/by_name wins over what the config said, which in turn wins
-        // over the default (alias only).
-        const bool by_alias = state.by_alias().value_or(validate_by_alias.value_or(true));
-        const bool by_name = state.by_name().value_or(validate_by_name.value_or(false));
+        // over the default (alias only), and the pair that names no key is refused
+        // before any argument is read (arguments.rs:207 -> lookup_key.rs:442).
+        const auto flags = state.lookup_flags_or(validate_by_alias.value_or(true),
+                                                 validate_by_name.value_or(false));
+        const bool by_alias = flags.by_alias;
+        const bool by_name = flags.by_name;
 
         for (size_t index = 0; index < parameters.size(); ++index) {
             const Parameter& p = parameters[index];
@@ -2401,8 +2404,12 @@ public:
     }
 
     ValResult<std::shared_ptr<void>> validate(const Input& input, ValidationState& state) override {
-        const bool by_alias = state.by_alias().value_or(validate_by_alias.value_or(true));
-        const bool by_name = state.by_name().value_or(validate_by_name.value_or(false));
+        // arguments_v3.rs:249 resolves the pair before reading the input, so a call that
+        // names no key at all is refused even when the validator never reaches a field.
+        const auto flags = state.lookup_flags_or(validate_by_alias.value_or(true),
+                                                 validate_by_name.value_or(false));
+        const bool by_alias = flags.by_alias;
+        const bool by_name = flags.by_name;
         const ExtraBehavior extra_behavior = state.extra_behavior_or(extra);
 
         // Rust tries the mapping path first and only falls back to ArgsKwargs.

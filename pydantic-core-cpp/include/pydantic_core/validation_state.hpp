@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include "speedate.hpp"
 #include "types.hpp"
@@ -98,7 +99,37 @@ public:
         if (input_type() == InputType::Json) return false;
         return strict_or_declared(declared, default_strict);
     }
-    
+
+    struct LookupFlags {
+        bool by_alias;
+        bool by_name;
+    };
+
+    // Which key a field is read by, the way Rust resolves it at every validator that looks fields
+    // up by key: `state.validate_by_alias_or(self.validate_by_alias)` (model_fields.rs:329 and
+    // :565, typed_dict.rs:167, named_tuple.rs:191, dataclass.rs:166, arguments.rs:207,
+    // arguments_v3.rs:249) - the call-time argument wins over what the schema node declares - and
+    // LookupType::from_bools (lookup_key.rs:442-449), which refuses the pair that leaves a field
+    // with no key to read it by.  Rust raises that as a Python ValueError rather than a validation
+    // error, so the run leaves `validate_*` as an exception instead of a ValidationError naming
+    // fields that were never looked for.
+    LookupFlags lookup_flags_or(bool schema_by_alias, bool schema_by_name) const {
+        LookupFlags flags{
+            config_.by_alias.value_or(schema_by_alias),
+            config_.by_name.value_or(schema_by_name)
+        };
+        if (!flags.by_alias && !flags.by_name) {
+            static const char* const both_off =
+                "`validate_by_name` and `validate_by_alias` cannot both be set to `False`.";
+#ifdef HAS_PYBIND11
+            throw py::value_error(both_off);
+#else
+            throw std::invalid_argument(both_off);
+#endif
+        }
+        return flags;
+    }
+
     // Extra behavior - use state setting or default
     ExtraBehavior extra_behavior_or(ExtraBehavior default_behavior) const {
         return config_.extra_behavior.value_or(default_behavior);

@@ -275,18 +275,22 @@ public:
                         state.location(), input.as_error_value().repr);
                 }
                 py::dict filtered;
+                // An attribute run reads the same lookup paths, so it resolves the same pair:
+                // the call-time keywords reach here too, instead of the schema's own answer
+                // being the only one that can name an attribute.
+                const auto attr_flags = state.lookup_flags_or(validate_by_alias_, validate_by_name_);
                 for (const auto& name : field_order_) {
                     const auto& field = fields_.at(name);
                     // Same lookup-key set as validate_dict (Rust semantics).
                     // For from_attributes, use the first key of each path
                     // (flat attribute access).
                     std::vector<std::string> lookup_keys;
-                    if (validate_by_alias_) {
+                    if (attr_flags.by_alias) {
                         for (const auto& p : field.validation_paths) {
                             if (!p.empty()) lookup_keys.push_back(p[0]);
                         }
                     }
-                    if (!field.has_alias || validate_by_name_) {
+                    if (!field.has_alias || attr_flags.by_name) {
                         lookup_keys.push_back(name);
                     }
                     std::unordered_set<std::string> seen_keys;
@@ -407,6 +411,14 @@ public:
         // it does not know about does not outscore the model they belong to.
         int fields_set_count = 0;
 
+        // Runtime by_alias/by_name (from model_validate) override what the schema node declares,
+        // and a pair that names no key at all is refused here rather than left to miss every
+        // field.  Rust resolves it once, above the field loop (model_fields.rs:329), so a model
+        // with no fields still refuses.
+        const auto lookup = state.lookup_flags_or(validate_by_alias_, validate_by_name_);
+        const bool use_by_alias = lookup.by_alias;
+        const bool use_by_name = lookup.by_name;
+
         for (const auto& name : field_order_) {
             const auto& field = fields_.at(name);
             // Error location uses the alias when loc_by_alias (default true),
@@ -417,12 +429,6 @@ public:
             // (Rust: scoped_set_field_name).  Restored after the loop.
             state.set_field_name(name);
 
-            // Runtime by_alias/by_name (from model_validate) override the
-            // config-level settings.
-            bool use_by_alias = validate_by_alias_;
-            bool use_by_name = validate_by_name_;
-            if (state.by_alias().has_value()) use_by_alias = state.by_alias().value();
-            if (state.by_name().has_value()) use_by_name = state.by_name().value();
             // Build lookup paths (Rust LookupPathCollection semantics):
             // - each validation path is a lookup path when validate_by_alias
             //   (default true);

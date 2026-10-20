@@ -1322,10 +1322,15 @@ private:
         const Input& input,
         ValidationState& state
     ) {
-        const bool by_alias = validate_by_alias.value_or(state.by_alias().value_or(true));
+        // named_tuple.rs:191 resolves the pair with state.validate_by_alias_or(...), so the
+        // call-time keyword beats what the schema node declares, and the both-false pair is
+        // refused there instead of being resolved field by field.
+        const auto flags = state.lookup_flags_or(validate_by_alias.value_or(true),
+                                                 validate_by_name.value_or(false));
+        const bool by_alias = flags.by_alias;
         // Rust defaults to looking up by alias only; a field name is read from
         // the mapping only when validate_by_name is turned on.
-        const bool by_name = validate_by_name.value_or(state.by_name().value_or(false));
+        const bool by_name = flags.by_name;
 
         std::vector<py::object> output;
         std::vector<std::shared_ptr<ValLineError>> errors;
@@ -1335,9 +1340,10 @@ private:
             std::vector<std::string> lookup;
             if (by_alias && !field.alias.empty()) lookup.push_back(field.alias);
             if (by_name) lookup.push_back(field.name);
-            // A field whose only path was turned off still has to be read from
-            // somewhere, so fall back to that path rather than always missing.
-            if (lookup.empty()) lookup.push_back(field.alias.empty() ? field.name : field.alias);
+            // A field with no alias has only its name to be read by, whatever the flags say --
+            // lookup_key.rs:398 always offers the name path when no alias is defined.  The other
+            // way this list could come out empty -- both flags off -- is refused above.
+            if (lookup.empty()) lookup.push_back(field.name);
 
             std::optional<py::object> value;
             std::string matched;

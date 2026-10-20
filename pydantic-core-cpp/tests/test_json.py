@@ -4100,3 +4100,44 @@ def test_a_typed_dict_holds_its_models_as_objects():
         assert isinstance(out['x'], M) and out['x'].a == 3  # an extra, validated by extras_schema
         assert sorted(out) == ['m', 'many', 'opt', 'x']  # no __pydantic_* key leaked beside them
         assert out['m'].__pydantic_fields_set__ == {'a'}
+
+
+def test_a_field_refuses_to_be_looked_up_by_neither_name_nor_alias():
+    # LookupType::from_bools (lookup_key.rs:442-449) has no answer for the pair that leaves a field
+    # with no key to read it by, and Rust raises it where each validator resolves the pair -- above
+    # the field loop (model_fields.rs:329), so a model with no fields at all still refuses.  It is a
+    # Python ValueError and not a ValidationError: the run never gets as far as missing fields.
+    class M:
+        pass
+
+    v = SchemaValidator(core_schema.model_schema(
+        M,
+        core_schema.model_fields_schema(
+            {'a': core_schema.model_field(core_schema.int_schema(), validation_alias='v')}
+        ),
+    ))
+
+    for kwargs in ({'by_alias': False}, {'by_alias': False, 'by_name': False}):
+        with pytest.raises(ValueError, match='cannot both be set to `False`'):
+            v.validate_python({'a': 1}, **kwargs)
+
+    # Turning either one of them on is enough, and by_name alone reads the name and not the alias.
+    assert v.validate_python({'a': 1}, by_alias=False, by_name=True).a == 1
+    with pytest.raises(ValidationError, match='Field required'):
+        v.validate_python({'v': 1}, by_alias=False, by_name=True)
+
+    # An attribute run reads the same lookup paths, so the keywords decide which attribute a field
+    # is read off; before this, only what the schema declared could name one.
+    class Holder:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    assert v.validate_python(Holder(a=1), from_attributes=True, by_name=True).a == 1
+    with pytest.raises(ValueError, match='cannot both be set to `False`'):
+        v.validate_python(Holder(a=1), from_attributes=True, by_alias=False)
+
+    # The pair is resolved once, above the field loop, so nothing has to be looked up for it to be
+    # refused.
+    blank = SchemaValidator(core_schema.model_schema(M, core_schema.model_fields_schema({})))
+    with pytest.raises(ValueError, match='cannot both be set to `False`'):
+        blank.validate_python({}, by_alias=False)
