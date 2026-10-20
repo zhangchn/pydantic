@@ -3333,11 +3333,14 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             }
         }
         
-        // Extract extras behavior from the schema (typed-dicts embed their own
-        // extra_behavior) or the top-level config
+        // build_tools.rs:181-199 asks two things and nothing else: the node's own ``extra_behavior``,
+        // then the config's ``extra_fields_behavior``.  The config has no other spelling of it --
+        // ``extra_behavior`` and ``extra`` sitting in a config are keys the reference never reads, so
+        // reading them here let a config that names nothing open the extras on a node that closed
+        // them.  (The schema's own slot was already folded into ``extra_fields_behavior`` above,
+        // which is how it keeps outranking the config the way ``schema_or_config`` does.)
         std::string extra_str = py_str(schema, "extra_behavior",
-            py_str(inner_config, "extra_fields_behavior",
-                py_str(inner_config, "extra_behavior", py_str(inner_config, "extra", "ignore"))));
+            py_str(inner_config, "extra_fields_behavior", "ignore"));
         auto extra = extra_behavior_from_string(extra_str);
         v->set_extra_behavior(extra);
 

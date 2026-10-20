@@ -4561,6 +4561,67 @@ def test_a_temporal_run_asks_the_tzinfo_only_when_something_needs_the_offset():
         assert calls == asked, calls
 
 
+def test_a_node_names_its_extra_fields_behavior_with_one_key_only():
+    """
+    pinning: which key opens a model's or a TypedDict's extras, and in what order.
+
+    The reference asks two things and nothing else: the node's own ``extra_behavior``, then
+    ``extra_fields_behavior`` of the config written *in that node*. A config that spells the
+    same wish ``extra_behavior`` or ``extra`` names nothing, and a node whose own slot says
+    ``ignore`` must stay closed while it holds them -- reading a config key the reference
+    never asks about opens a model nobody asked to be open.
+
+    A model node and a typed-dict node each replace the config they are built with, so the
+    root config below names nothing at all either.
+
+    Every answer is visible: ``allow`` keeps the extra key, ``ignore`` drops it, ``forbid``
+    refuses it, so a row whose slot was never read cannot look like a passing one.
+    """
+    plain = type('M', (), {})
+    data = {'zz': 5}
+
+    def fields_node(**kw):
+        node = {'type': 'model-fields', 'fields': {}}
+        node.update(kw)
+        return node
+
+    def extras(node, nodeconfig=None, config=None):
+        schema = {'type': 'model', 'cls': plain, 'schema': node}
+        if nodeconfig is not None:
+            schema['config'] = nodeconfig
+        kept = (SchemaValidator(schema, config) if config is not None
+                else SchemaValidator(schema)).validate_python(data)
+        return getattr(kept, '__pydantic_extra__', None)
+
+    assert extras(fields_node(extra_behavior='allow')) == {'zz': 5}
+    assert extras(fields_node(extra_behavior='ignore')) is None
+    assert extras(fields_node()) is None
+    assert extras(fields_node(), None, {'extra_fields_behavior': 'allow'}) is None
+
+    try:
+        extras(fields_node(extra_behavior='forbid'))
+        raise AssertionError('a model whose node forbids extras accepted one')
+    except ValidationError as exc:
+        assert [err['type'] for err in exc.errors(include_url=False)] == ['extra_forbidden'], exc
+
+    for wrong in ({'extra_behavior': 'allow'}, {'extra': 'allow'}):
+        assert extras(fields_node(), wrong) is None, wrong
+        assert extras(fields_node(extra_behavior='ignore'), wrong) is None, wrong
+
+    assert extras(fields_node(), {'extra_fields_behavior': 'allow'}) == {'zz': 5}
+    assert extras(fields_node(extra_behavior='ignore'), {'extra_fields_behavior': 'allow'}) is None
+
+    def td_extras(**kw):
+        node = {'type': 'typed-dict', 'fields': {}}
+        node.update(kw)
+        return dict(SchemaValidator(node).validate_python(data))
+
+    assert td_extras(extra_behavior='allow') == {'zz': 5}
+    assert td_extras() == {}
+    assert td_extras(config={'extra_behavior': 'allow'}) == {}
+    assert td_extras(config={'extra_fields_behavior': 'allow'}) == {'zz': 5}
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_') and callable(fn):
