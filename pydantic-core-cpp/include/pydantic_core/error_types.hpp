@@ -6,6 +6,9 @@
 #include <variant>
 #include <optional>
 #include <unordered_map>
+#include <stdexcept>
+#include <utility>
+#include <vector>
 #ifdef HAS_PYBIND11
 #include <pybind11/pybind11.h>
 namespace py = pybind11;
@@ -13,6 +16,68 @@ namespace py = pybind11;
 #include "types.hpp"
 
 namespace pydantic_core {
+
+// An error's context keys keep the order they were given in.  Rust builds the ctx dict by walking
+// the error variant's fields in the order the variant declares them, and `errors()[i]["ctx"]` -- and
+// the JSON string built from it -- hand that order straight to the caller.  A hash map answers with
+// whatever order its buckets like, so the same error reaches Python with its context spelled
+// differently.  Contexts hold a handful of keys, so a vector looked up linearly is both the ordered
+// map and the cheaper one.
+template <typename V>
+class ContextMap {
+  public:
+    using value_type = std::pair<std::string, V>;
+    using iterator = typename std::vector<value_type>::iterator;
+    using const_iterator = typename std::vector<value_type>::const_iterator;
+
+    V &operator[](const std::string &key) {
+        for (auto &kv : items_) {
+            if (kv.first == key) return kv.second;
+        }
+        items_.emplace_back(key, V());
+        return items_.back().second;
+    }
+
+    iterator begin() { return items_.begin(); }
+    iterator end() { return items_.end(); }
+    const_iterator begin() const { return items_.begin(); }
+    const_iterator end() const { return items_.end(); }
+    bool empty() const { return items_.empty(); }
+    std::size_t size() const { return items_.size(); }
+
+    std::size_t erase(const std::string &key) {
+        for (auto it = items_.begin(); it != items_.end(); ++it) {
+            if (it->first == key) {
+                items_.erase(it);
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    const V &at(const std::string &key) const {
+        for (const auto &kv : items_) {
+            if (kv.first == key) return kv.second;
+        }
+        throw std::out_of_range("error context has no key " + key);
+    }
+
+    iterator find(const std::string &key) {
+        for (auto it = items_.begin(); it != items_.end(); ++it) {
+            if (it->first == key) return it;
+        }
+        return items_.end();
+    }
+    const_iterator find(const std::string &key) const {
+        for (auto it = items_.begin(); it != items_.end(); ++it) {
+            if (it->first == key) return it;
+        }
+        return items_.end();
+    }
+
+  private:
+    std::vector<value_type> items_;
+};
 
 // Constraint values appear verbatim in error messages, so they need the same
 // shortest round-trip rendering Rust's formatter gives ("0.1", "1"), not the
@@ -266,8 +331,8 @@ public:
         : kind_(Kind::CustomError), custom_type_name_(std::move(custom_type_name)), custom_message_(std::move(custom_message)) {}
 
     Kind kind() const { return kind_; }
-    const std::unordered_map<std::string, std::string>& context() const { return context_; }
-    std::unordered_map<std::string, std::string>& context() { return context_; }
+    const ContextMap<std::string>& context() const { return context_; }
+    ContextMap<std::string>& context() { return context_; }
     
     // Get type name for error
     std::string type_name() const;
@@ -289,7 +354,7 @@ public:
         context_objects_[key] = std::move(value);
     }
 
-    const std::unordered_map<std::string, py::object>& context_objects() const {
+    const ContextMap<py::object>& context_objects() const {
         return context_objects_;
     }
 #endif
@@ -301,9 +366,9 @@ public:
     
 private:
     Kind kind_;
-    std::unordered_map<std::string, std::string> context_;
+    ContextMap<std::string> context_;
 #ifdef HAS_PYBIND11
-    std::unordered_map<std::string, py::object> context_objects_;
+    ContextMap<py::object> context_objects_;
 #endif
     // For pre-rendered custom errors (type_name + message stored as-is)
     std::string custom_type_name_;

@@ -384,8 +384,8 @@ std::string ErrorType::message() const {
     // Rust renders "{s}" from plural_s(expected_count). Validators that do not
     // pass it explicitly still get the right singular/plural form by reading it
     // back from the constraint the template names.
-    std::unordered_map<std::string, std::string> plural_ctx;
-    const std::unordered_map<std::string, std::string>* ctx = &context_;
+    ContextMap<std::string> plural_ctx;
+    const ContextMap<std::string>* ctx = &context_;
     if (result.find("{s}") != std::string::npos && context_.find("s") == context_.end()) {
         static constexpr const char* kCountKeys[] = {
             "max_length", "min_length", "max_digits", "decimal_places", "whole_digits"};

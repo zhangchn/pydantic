@@ -4424,6 +4424,45 @@ def test_an_object_with_no_dict_is_not_an_instance_to_fill():
                 assert str(exc) == "'%s' object has no attribute '__dict__'" % type_name, str(exc)
 
 
+def test_an_error_context_keeps_the_order_its_error_declares():
+    # errors()[i]["ctx"] is a dict a caller reads in order -- it is what pydantic renders, and what
+    # repr(ValidationError) spells.  Rust builds it by walking the error variant's fields in the
+    # order the variant declares them, so an error has one answer, not one per hash seed: the port
+    # held the context in a hash map and handed the keys back in bucket order.
+    union = SchemaValidator(core_schema.tagged_union_schema(
+        discriminator='t',
+        choices={
+            'A': core_schema.typed_dict_schema(
+                {'t': core_schema.typed_dict_field(core_schema.literal_schema(['A']))}),
+            'B': core_schema.typed_dict_schema(
+                {'t': core_schema.typed_dict_field(core_schema.literal_schema(['B']))}),
+        }))
+
+    for run in ('python', 'json'):
+        try:
+            if run == 'python':
+                union.validate_python({'t': 'C'})
+            else:
+                union.validate_json('{"t": "C"}')
+            raise AssertionError('%s run accepted an unknown tag' % run)
+        except ValidationError as exc:
+            err = exc.errors()[0]
+            assert err['type'] == 'union_tag_invalid', err
+            assert list(err['ctx']) == ['discriminator', 'tag', 'expected_tags'], err['ctx']
+            assert err['ctx']['tag'] == 'C'
+
+    # A constraint error keeps its keys in the order the constraint names them, too -- a list
+    # reports what it expected before what it got.
+    lengths = SchemaValidator(core_schema.list_schema(core_schema.int_schema(), min_length=2))
+    try:
+        lengths.validate_python([1])
+        raise AssertionError('a short list was accepted')
+    except ValidationError as exc:
+        err = exc.errors()[0]
+        assert err['type'] == 'too_short', err
+        assert list(err['ctx']) == ['field_type', 'min_length', 'actual_length'], err['ctx']
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_') and callable(fn):

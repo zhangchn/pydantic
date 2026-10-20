@@ -692,12 +692,14 @@ private:
     ValError tag_invalid(const Input& input, ValidationState& state, const py::object& tag) const {
         if (has_custom_error()) return custom_error(input, state);
         ErrorType err(ErrorType::Kind::UnionTagInvalid);
+        // The order is the order Rust's variant declares its fields -- discriminator, tag,
+        // expected_tags -- because that order is what errors()[i]["ctx"] spells back out.
         err.context()["discriminator"] = discriminator_repr_;
-        err.context()["expected_tags"] = tags_repr_;
         std::string tag_str;
         try { tag_str = py::str(tag).cast<std::string>(); }
         catch (const py::error_already_set&) { PyErr_Clear(); }
         err.context()["tag"] = tag_str;
+        err.context()["expected_tags"] = tags_repr_;
         return ValError::line_error(std::move(err), state.location(), input.as_error_value().repr);
     }
 };

@@ -136,12 +136,12 @@ public:
         // Rust renders the input type as input_value.get_type().qualname();
         // empty when the line error carries no Python input object.
         std::string input_type;
-        std::unordered_map<std::string, std::string> ctx;
+        ContextMap<std::string> ctx;
         bool is_custom = false;
 #ifdef HAS_PYBIND11
         // ctx keys whose real value is a Python object (see ErrorType::set_ctx_object);
         // the string ctx entry holds only the display form.
-        std::unordered_map<std::string, py::object> ctx_objs;
+        ContextMap<py::object> ctx_objs;
         bool has_raw_input = false;
         py::object raw_input_obj;
         bool has_raw_error = false;
