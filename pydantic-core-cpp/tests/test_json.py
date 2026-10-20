@@ -4622,6 +4622,42 @@ def test_a_node_names_its_extra_fields_behavior_with_one_key_only():
     assert td_extras(config={'extra_fields_behavior': 'allow'}) == {'zz': 5}
 
 
+def test_a_text_pattern_is_read_by_the_engine_that_can_read_it():
+    """
+    pinning: what a ``pattern`` written as text decides, and that the engine is chosen once.
+
+    The reference compiles the text with the regex crate.  This port asks ``std::regex``
+    first -- it is the engine that reads a POSIX class like ``[[:alpha:]]`` the way the
+    crate does -- and python's ``re`` takes what ``std::regex`` refuses to parse, which is
+    where the inline flags and the absolute-start anchor live.  An unparseable pattern used
+    to be dropped on the floor, so a field written ``pattern='(?i)^ab$'`` built and then
+    accepted anything: the refusal below is the point of the test, not the build.
+
+    The fallback must not become the primary engine: python reads ``[[:alpha:]]`` as a set of
+    the characters ``[ : a l p h``, which accepts a colon the crate and ``std::regex`` both
+    refuse.
+    """
+    def answers(pattern, *texts):
+        validator = SchemaValidator(core_schema.str_schema(pattern=pattern))
+        out = []
+        for text in texts:
+            try:
+                validator.validate_python(text)
+                out.append('y')
+            except ValidationError:
+                out.append('.')
+        return ''.join(out)
+
+    assert answers('(?i)^ab$', 'ab', 'AB', 'xb') == 'yy.'
+    assert answers('(?x)a b', 'ab', 'a b') == 'y.'
+    assert answers('(?P<g>a)', 'ab', '12') == 'y.'
+    assert answers('\\d+\\A', '12', 'ab') == '..'
+    assert answers('[[:alpha:]]+', 'ab', '12', ':') == 'y..'
+    # An engine that cannot read the text at all still leaves the pattern unenforced --
+    # refusing a schema the reference builds would break a model that validates there.
+    assert answers('\\p{Greek}', 'ab', 'α') == 'yy'
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_') and callable(fn):

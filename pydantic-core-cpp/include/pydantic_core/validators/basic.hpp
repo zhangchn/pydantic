@@ -641,6 +641,11 @@ public:
     // A compiled re.Pattern from the schema: Rust keeps it and uses the
     // RegexEngine::PythonRe branch instead of compiling the source itself.
     py::object pattern_re;
+    // The engine for a pattern given as text, chosen once when the schema is built
+    // (prepare_str_pattern).  Unset with pattern_engine_ready set means neither engine
+    // could compile it, which is the case the port has always skipped.
+    std::optional<std::regex> pattern_std;
+    bool pattern_engine_ready = false;
     bool strip_whitespace = false;
     bool to_lower = false;
     bool to_upper = false;
@@ -648,6 +653,30 @@ public:
     mutable std::string last_type_name_;
 
     StrConstrainedValidator() = default;
+
+    // The reference compiles a text pattern with the regex crate.  std::regex is asked first
+    // here -- it is the engine that reads a POSIX class like [[:alpha:]] the same way -- and
+    // python re, which the port already uses for a pattern the schema brings compiled, takes
+    // what std::regex refuses to parse.  That is where inline flags and the absolute-start
+    // anchor live: (?i)a means case-insensitive to the reference, while an engine that cannot
+    // parse it used to leave the constraint dropped and the field accepting everything.
+    // A pattern neither engine compiles is left to constrain nothing, as it always was: the
+    // reference builds schemas this one cannot parse (\p{Greek}, \z), and refusing those
+    // would break a model the reference validates.
+    void prepare_pattern_engine() {
+        pattern_engine_ready = true;
+        if (pattern.empty() || (pattern_re.ptr() && !pattern_re.is_none())) return;
+        try {
+            pattern_std.emplace(pattern);
+            return;
+        } catch (const std::regex_error&) {
+        }
+        try {
+            pattern_re = py::module_::import("re").attr("compile")(pattern);
+        } catch (const py::error_already_set&) {
+            PyErr_Clear();
+        }
+    }
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -726,9 +755,19 @@ auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str,
                 );
             }
         } else if (!pattern.empty()) {
+            // The engine for a text pattern is chosen once, when the schema is built.  A
+            // validator assembled by hand -- the C++ tests do -- still compiles per run the
+            // way this always did, and a pattern neither engine compiles still constrains
+            // nothing: the port has never refused a schema for that, and refusing one the
+            // reference builds would be worse than the hole it closes.
             try {
-                std::regex re(pattern);
-                if (!std::regex_search(str, re)) {
+                std::optional<std::regex> hand;
+                const std::regex* re = pattern_std ? &*pattern_std : nullptr;
+                if (!re && !pattern_engine_ready) {
+                    hand.emplace(pattern);
+                    re = &*hand;
+                }
+                if (re && !std::regex_search(str, *re)) {
                     return ValError::line_error(
                         ErrorType(ErrorType::Kind::StringPatternMismatch, "pattern", pattern),
                         state.location(),

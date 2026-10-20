@@ -367,7 +367,10 @@ static std::shared_ptr<Validator> build_from_element(
             if (auto v = ps("min_length")) cv->min_length = *v;
             if (auto v = ps("max_length")) cv->max_length = *v;
             auto pat = elem["pattern"];
-            if (!pat.error() && pat.value().is_string()) cv->pattern = std::string(pat.value().get_string().value());
+            if (!pat.error() && pat.value().is_string()) {
+                cv->pattern = std::string(pat.value().get_string().value());
+                cv->prepare_pattern_engine();
+            }
             auto sw = elem["strip_whitespace"];
             if (!sw.error() && sw.value().is_bool()) cv->strip_whitespace = sw.value().get_bool();
             auto tl = elem["to_lower"];
@@ -2172,6 +2175,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             if (has_pattern) {
                 v->pattern = *pattern_str;
                 if (pattern_compiled) v->pattern_re = pattern_obj;
+                v->prepare_pattern_engine();
             }
             if (strip_ws) v->strip_whitespace = *strip_ws;
             if (to_lower) v->to_lower = *to_lower;
