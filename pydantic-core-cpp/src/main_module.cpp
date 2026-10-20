@@ -9653,11 +9653,22 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                     else partial_mode = PartialMode::Off;
                 }
             }
-            return self.validate_python_object(py_input, pyobj_to_bool(strict), extra_opt, std::nullopt, context, /*coerce_strings=*/false, py::none(), std::nullopt, std::nullopt, partial_mode, InputType::Json);
+            // A document is read by the same pair of keys a dict is, so the keywords the caller
+            // passed travel to the run rather than stopping at the parser (mod.rs:263 declares
+            // both; the port's binding already took them and dropped them two lines below).
+            std::optional<bool> by_alias_opt;
+            if (!by_alias.is_none()) {
+                by_alias_opt = pyobj_to_bool(by_alias);
+            }
+            std::optional<bool> by_name_opt;
+            if (!by_name.is_none()) {
+                by_name_opt = pyobj_to_bool(by_name);
+            }
+            return self.validate_python_object(py_input, pyobj_to_bool(strict), extra_opt, std::nullopt, context, /*coerce_strings=*/false, py::none(), by_alias_opt, by_name_opt, partial_mode, InputType::Json);
         }, py::arg("json_data"), py::arg("strict") = py::none(), py::arg("context") = py::none(), py::arg("extra") = py::none(),
              py::arg("allow_partial") = py::none(), py::arg("by_alias") = py::none(), py::arg("by_name") = py::none())
         .def("validate_strings", [](SchemaValidator& self, const py::object& sd, py::object strict, py::object extra,
-                                     py::object allow_partial) {
+                                     py::object allow_partial, py::object by_alias, py::object by_name) {
             std::optional<ExtraBehavior> extra_opt;
             if (!extra.is_none()) {
                 std::string e = extra.cast<std::string>();
@@ -9676,9 +9687,18 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
                     else partial_mode = PartialMode::Off;
                 }
             }
-            return self.validate_strings_object(sd, pyobj_to_bool(strict), extra_opt, partial_mode);
+            std::optional<bool> by_alias_opt;
+            if (!by_alias.is_none()) {
+                by_alias_opt = pyobj_to_bool(by_alias);
+            }
+            std::optional<bool> by_name_opt;
+            if (!by_name.is_none()) {
+                by_name_opt = pyobj_to_bool(by_name);
+            }
+            return self.validate_strings_object(sd, pyobj_to_bool(strict), extra_opt, partial_mode,
+                                                by_alias_opt, by_name_opt);
         }, py::arg("string_data"), py::arg("strict") = py::none(), py::arg("extra") = py::none(),
-             py::arg("allow_partial") = py::none())
+             py::arg("allow_partial") = py::none(), py::arg("by_alias") = py::none(), py::arg("by_name") = py::none())
         .def("isinstance_python", [](SchemaValidator& self, const py::object& input, py::object strict) {
             // NEW: Use native PythonInput - no JSON round-trip!
             return self.isinstance_python_object(input, pyobj_to_bool(strict));

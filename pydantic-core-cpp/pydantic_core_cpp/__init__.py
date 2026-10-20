@@ -2084,7 +2084,11 @@ class SchemaValidator:
 
     def validate_strings(self, string_data, *, strict=None, extra=None, context=None, by_alias=None, by_name=None, allow_partial=None):
         try:
-            result = self._base.validate_strings(string_data, strict=strict, extra=extra, allow_partial=allow_partial)
+            # Rust declares by_alias/by_name here too (mod.rs:300), and a strings run looks its
+            # fields up by the same keys a dict run does -- so they go through instead of being
+            # accepted and dropped.  context stays behind: the binding has no place for it yet.
+            result = self._base.validate_strings(string_data, strict=strict, extra=extra,
+                                                 allow_partial=allow_partial, by_alias=by_alias, by_name=by_name)
         except ValidationError as e:
             self._attach_error_context(e)
             raise

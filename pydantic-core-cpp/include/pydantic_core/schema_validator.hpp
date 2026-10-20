@@ -73,7 +73,9 @@ public:
     py::object validate_strings_object(const py::object& input,
                                        std::optional<bool> strict = std::nullopt,
                                        std::optional<ExtraBehavior> extra = std::nullopt,
-                                       PartialMode allow_partial = PartialMode::Off);
+                                       PartialMode allow_partial = PartialMode::Off,
+                                       std::optional<bool> by_alias = std::nullopt,
+                                       std::optional<bool> by_name = std::nullopt);
 
     // isinstance check - returns bool instead of raising
     bool isinstance_python(const std::string& input_json,

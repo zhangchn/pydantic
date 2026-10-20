@@ -272,7 +272,9 @@ std::string SchemaValidator::validate_strings(const std::string& string_data,
 py::object SchemaValidator::validate_strings_object(const py::object& input,
                                                     std::optional<bool> strict,
                                                     std::optional<ExtraBehavior> extra,
-                                                    PartialMode allow_partial) {
+                                                    PartialMode allow_partial,
+                                                    std::optional<bool> by_alias,
+                                                    std::optional<bool> by_name) {
     if (!validator_) {
         throw std::runtime_error("Validator not initialized");
     }
@@ -300,8 +302,11 @@ py::object SchemaValidator::validate_strings_object(const py::object& input,
 
     // Dict (or any other) input: validate as-is in strings mode.  Declared
     // fields coerce string values via StringInput; extra fields keep the raw
-    // string value.
-    return validate_python_object(input, strict, extra, std::nullopt, py::none(), /*coerce_strings=*/true, py::none(), std::nullopt, std::nullopt, allow_partial);
+    // string value.  The lookup flags travel with the run (mod.rs:300 declares
+    // both): which key a declared field is read by is the caller's answer, not
+    // the schema's, even when every value arrived as text.
+    return validate_python_object(input, strict, extra, std::nullopt, py::none(), /*coerce_strings=*/true, py::none(),
+                                  by_alias, by_name, allow_partial);
 }
 
 bool SchemaValidator::isinstance_python(const std::string& input_json,

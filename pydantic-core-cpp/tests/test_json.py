@@ -4141,3 +4141,34 @@ def test_a_field_refuses_to_be_looked_up_by_neither_name_nor_alias():
     blank = SchemaValidator(core_schema.model_schema(M, core_schema.model_fields_schema({})))
     with pytest.raises(ValueError, match='cannot both be set to `False`'):
         blank.validate_python({}, by_alias=False)
+
+
+def test_a_text_run_reads_the_key_the_caller_named():
+    # Which key a field is read by is decided per run, so it is decided the same way whether the
+    # payload is a dict, a JSON document or a dict of strings: validate_json (mod.rs:263) and
+    # validate_strings (:300) both declare by_alias/by_name, and both handed the pair to a run that
+    # was never told about it -- the JSON binding passed std::nullopt where validate_python passes
+    # the caller's options, and validate_strings' wrapper accepted the keywords and dropped them.
+    class M:
+        pass
+
+    v = SchemaValidator(core_schema.model_schema(
+        M,
+        core_schema.model_fields_schema(
+            {'a': core_schema.model_field(core_schema.int_schema(), validation_alias='v')}
+        ),
+    ))
+
+    # The alias is the key by default, and the name becomes one because the caller asked.
+    assert v.validate_json('{"v": 1}').a == 1
+    assert v.validate_json('{"a": 1}', by_name=True).a == 1
+    assert v.validate_json('{"a": 1}', by_alias=False, by_name=True).a == 1
+    with pytest.raises(ValidationError, match='Field required'):
+        v.validate_json('{"v": 1}', by_alias=False, by_name=True)  # only the name now, and it is not there
+    with pytest.raises(ValueError, match='cannot both be set to `False`'):
+        v.validate_json('{"a": 1}', by_alias=False)
+
+    assert v.validate_strings({'v': '1'}).a == 1
+    assert v.validate_strings({'a': '1'}, by_name=True).a == 1
+    with pytest.raises(ValueError, match='cannot both be set to `False`'):
+        v.validate_strings({'a': '1'}, by_alias=False)
