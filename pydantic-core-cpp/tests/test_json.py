@@ -4289,3 +4289,65 @@ def test_an_assignment_run_answers_the_keywords_it_declares():
 
     with pytest.raises(TypeError, match="unexpected keyword argument 'nonsense'"):
         v.validate_assignment(target(), 'a', 7, nonsense=1)
+
+
+def test_what_an_assignment_run_leaves_on_the_instance():
+    # The keywords decide what a field is worth; the run also decides what the instance carries
+    # afterwards, and Rust's write-back (model_fields.rs:220-236, model.rs:229-239) is specific:
+    # the instance's own __pydantic_fields_set__ is kept and only extended, __dict__ becomes the
+    # validated dict with the dunders that rode in on it, __pydantic_extra__ is whatever the fields
+    # node made -- every key that is not a declared field under extra='allow', None otherwise --
+    # and nothing else is invented, so a run never conjures up __pydantic_private__.
+    class Plain:
+        pass
+
+    def fresh(**attrs):
+        t = Plain()
+        t.a, t.b = 5, 5
+        t.__pydantic_extra__ = None
+        t.__pydantic_fields_set__ = {'a', 'b'}
+        for k, v in attrs.items():
+            setattr(t, k, v)
+        return t
+
+    fields = {
+        'a': core_schema.model_field(core_schema.int_schema()),
+        'b': core_schema.model_field(core_schema.int_schema(), validation_alias='v'),
+    }
+    vp = SchemaValidator(core_schema.model_schema(Plain, core_schema.model_fields_schema(fields)))
+
+    # A declared field leaves the instance exactly as it was, apart from the value.
+    target = fresh()
+    vp.validate_assignment(target, 'a', '7')
+    assert target.a == 7 and target.b == 5
+    assert target.__pydantic_extra__ is None
+    assert target.__pydantic_fields_set__ == {'a', 'b'}
+
+    # An object that never had a __pydantic_private__ still has none afterwards, and one that came
+    # with a filled-in __pydantic_extra__ where extra is not allowed loses the dict -- the names it
+    # held stay where the merged input put them, in the model dict.
+    target = fresh(__pydantic_extra__={'old': 1})
+    vp.validate_assignment(target, 'a', '7')
+    assert not hasattr(target, '__pydantic_private__')
+    assert target.__pydantic_extra__ is None
+    assert target.old == 1
+
+    # Under extra='allow' the extras are every key the model does not declare, the dunders included
+    # -- they rode in with __dict__ and are not fields -- and the field set gains the assigned name
+    # wherever it now lives.
+    allow = SchemaValidator(core_schema.model_schema(
+        Plain, core_schema.model_fields_schema(fields, extra_behavior='allow')))
+    target = fresh()
+    allow.validate_assignment(target, 'zz', '3', extra='allow')
+    assert target.__pydantic_extra__ == {'__pydantic_extra__': None,
+                                         '__pydantic_fields_set__': {'a', 'b', 'zz'},
+                                         'zz': '3'}
+    assert sorted(vars(target)) == ['__pydantic_extra__', 'a', 'b']
+    assert target.a == 5 and target.b == 5
+
+
+if __name__ == '__main__':
+    for name, fn in sorted(globals().items()):
+        if name.startswith('test_') and callable(fn):
+            fn()
+    print('ok')

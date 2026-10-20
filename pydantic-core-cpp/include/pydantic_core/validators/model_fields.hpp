@@ -1566,23 +1566,41 @@ public:
                                         state.location(), "assignment validation returned non-dict");
         }
         py::dict updated = updated_ptr->cast<py::dict>();
-
-        // Split dunders / extras out of the updated dict
         py::object new_extra = py::none();
-        bool is_declared = fields_impl->fields().find(field_name) != fields_impl->fields().end();
-        if (updated.contains("__pydantic_extra__")) {
-            new_extra = updated[py::str("__pydantic_extra__")];
-            updated.attr("pop")(py::str("__pydantic_extra__"), py::none());
+
+        // Rust's write-back (model_fields.rs:220-236, model.rs:229-239): under extra='allow' every
+        // key that is not a declared field leaves the model dict and becomes __pydantic_extra__ --
+        // the dunders included, because they rode in with __dict__ -- and in every other case extra
+        // is None rather than whatever the object happened to carry.  The instance's own
+        // __pydantic_fields_set__ is extended in place instead of being dropped on the way out, so
+        // the attribute survives the run, and nothing else is invented: an assignment run does not
+        // create __pydantic_private__.
+        if (state.extra_behavior_or(fields_impl->extra_behavior()) == ExtraBehavior::Allow) {
+            py::dict extra_dict;
+            py::dict declared;
+            for (auto kv : updated) {
+                bool known = false;
+                try {
+                    known = fields_impl->fields().count(py::cast<std::string>(kv.first)) != 0;
+                } catch (...) {
+                    PyErr_Clear();
+                }
+                if (known) declared[kv.first] = kv.second;
+                else extra_dict[kv.first] = kv.second;
+            }
+            updated = declared;
+            new_extra = std::move(extra_dict);
+        } else {
+            new_extra = py::none();
         }
-        if (!is_declared) {
-            // assigned extra: route into __pydantic_extra__
-            if (new_extra.is_none()) new_extra = py::dict();
-            if (!py::isinstance<py::dict>(new_extra)) new_extra = py::dict(new_extra);
-            new_extra.cast<py::dict>()[py::str(field_name)] = updated[py::str(field_name)];
-            updated.attr("pop")(py::str(field_name), py::none());
-        }
-        updated.attr("pop")(py::str("__pydantic_fields_set__"), py::none());
+        // This port's own default carrier never reaches an instance.
         updated.attr("pop")(py::str("__pydantic_defaults__"), py::none());
+
+        py::object fs = py_hasattr(obj, "__pydantic_fields_set__")
+            ? py::object(obj.attr("__pydantic_fields_set__")) : py::object(py::none());
+        if (!fs.is_none() && py_hasattr(fs, "add")) {
+            fs.attr("add")(py::str(field_name));
+        }
 
         // Replace model __dict__ contents
         py::object d2 = obj.attr("__dict__");
@@ -1594,18 +1612,7 @@ public:
             }
         }
         auto setattr_fn = py::module_::import("builtins").attr("object").attr("__setattr__");
-        if (!py_hasattr(obj, "__pydantic_private__")) {
-            setattr_fn(obj, py::str("__pydantic_private__"), py::none());
-        }
-        py::object final_extra = new_extra.is_none()
-            ? (existing_extra.is_none() ? py::object(py::none()) : existing_extra)
-            : new_extra;
-        setattr_fn(obj, py::str("__pydantic_extra__"), final_extra);
-        py::object fs = py_hasattr(obj, "__pydantic_fields_set__")
-            ? py::object(obj.attr("__pydantic_fields_set__")) : py::object(py::none());
-        if (!fs.is_none() && py_hasattr(fs, "add")) {
-            fs.attr("add")(py::str(field_name));
-        }
+        setattr_fn(obj, py::str("__pydantic_extra__"), new_extra);
         return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(obj));
     }
 
