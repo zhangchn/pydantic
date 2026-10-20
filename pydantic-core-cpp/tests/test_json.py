@@ -4346,6 +4346,59 @@ def test_what_an_assignment_run_leaves_on_the_instance():
     assert target.a == 5 and target.b == 5
 
 
+def test_a_document_run_fills_the_instance_it_is_handed():
+    # `validate_json` takes the instance to fill, not only the document (mod.rs:264 declares
+    # self_instance and passes it down to _validate_json), and the wheel hands that same object back
+    # with the run written onto it.  The instance's current values are not part of the input: a
+    # document missing a required field still fails on a fully populated instance.
+    class Plain:
+        pass
+
+    def fresh(**attrs):
+        t = Plain()
+        t.a, t.b = 5, 5
+        t.__pydantic_extra__ = None
+        t.__pydantic_fields_set__ = set()
+        t.__pydantic_private__ = None
+        for k, v in attrs.items():
+            setattr(t, k, v)
+        return t
+
+    fields = {
+        'a': core_schema.model_field(core_schema.int_schema()),
+        'b': core_schema.model_field(core_schema.int_schema(), validation_alias='v'),
+    }
+    vp = SchemaValidator(core_schema.model_schema(Plain, core_schema.model_fields_schema(fields)))
+
+    target = fresh()
+    out = vp.validate_json('{"a": "7", "v": 2}', self_instance=target)
+    assert out is target
+    assert target.a == 7 and target.b == 2
+    assert target.__pydantic_fields_set__ == {'a', 'b'}
+    assert target.__pydantic_extra__ is None
+
+    # An extra name under extra='allow' lands in __pydantic_extra__ and joins the field set, exactly
+    # as the same document run through a python input would.
+    allow = SchemaValidator(core_schema.model_schema(
+        Plain, core_schema.model_fields_schema(fields, extra_behavior='allow')))
+    target = fresh()
+    assert allow.validate_json('{"a": 7, "v": 2, "zz": 1}', self_instance=target) is target
+    assert target.__pydantic_extra__ == {'zz': 1}
+    assert target.__pydantic_fields_set__ == {'a', 'b', 'zz'}
+
+    # What the instance already held is not a stand-in for a missing field.
+    target = fresh()
+    try:
+        vp.validate_json('{"a": 7}', self_instance=target)
+        raise AssertionError('expected a missing-field error')
+    except ValidationError as exc:
+        assert exc.errors()[0]['type'] == 'missing'
+
+    # Without the keyword a new instance is made, as it was before.
+    made = vp.validate_json('{"a": 7, "v": 2}')
+    assert isinstance(made, Plain) and made is not target
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_') and callable(fn):

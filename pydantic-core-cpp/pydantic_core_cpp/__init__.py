@@ -2057,14 +2057,15 @@ class SchemaValidator:
 
         return result
 
-    def validate_json(self, input, *, strict=None, extra=None, context=None,
+    def validate_json(self, input, *, strict=None, extra=None, context=None, self_instance=None,
                       allow_partial=None, by_alias=None, by_name=None):
-        # Rust's validate_json signature (validators/mod.rs:263) names the payload `input` and
-        # carries no from_attributes -- a document has no attributes to read -- so this is the
-        # keyword set that gets through to the validator.  The order follows the Rust one so the
-        # two signatures can be read side by side.
+        # Rust's validate_json signature (validators/mod.rs:263) names the payload `input`, carries
+        # no from_attributes -- a document has no attributes to read -- and takes the instance to
+        # fill, so this is the keyword set that gets through to the validator.  The order follows
+        # the Rust one so the two signatures can be read side by side.
         try:
-            result = self._base.validate_json(input, strict=strict, context=context, extra=extra,
+            result = self._base.validate_json(input, strict=strict, context=context,
+                                              self_instance=self_instance, extra=extra,
                                               allow_partial=allow_partial, by_alias=by_alias, by_name=by_name)
         except ValidationError as e:
             self._attach_error_context(e)
