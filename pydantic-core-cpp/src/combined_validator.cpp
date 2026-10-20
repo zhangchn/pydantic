@@ -3583,7 +3583,13 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             return_validator = build_from_py_dict(return_schema.cast<py::dict>(), config, definitions);
         }
         py::object function = required_any_slot(schema, "function");
-        return std::make_shared<CallValidator>(arguments_validator, function, return_validator);
+        auto call = std::make_shared<CallValidator>(arguments_validator, function, return_validator);
+        // call.rs:44 -- the schema may name the callable outright (pydantic does this for
+        // `@validate_call`); a None or an absent key lets the callable name itself.
+        if (schema.contains("function_name") && !schema["function_name"].is_none()) {
+            call->set_function_name(required_str_slot(schema, "function_name").cast<std::string>());
+        }
+        return call;
     }
 
     // --- Dataclass args (validates dataclass fields from ArgsKwargs/dict) ---

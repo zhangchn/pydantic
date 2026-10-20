@@ -4172,3 +4172,50 @@ def test_a_text_run_reads_the_key_the_caller_named():
     assert v.validate_strings({'a': '1'}, by_name=True).a == 1
     with pytest.raises(ValueError, match='cannot both be set to `False`'):
         v.validate_strings({'a': '1'}, by_alias=False)
+
+
+def test_a_run_is_titled_after_what_it_wraps():
+    # The title of a ValidationError names the validator that answered, and the two argument-taking
+    # nodes name themselves after what they wrap rather than after the schema type: a dataclass-args
+    # node takes the dataclass name (dataclass.rs:119, `format!("dataclass-args[{dataclass_name}]")`)
+    # and a call node the callable (call.rs:44-61: the schema's `function_name`, else `__name__`,
+    # else a partial's `func.__name__`, else `<unknown>`).  Both titled themselves by node type.
+    from functools import partial
+
+    def add(a):
+        return a
+
+    params = [core_schema.arguments_parameter(name='a', schema=core_schema.int_schema(),
+                                              mode='positional_or_keyword')]
+
+    def title_of(validator, payload):
+        with pytest.raises(ValidationError) as exc_info:
+            validator.validate_python(payload)
+        return exc_info.value.title
+
+    args = core_schema.arguments_schema(params)
+
+    # A plain arguments node keeps the bare schema-type name (arguments.rs:400).
+    assert title_of(SchemaValidator(args), {'a': 'x'}) == 'arguments'
+
+    call = core_schema.call_schema(args, add)
+    assert title_of(SchemaValidator(call), {'a': 'x'}) == 'call[add]'
+    named = core_schema.call_schema(args, add, function_name='my_func')
+    assert title_of(SchemaValidator(named), {'a': 'x'}) == 'call[my_func]'
+    assert title_of(SchemaValidator(core_schema.call_schema(args, partial(add))),
+                    {'a': 'x'}) == 'call[add]'
+
+    class Anonymous:
+        def __call__(self, a):
+            return a
+
+    assert title_of(SchemaValidator(core_schema.call_schema(args, Anonymous())),
+                    {'a': 'x'}) == 'call[<unknown>]'
+
+    dataclass_args = core_schema.dataclass_args_schema(
+        'Raw', [core_schema.dataclass_field('a', core_schema.int_schema())]
+    )
+    assert title_of(SchemaValidator(dataclass_args), {'a': 'x'}) == 'dataclass-args[Raw]'
+    # The title is settled before any field is looked at, so a run that fails on a missing field
+    # is titled the same as one that fails on its value.
+    assert title_of(SchemaValidator(dataclass_args), {}) == 'dataclass-args[Raw]'

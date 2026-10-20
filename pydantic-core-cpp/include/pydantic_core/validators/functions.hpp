@@ -1973,6 +1973,15 @@ public:
 
     std::string name() const override { return "arguments"; }
 
+    // A dataclass-args run is titled after the dataclass it is building
+    // (dataclass.rs:119): `dataclass-args[Raw]`, not `arguments`.
+    std::string display_name() const override {
+        if (dataclass_mode && !dataclass_name_.empty()) {
+            return "dataclass-args[" + dataclass_name_ + "]";
+        }
+        return name();
+    }
+
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
@@ -2821,7 +2830,9 @@ public:
                   std::shared_ptr<Validator> return_validator)
         : arguments_validator_(std::move(arguments_validator)),
           function_(std::move(function)),
-          return_validator_(std::move(return_validator)) {}
+          return_validator_(std::move(return_validator)) {
+        derive_function_name();
+    }
 
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
@@ -2878,6 +2889,13 @@ public:
 
     std::string name() const override { return "call"; }
 
+    // A call run is titled after the function it wraps (call.rs:44-61), not
+    // after the node type: `call[add]` for `validate_call(add)`.
+    std::string display_name() const override {
+        if (function_name_.empty()) return name();
+        return name() + "[" + function_name_ + "]";
+    }
+
     // The result type matches the return validator when one is present;
     // otherwise the function's own return value (a Python object).
     std::string effective_result_name() const override {
@@ -2886,7 +2904,11 @@ public:
     }
 
     void set_arguments_validator(std::shared_ptr<Validator> v) { arguments_validator_ = std::move(v); }
-    void set_function(py::object f) { function_ = std::move(f); }
+    void set_function(py::object f) {
+        function_ = std::move(f);
+        derive_function_name();
+    }
+    void set_function_name(std::string n) { function_name_ = std::move(n); }
     void set_return_validator(std::shared_ptr<Validator> v) { return_validator_ = std::move(v); }
 
     void visit_refs(RefVisitor visit, void* arg) const override {
@@ -2896,9 +2918,31 @@ public:
         visit_ref(visit, arg, function_);
     }
 private:
+    // call.rs:44-61: the callable's own `__name__`, else a partial's
+    // `func.__name__`, else the literal `<unknown>`.
+    void derive_function_name() {
+        if (!function_ || function_.is_none()) return;
+        try {
+            if (py::hasattr(function_, "__name__")) {
+                function_name_ = py::cast<std::string>(function_.attr("__name__"));
+                return;
+            }
+            if (py::hasattr(function_, "func")) {
+                py::object wrapped = function_.attr("func");
+                if (py::hasattr(wrapped, "__name__")) {
+                    function_name_ = py::cast<std::string>(wrapped.attr("__name__"));
+                    return;
+                }
+            }
+        } catch (...) {
+        }
+        function_name_ = "<unknown>";
+    }
+
     std::shared_ptr<Validator> arguments_validator_;
     py::object function_;
     std::shared_ptr<Validator> return_validator_;
+    std::string function_name_;
 };
 
 // PyDataclassValidator - validates pydantic dataclasses.
