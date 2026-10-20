@@ -4399,6 +4399,31 @@ def test_a_document_run_fills_the_instance_it_is_handed():
     assert isinstance(made, Plain) and made is not target
 
 
+def test_an_object_with_no_dict_is_not_an_instance_to_fill():
+    # A run handed something to write its answer into reads that object's dict before it looks at
+    # anything else (create_instance -> instance.dict()), so an object with no dict at all is an
+    # AttributeError naming its type -- on a document run as on a dict run -- rather than a fresh
+    # instance quietly handed back in the object's place.
+    class Plain:
+        pass
+
+    vp = SchemaValidator(core_schema.model_schema(Plain, core_schema.model_fields_schema({
+        'a': core_schema.model_field(core_schema.int_schema()),
+        'b': core_schema.model_field(core_schema.int_schema(), validation_alias='v'),
+    })))
+
+    for bad, type_name in ((17, 'int'), ({'a': 1}, 'dict'), ('x', 'str')):
+        for run in ('python', 'json'):
+            try:
+                if run == 'python':
+                    got = vp.validate_python({'a': 7, 'v': 2}, self_instance=bad)
+                else:
+                    got = vp.validate_json('{"a": 7, "v": 2}', self_instance=bad)
+                raise AssertionError('%s run answered with %r' % (run, got))
+            except AttributeError as exc:
+                assert str(exc) == "'%s' object has no attribute '__dict__'" % type_name, str(exc)
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_') and callable(fn):

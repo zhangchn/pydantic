@@ -9089,6 +9089,15 @@ static bool include_url_env_value() {
 // input can say.
 static py::object fill_self_instance(SchemaValidator& self, const py::object& validated,
                                      const py::object& self_instance, const py::object& input) {
+    // Rust reads the dict it is about to write before it looks at anything else (create_instance ->
+    // instance.dict()), so an object with no __dict__ at all -- an int, a dict, a string -- is an
+    // AttributeError rather than an object to fill; the port used to answer with a brand-new
+    // instance and no complaint.  A dataclass run is exempt: it writes attributes, which is how a
+    // slots dataclass with no __dict__ gets filled at all.  The lookup goes through builtins.getattr
+    // so the message is CPython's own ("'int' object has no attribute '__dict__'").
+    if (!self_instance.is_none() && !self.is_dataclass() && !py_hasattr(self_instance, "__dict__")) {
+        py::module_::import("builtins").attr("getattr")(self_instance, py::str("__dict__"));
+    }
     // If self_instance provided, populate and return it
     if (!self_instance.is_none() && py_hasattr(self_instance, "__dict__")) {
         // object.__setattr__ == Rust force_setattr
