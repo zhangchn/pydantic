@@ -9706,10 +9706,44 @@ PYBIND11_MODULE(_pydantic_core_cpp, m) {
         .def("get_default_value", [](SchemaValidator& self, py::object strict, py::object context) -> py::object {
             return self.get_default_value(pyobj_to_bool(strict), context);
         }, py::arg("strict") = py::none(), py::arg("context") = py::none())
-        .def("validate_assignment", [](SchemaValidator& self, const py::object& obj, const std::string& fn, const py::object& fv) {
+        .def("validate_assignment", [](SchemaValidator& self, const py::object& obj, const std::string& fn, const py::object& fv,
+                                       py::object strict, py::object extra, py::object from_attributes,
+                                       py::object context, py::object by_alias, py::object by_name) {
             // NEW: Use native PythonInput - no JSON round-trip!
-            return self.validate_assignment_object(obj, fn, fv);
-        }, py::arg("object"), py::arg("field_name"), py::arg("field_value"))
+            // Rust declares every one of these on the run (mod.rs:338), so accepting the
+            // call and dropping them would answer a caller's choice with a different run:
+            // strict reaches the field's own validator, extra decides whether an unknown
+            // name is a field at all, context reaches a Python validator below.
+            std::optional<bool> strict_opt;
+            if (!strict.is_none()) {
+                strict_opt = pyobj_to_bool(strict);
+            }
+            std::optional<ExtraBehavior> extra_opt;
+            if (!extra.is_none()) {
+                std::string e = extra.cast<std::string>();
+                if (e == "allow") extra_opt = ExtraBehavior::Allow;
+                else if (e == "forbid") extra_opt = ExtraBehavior::Forbid;
+                else if (e == "ignore") extra_opt = ExtraBehavior::Ignore;
+                else throw py::value_error("Input should be 'allow', 'forbid' or 'ignore'");
+            }
+            std::optional<bool> from_attributes_opt;
+            if (!from_attributes.is_none()) {
+                from_attributes_opt = pyobj_to_bool(from_attributes);
+            }
+            std::optional<bool> by_alias_opt;
+            if (!by_alias.is_none()) {
+                by_alias_opt = pyobj_to_bool(by_alias);
+            }
+            std::optional<bool> by_name_opt;
+            if (!by_name.is_none()) {
+                by_name_opt = pyobj_to_bool(by_name);
+            }
+            return self.validate_assignment_object(obj, fn, fv, strict_opt, extra_opt, from_attributes_opt,
+                                                   by_alias_opt, by_name_opt, context);
+        }, py::arg("obj"), py::arg("field_name"), py::arg("field_value"),
+           py::arg("strict") = py::none(), py::arg("extra") = py::none(),
+           py::arg("from_attributes") = py::none(), py::arg("context") = py::none(),
+           py::arg("by_alias") = py::none(), py::arg("by_name") = py::none())
         .def_property_readonly("title", &SchemaValidator::title)
         .def_property_readonly("validator_display_name", &SchemaValidator::validator_display_name)
         .def("__repr__", &SchemaValidator::repr)

@@ -90,9 +90,18 @@ public:
                                    const std::string& field_value);
 
     // Validate assignment on Python objects directly (NEW - no JSON round-trip)
+    // The keyword arguments are the ones Rust declares (mod.rs:338); they belong to
+    // the run, so strict reaches the field's own validator and extra decides whether
+    // an unknown name is a field at all.
     py::object validate_assignment_object(const py::object& obj,
                                           const std::string& field_name,
-                                          const py::object& field_value);
+                                          const py::object& field_value,
+                                          std::optional<bool> strict = std::nullopt,
+                                          std::optional<ExtraBehavior> extra = std::nullopt,
+                                          std::optional<bool> from_attributes = std::nullopt,
+                                          std::optional<bool> by_alias = std::nullopt,
+                                          std::optional<bool> by_name = std::nullopt,
+                                          py::object context = py::none());
 
     // Properties
     const std::string& title() const { return title_; }

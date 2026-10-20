@@ -733,8 +733,11 @@ public:
         const py::object& field_value, ValidationState& state) {
         auto it = fields_.find(field_name);
         if (it == fields_.end()) {
-            // Unknown field: extras behavior decides
-            if (extra_behavior_ == ExtraBehavior::Allow) {
+            // Unknown field: extras behavior decides.  The run answers before the schema
+            // does -- model_fields.rs:150 reads `state.extra_behavior_or(self.extra_behavior)`,
+            // so `extra='allow'` on an assignment call lets the name through even where the
+            // model was built to forbid it.
+            if (state.extra_behavior_or(extra_behavior_) == ExtraBehavior::Allow) {
                 py::dict updated = input_dict;
                 if (extras_validator_) {
                     PythonInput py_in(field_value);

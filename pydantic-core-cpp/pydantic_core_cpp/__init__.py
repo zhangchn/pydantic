@@ -2140,9 +2140,17 @@ class SchemaValidator:
             return None
         return Some(value)
 
-    def validate_assignment(self, obj, field_name, field_value):
+    def validate_assignment(self, obj, field_name, field_value, *, strict=None, extra=None,
+                            from_attributes=None, context=None, by_alias=None, by_name=None):
+        # The run's options are Rust's to declare (mod.rs:338) and the caller's to set, so
+        # they go down to the extension rather than being answered here -- `by_alias` and
+        # `by_name` included, which an assignment run carries but never consults: a field is
+        # answered by its name (model_fields.rs:182), not by the key it is written under.
         try:
-            out = self._base.validate_assignment(obj, field_name, field_value)
+            out = self._base.validate_assignment(
+                obj, field_name, field_value,
+                strict=strict, extra=extra, from_attributes=from_attributes,
+                context=context, by_alias=by_alias, by_name=by_name)
         except ValidationError as e:
             self._attach_error_context(e)
             raise

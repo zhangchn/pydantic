@@ -4219,3 +4219,73 @@ def test_a_run_is_titled_after_what_it_wraps():
     # The title is settled before any field is looked at, so a run that fails on a missing field
     # is titled the same as one that fails on its value.
     assert title_of(SchemaValidator(dataclass_args), {}) == 'dataclass-args[Raw]'
+
+
+def test_an_assignment_run_answers_the_keywords_it_declares():
+    # An assignment run carries the same options as any other run -- Rust declares
+    # (obj, field_name, field_value, *, strict, extra, from_attributes, context, by_alias,
+    # by_name) at mod.rs:338 -- but the port's entry point took three positional arguments and
+    # nothing else, so every keyword arrived as a TypeError.  The extras branch was a second gap
+    # behind it: it read the schema's own behaviour, so an `extra='allow'` that did get through
+    # still could not open it (model_fields.rs:150 asks the run first, the schema second).
+    class Plain:
+        pass
+
+    v = SchemaValidator(core_schema.model_schema(
+        Plain,
+        core_schema.model_fields_schema({
+            'a': core_schema.model_field(core_schema.int_schema()),
+            'b': core_schema.model_field(core_schema.int_schema(), validation_alias='v'),
+        }),
+    ))
+
+    def target():
+        # The three dunders a model instance carries: an assignment run reads __dict__ and
+        # __pydantic_extra__ off the object, so a hand-rolled target has to have them.
+        t = Plain()
+        t.a, t.b = 5, 5
+        t.__pydantic_extra__ = None
+        t.__pydantic_fields_set__ = {'a', 'b'}
+        t.__pydantic_private__ = None
+        return t
+
+    t = target()
+    v.validate_assignment(t, 'a', '7')
+    assert t.a == 7
+
+    # strict reaches the field's own validator, so the coercion that the lax run performs is
+    # refused here.
+    with pytest.raises(ValidationError, match='Input should be a valid integer'):
+        v.validate_assignment(target(), 'a', '7', strict=True)
+
+    # A field is answered by its name, never by the key an alias writes it under, so by_alias and
+    # by_name are carried by this run and consulted by none: the pair that is refused in a fields
+    # run is simply not in play here, and turning either one off changes nothing.
+    with pytest.raises(ValidationError, match="Object has no attribute 'v'"):
+        v.validate_assignment(target(), 'v', '3')
+    with pytest.raises(ValidationError, match="Object has no attribute 'v'"):
+        v.validate_assignment(target(), 'v', '3', by_alias=False)
+    t = target()
+    v.validate_assignment(t, 'b', '3', by_name=True)
+    assert t.b == 3
+    t = target()
+    v.validate_assignment(t, 'b', '3', by_alias=False, by_name=False)
+    assert t.b == 3
+
+    # extra decides whether an unknown name is a field, and it is the caller's answer that
+    # decides it -- without an explicit keyword the schema's own behaviour (forbid) still refuses.
+    with pytest.raises(ValidationError, match="Object has no attribute 'zz'"):
+        v.validate_assignment(target(), 'zz', '3')
+    t = target()
+    v.validate_assignment(t, 'zz', '3', extra='allow')
+    assert t.__pydantic_extra__['zz'] == '3'
+
+    # from_attributes and context belong to the run too, and reaching the validator with them
+    # must not change an answer that needs neither.
+    for kwargs in ({'from_attributes': True}, {'context': None}):
+        t = target()
+        v.validate_assignment(t, 'a', 7, **kwargs)
+        assert t.a == 7
+
+    with pytest.raises(TypeError, match="unexpected keyword argument 'nonsense'"):
+        v.validate_assignment(target(), 'a', 7, nonsense=1)

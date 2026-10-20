@@ -425,7 +425,13 @@ static py::dict collect_instance_data(const py::object& obj) {
 
 py::object SchemaValidator::validate_assignment_object(const py::object& obj,
                                                        const std::string& field_name,
-                                                       const py::object& field_value) {
+                                                       const py::object& field_value,
+                                                       std::optional<bool> strict,
+                                                       std::optional<ExtraBehavior> extra,
+                                                       std::optional<bool> from_attributes,
+                                                       std::optional<bool> by_alias,
+                                                       std::optional<bool> by_name,
+                                                       py::object context) {
     if (!validator_) {
         throw std::runtime_error("Validator not initialized");
     }
@@ -436,6 +442,32 @@ py::object SchemaValidator::validate_assignment_object(const py::object& obj,
     // fall back to the legacy whole-model re-validation below).
     if (auto base = validator_->base_validator()) {
         ValidationState state(config_);
+        // An assignment run carries the same run options as any other (mod.rs:338), so
+        // they go on the state the same way validate_python_object puts them there: the
+        // field's own validator sees strict, the extra branch sees extra_behavior, and
+        // which name a field answers to stays the caller's answer rather than the
+        // schema's.  Rust matches an assigned field by name only
+        // (model_fields.rs:182), so by_alias/by_name decide nothing here -- they are
+        // carried, not consulted, and no both-false pair can be refused on this path.
+        state.set_input_type(InputType::Python);
+        if (strict.has_value()) {
+            state.set_strict(*strict);
+        }
+        if (extra.has_value()) {
+            state.set_extra_behavior(*extra);
+        }
+        if (from_attributes.has_value()) {
+            state.set_from_attributes(*from_attributes);
+        }
+        if (by_alias.has_value()) {
+            state.set_by_alias(*by_alias);
+        }
+        if (by_name.has_value()) {
+            state.set_by_name(*by_name);
+        }
+        if (!context.is_none()) {
+            state.set_context_py(context);
+        }
         auto r = base->validate_assignment(obj, field_name, field_value, state);
         if (!r.is_ok()) {
             bool unsupported = false;
