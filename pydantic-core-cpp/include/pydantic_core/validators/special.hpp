@@ -17,6 +17,7 @@
 #include <regex>
 #include <algorithm>
 #include <cctype>
+#include <limits>
 
 namespace py = pybind11;
 namespace pydantic_core {
@@ -709,18 +710,34 @@ static std::string timedelta_human_readable(const py::object& td) {
 }
 
 // Divisibility needs the duration as one number.  Rust totals seconds and microseconds as
-// i128 (timedelta.rs:44-45); a Python timedelta is built from days, seconds and
-// microseconds whose total always fits an int64, so the narrow is a formality and nullopt
-// here only means "this object has no duration fields" -- answered as the constraint not
-// holding, which is the answer the reference has for a duration it cannot divide.
+// i128 (timedelta.rs:44-45).  A Python timedelta built by CPython keeps |days| at or below
+// 999,999,999, and days*86400*1e6 of that is 8.64e19 -- past an int64 -- so a duration near
+// the ceiling does NOT fit the narrow, and nullopt means "this duration's total is not
+// statable here" as well as "this object has no duration fields"; both are answered as the
+// constraint not holding, which is the answer the reference has for a duration it cannot
+// divide.  The arithmetic is guarded step by step rather than widened because MSVC has no
+// 128-bit integer type at all, and the step guards refuse exactly where the widened total
+// would have refused for any duration CPython can build.
 static std::optional<long long> timedelta_total_micros(const py::object& td) {
+    constexpr long long ll_max = std::numeric_limits<long long>::max();
+    constexpr long long ll_min = std::numeric_limits<long long>::min();
+    // Adding `add` to `have` without overflow, for either sign of `add`.
+    auto would_overflow = [ll_max, ll_min](long long have, long long add) {
+        return (add > 0 && have > ll_max - add) || (add < 0 && have < ll_min - add);
+    };
     try {
         const long long days = td.attr("days").cast<long long>();
         const long long seconds = td.attr("seconds").cast<long long>();
         const long long micros = td.attr("microseconds").cast<long long>();
-        const __int128 total = ((__int128)days * 86400 + seconds) * 1000000 + micros;
-        if (total > ((__int128)1 << 63) - 1 || total < -((__int128)1 << 63)) return std::nullopt;
-        return (long long)total;
+        if (days > ll_max / 86400 || days < ll_min / 86400) return std::nullopt;
+        long long total = days * 86400;
+        if (would_overflow(total, seconds)) return std::nullopt;
+        total += seconds;
+        if (total > ll_max / 1000000 || total < ll_min / 1000000) return std::nullopt;
+        total *= 1000000;
+        if (would_overflow(total, micros)) return std::nullopt;
+        total += micros;
+        return total;
     } catch (py::error_already_set& e) {
         e.restore();
         PyErr_Clear();

@@ -7,13 +7,29 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Always emit DWARF debug info: needed by the dSYM step (release) and for
 # local lldb debugging (debug). Independent of whether symbols get stripped.
-add_compile_options(-g)
+# cl.exe has no -g (it answers "warning D9002: ignoring unknown option '-g'", which it also
+# then hands to every dependency compiled in this project, simdjson among them), and MSVC
+# keeps debug info in a .pdb named by the /Zi-family flag that CMAKE_BUILD_TYPE already
+# picks, so the flag belongs to the GCC/Clang spellings only.
+if(NOT MSVC)
+    add_compile_options(-g)
+endif()
 
 # PDC_DEBUG=ON: unoptimized build that retains ALL symbols (local + global +
 # DWARF) in the object files and the .so — nothing is stripped. Use for lldb.
 option(PDC_DEBUG "Debug build: -O0 with full unstripped symbols" OFF)
 
-if(PDC_DEBUG)
+# cl.exe spells these /Od and /O2 and CMAKE_BUILD_TYPE already chooses them (scikit-build-core
+# builds Release, which carries /O2), while a bare -O3 is not a numeric argument it accepts.
+# PDC_DEBUG still needs saying on MSVC because it is a cache ask that does not move the build
+# type out of Release.
+if(MSVC)
+    if(PDC_DEBUG)
+        set(PDC_OPT_FLAGS /Od /Ob0 /Zi)
+    else()
+        set(PDC_OPT_FLAGS "")
+    endif()
+elseif(PDC_DEBUG)
     set(PDC_OPT_FLAGS -O0)
 else()
     set(PDC_OPT_FLAGS -O3)
@@ -153,12 +169,23 @@ target_link_libraries(_pydantic_core_cpp PRIVATE
     simdjson::simdjson
 )
 
-target_compile_options(_pydantic_core_cpp PRIVATE
-    -Wall
-    -Wextra
-    -Wpedantic
-    ${PDC_OPT_FLAGS}
-)
+# The warning set is GCC/Clang spelling, and cl.exe reads "-Wextra" as "/W" followed by a word
+# it must be given a number for: "command line error D8021: invalid numeric argument
+# '/Wextra'", which stops the build before a single source file is compiled.  MSVC gets its
+# own level flag -- /W3 rather than /W4, because /W4 over pybind11-heavy translation units is
+# mostly C4127/C4251 noise -- plus pybind11::windows_extras (/bigobj /MP): these sources are
+# large enough that a COFF object can run out of its section limit without /bigobj.
+if(MSVC)
+    target_compile_options(_pydantic_core_cpp PRIVATE /W3 ${PDC_OPT_FLAGS})
+    target_link_libraries(_pydantic_core_cpp PRIVATE pybind11::windows_extras)
+else()
+    target_compile_options(_pydantic_core_cpp PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+        ${PDC_OPT_FLAGS}
+    )
+endif()
 
 # Strip symbols into a .dSYM bundle (macOS, non-Debug builds) and ship the
 # bundle next to the .so in the installed package (site-packages).
@@ -166,8 +193,15 @@ if(COMMAND pdc_strip_to_dsym)
     pdc_strip_to_dsym(_pydantic_core_cpp "pydantic_core_cpp")
 endif()
 
-# Install the extension into the Python package directory for wheel building
-install(TARGETS _pydantic_core_cpp LIBRARY DESTINATION pydantic_core_cpp)
+# Install the extension into the Python package directory for wheel building.  Both the RUNTIME
+# and the LIBRARY destination group are named on purpose: on POSIX the module is a LIBRARY-group
+# artifact (this build's install manifest copies it from there), while a Windows extension is a
+# .pyd -- a DLL, and a DLL is a RUNTIME-group artifact -- so naming LIBRARY alone leaves open a
+# build that succeeds, installs nothing, and lets pydantic's shim fall back to the Rust backend.
+# ARCHIVE is deliberately absent, so an MSVC import library is not shipped in the package.
+install(TARGETS _pydantic_core_cpp
+        RUNTIME DESTINATION pydantic_core_cpp
+        LIBRARY DESTINATION pydantic_core_cpp)
 
 # ---------------------------------------------------------------------------
 # Tests (only for standalone builds, not during wheel building)

@@ -1132,11 +1132,15 @@ static bool json_leaf_convert(const std::string& type, const py::object& value,
             return true;
         }
         if (type == "timedelta") {
-            long days = value.attr("days").cast<long>();
-            long seconds = value.attr("seconds").cast<long>();
-            long microseconds = value.attr("microseconds").cast<long>();
+            // long long, not long: on Windows a C long is 32 bits, and days * 86400 is the
+            // milliseconds form's first step -- a 300,000-day duration would serialize through an
+            // overflowed product there.  A CPython timedelta holds |days| up to 999,999,999, so
+            // the day count itself fits either way; the product is what needs the wider type.
+            long long days = value.attr("days").cast<long long>();
+            long long seconds = value.attr("seconds").cast<long long>();
+            long long microseconds = value.attr("microseconds").cast<long long>();
             if (ser_json_timedelta == "milliseconds") {
-                long long micros = (long long)(days * 86400 + seconds) * 1000000LL + microseconds;
+                long long micros = (days * 86400 + seconds) * 1000000LL + microseconds;
                 out = py::float_(micros / 1000.0);
                 return true;
             }
@@ -1153,10 +1157,10 @@ static bool json_leaf_convert(const std::string& type, const py::object& value,
                 if (seconds < 0) { seconds += 86400; days--; }
                 if (days < 0) { days = 0; seconds = 0; microseconds = 0; }
             }
-            long hours = seconds / 3600;
+            long long hours = seconds / 3600;
             seconds = seconds % 3600;
-            long mins = seconds / 60;
-            long secs = seconds % 60;
+            long long mins = seconds / 60;
+            long long secs = seconds % 60;
             std::string result = negative ? "-P" : "P";
             if (days > 0) result += std::to_string(days) + "D";
             bool has_time = hours > 0 || mins > 0 || secs > 0 || microseconds > 0;
@@ -1167,7 +1171,7 @@ static bool json_leaf_convert(const std::string& type, const py::object& value,
                 if (secs > 0 || microseconds > 0) {
                     if (microseconds > 0) {
                         char buf[32];
-                        snprintf(buf, sizeof(buf), "%ld.%06ld", secs, microseconds);
+                        snprintf(buf, sizeof(buf), "%lld.%06lld", secs, microseconds);
                         std::string s(buf);
                         auto last = s.find_last_not_of('0');
                         if (last != std::string::npos) s.erase(last + 1);
@@ -3958,12 +3962,14 @@ struct SerNode {
         if (type == "timedelta") {
             try {
                 if (ser_json_timedelta == "float" || ser_json_timedelta == "milliseconds") {
-                    long days = value.attr("days").cast<long>();
-                    long seconds = value.attr("seconds").cast<long>();
-                    long microseconds = value.attr("microseconds").cast<long>();
+                    // long long, not long: a C long is 32 bits on Windows and days * 86400 is
+                    // the first step of the milliseconds form.
+                    long long days = value.attr("days").cast<long long>();
+                    long long seconds = value.attr("seconds").cast<long long>();
+                    long long microseconds = value.attr("microseconds").cast<long long>();
                     double total = days * 86400.0 + seconds + microseconds / 1000000.0;
                     if (ser_json_timedelta == "milliseconds") {
-                        total = ((long long)(days * 86400 + seconds) * 1000000LL + microseconds) / 1000.0;
+                        total = ((days * 86400 + seconds) * 1000000LL + microseconds) / 1000.0;
                     }
                     // Format as number without trailing zeros
                     std::string s = std::to_string(total);
@@ -3975,9 +3981,9 @@ struct SerNode {
                     }
                     return s;
                 }
-                long days = value.attr("days").cast<long>();
-                long seconds = value.attr("seconds").cast<long>();
-                long microseconds = value.attr("microseconds").cast<long>();
+                long long days = value.attr("days").cast<long long>();
+                long long seconds = value.attr("seconds").cast<long long>();
+                long long microseconds = value.attr("microseconds").cast<long long>();
                 // Compute total seconds to determine sign
                 double total_seconds = days * 86400.0 + seconds + microseconds / 1000000.0;
                 bool negative = total_seconds < 0;
@@ -3991,10 +3997,10 @@ struct SerNode {
                     if (days < 0) { days = 0; seconds = 0; microseconds = 0; }
                 }
                 // Break seconds into hours, minutes, seconds
-                long hours = seconds / 3600;
+                long long hours = seconds / 3600;
                 seconds = seconds % 3600;
-                long mins = seconds / 60;
-                long secs = seconds % 60;
+                long long mins = seconds / 60;
+                long long secs = seconds % 60;
 
                 std::string result = negative ? "-P" : "P";
                 if (days > 0) result += std::to_string(days) + "D";
@@ -4008,7 +4014,7 @@ struct SerNode {
                     if (secs > 0 || microseconds > 0) {
                         if (microseconds > 0) {
                             char buf[32];
-                            snprintf(buf, sizeof(buf), "%ld.%06ld", secs, microseconds);
+                            snprintf(buf, sizeof(buf), "%lld.%06lld", secs, microseconds);
                             std::string s(buf);
                             auto last = s.find_last_not_of('0');
                             if (last != std::string::npos) s.erase(last + 1);

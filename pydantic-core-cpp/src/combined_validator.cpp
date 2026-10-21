@@ -1413,6 +1413,13 @@ static TZConstraint tz_constraint_from_value(const py::object& value) {
     PyObject* indexed = PyNumber_Index(value.ptr());
     if (!indexed) throw py::error_already_set();
     py::object held = py::reinterpret_steal<py::object>(indexed);
+    // This one stays a C long, Windows included.  The reference extracts through pyo3, which
+    // asks CPython for a C long and hands back CPython's own words when the value does not fit
+    // one -- "Python int too large to convert to C long" -- and that ceiling moves with the
+    // platform that built the reference.  Widening this to long long was tried on 2026-10-21 as
+    // a Windows portability fix and adhoc_tz_build answered 8 divergent rows: the port said
+    // "int too big to convert" where the reference, built by the same CPython call, says the
+    // C-long sentence on every platform.  The two ceilings are then the reference's own.
     const long as_long = PyLong_AsLong(indexed);
     if (as_long == -1 && PyErr_Occurred()) throw py::error_already_set();
     if (as_long > 2147483647L)
