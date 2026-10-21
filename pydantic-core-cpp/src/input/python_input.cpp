@@ -1428,12 +1428,17 @@ ValResult<ValMatch<EitherTimedelta>> PythonInput::validate_timedelta(bool strict
     // than is_int() because that is what pyo3's i64 extraction asks -- and a bool answers it, so
     // True is a duration of one second here, as a value and as a bound alike (input_python.rs:741).
     // A Python int has no upper bound: casting to long long either wrapped into the day field or,
-    // for an int too big for long long, threw RuntimeError straight out of the validator.  The
-    // wheel's cap is not a magnitude limit either: speedate truncates the day count into the u32
-    // it holds it in *before* the 999,999,999-day check, so 1e15 seconds is refused while 2**63-1
-    // is accepted as a 579,025,220-day duration, and 86400*(2**32+5e8) comes back as 500,000,000
-    // days.  An int that does not fit i64 leaves this arm through f64 extraction, where the cast
-    // saturates rather than wrapping, so the wheel refuses it -- hence the refusal of overflow.
+    // for an int too big for long long, threw RuntimeError straight out of the validator.  The cap
+    // is a refusal, not a limit: int_as_duration (input/datetime.rs:710) asks whether
+    // total_seconds / 86400 fits a u32 and refuses the answer if it does not, before speedate's
+    // own 999,999,999-day check -- "the number of days can exceed u32::MAX (and casting would
+    // silently wrap it)".  Upstream 2622b74b3 (reference 2.50.1) replaced the wheel's earlier
+    // truncation, which accepted 2**63-1 as a 579,025,220-day duration and
+    // 86400*(2**32+5e8) as 500,000,000 days; masking the day count here reproduces that older
+    // answer, so it must stay off.  Because 999,999,999 < u32::MAX, the single day check below
+    // refuses everything either ceiling refuses.  An int that does not fit i64 leaves this arm
+    // through f64 extraction, where the cast saturates rather than wrapping, so the wheel refuses
+    // it -- hence the refusal of overflow.
     if (PyLong_Check(obj_.ptr()) && !strict) {
         int overflow = 0;
         long long seconds = PyLong_AsLongLongAndOverflow(obj_.ptr(), &overflow);
@@ -1448,7 +1453,7 @@ ValResult<ValMatch<EitherTimedelta>> PythonInput::validate_timedelta(bool strict
         const unsigned long long abs_seconds =
             seconds < 0 ? 0ULL - static_cast<unsigned long long>(seconds)
                         : static_cast<unsigned long long>(seconds);
-        const unsigned long long day_count = (abs_seconds / 86400ULL) & 0xFFFFFFFFULL;
+        const unsigned long long day_count = abs_seconds / 86400ULL;
         const unsigned long long rest = abs_seconds % 86400ULL;
         if (day_count > static_cast<unsigned long long>(TD_MAX_DAYS)) {
             return ValError::line_error(

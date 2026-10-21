@@ -4658,6 +4658,42 @@ def test_a_text_pattern_is_read_by_the_engine_that_can_read_it():
     assert answers('\\p{Greek}', 'ab', 'α') == 'yy'
 
 
+def test_a_duration_past_the_day_ceiling_is_refused_rather_than_wrapped() -> None:
+    # int_as_duration (input/datetime.rs:710, upstream 2622b74b3 -- the reference 2.50.1) asks
+    # whether total_seconds / 86400 fits a u32 and refuses the answer when it does not, because a
+    # truncated day count "would silently wrap".  A wrapped duration is worse than a refusal:
+    # 2**63-1 came back as a 579,025,220-day delta that every bound a schema can carry lets it
+    # through.  The ceiling is still not a magnitude limit, so the largest duration under it has
+    # to survive untouched.
+    refused = ('time_delta_parsing', 'Input should be a valid timedelta, durations may not exceed 999,999,999 days')
+
+    val = SchemaValidator(core_schema.timedelta_schema())
+
+    def answer(data):
+        try:
+            got = val.validate_python(data)
+        except ValidationError as exc:
+            err = exc.errors()[0]
+            return err['type'], err['msg']
+        return got
+
+    assert answer(2**63 - 1) == refused
+    assert answer(-(2**63 - 1)) == refused
+    assert answer(86400 * (2**32 + 5 * 10**8)) == refused  # used to come back as 500,000,000 days
+    assert answer(10**15) == refused
+    assert answer(2**64) == refused  # too big for i64, so it leaves this arm through f64
+    assert answer(999999999 * 86400 - 1) == datetime.timedelta(days=999999998, seconds=86399)
+    assert answer(3600) == datetime.timedelta(seconds=3600)
+    assert answer(True) == datetime.timedelta(seconds=1)
+
+    # The same integer as a bound is refused where the bound is built, not where it is compared,
+    # because building the bound coerces it with the validator that owns the ceiling.
+    with pytest.raises(SchemaError) as exc_info:
+        SchemaValidator(core_schema.timedelta_schema(le=2**63 - 1))
+    assert 'Error building "timedelta" validator:' in str(exc_info.value)
+    assert "'le' must be coercible to a timedelta instance" in str(exc_info.value)
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_') and callable(fn):
