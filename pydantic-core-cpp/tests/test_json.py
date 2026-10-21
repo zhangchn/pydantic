@@ -4696,6 +4696,34 @@ def test_a_duration_past_the_day_ceiling_is_refused_rather_than_wrapped() -> Non
     assert "'le' must be coercible to a timedelta instance" in str(exc_info.value)
 
 
+def test_an_ipv6_url_host_is_judged_by_one_rule_on_every_platform() -> None:
+    # A bracketed host used to be asked of inet_pton, which is why the check answers the same way
+    # here as on a machine with no <arpa/inet.h> to include.  Asking libc also meant asking the
+    # libc: macOS and glibc take a "fe80::1%eth0" scope id, the reference (parse_ipv6_addr, url
+    # crate) refuses one, so a host was legal or not depending on where the wheel was built.
+    val = SchemaValidator(core_schema.url_schema())
+
+    def answer(text):
+        try:
+            return str(val.validate_python(text))
+        except ValidationError as exc:
+            err = exc.errors()[0]
+            return err['type'], err['msg']
+
+    refused = ('url_parsing', 'Input should be a valid URL, invalid IPv6 address')
+    for scoped in ('http://[fe80::1%eth0]/', 'http://[fe80::1%25eth0]/', 'http://[::1%0]/'):
+        assert answer(scoped) == refused
+
+    # The forms a host has to keep working: "::" anywhere it may stand, and a dotted quad owning
+    # the trailing 32 bits.  Only acceptance is asserted -- how much of the host the reference
+    # rewrites on the way out is still its own open question.
+    assert answer('http://[::1]/').startswith('http://[')
+    assert answer('http://[1:2:3:4:5:6:7:8]/').startswith('http://[')
+    assert answer('http://[1:2:3:4:5:6:7::]/').startswith('http://[')
+    assert answer('http://[::ffff:1.2.3.4]/').startswith('http://[')
+    assert answer('http://[::ffff:1.2.3.4]:8080/p').startswith('http://[')
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_') and callable(fn):

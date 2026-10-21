@@ -12,6 +12,7 @@
 #include "pydantic_core/json_input.hpp"
 #include "pydantic_core/string_input.hpp"
 #include "pydantic_core/py_compat.hpp"
+#include "pydantic_core/url_types.hpp"
 
 // Python interpreter for the lifetime of the process — the validators under
 // test convert values to/from Python objects (pybind11 needs a running
@@ -1113,10 +1114,77 @@ TEST_CASE("DatetimeValidator") {
 TEST_CASE("UrlValidator") {
     UrlValidator validator;
     CHECK(validator.name() == "url");
-    
+
     ValidationState state;
     auto result = validator.validate(StringInput("https://example.com"), state);
     CHECK(result.is_ok());
+}
+
+TEST_CASE("is_valid_ipv6 - the reference's rules, which libc does not share") {
+    // A bracketed host used to be asked of inet_pton: no Windows spelling of it exists, and its
+    // answer is flavoured by whichever libc shipped -- macOS and glibc both take a "fe80::1%eth0"
+    // scope id and a five-zero group, which parser::parse_ipv6_addr (url crate) refuses.  The
+    // table is the reference's, so it has to say the same thing on every platform.
+    auto ok = [](const char* host) { CHECK(is_valid_ipv6(host)); };
+    auto no = [](const char* host) { CHECK_FALSE(is_valid_ipv6(host)); };
+
+    ok("::");
+    ok("::1");
+    ok("0:0:0:0:0:0:0:1");
+    ok("1:2:3:4:5:6:7:8");
+    ok("fe80::1");
+    ok("FE80::1");                                    // hex digits, so case does not matter
+    ok("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff");
+    ok("1::8");
+    ok("0::0");
+    ok("1:2:3:4:5:6:7::");                             // "::" may stand at either end
+    ok("::7:6:5:4:3:2:1");
+    ok("0000:0000:0000:0000:0000:0000:0000:0001");     // four digits is a full-width group
+    ok("1234::");
+    ok("::ffff:1.2.3.4");                              // a dotted quad is the trailing 32 bits
+    ok("1:2:3:4:5:6:1.2.3.4");
+    ok("1:2:3:4:5:6:192.168.1.1");
+    ok("::192.168.1.1");
+    ok("ff::1:2.3.4.5");
+
+    no("");
+    no("a");
+    no("1.2.3.4");                                     // a quad alone is v4, not a v6 host
+    no("1:2:3:4:5:6:7:8:9");                           // nine groups
+    no("1:2:3:4:5:6:7:8::");                           // eight groups and a "::" is nine at least
+    no("1:2:3:4:5:6:7:1.2.3.4");                       // a quad is two groups: that is nine too
+    no("1:2:3:4:5:6:7:8:");                            // a lone trailing separator
+    no(":1:2:3:4:5:6:7:8");
+    no("1::2::3");                                     // one "::" run, not two
+    no(":::");
+    no(":");
+    no("1:");
+    no("::0:");
+    no("1:2:3:4::5:6:7:8");
+    no("00000::1");                                    // five digits, whatever inet_pton answers
+    no("0000f::1");
+    no("12345::1");
+    no("10000::1");
+    no("0x1::2");
+    no("g::1");
+    no("1::g");
+    no("1 :2:3:4:5:6:7:8");
+    no("1: 2:3:4:5:6:7:8");
+    no("1_2::3");
+    no("fe80::1%eth0");                                // the reference has no scope id
+    no("fe80::1%25eth0");
+    no("::1%0");
+    no("%eth0");
+    no("::ffff:1.2.3");
+    no("::ffff:1.2.3.256");
+    no("::ffff:1.2.3.4.5");
+    no("::ffff:01.2.3.4");                             // no leading zero in an octet
+    no("::ffff:1.2.3.04");
+    no("::ffff:1..4");
+    no("::ffff:1.2.3.4:");
+    no("::ffff:1.2.3.4a");
+    no("::ffff:1.2.3.-4");
+    no("1.2.3.4:5:6:7:8");                             // a quad owns the end of the host only
 }
 
 TEST_CASE("UuidValidator") {

@@ -4,8 +4,6 @@
 #include <stdexcept>
 #include <algorithm>
 #include <cctype>
-#include <arpa/inet.h>
-#include <netinet/in.h>
 
 namespace pydantic_core {
 
@@ -23,10 +21,79 @@ bool is_special_scheme(const std::string& s) {
     return s == "http" || s == "https" || s == "ws" || s == "wss" || s == "ftp" || s == "file";
 }
 
+// IPv6 literal (no brackets), spelled out here rather than asked of libc: <arpa/inet.h> has no
+// Windows spelling (MinGW stops the build on it) and winsock's inet_pton wants a WSAStartup and
+// answers differently again.  Asking libc also means the answer depends on which libc shipped --
+// macOS and glibc both take a "fe80::1%eth0" scope id and a five-zero group, and the reference
+// refuses both.  These are the reference's rules (url crate parser::parse_ipv6_addr): 1-4 hex
+// digits per group, at most one "::" standing for one or more zero groups, an IPv4 dotted quad only
+// as the trailing 32 bits, and no scope id.
 bool is_valid_ipv6(const std::string& host) {
     if (host.empty()) return false;
-    struct in6_addr dst;
-    return inet_pton(AF_INET6, host.c_str(), &dst) == 1;
+
+    auto hex_digit = [](char ch) { return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') ||
+                                          (ch >= 'A' && ch <= 'F'); };
+    // One octet of a dotted quad: the reference takes no leading zero and nothing over 255.
+    auto valid_octet = [](const std::string& s) {
+        if (s.empty() || s.size() > 3 || (s.size() > 1 && s[0] == '0')) return false;
+        unsigned value = 0;
+        for (char ch : s) {
+            if (ch < '0' || ch > '9') return false;
+            value = value * 10 + static_cast<unsigned>(ch - '0');
+        }
+        return value <= 255;
+    };
+
+    size_t i = 0;
+    size_t groups = 0;         // the 16-bit groups spelled out; a dotted quad spells two
+    bool compressed = false;   // a "::" has been seen
+    if (host[0] == ':') {
+        if (host.size() < 2 || host[1] != ':') return false;  // ":1::" is not a host
+        compressed = true;
+        i = 2;
+        if (i == host.size()) return true;                    // "::" is every bit zero
+    }
+
+    while (i < host.size()) {
+        size_t start = i;
+        while (i < host.size() && hex_digit(host[i])) ++i;
+        if (i == start) return false;                         // nothing where a group belongs
+        if (i - start > 4) return false;                      // "12345::1" is not a group
+
+        if (i < host.size() && host[i] == '.') {
+            // A dotted quad owns the rest of the host and stands for its last two groups, so
+            // "1:2.3.4.5" or "1.2.3.4:80" fails here rather than being read as a hex group.
+            const std::string rest = host.substr(start);
+            size_t octets = 0, p = 0;
+            for (;;) {
+                size_t dot = rest.find('.', p);
+                if (!valid_octet(rest.substr(p, dot == std::string::npos ? std::string::npos
+                                                                        : dot - p)))
+                    return false;
+                ++octets;
+                if (dot == std::string::npos) break;
+                p = dot + 1;
+            }
+            if (octets != 4) return false;
+            groups += 2;
+            break;
+        }
+
+        ++groups;
+        if (i == host.size()) break;                          // the host ends with this group
+        if (host[i] != ':') return false;                     // '%', ' ', '_', anything else
+        ++i;
+        if (i < host.size() && host[i] == ':') {
+            if (compressed) return false;                     // only one "::" run
+            compressed = true;
+            ++i;
+            if (i == host.size()) break;                      // a trailing "::" stands for zeroes
+        } else if (i == host.size()) {
+            return false;                                     // a lone trailing ':' is not a group
+        }
+    }
+
+    return compressed ? groups <= 7 : groups == 8;
 }
 
 void strip_url_whitespace(std::string& s) {
