@@ -26,7 +26,7 @@ introduced by [PEP 440].
 """
 
 # Keep this in sync with the version constraint in the `pyproject.toml` dependencies:
-_COMPATIBLE_PYDANTIC_CORE_VERSION = '2.50.0'
+_COMPATIBLE_PYDANTIC_CORE_VERSION = '2.50.1'
 
 
 def version_short() -> str:
