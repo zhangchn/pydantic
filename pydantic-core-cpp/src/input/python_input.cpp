@@ -1432,13 +1432,16 @@ ValResult<ValMatch<EitherTimedelta>> PythonInput::validate_timedelta(bool strict
     // is a refusal, not a limit: int_as_duration (input/datetime.rs:710) asks whether
     // total_seconds / 86400 fits a u32 and refuses the answer if it does not, before speedate's
     // own 999,999,999-day check -- "the number of days can exceed u32::MAX (and casting would
-    // silently wrap it)".  Upstream 2622b74b3 (reference 2.50.1) replaced the wheel's earlier
-    // truncation, which accepted 2**63-1 as a 579,025,220-day duration and
-    // 86400*(2**32+5e8) as 500,000,000 days; masking the day count here reproduces that older
-    // answer, so it must stay off.  Because 999,999,999 < u32::MAX, the single day check below
-    // refuses everything either ceiling refuses.  An int that does not fit i64 leaves this arm
-    // through f64 extraction, where the cast saturates rather than wrapping, so the wheel refuses
-    // it -- hence the refusal of overflow.
+    // silently wrap it)".  Upstream 2622b74b3 added that guard to the core source this branch
+    // merges, and it has not been released yet: the published 2.50.0 wheel this branch pins
+    // still truncates, so adhoc_td_bounds reports a row where the port refuses and the wheel
+    // answers a 579,025,220-day duration (and 86400*(2**32+5e8) as 500,000,000 days).  That row
+    // is the unreleased guard showing its face, not a port bug -- masking the day count here
+    // would reproduce the old wheel answer, so the mask must stay off.  Because
+    // 999,999,999 < u32::MAX, the single day check below refuses everything either ceiling
+    // refuses.  An int that does not fit i64 leaves this arm through f64 extraction, where the
+    // cast saturates rather than wrapping, so the wheel refuses it -- hence the refusal of
+    // overflow.
     if (PyLong_Check(obj_.ptr()) && !strict) {
         int overflow = 0;
         long long seconds = PyLong_AsLongLongAndOverflow(obj_.ptr(), &overflow);

@@ -2816,7 +2816,7 @@ wasm = [
 
 [[package]]
 name = "pydantic-core-cpp"
-version = "2.50.1"
+version = "2.50.0"
 source = { editable = "pydantic-core-cpp" }
 dependencies = [
     { name = "typing-extensions" },
