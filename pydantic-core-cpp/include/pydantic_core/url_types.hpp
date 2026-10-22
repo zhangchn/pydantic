@@ -19,6 +19,11 @@ bool is_special_scheme(const std::string& s);
 // Validate an IPv6 literal (no brackets), matching url crate host parsing.
 bool is_valid_ipv6(const std::string& host);
 
+// The url crate's spelling of an address it accepted: longest run of at least two zero groups
+// folded to "::" (first run wins a tie), no leading zeros, lower case, an embedded IPv4 quad
+// written as hex groups.  Empty string means "not an IPv6 literal".
+std::string canonical_ipv6_host(const std::string& host);
+
 // Thrown when a host is required to be non-empty but is empty.
 // Maps to the url_parsing error with message "empty host".
 struct UrlEmptyHostError : public std::invalid_argument {

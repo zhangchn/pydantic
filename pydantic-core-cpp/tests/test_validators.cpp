@@ -1187,6 +1187,54 @@ TEST_CASE("is_valid_ipv6 - the reference's rules, which libc does not share") {
     no("1.2.3.4:5:6:7:8");                             // a quad owns the end of the host only
 }
 
+TEST_CASE("canonical_ipv6_host - the spelling the reference answers with") {
+    // Accepting a host is half the job; the reference parses it and hands the *address* back, so
+    // the spelling it prints is part of the answer.  Every row here is what the 2.50.0 wheel
+    // returned for exactly that input -- they are the rules, not an illustration of them.
+    auto same = [](const char* host) { CHECK(canonical_ipv6_host(host) == host); };
+    auto says = [](const char* host, const char* want) { CHECK(canonical_ipv6_host(host) == want); };
+
+    says("0:0:0:0:0:0:0:1", "::1");
+    says("0:0:0:0:0:0:0:0", "::");
+    says("0::", "::");
+    says("1:0:0:0:0:0:0:0", "1::");
+    says("1::0", "1::");                               // one spelled group, seven folded
+    same("::");
+    same("::1");
+    same("1::");
+    same("1:2:3:4:5:6:7:8");
+
+    // Which run: the longest, and the first when two runs tie.
+    says("1:0:0:2:0:0:0:3", "1:0:0:2::3");
+    says("1:0:0:2:0:0:3:4", "1::2:0:0:3:4");
+    says("2001:db8:0:0:1:0:0:1", "2001:db8::1:0:0:1");
+    says("2001:db8:0:1:0:0:0:1", "2001:db8:0:1::1");
+    same("1:0:2:0:3:4:5:6");                           // a lone zero group is never folded
+    same("0:1:0:2:0:3:0:4");
+
+    // Lower case, and no leading zeros.
+    says("FE80::1", "fe80::1");
+    says("AABB::CC", "aabb::cc");
+    says("0a:0b::1", "a:b::1");
+    says("fe80:0000:0000:0000:0000:0000:0000:0001", "fe80::1");
+
+    // An embedded IPv4 quad is two hex groups, not dotted text -- which is how a std Ipv6Addr
+    // would print a v4-mapped address, and the reference does not.
+    says("::ffff:1.2.3.4", "::ffff:102:304");
+    says("::1.2.3.4", "::102:304");
+    says("64:ff9b::1.2.3.4", "64:ff9b::102:304");
+    says("0:0:0:0:0:ffff:192.168.0.1", "::ffff:c0a8:1");
+    says("::ffff:0.0.0.0", "::ffff:0:0");              // the run at the front wins the single 0
+    same("::ffff:c0a8:101");
+
+    // Not a literal: nothing to canonicalize, so nothing to say.
+    CHECK(canonical_ipv6_host("").empty());
+    CHECK(canonical_ipv6_host("example.com").empty());
+    CHECK(canonical_ipv6_host("1.2.3.4").empty());
+    CHECK(canonical_ipv6_host("fe80::1%eth0").empty());
+    CHECK(canonical_ipv6_host("12345::1").empty());
+}
+
 TEST_CASE("UuidValidator") {
     UuidValidator validator;
     CHECK(validator.name() == "uuid");

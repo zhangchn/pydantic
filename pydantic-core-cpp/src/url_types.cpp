@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 
 namespace pydantic_core {
 
@@ -21,71 +22,96 @@ bool is_special_scheme(const std::string& s) {
     return s == "http" || s == "https" || s == "ws" || s == "wss" || s == "ftp" || s == "file";
 }
 
+namespace {
+
+int hex_value(char ch) {
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return -1;
+}
+
+// One octet of a dotted quad: the reference takes no leading zero and nothing over 255.
+bool valid_octet(const std::string& s, unsigned& value) {
+    if (s.empty() || s.size() > 3 || (s.size() > 1 && s[0] == '0')) return false;
+    unsigned v = 0;
+    for (char ch : s) {
+        if (ch < '0' || ch > '9') return false;
+        v = v * 10 + static_cast<unsigned>(ch - '0');
+    }
+    if (v > 255) return false;
+    value = v;
+    return true;
+}
+
+} // namespace
+
 // IPv6 literal (no brackets), spelled out here rather than asked of libc: <arpa/inet.h> has no
 // Windows spelling (MinGW stops the build on it) and winsock's inet_pton wants a WSAStartup and
 // answers differently again.  Asking libc also means the answer depends on which libc shipped --
 // macOS and glibc both take a "fe80::1%eth0" scope id and a five-zero group, and the reference
 // refuses both.  These are the reference's rules (url crate parser::parse_ipv6_addr): 1-4 hex
 // digits per group, at most one "::" standing for one or more zero groups, an IPv4 dotted quad only
-// as the trailing 32 bits, and no scope id.
-bool is_valid_ipv6(const std::string& host) {
+// as the trailing 32 bits, and no scope id.  On success out[0..8] holds the address itself, which
+// is what makes a canonical spelling possible as well as a yes/no.
+static bool parse_ipv6_groups(const std::string& host, uint16_t out[8]) {
     if (host.empty()) return false;
 
-    auto hex_digit = [](char ch) { return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') ||
-                                          (ch >= 'A' && ch <= 'F'); };
-    // One octet of a dotted quad: the reference takes no leading zero and nothing over 255.
-    auto valid_octet = [](const std::string& s) {
-        if (s.empty() || s.size() > 3 || (s.size() > 1 && s[0] == '0')) return false;
-        unsigned value = 0;
-        for (char ch : s) {
-            if (ch < '0' || ch > '9') return false;
-            value = value * 10 + static_cast<unsigned>(ch - '0');
-        }
-        return value <= 255;
-    };
-
+    std::vector<uint16_t> head, tail;               // groups spelled before / after the "::"
+    std::vector<uint16_t>* sink = &head;
+    bool compressed = false;
     size_t i = 0;
-    size_t groups = 0;         // the 16-bit groups spelled out; a dotted quad spells two
-    bool compressed = false;   // a "::" has been seen
     if (host[0] == ':') {
         if (host.size() < 2 || host[1] != ':') return false;  // ":1::" is not a host
         compressed = true;
+        sink = &tail;                                         // everything spelled comes after it
         i = 2;
-        if (i == host.size()) return true;                    // "::" is every bit zero
+        if (i == host.size()) {                               // "::" is every bit zero
+            for (int g = 0; g < 8; ++g) out[g] = 0;
+            return true;
+        }
     }
 
     while (i < host.size()) {
         size_t start = i;
-        while (i < host.size() && hex_digit(host[i])) ++i;
+        unsigned value = 0;
+        while (i < host.size() && hex_value(host[i]) >= 0) {
+            if (i - start == 4) return false;                 // "12345::1" is not a group
+            value = value * 16 + static_cast<unsigned>(hex_value(host[i]));
+            ++i;
+        }
         if (i == start) return false;                         // nothing where a group belongs
-        if (i - start > 4) return false;                      // "12345::1" is not a group
 
         if (i < host.size() && host[i] == '.') {
             // A dotted quad owns the rest of the host and stands for its last two groups, so
             // "1:2.3.4.5" or "1.2.3.4:80" fails here rather than being read as a hex group.
             const std::string rest = host.substr(start);
-            size_t octets = 0, p = 0;
-            for (;;) {
+            unsigned octet[4] = {0, 0, 0, 0};
+            size_t p = 0, n = 0;
+            for (;; ++n) {
+                if (n == 4) return false;
                 size_t dot = rest.find('.', p);
                 if (!valid_octet(rest.substr(p, dot == std::string::npos ? std::string::npos
-                                                                        : dot - p)))
+                                                                        : dot - p),
+                                 octet[n]))
                     return false;
-                ++octets;
                 if (dot == std::string::npos) break;
                 p = dot + 1;
             }
-            if (octets != 4) return false;
-            groups += 2;
-            break;
+            if (n != 3) return false;                                     // "1.2.3" is three
+            sink->push_back(static_cast<uint16_t>((octet[0] << 8) | octet[1]));
+            sink->push_back(static_cast<uint16_t>((octet[2] << 8) | octet[3]));
+            break;                                            // nothing may follow the quad
         }
 
-        ++groups;
+        sink->push_back(static_cast<uint16_t>(value));
         if (i == host.size()) break;                          // the host ends with this group
         if (host[i] != ':') return false;                     // '%', ' ', '_', anything else
         ++i;
         if (i < host.size() && host[i] == ':') {
             if (compressed) return false;                     // only one "::" run
             compressed = true;
+            sink = &tail;
             ++i;
             if (i == host.size()) break;                      // a trailing "::" stands for zeroes
         } else if (i == host.size()) {
@@ -93,7 +119,56 @@ bool is_valid_ipv6(const std::string& host) {
         }
     }
 
-    return compressed ? groups <= 7 : groups == 8;
+    size_t spelled = head.size() + tail.size();
+    if (!compressed) {
+        if (spelled != 8) return false;
+        for (size_t g = 0; g < 8; ++g) out[g] = head[g];
+        return true;
+    }
+    if (spelled > 7) return false;                            // "::" has to stand for a group
+    size_t k = 0;
+    for (uint16_t g : head) out[k++] = g;
+    while (k < 8 - tail.size()) out[k++] = 0;
+    for (uint16_t g : tail) out[k++] = g;
+    return true;
+}
+
+bool is_valid_ipv6(const std::string& host) {
+    uint16_t groups[8];
+    return parse_ipv6_groups(host, groups);
+}
+
+// The spelling the reference hands back for an address it accepted, because it parses the host
+// instead of echoing it.  Measured on the 2.50.0 wheel: the longest run of at least two zero
+// groups folds into "::" and a tie goes to the first run -- "1:0:0:2:0:0:3:4" returns
+// "1::2:0:0:3:4" while "1:0:0:2:0:0:0:3" returns "1:0:0:2::3" -- a lone zero group is never
+// folded, groups drop their leading zeros and print lower case ("0a:0b::1" returns "a:b::1"), and
+// a dotted quad comes back as the two hex groups it is ("::ffff:1.2.3.4" returns "::ffff:102:304")
+// rather than in the dotted form a std Ipv6Addr would print for a v4-mapped address.
+// Returns "" for a host that is not an IPv6 literal, leaving whatever it is uncanonicalized.
+std::string canonical_ipv6_host(const std::string& host) {
+    uint16_t g[8];
+    if (!parse_ipv6_groups(host, g)) return {};
+
+    int best = -1, best_len = 0, run = 0;
+    for (int i = 0; i <= 8; ++i) {
+        if (i < 8 && g[i] == 0) { ++run; continue; }
+        if (run >= 2 && run > best_len) { best = i - run; best_len = run; }
+        run = 0;
+    }
+
+    auto join = [&g](int from, int to) {
+        std::string s;
+        for (int i = from; i < to; ++i) {
+            if (!s.empty()) s += ':';
+            std::ostringstream part;
+            part << std::hex << g[i];
+            s += part.str();
+        }
+        return s;
+    };
+    if (best < 0) return join(0, 8);
+    return join(0, best) + "::" + join(best + best_len, 8);
 }
 
 void strip_url_whitespace(std::string& s) {
@@ -163,6 +238,10 @@ static HostSpec parse_host_segment(const std::string& seg, bool lower) {
         size_t be = s.find(']');
         if (be != std::string::npos) {
             h.host = s.substr(0, be + 1);
+            // The same rule Url applies, for every host in the list rather than the last: the
+            // reference answers the address it parsed, not the spelling it was handed.
+            std::string canon = canonical_ipv6_host(s.substr(1, be - 1));
+            if (!canon.empty()) h.host = "[" + canon + "]";
             if (be + 1 < s.size() && s[be + 1] == ':') {
                 try { h.port = std::stoi(s.substr(be + 2)); }
                 catch (...) { throw std::invalid_argument("invalid port: " + seg); }
@@ -262,6 +341,16 @@ Url::Url(const std::string& url_str, bool preserve_empty_path, const UrlDefaults
     // Non-special schemes keep the (opaque) host exactly as given.
     if (is_special_scheme(scheme_)) {
         host_ = idna_encode(to_lower(host_));
+    }
+
+    // A bracketed host is an address, not a spelling: the reference answers the address it parsed
+    // rather than the bytes it was handed, so the canonical text is what every later reader has to
+    // see -- host_, the url_ reassembled below, and through them unicode_string, __str__, repr and
+    // the json leaf.  An unparseable host keeps its bytes: refusing is is_valid_ipv6's job, not
+    // this one's, and a Url built from a string the validator already blessed never hits it.
+    if (host_.size() > 2 && host_.front() == '[' && host_.back() == ']') {
+        std::string canon = canonical_ipv6_host(host_.substr(1, host_.size() - 2));
+        if (!canon.empty()) host_ = "[" + canon + "]";
     }
 
     // check_sub_defaults: substitute default_host / default_port / default_path.

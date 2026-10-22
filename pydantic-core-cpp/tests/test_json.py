@@ -4715,13 +4715,45 @@ def test_an_ipv6_url_host_is_judged_by_one_rule_on_every_platform() -> None:
         assert answer(scoped) == refused
 
     # The forms a host has to keep working: "::" anywhere it may stand, and a dotted quad owning
-    # the trailing 32 bits.  Only acceptance is asserted -- how much of the host the reference
-    # rewrites on the way out is still its own open question.
+    # the trailing 32 bits.  Only acceptance is asserted here -- the spelling the answer comes back
+    # in is the test below's business, and asserting both at once would let one mask the other.
     assert answer('http://[::1]/').startswith('http://[')
     assert answer('http://[1:2:3:4:5:6:7:8]/').startswith('http://[')
     assert answer('http://[1:2:3:4:5:6:7::]/').startswith('http://[')
     assert answer('http://[::ffff:1.2.3.4]/').startswith('http://[')
     assert answer('http://[::ffff:1.2.3.4]:8080/p').startswith('http://[')
+
+
+def test_an_ipv6_host_comes_back_in_the_spelling_the_reference_uses() -> None:
+    # Accepting a host is only half of it: the reference parses the bracketed text into an address
+    # and answers the address, so the spelling is part of the answer and the port had been echoing
+    # the input.  Measured on the 2.50.0 wheel (probe adhoc_ipv6_canon.py): the longest run of at
+    # least two zero groups folds into "::" and the first run wins a tie, a lone zero group is
+    # never folded, groups lose leading zeros and print lower case, and an embedded IPv4 quad is
+    # written as the two hex groups it is rather than as dotted text.
+    val = SchemaValidator(core_schema.url_schema())
+
+    def spell(text):
+        return str(val.validate_python(text))
+
+    assert spell('http://[0:0:0:0:0:0:0:1]/p') == 'http://[::1]/p'
+    assert spell('http://[1:0:0:2:0:0:3:4]/p') == 'http://[1::2:0:0:3:4]/p'      # tie: first run
+    assert spell('http://[1:0:0:2:0:0:0:3]/p') == 'http://[1:0:0:2::3]/p'        # longest run
+    assert spell('http://[1:0:2:0:3:4:5:6]/p') == 'http://[1:0:2:0:3:4:5:6]/p'   # lone zeros kept
+    assert spell('http://[FE80::1]/p') == 'http://[fe80::1]/p'
+    assert spell('http://[0a:0b::1]/p') == 'http://[a:b::1]/p'
+    assert spell('http://[::ffff:1.2.3.4]/p') == 'http://[::ffff:102:304]/p'
+    # The canonical spelling is a fixed point, so re-validating a stored Url cannot drift.
+    assert spell('http://[::1]/p') == 'http://[::1]/p'
+    assert spell('http://[::ffff:102:304]/p') == 'http://[::ffff:102:304]/p'
+
+    # The multi-host sibling holds a list of hosts and answers the same way for every one of them,
+    # not only the one the defaults apply to.
+    mh = SchemaValidator(core_schema.multi_host_url_schema())
+    assert str(mh.validate_python('http://[FE80::1],[::ffff:1.2.3.4]/p')) == (
+        'http://[fe80::1],[::ffff:102:304]/p'
+    )
+    assert str(mh.validate_python('http://[0:0:0:0:0:0:0:1]/p')) == 'http://[::1]/p'
 
 
 if __name__ == '__main__':
