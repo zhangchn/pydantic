@@ -50,12 +50,36 @@ if(SKBUILD)
     find_package(pybind11 CONFIG REQUIRED)
 else()
     find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+    # pybind11 looks for Python itself unless told not to: its 2.13 default route is the legacy
+    # FindPythonInterp (tools/FindPythonLibsNew.cmake), which is a second, unrelated search.  On a
+    # machine holding several Pythons the two searches can answer differently, and the windows
+    # runner did exactly that -- the link line carried python315.lib beside python312.lib while
+    # every source file was compiled against 3.12's headers, which the linker reports nothing
+    # about and the test binary finds out at startup.  So hand the interpreter that was just found
+    # to both of pybind11's routes: PYBIND11_FINDPYTHON is the one its own deprecation warning
+    # recommends, PYTHON_EXECUTABLE is what the legacy route reads.
+    set(PYBIND11_FINDPYTHON ON)
+    if(NOT Python_EXECUTABLE)
+        set(Python_EXECUTABLE "${Python3_EXECUTABLE}")
+    endif()
+    if(NOT PYTHON_EXECUTABLE)
+        set(PYTHON_EXECUTABLE "${Python3_EXECUTABLE}")
+    endif()
     FetchContent_Declare(
         pybind11
         GIT_REPOSITORY https://github.com/pybind/pybind11.git
         GIT_TAG v2.13.6
     )
     FetchContent_MakeAvailable(pybind11)
+
+    # Loud here beats mysterious later: two interpreters in one binary is a crash with no stack
+    # trace, and a version mismatch only shows up as symbols that do not line up at run time.
+    if(DEFINED Python_VERSION AND NOT Python_VERSION VERSION_EQUAL Python3_VERSION)
+        message(FATAL_ERROR
+            "pybind11 resolved Python ${Python_VERSION} (${Python_EXECUTABLE}) while this project "
+            "found Python ${Python3_VERSION} (${Python3_EXECUTABLE}); the test binaries would link "
+            "one interpreter's library against the other's headers.")
+    endif()
 endif()
 
 # simdjson for JSON parsing (build-only dependency, don't install into wheel)
@@ -229,6 +253,11 @@ if(NOT SKBUILD)
     target_include_directories(test_validation_state PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
     # Test validators
+    # schema_validator.cpp below pulls SchemaBuilder::build / build_from_py in, so
+    # combined_validator.cpp -- their definition, and what the four sibling test targets already
+    # list for exactly that reason -- has to be here too.  macOS links an executable with
+    # undefined symbols (pybind11::module adds `-undefined dynamic_lookup`) and never calls them,
+    # so only ld.exe notices; the same is true of every other gap this list has hidden.
     add_executable(test_validators tests/test_validators.cpp
         src/speedate.cpp
         src/errors/errors.cpp
@@ -236,6 +265,7 @@ if(NOT SKBUILD)
         src/recursion_guard.cpp
         src/validation_state.cpp
         src/validator.cpp
+        src/combined_validator.cpp
         src/url_types.cpp
         src/schema_validator.cpp
         src/input/json_input.cpp
@@ -371,7 +401,10 @@ if(NOT SKBUILD)
     add_test(NAME Speedate COMMAND test_speedate)
 
     # Test suite: JSON grammar diagnostics (jiter-compatible wording)
+    # json_input.cpp parses temporal text through speedate.cpp, so that object has to be linked
+    # even though nothing in this test names a date; invisible here, fatal to ld.exe.
     add_executable(test_json_diagnose tests/test_json_diagnose.cpp
+        src/speedate.cpp
         src/input/json_input.cpp
         src/errors/errors.cpp
         src/errors/error_types.cpp
