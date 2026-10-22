@@ -205,6 +205,87 @@ static std::string idna_encode(const std::string& host) {
     return host;
 }
 
+namespace {
+
+// The URL Standard's userinfo percent-encode set -- with a backslash added, which the Standard does
+// not list but the reference does escape ("non-special://a\b@host" comes back as "a%5Cb"; a special
+// scheme never shows it because "\" ends its authority first) -- and with "%" deliberately absent:
+// the reference passes "%41" and "%ZZ" through untouched instead of decoding and re-encoding, which
+// is what makes its own escaped spelling a fixed point.  "#" and "?" are in the set too and simply
+// never reach it: they end the authority before a userinfo starts.
+bool userinfo_needs_escape(unsigned char c) {
+    if (c <= 0x1F || c > 0x7E) return true;   // C0 controls, DEL, and every non-ASCII byte
+    switch (c) {
+        case ' ':  case '"': case '<': case '>': case '`': case '{': case '}':
+        case '/':  case ':': case ';': case '=': case '@': case '[': case ']':
+        case '^':  case '|': case '\\':
+            return true;
+        default:
+            return false;
+    }
+}
+
+} // namespace
+
+// A userinfo in the reference's spelling.  Tab/CR/LF are not escaped but dropped, as they are
+// everywhere else in the reference's input, and a non-ASCII byte becomes one %XX per UTF-8 byte.
+std::string encode_userinfo(const std::string& raw) {
+    static const char HEX[] = "0123456789ABCDEF";
+    std::string out;
+    for (char ch : raw) {
+        unsigned char c = static_cast<unsigned char>(ch);
+        if (c == '\t' || c == '\r' || c == '\n') continue;
+        if (!userinfo_needs_escape(c)) { out.push_back(ch); continue; }
+        out.push_back('%');
+        out.push_back(HEX[c >> 4]);
+        out.push_back(HEX[c & 0xF]);
+    }
+    return out;
+}
+
+// The reference's username and password, from the region before the authority's last "@": the first
+// ":" separates them and each half travels escaped on its own ("a:b:c" is user "a", pass "b%3Ac").
+// An empty half is not an empty string -- the reference answers no value at all, so ":@" carries no
+// userinfo and "@host" serializes without the "@".
+void split_userinfo_halves(const std::string& userinfo,
+                           std::optional<std::string>& user,
+                           std::optional<std::string>& pass) {
+    std::string clean;
+    for (char ch : userinfo) {
+        if (ch != '\t' && ch != '\r' && ch != '\n') clean.push_back(ch);
+    }
+    size_t colon = clean.find(':');
+    std::string user_part = encode_userinfo(clean.substr(0, colon));
+    std::string pass_part = (colon == std::string::npos) ? std::string()
+                                                         : encode_userinfo(clean.substr(colon + 1));
+    if (!user_part.empty()) user = user_part;
+    if (!pass_part.empty()) pass = pass_part;
+}
+
+// The authority region urllib reads as the netloc: after "scheme:" and an exact "//", up to the
+// first "/?#".  Anything else -- no "//", no scheme -- leaves urllib with an empty netloc and the
+// whole remainder in the path, so there is no userinfo to rewrite either.  This has to agree with
+// urllib's own scan, because the caller keeps urllib for everything past the authority.
+static bool authority_span(const std::string& s, size_t& start, size_t& end) {
+    start = end = 0;
+    if (s.empty()) return false;
+    unsigned char first = static_cast<unsigned char>(s[0]);
+    if (!((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z'))) return false;
+    size_t colon = s.find(':');
+    if (colon == std::string::npos || colon == 0) return false;
+    for (size_t i = 1; i < colon; ++i) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        bool scheme_char = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                           (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.';
+        if (!scheme_char) return false;
+    }
+    if (s.compare(colon + 1, 2, "//") != 0) return false;
+    start = colon + 3;
+    size_t e = s.find_first_of("/?#", start);
+    end = (e == std::string::npos) ? s.size() : e;
+    return true;
+}
+
 // Split a string on a single-char delimiter (keeping empty trailing fields).
 static std::vector<std::string> split_comma(const std::string& s) {
     std::vector<std::string> out;
@@ -222,16 +303,11 @@ static std::vector<std::string> split_comma(const std::string& s) {
 static HostSpec parse_host_segment(const std::string& seg, bool lower) {
     HostSpec h;
     std::string s = seg;
-    size_t at = s.find('@');
+    // The last "@", not the first: a userinfo may hold "@" of its own, and it is the host that has
+    // to start after the separator ("a@b@h1" is user "a%40b" at host "h1").
+    size_t at = s.rfind('@');
     if (at != std::string::npos) {
-        std::string auth = s.substr(0, at);
-        size_t colon = auth.find(':');
-        if (colon != std::string::npos) {
-            h.username = auth.substr(0, colon);
-            h.password = auth.substr(colon + 1);
-        } else {
-            h.username = auth;
-        }
+        split_userinfo_halves(s.substr(0, at), h.username, h.password);
         s = s.substr(at + 1);
     }
     if (!s.empty() && s[0] == '[') {
@@ -287,8 +363,27 @@ Url::Url(const std::string& url_str, bool preserve_empty_path, const UrlDefaults
     : url_(url_str) {
     std::string trimmed = url_str;
     strip_url_whitespace(trimmed);
+
+    // urllib splits the netloc, and it reads a stray bracket anywhere in it -- a userinfo's "[user"
+    // included -- as a broken IPv6 host and refuses the whole URL.  The reference escapes a userinfo
+    // instead of refusing it, so the region is escaped here, before urllib is asked, and the escaped
+    // text is what every later reader sees: user_, password_, and url_ reassembled below.
+    std::string to_parse = trimmed;
+    size_t auth_beg = 0, auth_end = 0;
+    if (authority_span(trimmed, auth_beg, auth_end)) {
+        std::string authority = trimmed.substr(auth_beg, auth_end - auth_beg);
+        size_t at_pos = authority.rfind('@');
+        if (at_pos != std::string::npos) {
+            split_userinfo_halves(authority.substr(0, at_pos), user_, password_);
+            std::string userinfo;
+            if (user_) userinfo += *user_;
+            if (password_) { userinfo += ":"; userinfo += *password_; }
+            to_parse = trimmed.substr(0, auth_beg) + userinfo + trimmed.substr(auth_beg + at_pos);
+        }
+    }
+
     py::object urllib = py::module_::import("urllib.parse");
-    py::object parsed = urllib.attr("urlparse")(trimmed);
+    py::object parsed = urllib.attr("urlparse")(to_parse);
 
     scheme_ = py::str(parsed.attr("scheme")).cast<std::string>();
     if (scheme_.empty()) {
@@ -298,19 +393,10 @@ Url::Url(const std::string& url_str, bool preserve_empty_path, const UrlDefaults
 
     std::string netloc = py::str(parsed.attr("netloc")).cast<std::string>();
 
-    // Extract user:password from netloc if present.
-    size_t at_pos = netloc.find('@');
-    if (at_pos != std::string::npos) {
-        std::string auth = netloc.substr(0, at_pos);
-        size_t colon_pos = auth.find(':');
-        if (colon_pos != std::string::npos) {
-            user_ = auth.substr(0, colon_pos);
-            password_ = auth.substr(colon_pos + 1);
-        } else {
-            user_ = auth;
-        }
-        netloc = netloc.substr(at_pos + 1);
-    }
+    // The userinfo is the region before the netloc's last "@" -- the same separator authority_span
+    // cut at, now the only "@" left since an escaped userinfo carries none.
+    size_t at_pos = netloc.rfind('@');
+    if (at_pos != std::string::npos) netloc = netloc.substr(at_pos + 1);
 
     // Extract port from netloc if present.
     size_t colon_pos = netloc.rfind(':');

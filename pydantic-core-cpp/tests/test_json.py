@@ -4756,6 +4756,55 @@ def test_an_ipv6_host_comes_back_in_the_spelling_the_reference_uses() -> None:
     assert str(mh.validate_python('http://[0:0:0:0:0:0:0:1]/p')) == 'http://[::1]/p'
 
 
+def test_a_userinfo_is_escaped_and_ends_at_the_last_at() -> None:
+    # The port used to hand back the bytes it found between "//" and the host; the reference answers
+    # an escaped userinfo and reads the authority up to its LAST "@", so a userinfo may hold one of
+    # its own.  Measured on the 2.50.0 wheel (probe adhoc_userinfo.py).  A bracket is the sharp edge:
+    # urllib, which is what the port splits the netloc with, reads "[user" as a broken IPv6 host and
+    # refuses the whole URL where the reference escapes the bracket and carries on.
+    val = SchemaValidator(core_schema.url_schema())
+
+    def spell(text):
+        return str(val.validate_python(text))
+
+    assert spell('http://[user@host/p') == 'http://%5Buser@host/p'
+    assert spell('http://user]@host/p') == 'http://user%5D@host/p'
+    assert spell('http://a b@host/p') == 'http://a%20b@host/p'
+    assert spell('http://a^b@host/p') == 'http://a%5Eb@host/p'
+    assert spell('http://a\x01b@host/p') == 'http://a%01b@host/p'
+    assert spell('http://aéb@host/p') == 'http://a%C3%A9b@host/p'
+    assert spell('http://a\tb@host/p') == 'http://ab@host/p'  # tab is dropped, not escaped
+    assert spell('http://a!b@host/p') == 'http://a!b@host/p'  # unreserved and sub-delims survive
+    assert spell('non-special://a\\b@host/p') == 'non-special://a%5Cb@host/p'
+
+    # The separator is the last "@", and only the first ":" splits the two halves.
+    assert spell('http://a@b@host/p') == 'http://a%40b@host/p'
+    assert spell('http://a:b:c@host/p') == 'http://a:b%3Ac@host/p'
+    assert spell('http://a@[b]@c/p') == 'http://a%40%5Bb%5D@c/p'
+
+    # "%" is not escaped, so the escaped spelling is a fixed point and re-validating cannot drift.
+    assert spell('http://%5Buser@host/p') == 'http://%5Buser@host/p'
+    assert spell('http://a%ZZb@host/p') == 'http://a%ZZb@host/p'
+
+    # An empty half is no value at all: "@host" carries no userinfo and does not print the "@".
+    assert spell('http://@host/p') == 'http://host/p'
+    assert spell('http://:@host/p') == 'http://host/p'
+    assert spell('http://a:@host/p') == 'http://a@host/p'
+    assert spell('http://:b@host/p') == 'http://:b@host/p'
+    assert val.validate_python('http://@host/p').username is None
+    assert val.validate_python('http://a:@host/p').password is None
+    assert val.validate_python('http://:b@host/p').username is None
+
+    # The same URL on the wire rather than in a str, and the sibling holding a list of hosts, where
+    # the rule has to hold for every host and not just the one the defaults apply to.
+    assert val.validate_json('"http://[user@host/p"').username == '%5Buser'
+    mh = SchemaValidator(core_schema.multi_host_url_schema())
+    assert str(mh.validate_python('http://[user@host/p')) == 'http://%5Buser@host/p'
+    assert str(mh.validate_python('http://a@b@h1,h2/p')) == 'http://a%40b@h1,h2/p'
+    assert str(mh.validate_python('http://a@h1,b[c@h2/p')) == 'http://a@h1,b%5Bc@h2/p'
+    assert str(mh.validate_python('http://@h1/p')) == 'http://h1/p'
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_') and callable(fn):

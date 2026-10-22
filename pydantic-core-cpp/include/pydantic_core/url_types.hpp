@@ -24,6 +24,18 @@ bool is_valid_ipv6(const std::string& host);
 // written as hex groups.  Empty string means "not an IPv6 literal".
 std::string canonical_ipv6_host(const std::string& host);
 
+// A userinfo in the reference's spelling: the URL Standard's userinfo percent-encode set escaped as
+// %XX (upper-case hex), tab/CR/LF dropped rather than escaped, and a bare "%" left alone -- which is
+// what makes the reference's own escaped output a fixed point.
+std::string encode_userinfo(const std::string& raw);
+
+// The reference's username and password, taken from the region before an authority's last "@": the
+// first ":" separates the two halves, each half is escaped on its own, and an empty half is no
+// value at all rather than an empty string.
+void split_userinfo_halves(const std::string& userinfo,
+                           std::optional<std::string>& user,
+                           std::optional<std::string>& pass);
+
 // Thrown when a host is required to be non-empty but is empty.
 // Maps to the url_parsing error with message "empty host".
 struct UrlEmptyHostError : public std::invalid_argument {

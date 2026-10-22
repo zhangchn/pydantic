@@ -1235,6 +1235,83 @@ TEST_CASE("canonical_ipv6_host - the spelling the reference answers with") {
     CHECK(canonical_ipv6_host("12345::1").empty());
 }
 
+TEST_CASE("encode_userinfo - the escape set, and a bracket is not a host") {
+    // A userinfo used to travel as the bytes between "//" and the host.  The reference answers a
+    // rewritten one, and the rewriting matters beyond cosmetics: urllib -- which splits the netloc
+    // here -- reads "[user" as a broken IPv6 host and refuses the whole URL, while the reference
+    // escapes the bracket and keeps going.  Every row is what the 2.50.0 wheel answered.
+    auto says = [](const char* raw, const char* want) { CHECK(encode_userinfo(raw) == want); };
+
+    says("", "");
+    says("user", "user");
+    says("aCb", "aCb");
+    says("a-b.b", "a-b.b");                            // unreserved: alphanumerics and "-. _ ~"
+    says("~a", "~a");
+    says("a!b", "a!b");                                // and the sub-delims
+    says("a$b", "a$b");
+    says("a&b", "a&b");
+    says("a'b", "a'b");
+    says("a(b", "a(b");
+    says("a)b", "a)b");
+    says("a*b", "a*b");
+    says("a+b", "a+b");
+    says("a,b", "a,b");
+    says("a_b", "a_b");
+
+    says("a b", "a%20b");
+    says("a\"b", "a%22b");
+    says("a<b", "a%3Cb");
+    says("a>b", "a%3Eb");
+    says("a`b", "a%60b");
+    says("a{b}", "a%7Bb%7D");
+    says("a^b", "a%5Eb");
+    says("a|b", "a%7Cb");
+    says("a;b", "a%3Bb");
+    says("a=b", "a%3Db");
+    says("a@b", "a%40b");                              // "@" may sit inside a userinfo, escaped
+    says("a:b", "a%3Ab");
+    says("a\\b", "a%5Cb");                             // the Standard omits it, the reference does not
+    says("[user", "%5Buser");                          // the row urllib used to refuse outright
+    says("user]", "user%5D");
+    says("a\x01" "b", "a%01b");                         // a C0 control (split so "\x01b" is one escape)
+    says("a\x7f" "b", "a%7Fb");                         // DEL: above "~", so escaped
+    says("a\xc3" "\xa9" "b", "a%C3%A9b");               // one %XX per UTF-8 byte
+
+    // "%" is not in the set, so the reference's own output is a fixed point -- "%ZZ" included.
+    says("a%b", "a%b");
+    says("a%41b", "a%41b");
+    says("a%ZZb", "a%ZZb");
+    says("a%%b", "a%%b");
+
+    // Tab/CR/LF are dropped from the reference's input everywhere, not escaped.
+    says("a\tb", "ab");
+    says("a\r\nb", "ab");
+}
+
+TEST_CASE("split_userinfo_halves - where a username stops and a password starts") {
+    // The first ":" separates the two halves and each is escaped on its own, so "a:b:c" is user "a"
+    // with password "b%3Ac" rather than a user called "a:b".  An empty half is no value at all -- the
+    // reference answers None, not "", which is what makes ":@" carry no userinfo and "@host"
+    // serialize without the "@".
+    auto says = [](const char* raw, const char* user, const char* pass) {
+        std::optional<std::string> u, p;
+        split_userinfo_halves(raw, u, p);
+        if (!user) { CHECK_FALSE(u.has_value()); } else { CHECK(u.has_value()); CHECK(*u == user); }
+        if (!pass) { CHECK_FALSE(p.has_value()); } else { CHECK(p.has_value()); CHECK(*p == pass); }
+    };
+
+    says("", nullptr, nullptr);
+    says(":", nullptr, nullptr);
+    says("a:", "a", nullptr);
+    says(":b", nullptr, "b");
+    says("user", "user", nullptr);
+    says("a:b", "a", "b");
+    says("a:b:c", "a", "b%3Ac");
+    says("[user", "%5Buser", nullptr);
+    says("a b:c d", "a%20b", "c%20d");
+    says("a\tb:c", "ab", "c");
+}
+
 TEST_CASE("UuidValidator") {
     UuidValidator validator;
     CHECK(validator.name() == "uuid");
