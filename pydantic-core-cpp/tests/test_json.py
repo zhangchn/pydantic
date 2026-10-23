@@ -4445,6 +4445,35 @@ def test_an_instance_being_filled_is_never_asked_its_own_class_about_itself():
     assert '__pydantic_private__' not in Refuser.asked
 
 
+def test_a_write_the_instance_refuses_reaches_the_caller():
+    # The fill ends by writing three dunders onto the instance with object.__setattr__, and an
+    # instance can refuse one: a read-only attribute makes the write itself an AttributeError.  The
+    # reference propagates it -- measured on the 2.50.0 wheel, `validate_python({'a': 7, 'zz': 2},
+    # self_instance=t)` answers `AttributeError: can't set attribute '__pydantic_extra__'` -- because
+    # every one of those writes is a `?` in Rust with nothing around it.  The port had a `catch`
+    # wrapped around the whole fill that printed the failure to stdout and returned the half-written
+    # object, so a refused write became a wrong value plus one line nobody reads.  No test in the
+    # merged pydantic suite ever reached that handler, which is why removing it changes nothing
+    # except the cases like this one.  (The message is CPython's, and CPython rewords it between
+    # versions, so the pin is on the type and the name.)
+    class Host:
+        @property
+        def __pydantic_extra__(self):
+            return None
+
+    fields = {'a': core_schema.model_field(core_schema.int_schema())}
+    vp = SchemaValidator(core_schema.model_schema(
+        Host, core_schema.model_fields_schema(fields, extra_behavior='allow')))
+
+    target = Host()
+    target.a = 1
+    try:
+        vp.validate_python({'a': 7, 'zz': 2}, self_instance=target)
+        raise AssertionError('expected the refused write to reach the caller')
+    except AttributeError as exc:
+        assert '__pydantic_extra__' in str(exc), str(exc)
+
+
 def test_an_object_with_no_dict_is_not_an_instance_to_fill():
     # A run handed something to write its answer into reads that object's dict before it looks at
     # anything else (create_instance -> instance.dict()), so an object with no dict at all is an

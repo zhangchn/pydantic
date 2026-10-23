@@ -9120,115 +9120,110 @@ static py::object fill_self_instance(SchemaValidator& self, const py::object& va
                 foreign_return = true;
             }
         }
-        try {
-            if (self.is_root_model()) {
-                // Root model: store the whole validated value as 'root'
-                py::dict d = self_instance.attr("__dict__");
-                d[py::str("root")] = validated;
-                if (!py_generic_hasattr(self_instance, "__pydantic_private__")) {
-                    force_setattr(self_instance, py::str("__pydantic_private__"), py::none());
-                }
-                force_setattr(self_instance, py::str("__pydantic_extra__"), py::none());
-                // Rust ModelValidator: a PydanticUndefined input means the
-                // schema default filled the root, so no field is set.
-                py::object root_undefined = pydantic_undefined_obj();
-                bool root_from_default =
-                    root_undefined.ptr() && input.ptr() == root_undefined.ptr();
-                force_setattr(self_instance, py::str("__pydantic_fields_set__"),
-                              root_from_default
-                                  ? py::set()
-                                  : py::set(py::make_tuple(py::str("root"))));
-            } else if (self.is_dataclass() && !foreign_return) {
-                // Rust DataclassValidator::set_dict_call: the
-                // dataclass-args validator returns
-                // (output_dict, post_init_kwargs).  Replace __dict__
-                // with the validated flat dict (fields + extras for
-                // extra=allow); plain dataclasses do not receive the
-                // __pydantic_* attributes.
-                py::object dc_obj = validated;
-                py::object post_init_kwargs = py::none();
-                if (py::isinstance<py::tuple>(dc_obj) && py::len(dc_obj) == 2 &&
-                    py::isinstance<py::dict>(dc_obj[py::int_(0)])) {
-                    post_init_kwargs = dc_obj[py::int_(1)];
-                    dc_obj = dc_obj[py::int_(0)];
-                }
-                if (py::isinstance<py::dict>(dc_obj)) {
-                    py::dict validated_dict = dc_obj.cast<py::dict>();
-                    if (validated_dict.contains("__pydantic_defaults__")) validated_dict.attr("pop")("__pydantic_defaults__");
-                    if (validated_dict.contains("__pydantic_extra__")) {
-                        py::object extra_val = validated_dict["__pydantic_extra__"];
-                        validated_dict.attr("pop")("__pydantic_extra__");
-                        if (!extra_val.is_none() && py::isinstance<py::dict>(extra_val)) {
-                            for (auto item : extra_val.cast<py::dict>()) {
-                                validated_dict[item.first] = item.second;
-                            }
-                        }
-                    }
-                    if (validated_dict.contains("__pydantic_fields_set__")) validated_dict.attr("pop")("__pydantic_fields_set__");
-                    force_setattr(self_instance, py::str("__dict__"), validated_dict);
-                    // Rust: __post_init__(*post_init_kwargs)
-                    if (py_hasattr(self_instance, "__post_init__")) {
-                        if (!post_init_kwargs.is_none() && py::isinstance<py::tuple>(post_init_kwargs)) {
-                            self_instance.attr("__post_init__")(*post_init_kwargs.cast<py::tuple>());
-                        } else {
-                            self_instance.attr("__post_init__")();
-                        }
-                    }
-                }
-            } else if (!foreign_return && py::isinstance<py::dict>(validated)) {
-                py::dict d = self_instance.attr("__dict__");
-                py::dict validated_dict = validated.cast<py::dict>();
-
-                // Extract special keys before copying to __dict__
-                py::object extra_fields = py::none();
-                py::object fields_set = py::set();
-
+        if (self.is_root_model()) {
+            // Root model: store the whole validated value as 'root'
+            py::dict d = self_instance.attr("__dict__");
+            d[py::str("root")] = validated;
+            if (!py_generic_hasattr(self_instance, "__pydantic_private__")) {
+                force_setattr(self_instance, py::str("__pydantic_private__"), py::none());
+            }
+            force_setattr(self_instance, py::str("__pydantic_extra__"), py::none());
+            // Rust ModelValidator: a PydanticUndefined input means the
+            // schema default filled the root, so no field is set.
+            py::object root_undefined = pydantic_undefined_obj();
+            bool root_from_default =
+                root_undefined.ptr() && input.ptr() == root_undefined.ptr();
+            force_setattr(self_instance, py::str("__pydantic_fields_set__"),
+                          root_from_default
+                              ? py::set()
+                              : py::set(py::make_tuple(py::str("root"))));
+        } else if (self.is_dataclass() && !foreign_return) {
+            // Rust DataclassValidator::set_dict_call: the
+            // dataclass-args validator returns
+            // (output_dict, post_init_kwargs).  Replace __dict__
+            // with the validated flat dict (fields + extras for
+            // extra=allow); plain dataclasses do not receive the
+            // __pydantic_* attributes.
+            py::object dc_obj = validated;
+            py::object post_init_kwargs = py::none();
+            if (py::isinstance<py::tuple>(dc_obj) && py::len(dc_obj) == 2 &&
+                py::isinstance<py::dict>(dc_obj[py::int_(0)])) {
+                post_init_kwargs = dc_obj[py::int_(1)];
+                dc_obj = dc_obj[py::int_(0)];
+            }
+            if (py::isinstance<py::dict>(dc_obj)) {
+                py::dict validated_dict = dc_obj.cast<py::dict>();
+                if (validated_dict.contains("__pydantic_defaults__")) validated_dict.attr("pop")("__pydantic_defaults__");
                 if (validated_dict.contains("__pydantic_extra__")) {
-                    extra_fields = validated_dict["__pydantic_extra__"];
+                    py::object extra_val = validated_dict["__pydantic_extra__"];
                     validated_dict.attr("pop")("__pydantic_extra__");
+                    if (!extra_val.is_none() && py::isinstance<py::dict>(extra_val)) {
+                        for (auto item : extra_val.cast<py::dict>()) {
+                            validated_dict[item.first] = item.second;
+                        }
+                    }
                 }
-                if (validated_dict.contains("__pydantic_fields_set__")) {
-                    fields_set = validated_dict["__pydantic_fields_set__"];
-                    validated_dict.attr("pop")("__pydantic_fields_set__");
-                }
-
-                // Copy only declared fields to __dict__
-                for (auto item : validated_dict) {
-                    d[item.first] = item.second;
-                }
-
-                // Set pydantic slot attributes
-                if (!py_generic_hasattr(self_instance, "__pydantic_private__")) {
-                    force_setattr(self_instance, py::str("__pydantic_private__"), py::none());
-                }
-                force_setattr(self_instance, py::str("__pydantic_extra__"),
-                    extra_fields.is_none() ? py::none() : extra_fields);
-                force_setattr(self_instance, py::str("__pydantic_fields_set__"), fields_set);
-            } else if (!foreign_return && py_hasattr(validated, "__dict__")) {
-                // validated is a model instance (e.g. from FunctionAfterValidator)
-                // Copy its __dict__ to self_instance
-                py::dict d = self_instance.attr("__dict__");
-                py::dict validated_dict = validated.attr("__dict__");
-                for (auto item : validated_dict) {
-                    d[item.first] = item.second;
-                }
-                // Copy pydantic slot attributes
-                if (py_hasattr(validated, "__pydantic_extra__")) {
-                    force_setattr(self_instance, py::str("__pydantic_extra__"), validated.attr("__pydantic_extra__"));
-                }
-                if (py_hasattr(validated, "__pydantic_fields_set__")) {
-                    force_setattr(self_instance, py::str("__pydantic_fields_set__"), validated.attr("__pydantic_fields_set__"));
-                }
-                if (!py_generic_hasattr(self_instance, "__pydantic_private__")) {
-                    force_setattr(self_instance, py::str("__pydantic_private__"), py::none());
+                if (validated_dict.contains("__pydantic_fields_set__")) validated_dict.attr("pop")("__pydantic_fields_set__");
+                force_setattr(self_instance, py::str("__dict__"), validated_dict);
+                // Rust: __post_init__(*post_init_kwargs)
+                if (py_hasattr(self_instance, "__post_init__")) {
+                    if (!post_init_kwargs.is_none() && py::isinstance<py::tuple>(post_init_kwargs)) {
+                        self_instance.attr("__post_init__")(*post_init_kwargs.cast<py::tuple>());
+                    } else {
+                        self_instance.attr("__post_init__")();
+                    }
                 }
             }
-            // NOTE: model_post_init is called from the Python wrapper after
-            // nested models are processed, to ensure correct call order.
-        } catch (const std::exception& e) {
-            // If anything fails, just return validated as-is
-            py::print("validate_python self_instance error:", py::str(e.what()));
+        } else if (!foreign_return && py::isinstance<py::dict>(validated)) {
+            py::dict d = self_instance.attr("__dict__");
+            py::dict validated_dict = validated.cast<py::dict>();
+
+            // Extract special keys before copying to __dict__
+            py::object extra_fields = py::none();
+            py::object fields_set = py::set();
+
+            if (validated_dict.contains("__pydantic_extra__")) {
+                extra_fields = validated_dict["__pydantic_extra__"];
+                validated_dict.attr("pop")("__pydantic_extra__");
+            }
+            if (validated_dict.contains("__pydantic_fields_set__")) {
+                fields_set = validated_dict["__pydantic_fields_set__"];
+                validated_dict.attr("pop")("__pydantic_fields_set__");
+            }
+
+            // Copy only declared fields to __dict__
+            for (auto item : validated_dict) {
+                d[item.first] = item.second;
+            }
+
+            // Set pydantic slot attributes
+            if (!py_generic_hasattr(self_instance, "__pydantic_private__")) {
+                force_setattr(self_instance, py::str("__pydantic_private__"), py::none());
+            }
+            force_setattr(self_instance, py::str("__pydantic_extra__"),
+                extra_fields.is_none() ? py::none() : extra_fields);
+            force_setattr(self_instance, py::str("__pydantic_fields_set__"), fields_set);
+        } else if (!foreign_return && py_hasattr(validated, "__dict__")) {
+            // validated is a model instance (e.g. from FunctionAfterValidator)
+            // Copy its __dict__ to self_instance
+            py::dict d = self_instance.attr("__dict__");
+            py::dict validated_dict = validated.attr("__dict__");
+            for (auto item : validated_dict) {
+                d[item.first] = item.second;
+            }
+            // Copy pydantic slot attributes
+            if (py_hasattr(validated, "__pydantic_extra__")) {
+                force_setattr(self_instance, py::str("__pydantic_extra__"), validated.attr("__pydantic_extra__"));
+            }
+            if (py_hasattr(validated, "__pydantic_fields_set__")) {
+                force_setattr(self_instance, py::str("__pydantic_fields_set__"), validated.attr("__pydantic_fields_set__"));
+            }
+            if (!py_generic_hasattr(self_instance, "__pydantic_private__")) {
+                force_setattr(self_instance, py::str("__pydantic_private__"), py::none());
+            }
         }
+        // NOTE: model_post_init is called from the Python wrapper after
+        // nested models are processed, to ensure correct call order.
         // Rust validate_init surfaces the after-validator's return value
         // (main.py warns when it is not self).  self keeps the validated
         // fields via the snapshot above.
@@ -9248,21 +9243,17 @@ static py::object fill_self_instance(SchemaValidator& self, const py::object& va
             dc_obj = dc_obj[py::int_(0)];
         }
         if (py::isinstance<py::dict>(dc_obj)) {
-            try {
-                py::dict validated_dict = dc_obj.cast<py::dict>();
-                auto setattr = py::module_::import("builtins").attr("object").attr("__setattr__");
-                for (auto item : validated_dict) {
-                    setattr(self_instance, item.first, item.second);
+            py::dict validated_dict = dc_obj.cast<py::dict>();
+            auto setattr = py::module_::import("builtins").attr("object").attr("__setattr__");
+            for (auto item : validated_dict) {
+                setattr(self_instance, item.first, item.second);
+            }
+            if (py_hasattr(self_instance, "__post_init__")) {
+                if (!post_init_kwargs.is_none() && py::isinstance<py::tuple>(post_init_kwargs)) {
+                    self_instance.attr("__post_init__")(*post_init_kwargs.cast<py::tuple>());
+                } else {
+                    self_instance.attr("__post_init__")();
                 }
-                if (py_hasattr(self_instance, "__post_init__")) {
-                    if (!post_init_kwargs.is_none() && py::isinstance<py::tuple>(post_init_kwargs)) {
-                        self_instance.attr("__post_init__")(*post_init_kwargs.cast<py::tuple>());
-                    } else {
-                        self_instance.attr("__post_init__")();
-                    }
-                }
-            } catch (const std::exception& e) {
-                py::print("validate_python slots dataclass error:", py::str(e.what()));
             }
             return self_instance;
         }
