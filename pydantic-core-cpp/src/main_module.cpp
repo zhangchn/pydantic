@@ -9125,7 +9125,7 @@ static py::object fill_self_instance(SchemaValidator& self, const py::object& va
                 // Root model: store the whole validated value as 'root'
                 py::dict d = self_instance.attr("__dict__");
                 d[py::str("root")] = validated;
-                if (!py_hasattr(self_instance, "__pydantic_private__")) {
+                if (!py_generic_hasattr(self_instance, "__pydantic_private__")) {
                     force_setattr(self_instance, py::str("__pydantic_private__"), py::none());
                 }
                 force_setattr(self_instance, py::str("__pydantic_extra__"), py::none());
@@ -9198,7 +9198,7 @@ static py::object fill_self_instance(SchemaValidator& self, const py::object& va
                 }
 
                 // Set pydantic slot attributes
-                if (!py_hasattr(self_instance, "__pydantic_private__")) {
+                if (!py_generic_hasattr(self_instance, "__pydantic_private__")) {
                     force_setattr(self_instance, py::str("__pydantic_private__"), py::none());
                 }
                 force_setattr(self_instance, py::str("__pydantic_extra__"),
@@ -9219,7 +9219,7 @@ static py::object fill_self_instance(SchemaValidator& self, const py::object& va
                 if (py_hasattr(validated, "__pydantic_fields_set__")) {
                     force_setattr(self_instance, py::str("__pydantic_fields_set__"), validated.attr("__pydantic_fields_set__"));
                 }
-                if (!py_hasattr(self_instance, "__pydantic_private__")) {
+                if (!py_generic_hasattr(self_instance, "__pydantic_private__")) {
                     force_setattr(self_instance, py::str("__pydantic_private__"), py::none());
                 }
             }

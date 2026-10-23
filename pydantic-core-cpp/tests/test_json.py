@@ -4399,6 +4399,52 @@ def test_a_document_run_fills_the_instance_it_is_handed():
     assert isinstance(made, Plain) and made is not target
 
 
+def test_an_instance_being_filled_is_never_asked_its_own_class_about_itself():
+    # Filling an instance writes __pydantic_private__ when it holds none, and asking an instance
+    # whether it holds an attribute runs that class's __getattr__.  A model that declares
+    # __pydantic_extra__ as a field -- `__pydantic_extra__: dict[str, int] = Field(init=False)` --
+    # answers that question from a __getattr__ whose first move is `item in self.__pydantic_extra__`,
+    # and mid-fill that name resolves to the class-level FieldInfo rather than an extras dict, so the
+    # answer is a TypeError, not "no".  Python 3.13+ reports a non-AttributeError as a failure where
+    # the older API simply said "no attribute": on 3.14 the run gave up part-way through and handed
+    # back an instance holding only `__pydantic_extra__: None`, which is the CI failure in
+    # pydantic's tests/test_main.py::test_extra_validator_field.  Asking the generic attribute
+    # machinery keeps the question about the slot and leaves __getattr__ asleep.
+    class FieldLike:
+        __slots__ = ()  # what `in` refuses to ask about, as FieldInfo does
+
+    class Refuser:
+        __pydantic_extra__ = FieldLike()
+        asked = []
+
+        def __getattr__(self, item):
+            Refuser.asked.append(item)
+            held = object.__getattribute__(self, '__pydantic_extra__')
+            if held is not None and item in held:
+                return held[item]
+            raise AttributeError(item)
+
+    fields = {
+        'a': core_schema.model_field(core_schema.int_schema()),
+        'b': core_schema.model_field(core_schema.int_schema(), validation_alias='v'),
+    }
+    vp = SchemaValidator(core_schema.model_schema(
+        Refuser, core_schema.model_fields_schema(fields, extra_behavior='allow')))
+
+    target = Refuser()
+    assert vp.validate_python({'a': 7, 'v': 2, 'zz': 1}, self_instance=target) is target
+    assert target.a == 7 and target.b == 2
+    assert sorted(vars(target)) == ['__pydantic_extra__', '__pydantic_fields_set__',
+                                    '__pydantic_private__', 'a', 'b']
+    assert vars(target)['__pydantic_extra__'] == {'zz': 1}
+    assert vars(target)['__pydantic_fields_set__'] == {'a', 'b', 'zz'}
+    assert vars(target)['__pydantic_private__'] is None
+    # Whether the slot holds something is a question about the instance, not something to ask the
+    # class: even where the interpreter swallows the TypeError (3.10 and older), the fill must not
+    # have woken __getattr__ to find out.
+    assert '__pydantic_private__' not in Refuser.asked
+
+
 def test_an_object_with_no_dict_is_not_an_instance_to_fill():
     # A run handed something to write its answer into reads that object's dict before it looks at
     # anything else (create_instance -> instance.dict()), so an object with no dict at all is an

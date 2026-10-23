@@ -67,6 +67,40 @@ inline bool py_hasattr(const pybind11::handle& obj, const char* name) {
     return py_hasattr(obj.ptr(), name);
 }
 
+// Existence check that never runs the class's own __getattr__.
+//
+// py_hasattr asks the object, so a class that defines __getattr__ answers it.  pydantic's
+// BaseModel does, and while an instance is still being filled its __getattr__ inspects
+// __pydantic_extra__, which at that moment is the class-level FieldInfo of a
+// `Field(init=False)` annotation rather than the instance's extras dict -- so the answer is
+// a TypeError, not an AttributeError.  Python 3.13+ reports that as a failure
+// (PyObject_GetOptionalAttrString returns -1) where the older PyObject_HasAttrString just
+// said "no attribute", which is why a probe written with py_hasattr filled instances
+// cleanly on 3.10 and handed back a half-built one on 3.14.  The check here is only ever
+// about a slot that either holds a value or does not, so it asks the generic attribute
+// machinery directly and keeps __getattr__ out of it.
+inline bool py_generic_hasattr(PyObject* obj, const char* name) {
+    PyObject* name_str = PyUnicode_InternFromString(name);
+    if (!name_str) {
+        throw pybind11::error_already_set();
+    }
+    PyObject* value = PyObject_GenericGetAttr(obj, name_str);
+    Py_DECREF(name_str);
+    if (value) {
+        Py_DECREF(value);
+        return true;
+    }
+    if (!PyErr_ExceptionMatches(PyExc_AttributeError)) {
+        throw pybind11::error_already_set();
+    }
+    PyErr_Clear();
+    return false;
+}
+
+inline bool py_generic_hasattr(const pybind11::handle& obj, const char* name) {
+    return py_generic_hasattr(obj.ptr(), name);
+}
+
 // collections.deque has no static type in the C-API, so the type object is
 // imported once and kept for the lifetime of the process (Rust's
 // common::deque::get_deque_type).
