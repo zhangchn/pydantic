@@ -19,6 +19,9 @@
 #include "pydantic_core/schema_validator.hpp"
 #include "pydantic_core/serialization_config.hpp"
 #include "pydantic_core/url_types.hpp"
+// The port's own convert_err lives here (function_error_from_exception), and the fill needs it to
+// turn a dataclass post-init failure into the line error Rust would have built.
+#include "pydantic_core/validators/functions.hpp"
 
 namespace py = pybind11;
 using namespace pydantic_core;
@@ -9086,6 +9089,52 @@ static bool include_url_env_value() {
     return settled;
 }
 
+// A dataclass's `__post_init__` runs inside validation, so Rust hands its failure to `convert_err`
+// (dataclass.rs:693 -> function.rs:503) together with the run's own input: a ValueError becomes a
+// `value_error` line on the run carrying the payload the constructor was given (an `ArgsKwargs` for
+// a dataclass) rather than the half-built instance, an uncaught `PydanticOmit`/`PydanticUseDefault`
+// becomes the SchemaError the binding boundary would raise, and anything `convert_err` has no
+// branch for -- KeyError, RuntimeError -- escapes the constructor unchanged.  The port let every
+// one of them escape.
+static void call_dataclass_post_init(SchemaValidator& self, const py::object& self_instance,
+                                     const py::object& post_init_kwargs, const py::object& input) {
+    if (!py_hasattr(self_instance, "__post_init__")) return;
+    try {
+        if (!post_init_kwargs.is_none() && py::isinstance<py::tuple>(post_init_kwargs)) {
+            self_instance.attr("__post_init__")(*post_init_kwargs.cast<py::tuple>());
+        } else {
+            self_instance.attr("__post_init__")();
+        }
+    } catch (py::error_already_set& e) {
+        // The run is over by the time an instance gets filled, so the location the error carries is
+        // the dataclass's own, which is where a top-level dataclass run puts it.
+        PythonInput py_input{input};
+        ValidationState state;
+        ValError err = function_error_from_exception(e, py_input, state);
+        if (err.is_internal()) {
+            // `convert_err` has no branch for it: the exception reaches the caller as raised.
+            py::object exc = err.internal_py_err();
+            PyErr_SetObject(reinterpret_cast<PyObject*>(Py_TYPE(exc.ptr())), exc.ptr());
+            throw py::error_already_set();
+        }
+        // Rust mod.rs:256-257 answers a sentinel that nothing caught with a SchemaError.  Filling an
+        // instance happens after the run's error channel closed, so there is no signal left to
+        // carry: the answer is raised here.
+        if (err.is_omit()) {
+            throw SchemaError(
+                "Uncaught Omit error, please check your usage of `default` validators.");
+        }
+        if (err.is_use_default()) {
+            throw SchemaError("Uncaught `PydanticUseDefault` exception: the error was raised in a "
+                              "field validator and no default value is available for that field.");
+        }
+        // This raise does not pass through SchemaValidator::validate_python, so the channel the
+        // wrapper reads ctx objects back from has to be seeded here like it does there.
+        seed_error_object_channel(err, input);
+        throw ValidationError(self.title(), InputType::Python, err, input);
+    }
+}
+
 // Fills a handed-in instance from a completed run and answers with the object the caller must hand
 // back: the instance itself, the run's value when the instance cannot be filled, or the foreign
 // value an after-validator returned, which Rust's validate_init surfaces.  Every entry point that
@@ -9166,13 +9215,7 @@ static py::object fill_self_instance(SchemaValidator& self, const py::object& va
                 if (validated_dict.contains("__pydantic_fields_set__")) validated_dict.attr("pop")("__pydantic_fields_set__");
                 force_setattr(self_instance, py::str("__dict__"), validated_dict);
                 // Rust: __post_init__(*post_init_kwargs)
-                if (py_hasattr(self_instance, "__post_init__")) {
-                    if (!post_init_kwargs.is_none() && py::isinstance<py::tuple>(post_init_kwargs)) {
-                        self_instance.attr("__post_init__")(*post_init_kwargs.cast<py::tuple>());
-                    } else {
-                        self_instance.attr("__post_init__")();
-                    }
-                }
+                call_dataclass_post_init(self, self_instance, post_init_kwargs, input);
             }
         } else if (!foreign_return && py::isinstance<py::dict>(validated)) {
             py::dict d = self_instance.attr("__dict__");
@@ -9248,13 +9291,7 @@ static py::object fill_self_instance(SchemaValidator& self, const py::object& va
             for (auto item : validated_dict) {
                 setattr(self_instance, item.first, item.second);
             }
-            if (py_hasattr(self_instance, "__post_init__")) {
-                if (!post_init_kwargs.is_none() && py::isinstance<py::tuple>(post_init_kwargs)) {
-                    self_instance.attr("__post_init__")(*post_init_kwargs.cast<py::tuple>());
-                } else {
-                    self_instance.attr("__post_init__")();
-                }
-            }
+            call_dataclass_post_init(self, self_instance, post_init_kwargs, input);
             return self_instance;
         }
     }

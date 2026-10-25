@@ -201,4 +201,15 @@ struct InputValue {
     std::string to_string() const { return repr; }
 };
 
+#ifdef HAS_PYBIND11
+// Seed the module-level side channels the Python wrapper reads ctx objects back from.
+//
+// register_exception builds a *fresh* Python exception from the C++ object, so no C++ member
+// survives the throw: the wrapper reconstructs ctx['error'], the ctx objects and input_value by
+// index from `__main__._last_error_objs` / `_last_error_ctx_objs` / `_last_error_input_objs`.  A
+// raiser that skips this still produces a correct message, but its ctx comes back as the
+// `__PYDANTIC_EXC_REF__` placeholder, so every site that throws a ValidationError has to call it.
+void seed_error_object_channel(const ValError& val_error, const pybind11::object& raw_input);
+#endif
+
 } // namespace pydantic_core

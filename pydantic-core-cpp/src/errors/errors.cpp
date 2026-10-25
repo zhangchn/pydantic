@@ -265,4 +265,37 @@ std::string ValidationError::to_json_string() const {
     return oss.str();
 }
 
+#ifdef HAS_PYBIND11
+void seed_error_object_channel(const ValError& val_error, const py::object& raw_input) {
+    try {
+        py::module_ m = py::module_::import("__main__");
+        m.attr("_last_raw_input") = raw_input;
+        // Index-aligned with the error details, so the wrapper can attach them to
+        // ctx['error'] for value_error/assertion_error entries and to input_value.
+        py::list err_objs;
+        py::list err_ctx_objs;
+        py::list err_input_objs;
+        if (val_error.has_line_errors()) {
+            for (const auto& le : val_error.line_errors()) {
+                err_objs.append(le->raw_error_obj.ptr() ? py::object(le->raw_error_obj) : py::none());
+                py::dict ctx_d;
+                for (const auto& [k, v] : le->error_type.context_objects()) {
+                    ctx_d[py::str(k)] = v;
+                }
+                err_ctx_objs.append(std::move(ctx_d));
+                // The object the failing validator actually received, which is what
+                // Rust writes into input_value.
+                err_input_objs.append(
+                    le->raw_input_obj.ptr() ? py::object(le->raw_input_obj) : py::none());
+            }
+        }
+        m.attr("_last_error_objs") = err_objs;
+        m.attr("_last_error_ctx_objs") = err_ctx_objs;
+        m.attr("_last_error_input_objs") = err_input_objs;
+    } catch (...) {
+        // Losing the seed costs the ctx objects, never the error itself.
+    }
+}
+#endif
+
 } // namespace pydantic_core

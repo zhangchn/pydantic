@@ -819,39 +819,10 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
         return result_to_python(result.value());
     } else {
 #ifdef HAS_PYBIND11
-        // Store raw Python input on module for error dict reconstruction.
-        // This mirrors Rust's approach where as_val_error(input) keeps Py<PyAny>.
-        // register_exception creates a new Python exception from C++ object, so
-        // the C++ ValidationError errors() lambda can't run — but module-level
-        // storage survives the throw/catch cycle.
-        try {
-            py::module_ m = py::module_::import("__main__");
-            m.attr("_last_raw_input") = input;
-            // Collect Python exception objects from line errors, index-aligned
-            // with the error details, so the Python wrapper can attach them to
-            // ctx['error'] for value_error/assertion_error entries.
-            py::list err_objs;
-            py::list err_ctx_objs;
-            py::list err_input_objs;
-            if (result.error().has_line_errors()) {
-                for (const auto& le : result.error().line_errors()) {
-                    err_objs.append(le->raw_error_obj.ptr() ? py::object(le->raw_error_obj) : py::none());
-                    py::dict ctx_d;
-                    for (const auto& [k, v] : le->error_type.context_objects()) {
-                        ctx_d[py::str(k)] = v;
-                    }
-                    err_ctx_objs.append(std::move(ctx_d));
-                    // The object the failing validator actually received, which
-                    // is what Rust writes into input_value.
-                    err_input_objs.append(le->raw_input_obj.ptr() ? py::object(le->raw_input_obj) : py::none());
-                }
-            }
-            m.attr("_last_error_objs") = err_objs;
-            m.attr("_last_error_ctx_objs") = err_ctx_objs;
-            m.attr("_last_error_input_objs") = err_input_objs;
-        } catch (...) {
-            // Silently ignore if module state setting fails
-        }
+        // The raw input and the line errors' Python objects travel to the wrapper through
+        // module-level channels, because register_exception builds a fresh Python exception and no
+        // C++ member survives the throw.
+        seed_error_object_channel(result.error(), input);
 #endif
         reraise_if_internal(result.error());
         // Rust turns an Omit that escapes the whole schema into a SchemaError
@@ -859,6 +830,11 @@ py::object SchemaValidator::validate_python_object(const py::object& input,
         if (result.error().is_omit()) {
             throw SchemaError(
                 "Uncaught Omit error, please check your usage of `default` validators.");
+        }
+        // ... and the other sentinel the same way (mod.rs:257, ValidationError::use_default_error).
+        if (result.error().is_use_default()) {
+            throw SchemaError("Uncaught `PydanticUseDefault` exception: the error was raised in a "
+                              "field validator and no default value is available for that field.");
         }
         // The run's input type travels into the error: Rust renders a line
         // error's message from the input it failed on, so a JSON document gets

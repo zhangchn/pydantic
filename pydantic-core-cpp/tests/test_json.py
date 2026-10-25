@@ -23,7 +23,9 @@ from dirty_equals import IsFloatNan, IsList
 
 import pydantic_core_cpp
 from pydantic_core_cpp import (
+    ArgsKwargs,
     CoreConfig,
+    PydanticOmit,
     PydanticSerializationError,
     PydanticSerializationUnexpectedValue,
     SchemaError,
@@ -4878,6 +4880,112 @@ def test_a_userinfo_is_escaped_and_ends_at_the_last_at() -> None:
     assert str(mh.validate_python('http://a@b@h1,h2/p')) == 'http://a%40b@h1,h2/p'
     assert str(mh.validate_python('http://a@h1,b[c@h2/p')) == 'http://a@h1,b%5Bc@h2/p'
     assert str(mh.validate_python('http://@h1/p')) == 'http://h1/p'
+
+
+def test_a_dataclass_post_init_failure_belongs_to_the_run() -> None:
+    # `__post_init__` runs inside validation (dataclass.rs:693 hands the failure to convert_err), so
+    # it is the run's own error rather than a stray exception: the ValueError becomes a `value_error`
+    # line carrying the payload the constructor was given -- not the half-built instance -- with the
+    # exception object itself in ctx, and the same line lands on the enclosing field when the
+    # dataclass is one.  An exception convert_err has no branch for still leaves the constructor as
+    # itself.  The port let the raise escape when filling an instance, and at the field site it built
+    # a `custom_error` line out of the exception's traceback text.  Measured on the 2.50.0 wheel
+    # (probes dc_post_init_diff.py, dc_post_init_nested.py).
+    @dataclasses.dataclass
+    class Shouty:
+        a: int
+
+        def __post_init__(self) -> None:
+            raise ValueError('boom')
+
+    @dataclasses.dataclass
+    class Assertive:
+        a: int
+
+        def __post_init__(self) -> None:
+            raise AssertionError('nope')
+
+    @dataclasses.dataclass
+    class Missing:
+        a: int
+
+        def __post_init__(self) -> None:
+            raise KeyError('nope')
+
+    @dataclasses.dataclass
+    class Omitted:
+        a: int
+
+        def __post_init__(self) -> None:
+            raise PydanticOmit()
+
+    def member(cls: type, name: str) -> core_schema.CoreSchema:
+        return core_schema.dataclass_schema(
+            cls,
+            core_schema.dataclass_args_schema(name, [{'name': 'a', 'schema': core_schema.int_schema()}]),
+            ['a'],
+            post_init=True,
+        )
+
+    def raised(validate) -> dict:
+        with pytest.raises(ValidationError) as exc_info:
+            validate()
+        errors = exc_info.value.errors(include_url=False)
+        assert len(errors) == 1
+        return errors[0]
+
+    def filled(cls: type, name: str):
+        v = SchemaValidator(member(cls, name))
+        return lambda kwargs: raised(
+            lambda: v.validate_python(ArgsKwargs((), kwargs), self_instance=cls.__new__(cls))
+        )
+
+    err = filled(Shouty, 'Shouty')({'a': 1})
+    assert (err['type'], err['loc'], err['msg']) == ('value_error', (), 'Value error, boom')
+    # The constructor's payload, which is what a dataclass run is handed; the instance is half-built.
+    assert repr(err['input']) == "ArgsKwargs((), {'a': 1})"
+    # ctx carries the exception, not its text: a string here loses what raised.
+    assert repr(err['ctx']['error']) == "ValueError('boom')"
+
+    err = filled(Assertive, 'Assertive')({'a': 1})
+    assert (err['type'], err['loc'], err['msg']) == ('assertion_error', (), 'Assertion failed, nope')
+    assert repr(err['ctx']['error']) == "AssertionError('nope')"
+
+    # convert_err has no branch for a KeyError, so it escapes the constructor unchanged.
+    missing = SchemaValidator(member(Missing, 'Missing'))
+    with pytest.raises(KeyError):
+        missing.validate_python(ArgsKwargs((), {'a': 1}), self_instance=Missing.__new__(Missing))
+
+    # An uncaught sentinel is the boundary's SchemaError, not a line error (mod.rs:256).
+    omitted = SchemaValidator(member(Omitted, 'Omitted'))
+    with pytest.raises(SchemaError, match='Uncaught Omit error'):
+        omitted.validate_python(ArgsKwargs((), {'a': 1}), self_instance=Omitted.__new__(Omitted))
+
+    # The same failure met one level down reports on the field, with the field's own input.
+    holder = SchemaValidator(
+        core_schema.typed_dict_schema(
+            {
+                'x': core_schema.typed_dict_field(member(Shouty, 'Shouty')),
+                'y': core_schema.typed_dict_field(core_schema.int_schema()),
+            }
+        )
+    )
+    err = raised(lambda: holder.validate_python({'x': {'a': 1}, 'y': 2}))
+    assert (err['type'], err['loc'], err['msg']) == ('value_error', ('x',), 'Value error, boom')
+    assert err['input'] == {'a': 1}
+    assert repr(err['ctx']['error']) == "ValueError('boom')"
+
+    # An omit is not an error at all: a field that omits itself is dropped, which only holds while
+    # the failure still travels as the signal instead of a line.
+    omit_holder = SchemaValidator(
+        core_schema.typed_dict_schema(
+            {
+                'x': core_schema.typed_dict_field(member(Omitted, 'Omitted')),
+                'y': core_schema.typed_dict_field(core_schema.int_schema()),
+            }
+        )
+    )
+    assert omit_holder.validate_python({'x': {'a': 1}, 'y': 2}) == {'y': 2}
 
 
 if __name__ == '__main__':

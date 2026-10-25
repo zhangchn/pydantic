@@ -3074,10 +3074,11 @@ public:
                         instance.attr("__post_init__")();
                     }
                 } catch (py::error_already_set& e) {
-                    e.restore();
-                    PyErr_Clear();
-                    return ValError::line_error(ErrorType(ErrorType::Kind::CustomError),
-                                                state.location(), "Dataclass __post_init__ failed: " + std::string(e.what()));
+                    // Rust dataclass.rs:693: the post-init is part of validation, so its failure
+                    // goes to convert_err with the dataclass's own input -- a ValueError becomes a
+                    // `value_error` line on the enclosing field rather than a line invented from the
+                    // exception's text.
+                    return function_error_from_exception(e, *effective_input, state);
                 }
             }
             return ValResult<std::shared_ptr<void>>(std::make_shared<py::object>(instance));
