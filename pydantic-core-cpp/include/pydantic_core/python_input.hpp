@@ -171,7 +171,7 @@ public:
     InputType input_type() const override { return InputType::Python; }
     InputValue as_error_value() const override;
     bool is_none() const override;
-    
+
     // Get Python object representation - returns the underlying PyObject
     py::object as_python_object() const override { return obj_; }
 
@@ -209,11 +209,11 @@ public:
 
     // Access underlying PyObject
     const py::object& py_object() const { return obj_; }
-    
+
     // from_attributes support: check if object has attributes
     bool has_attributes() const;
     bool is_dict_like() const;  // dict or object with attributes
-    
+
     // Get object attributes as Python dict (for from_attributes mode)
     py::dict get_attributes_as_dict() const;
 

@@ -192,14 +192,14 @@ template<typename T>
 class Some {
 public:
     explicit Some(T value) : value_(std::move(value)) {}
-    
+
     const T& value() const { return value_; }
     T& value() { return value_; }
-    
+
     std::string repr() const {
         return "Some(" + value_.repr() + ")";
     }
-    
+
 private:
     T value_;
 };

@@ -4707,8 +4707,8 @@ def test_a_text_pattern_is_read_by_the_engine_that_can_read_it():
     The reference compiles the text with the regex crate.  This port asks ``std::regex``
     first -- it is the engine that reads a POSIX class like ``[[:alpha:]]`` the way the
     crate does -- and python's ``re`` takes what ``std::regex`` refuses to parse, which is
-    where the inline flags and the absolute-start anchor live.  An unparseable pattern used
-    to be dropped on the floor, so a field written ``pattern='(?i)^ab$'`` built and then
+    where the inline flags and the absolute-start anchor live.  A pattern the engine refused
+    used to be dropped on the floor, so a field written ``pattern='(?i)^ab$'`` built and then
     accepted anything: the refusal below is the point of the test, not the build.
 
     The fallback must not become the primary engine: python reads ``[[:alpha:]]`` as a set of

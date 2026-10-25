@@ -64,12 +64,12 @@ using LocItem = std::variant<int64_t, std::string>;
 // Error location path
 struct Location {
     std::vector<LocItem> items;
-    
+
     void push(int64_t index) { items.push_back(index); }
     void push(const std::string& key) { items.push_back(key); }
     void pop() { if (!items.empty()) items.pop_back(); }
     void prepend(const std::string& key) { items.insert(items.begin(), key); }
-    
+
     std::string to_string() const {
         std::string result;
         for (size_t i = 0; i < items.size(); ++i) {

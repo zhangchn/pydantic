@@ -35,30 +35,30 @@ std::string ErrorType::type_name() const {
         {Kind::BoolParsing, "bool_parsing"},
         {Kind::IntParsing, "int_parsing"},
         {Kind::FloatParsing, "float_parsing"},
-        
+
         // Integer constraint errors
         {Kind::IntMultipleOf, "int_multiple_of"},
         {Kind::IntGreaterThan, "int_greater_than"},
         {Kind::IntLessThan, "int_less_than"},
         {Kind::IntGreaterThanEqual, "int_greater_than_equal"},
         {Kind::IntLessThanEqual, "int_less_than_equal"},
-        
+
         // Float constraint errors
         {Kind::FloatMultipleOf, "float_multiple_of"},
         {Kind::FloatGreaterThan, "float_greater_than"},
         {Kind::FloatLessThan, "float_less_than"},
         {Kind::FloatGreaterThanEqual, "float_greater_than_equal"},
         {Kind::FloatLessThanEqual, "float_less_than_equal"},
-        
+
         // String constraint errors
         {Kind::StringTooShort, "string_too_short"},
         {Kind::StringTooLong, "string_too_long"},
         {Kind::StringPatternMismatch, "string_pattern_mismatch"},
-        
+
         // Bytes constraint errors
         {Kind::BytesTooShort, "bytes_too_short"},
         {Kind::BytesTooLong, "bytes_too_long"},
-        
+
         // List/Set constraint errors - use generic too_short/too_long
         {Kind::ListTooShort, "too_short"},
         {Kind::ListTooLong, "too_long"},
@@ -68,15 +68,15 @@ std::string ErrorType::type_name() const {
         // Dict constraint errors - use generic too_short/too_long
         {Kind::DictTooShort, "too_short"},
         {Kind::DictTooLong, "too_long"},
-        
+
         // Tuple errors
         {Kind::TupleLengthMismatch, "tuple_length_mismatch"},
-        
+
         // Literal errors
         {Kind::LiteralMismatch, "literal_mismatch"},
         {Kind::LiteralError, "literal_error"},
         {Kind::EnumError, "enum"},
-        
+
         // Collection / string / bytes errors (Rust names)
         {Kind::IterableType, "iterable_type"},
         {Kind::IterationError, "iteration_error"},
@@ -177,7 +177,7 @@ std::string ErrorType::type_name() const {
         {Kind::RecursionLoop, "recursion_loop"},
         {Kind::ValueError, "value_error"},
         {Kind::AssertionError, "assertion_error"},
-        
+
         // Generic constraint errors
         {Kind::GreaterThan, "greater_than"},
         {Kind::LessThan, "less_than"},
@@ -220,30 +220,30 @@ std::string ErrorType::message_template() const {
         {Kind::BoolParsing, "Input should be a valid boolean, unable to interpret input"},
         {Kind::IntParsing, "Input should be a valid integer, unable to parse string as an integer"},
         {Kind::FloatParsing, "Input should be a valid number, unable to parse string as a number"},
-        
+
         // Integer constraint errors
         {Kind::IntMultipleOf, "Input should be a multiple of {value}"},
         {Kind::IntGreaterThan, "Input should be greater than {value}"},
         {Kind::IntLessThan, "Input should be less than {value}"},
         {Kind::IntGreaterThanEqual, "Input should be greater than or equal to {value}"},
         {Kind::IntLessThanEqual, "Input should be less than or equal to {value}"},
-        
+
         // Float constraint errors
         {Kind::FloatMultipleOf, "Input should be a multiple of {value}"},
         {Kind::FloatGreaterThan, "Input should be greater than {value}"},
         {Kind::FloatLessThan, "Input should be less than {value}"},
         {Kind::FloatGreaterThanEqual, "Input should be greater than or equal to {value}"},
         {Kind::FloatLessThanEqual, "Input should be less than or equal to {value}"},
-        
+
         // String constraint errors
         {Kind::StringTooShort, "String should have at least {min_length} character{s}"},
         {Kind::StringTooLong, "String should have at most {max_length} character{s}"},
         {Kind::StringPatternMismatch, "String should match pattern '{pattern}'"},
-        
+
         // Bytes constraint errors
         {Kind::BytesTooShort, "Data should have at least {min_length} bytes"},
         {Kind::BytesTooLong, "Data should have at most {max_length} bytes"},
-        
+
         // List/Set constraint errors - use generic too_short/too_long messages
         {Kind::ListTooShort, "{field_type} should have at least {min_length} item{s} after validation, not {actual_length}"},
         {Kind::ListTooLong, "{field_type} should have at most {max_length} item{s} after validation, not {actual_length}"},
@@ -253,10 +253,10 @@ std::string ErrorType::message_template() const {
         // Dict constraint errors - use generic too_short/too_long messages
         {Kind::DictTooShort, "{field_type} should have at least {min_length} item{s} after validation, not {actual_length}"},
         {Kind::DictTooLong, "{field_type} should have at most {max_length} item{s} after validation, not {actual_length}"},
-        
+
         // Tuple errors
         {Kind::TupleLengthMismatch, "Tuple should have {expected} items, got {actual}"},
-        
+
         // Literal errors
         {Kind::LiteralMismatch, "Input should match one of the allowed values"},
         {Kind::LiteralError, "Input should be {expected}"},
@@ -301,7 +301,7 @@ std::string ErrorType::message_template() const {
         {Kind::UnexpectedPositionalArgument, "Unexpected positional argument"},
         {Kind::UnexpectedKeywordArgument, "Unexpected keyword argument"},
         {Kind::MultipleArgumentValues, "Got multiple values for argument"},
-        
+
         // Other errors
         {Kind::JsonInvalid, "Invalid JSON: {error}"},
         {Kind::InvalidJsonValue, "input was not a valid JSON value"},
@@ -310,7 +310,7 @@ std::string ErrorType::message_template() const {
         {Kind::RecursionLoop, "Recursion error - cyclic reference detected"},
         {Kind::ValueError, "Value error, {error}"},
         {Kind::AssertionError, "Assertion failed, {error}"},
-        
+
         // Generic constraint errors
         {Kind::GreaterThan, "Input should be greater than {gt}"},
         {Kind::LessThan, "Input should be less than {lt}"},

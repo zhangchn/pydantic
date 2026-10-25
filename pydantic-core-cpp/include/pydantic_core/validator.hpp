@@ -120,20 +120,20 @@ inline bool enter_node(const void* node) {
 class Validator {
 public:
     virtual ~Validator() = default;
-    
+
     // Main validation method - validates input and returns result
     virtual ValResult<std::shared_ptr<void>> validate(
-        const Input& input, 
+        const Input& input,
         ValidationState& state
     ) = 0;
-    
+
     // Get default value (for WithDefaultValidator)
     virtual ValResult<std::shared_ptr<void>> default_value(
         ValidationState& state
     ) {
         return ValError::omit();
     }
-    
+
     // Get validator name for error messages
     virtual std::string name() const = 0;
 
@@ -206,7 +206,7 @@ public:
     // (root models report their inner value type, models wrapping function
     // validators report "py_object").
     virtual std::string effective_result_name() const { return name(); }
-    
+
     // Validate assignment (for model field assignment)
     virtual ValResult<std::shared_ptr<void>> validate_assignment(
         const Input& input,
@@ -226,7 +226,7 @@ public:
 class BuildValidator {
 public:
     virtual ~BuildValidator() = default;
-    
+
     // Build validator from schema
     // schema: dict with "type" key and other schema properties
     // config: optional CoreConfig dict
@@ -234,7 +234,7 @@ public:
         const std::unordered_map<std::string, std::string>& schema,
         const std::unordered_map<std::string, std::string>& config
     ) = 0;
-    
+
     // Get expected type name (e.g., "model", "int", "str")
     virtual std::string expected_type() const = 0;
 };
@@ -244,23 +244,23 @@ class SchemaParser {
 public:
     SchemaParser(const std::unordered_map<std::string, std::string>& schema)
         : schema_(schema) {}
-    
+
     std::string type() const {
         auto it = schema_.find("type");
         return it != schema_.end() ? it->second : "";
     }
-    
+
     std::string get(const std::string& key, const std::string& default_val = "") const {
         auto it = schema_.find(key);
         return it != schema_.end() ? it->second : default_val;
     }
-    
+
     std::optional<bool> get_bool(const std::string& key) const {
         auto it = schema_.find(key);
         if (it == schema_.end()) return std::nullopt;
         return it->second == "true" || it->second == "1";
     }
-    
+
     std::optional<int64_t> get_int(const std::string& key) const {
         auto it = schema_.find(key);
         if (it == schema_.end()) return std::nullopt;
@@ -270,7 +270,7 @@ public:
             return std::nullopt;
         }
     }
-    
+
     std::optional<double> get_float(const std::string& key) const {
         auto it = schema_.find(key);
         if (it == schema_.end()) return std::nullopt;
@@ -280,13 +280,13 @@ public:
             return std::nullopt;
         }
     }
-    
+
     // Get inner schema (for validators that wrap other schemas)
     std::unordered_map<std::string, std::string> get_inner_schema(const std::string& key = "schema") const {
         // For now, return empty - Phase 2 will implement proper schema parsing
         return std::unordered_map<std::string, std::string>();
     }
-    
+
 private:
     const std::unordered_map<std::string, std::string>& schema_;
 };
@@ -299,10 +299,10 @@ public:
         const std::unordered_map<std::string, std::string>& schema,
         const std::unordered_map<std::string, std::string>& config
     );
-    
+
     // Register custom validator builder
     static void register_builder(const std::string& type, std::unique_ptr<BuildValidator> builder);
-    
+
 private:
     static std::unordered_map<std::string, std::unique_ptr<BuildValidator>>& builders();
 };

@@ -5883,7 +5883,7 @@ private:
             // Apply include/exclude filters (supports nested dict filters)
             auto next = apply_ser_filter(py::str(k), include, exclude);
             if (next.omit) continue;
-            
+
             // exclude_unset: skip fields that were not explicitly set in input
             if (exclude_unset) {
                 py::object fs = py::none();
@@ -5898,7 +5898,7 @@ private:
                     if (!fs.cast<py::set>().contains(py::str(k))) continue;
                 }
             }
-            
+
             // exclude_defaults: skip fields whose value equals their default.
             // Rust: exclude_default reads the default from the field's own
             // serializer (WithDefaultSerializer::get_default) — never from the
@@ -5915,7 +5915,7 @@ private:
                     }
                 }
             }
-            
+
             // Determine output key name
             std::string output_key = k;
             if (ser_use_alias()) {
@@ -5924,7 +5924,7 @@ private:
                     output_key = alias_it->second;
                 }
             }
-            
+
             py::str key(k);
             py::object fv;
             bool has_value = true;
@@ -8183,7 +8183,7 @@ public:
                       bool exclude_computed_fields, bool round_trip, py::object warnings, std::optional<py::object> fallback,
                       bool serialize_as_any, std::optional<bool> polymorphic, py::object context,
                       bool& warn_owned) const {
-        
+
         g_exclude_computed_fields = exclude_computed_fields;
         g_polymorphic_serialization = polymorphic;  // reset per call (None -> nullopt)
         SerCallExtraScope ser_scope;

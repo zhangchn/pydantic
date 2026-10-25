@@ -614,4 +614,4 @@ def test_infer_json_known_types():
     assert dumped(re.compile('a+')) == '{"x":"a+"}'
     assert dumped(bytearray(b'abc')) == '{"x":"abc"}'
     assert dumped(frozenset([3])) == '{"x":[3]}'
-    assert dumped((i for i in range(3))) == '{"x":[0,1,2]}'
+    assert dumped(i for i in range(3)) == '{"x":[0,1,2]}'

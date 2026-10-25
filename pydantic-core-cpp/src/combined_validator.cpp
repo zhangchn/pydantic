@@ -646,7 +646,7 @@ static std::shared_ptr<Validator> build_from_element(
     // ========================================================================
     // Function validators - call Python functions with ValidationInfo
     // ========================================================================
-    
+
     // function-before: func(input, info) -> transformed, then validate
     if (type == "function-before") {
         auto inner_schema = elem["schema"];
@@ -658,7 +658,7 @@ static std::shared_ptr<Validator> build_from_element(
         // Note: Python function is set later by SchemaValidator when it receives the schema dict
         return validator;
     }
-    
+
     // function-after: validate first, then func(validated, info) -> output
     if (type == "function-after") {
         auto inner_schema = elem["schema"];
@@ -669,13 +669,13 @@ static std::shared_ptr<Validator> build_from_element(
         auto validator = std::make_shared<FunctionAfterValidator>(inner_v, py::none());
         return validator;
     }
-    
+
     // function-plain: func(input, info) -> output (no inner validation)
     if (type == "function-plain") {
         auto validator = std::make_shared<FunctionPlainValidator>(py::none());
         return validator;
     }
-    
+
     // function-wrap: func(input, handler, info) -> output
     // handler calls inner validator
     if (type == "function-wrap") {
@@ -1154,9 +1154,9 @@ static std::shared_ptr<Validator> build_from_element(
     if (type == "definitions") {
         auto defs_arr = elem["definitions"];
         auto schema_val = elem["schema"];
-        
+
         auto registry = std::make_shared<DefinitionsRegistry>();
-        
+
         // First pass: extract all refs and register stubs so recursive refs can resolve
         if (!defs_arr.error() && defs_arr.value().is_array()) {
             for (auto def_elem : defs_arr.value().get_array().value()) {
@@ -1167,7 +1167,7 @@ static std::shared_ptr<Validator> build_from_element(
                 }
             }
         }
-        
+
         // Second pass: build all definitions (recursive refs resolve to stubs, then get replaced)
         if (!defs_arr.error() && defs_arr.value().is_array()) {
             for (auto def_elem : defs_arr.value().get_array().value()) {
@@ -1177,7 +1177,7 @@ static std::shared_ptr<Validator> build_from_element(
                     ref = std::string(ref_val.value().get_string().value());
                 }
                 if (ref.empty()) continue;
-                
+
                 auto def_validator = build_from_element(def_elem, config, registry);
                 // Rust composes validator names while the definition is still
                 // being built, so a reference to a definition that is not built
@@ -1187,7 +1187,7 @@ static std::shared_ptr<Validator> build_from_element(
                 registry->add_definition(ref, def_validator);
             }
         }
-        
+
         // Third pass: build the main schema with fully populated registry
         if (!schema_val.error()) {
             auto main_validator = build_from_element(schema_val.value(), config, registry);
@@ -1202,7 +1202,7 @@ static std::shared_ptr<Validator> build_from_element(
         if (!ref_val.error() && ref_val.value().is_string()) {
             ref = std::string(ref_val.value().get_string().value());
         }
-        
+
         auto def_ref = std::make_shared<DefinitionRefValidator>();
         def_ref->set_ref(ref);
         def_ref->set_definitions(definitions);
@@ -3172,7 +3172,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
                 std::string field_name = py::str(item.first).cast<std::string>();
                 py::dict field_def = schema_element_dict(item.second);
                 required_entry_schema(field_def, field_error_prefix(field_name));
-                
+
                 // Extract field schema
                 std::shared_ptr<Validator> field_validator;
                 py::dict field_schema_dict;
@@ -3343,7 +3343,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
                 v->add_field(field_name, std::move(info));
             }
         }
-        
+
         // build_tools.rs:181-199 asks two things and nothing else: the node's own ``extra_behavior``,
         // then the config's ``extra_fields_behavior``.  The config has no other spelling of it --
         // ``extra_behavior`` and ``extra`` sitting in a config are keys the reference never reads, so
@@ -3382,7 +3382,7 @@ static std::shared_ptr<Validator> build_from_py_dict_uncached(
             registry->set_use_prebuilt(definitions->use_prebuilt());
             registry->set_class_under_build(definitions->class_under_build());
         }
-        
+
         // definitions.rs:31,41 -- the required list of definitions is built first so
         // the refs they register resolve while the main schema below is built.
         build_definitions_from_py(required_list_slot(schema, "definitions"), config, registry);

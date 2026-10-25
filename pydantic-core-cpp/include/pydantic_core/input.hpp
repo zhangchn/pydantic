@@ -79,34 +79,34 @@ inline std::string rust_float_to_string(double value) {
 // String representation
 struct EitherString {
     std::variant<std::string, std::string_view> value;
-    
+
     EitherString(const std::string& s) : value(s) {}
     EitherString(std::string_view s) : value(s) {}
-    
+
     std::string to_string() const {
         if (auto* s = std::get_if<std::string>(&value)) {
             return *s;
         }
         return std::string(std::get<std::string_view>(value));
     }
-    
+
     std::string_view as_view() const {
         if (auto* s = std::get_if<std::string>(&value)) {
             return *s;
         }
         return std::get<std::string_view>(value);
     }
-    
+
     std::string as_cow() const { return to_string(); }
 };
 
 // Bytes representation
 struct EitherBytes {
     std::variant<std::vector<uint8_t>, std::string_view> data;
-    
+
     EitherBytes(const std::vector<uint8_t>& b) : data(b) {}
     EitherBytes(std::string_view b) : data(b) {}
-    
+
     // Set when the value came from a Python bytes subclass: Rust returns the
     // input object itself, so the subclass has to survive to the output.
     // Declared after `data` so the existing layout-based casts keep working.
@@ -119,7 +119,7 @@ struct EitherBytes {
         auto sv = std::get<std::string_view>(data);
         return std::vector<uint8_t>(sv.begin(), sv.end());
     }
-    
+
     size_t size() const {
         if (auto* v = std::get_if<std::vector<uint8_t>>(&data)) {
             return v->size();
@@ -133,14 +133,14 @@ struct EitherInt {
     // The py::object alternative holds a Python int for values beyond
     // uint64 range (Rust EitherInt::BigInt) — arbitrary precision.
     std::variant<int64_t, uint64_t, py::object> value;
-    
+
     EitherInt(int64_t i) : value(i) {}
     EitherInt(uint64_t u) : value(u) {}
     EitherInt(py::object o) : value(std::move(o)) {}
-    
+
     bool is_python() const { return std::holds_alternative<py::object>(value); }
     const py::object& as_python() const { return std::get<py::object>(value); }
-    
+
     // Python int value (any representation) — used for result conversion
     py::object to_python() const {
         if (auto* i = std::get_if<int64_t>(&value)) return py::int_(*i);
@@ -149,7 +149,7 @@ struct EitherInt {
         }
         return std::get<py::object>(value);
     }
-    
+
     std::optional<int64_t> as_i64() const {
         if (auto* i = std::get_if<int64_t>(&value)) {
             return *i;
@@ -161,7 +161,7 @@ struct EitherInt {
         }
         return std::nullopt;
     }
-    
+
     std::optional<uint64_t> as_u64() const {
         if (auto* u = std::get_if<uint64_t>(&value)) {
             return *u;
@@ -681,15 +681,15 @@ inline std::optional<Timedelta> try_parse_timedelta_str(const std::string& input
 class ValidatedDict {
 public:
     virtual ~ValidatedDict() = default;
-    
+
     virtual size_t size() const = 0;
     virtual bool empty() const = 0;
-    
+
     struct Entry {
         std::string key;
         std::string value_repr;  // String representation for error messages
     };
-    
+
     virtual std::vector<Entry> entries() const = 0;
     virtual std::vector<std::string> keys() const = 0;
 
@@ -730,10 +730,10 @@ public:
 class ValidatedList {
 public:
     virtual ~ValidatedList() = default;
-    
+
     virtual size_t size() const = 0;
     virtual bool empty() const = 0;
-    
+
     struct Entry {
         size_t index;
         std::string value_repr;  // String representation for error messages

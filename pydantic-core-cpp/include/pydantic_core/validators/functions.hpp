@@ -462,7 +462,7 @@ public:
             if (inner_) return inner_->validate(input, state);
             return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
         }
-        
+
         try {
             py::object info_obj = make_validation_info(state);
 
@@ -1122,7 +1122,7 @@ public:
         if (py_func_.is_none()) {
             return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
         }
-        
+
         try {
             py::object info_obj = make_validation_info(state);
 
@@ -1201,10 +1201,10 @@ public:
             if (inner_) return inner_->validate(input, state);
             return ValResult<std::shared_ptr<void>>(std::make_shared<int>(1));
         }
-        
+
         try {
             py::object info_obj = make_validation_info(state);
-            
+
             py::object handler = py::cpp_function([this, &state](py::object v) -> py::object {
                 if (inner_) {
                     auto py_input = std::make_unique<PythonInput>(v);
@@ -1236,7 +1236,7 @@ public:
                 }
                 return v;
             });
-            
+
             py::object output;
             try {
                 // Try with info object (general wrap functions)

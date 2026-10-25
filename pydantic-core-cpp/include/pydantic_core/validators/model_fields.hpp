@@ -224,7 +224,7 @@ public:
         if (state.from_attributes().has_value()) {
             use_from_attributes = state.from_attributes().value();
         }
-        
+
         // Get dict - if from_attributes is true, extract only known field attributes
         // (only for non-dict inputs; dicts are already in the right format)
         //
@@ -325,7 +325,7 @@ public:
                 return validate_dict(std::move(dict), input, state);
             }
         }
-        
+
         // Regular dict validation — recursion guard using the actual object address
         // to detect cyclic references (same PyObject seen again at a deeper level)
         const void* rec_key = dynamic_cast<const PythonInput*>(&input)

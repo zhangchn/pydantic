@@ -72,8 +72,10 @@ TEST_CASE("numbers") {
 TEST_CASE("identifiers") {
     CHECK(diagnose("nan") == "expected ident at line 1 column 2");
     CHECK(diagnose("Nan") == "expected ident at line 1 column 3");
-    CHECK(diagnose("tru") == "EOF while parsing a value at line 1 column 3");
-    CHECK(diagnose("fals") == "EOF while parsing a value at line 1 column 4");
+    // The two inputs below are deliberately truncated JSON literals -- the point of the row is the
+    // parser's EOF message, so the bytes are the expectation and cannot be spelled out.
+    CHECK(diagnose("tru") == "EOF while parsing a value at line 1 column 3");  // codespell:ignore tru
+    CHECK(diagnose("fals") == "EOF while parsing a value at line 1 column 4");  // codespell:ignore fals
     CHECK(diagnose("nul") == "EOF while parsing a value at line 1 column 3");
 }
 

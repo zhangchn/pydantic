@@ -145,8 +145,8 @@ def _errors_with_include_url(
             if raw_input is not None or own_inputs is not None:
                 for i, err in enumerate(result):
                     cur = err.get('input')
-                    # Only restore the raw object when the C++ stored an
-                    # unparseable string repr. If _parse_input already
+                    # Only restore the raw object when the C++ stored a
+                    # string repr that will not parse. If _parse_input already
                     # reconstructed a real object (ArgsKwargs, dict, None,
                     # int, ...), keep it — it is the authoritative input.
                     if not isinstance(cur, _UnparsedInput):
@@ -230,7 +230,7 @@ _LOC_NOT_FOUND = object()
 
 def _lookup_value_by_loc(obj, loc):
     """Recursively look up a value in a dict/tuple/ArgsKwargs by location path.
-    
+
     E.g. obj={'t': ArbitraryType()}, loc=('t',) → ArbitraryType()
     Returns _LOC_NOT_FOUND when no part of the path resolves.
 
@@ -1901,7 +1901,7 @@ class SchemaValidator:
         """Apply default values to result dict for missing fields."""
         if not isinstance(result, dict) or not defaults:
             return result
-        
+
         for field_name, default_info in defaults.items():
             if field_name not in result:
                 if default_info[0] == 'factory':
@@ -1957,11 +1957,11 @@ class SchemaValidator:
             # A container at the root holds its members as plain dicts until the
             # schema walk rebuilds them, so list[Model] must convert each item.
             result = self._dict_to_model(result)
-            
+
             # If result is a model instance, return it
             if not isinstance(result, dict):
                 return result
-                
+
             # Otherwise, try to construct a model from the top-level schema
             schema_type = self._schema.get("type") if hasattr(self._schema, "get") else None
             if schema_type == "definitions":
@@ -2608,35 +2608,35 @@ def from_json(
 
 class ArgsKwargs:
     """Container for positional and keyword arguments.
-    
+
     Used by dataclass validation to support positional arguments in __init__.
     Matches pydantic_core.ArgsKwargs from Rust implementation.
     """
-    
+
     __slots__ = ('args', 'kwargs')
-    
+
     def __init__(self, args: tuple = (), kwargs: dict = None) -> None:
         if kwargs is None:
             kwargs = {}
         self.args = args if isinstance(args, tuple) else tuple(args)
         self.kwargs = kwargs if isinstance(kwargs, dict) else dict(kwargs)
-    
+
     def __repr__(self) -> str:
         if not self.kwargs:
             return f"ArgsKwargs({self.args!r})"
         return f"ArgsKwargs({self.args!r}, {self.kwargs!r})"
-    
+
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, ArgsKwargs):
             return NotImplemented
         return self.args == other.args and self.kwargs == other.kwargs
-    
+
     def __hash__(self) -> int:
         return hash((self.args, frozenset(self.kwargs.items())))
-    
+
     def to_call_args(self) -> tuple:
         """Convert to arguments suitable for a function call.
-        
+
         Returns a tuple of (args, kwargs) that can be used as:
         func(*args, **kwargs)
         """

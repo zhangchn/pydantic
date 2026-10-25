@@ -34,7 +34,7 @@ struct ValidatedValue {
         std::vector<ValidatedValue>,
         std::vector<std::pair<std::string, ValidatedValue>>
     > data;
-    
+
     ValidatedValue() : data(std::monostate{}) {}
     explicit ValidatedValue(std::monostate) : data(std::monostate{}) {}
     explicit ValidatedValue(bool b) : data(b) {}
@@ -46,7 +46,7 @@ struct ValidatedValue {
     explicit ValidatedValue(const std::vector<uint8_t>& b) : data(b) {}
     explicit ValidatedValue(const std::vector<ValidatedValue>& l) : data(l) {}
     explicit ValidatedValue(const std::vector<std::pair<std::string, ValidatedValue>>& d) : data(d) {}
-    
+
     bool is_none() const { return std::holds_alternative<std::monostate>(data); }
     bool is_bool() const { return std::holds_alternative<bool>(data); }
     bool is_int() const { return std::holds_alternative<int64_t>(data) || std::holds_alternative<uint64_t>(data); }
@@ -55,7 +55,7 @@ struct ValidatedValue {
     bool is_bytes() const { return std::holds_alternative<std::vector<uint8_t>>(data); }
     bool is_list() const { return std::holds_alternative<std::vector<ValidatedValue>>(data); }
     bool is_dict() const { return std::holds_alternative<std::vector<std::pair<std::string, ValidatedValue>>>(data); }
-    
+
     std::string repr() const {
         if (is_none()) return "None";
         if (is_bool()) return std::get<bool>(data) ? "True" : "False";
@@ -89,7 +89,7 @@ struct ValidatedValue {
         }
         return "?";
     }
-    
+
     // Equality for LiteralValidator
     bool operator==(const ValidatedValue& other) const {
         return data == other.data;
@@ -130,7 +130,7 @@ using CombinedValidator = std::variant<
 
 struct NoneValidator {
     bool strict = false;
-    
+
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
         if (input.is_none()) {
             return ValidatedValue(std::monostate{});
@@ -146,7 +146,7 @@ struct NoneValidator {
 
 struct BoolValidator {
     bool strict = false;
-    
+
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
         auto result = input.validate_bool(state.strict_or(strict));
         if (result.is_err()) return result.error();
@@ -157,16 +157,16 @@ struct BoolValidator {
 
 struct IntValidator {
     bool strict = false;
-    
+
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
         auto result = input.validate_int(state.strict_or(strict));
         if (result.is_err()) return result.error();
-        
+
         auto i64 = result.value().value().as_i64();
         if (i64) return ValidatedValue(*i64);
         auto u64 = result.value().value().as_u64();
         if (u64) return ValidatedValue(*u64);
-        
+
         return ValError::line_error(ErrorType(ErrorType::Kind::IntType), Location(), input.as_error_value().repr);
     }
     std::string name() const { return "int"; }
@@ -176,18 +176,18 @@ struct ConstrainedIntValidator {
     bool strict = false;
     std::optional<int64_t> multiple_of;
     std::optional<int64_t> le, lt, ge, gt;
-    
+
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
         auto result = input.validate_int(state.strict_or(strict));
         if (result.is_err()) return result.error();
-        
+
         auto i64_val = result.value().value().as_i64();
         if (!i64_val) {
             return ValError::line_error(ErrorType(ErrorType::Kind::IntType), Location(), "integer too large");
         }
-        
+
         int64_t value = *i64_val;
-        
+
         if (multiple_of && value % *multiple_of != 0) {
             return ValError::line_error(ErrorType(ErrorType::Kind::IntMultipleOf, *multiple_of), Location(), input.as_error_value().repr);
         }
@@ -203,7 +203,7 @@ struct ConstrainedIntValidator {
         if (gt && value <= *gt) {
             return ValError::line_error(ErrorType(ErrorType::Kind::IntGreaterThan, *gt), Location(), input.as_error_value().repr);
         }
-        
+
         return ValidatedValue(value);
     }
     std::string name() const { return "constrained-int"; }
@@ -212,17 +212,17 @@ struct ConstrainedIntValidator {
 struct FloatValidator {
     bool strict = false;
     bool allow_inf_nan = false;
-    
+
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
         auto result = input.validate_float(state.strict_or(strict));
         if (result.is_err()) return result.error();
-        
+
         double value = result.value().value().as_double();
-        
+
         if (!allow_inf_nan && (std::isinf(value) || std::isnan(value))) {
             return ValError::line_error(ErrorType(ErrorType::Kind::FloatType), Location(), input.as_error_value().repr);
         }
-        
+
         return ValidatedValue(value);
     }
     std::string name() const { return "float"; }
@@ -232,19 +232,19 @@ struct ConstrainedFloatValidator {
     bool strict = false;
     bool allow_inf_nan = false;
     std::optional<double> multiple_of, le, lt, ge, gt;
-    
+
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
         auto result = input.validate_float(state.strict_or(strict));
         if (result.is_err()) return result.error();
-        
+
         double value = result.value().value().as_double();
-        
+
         if (!allow_inf_nan && (std::isinf(value) || std::isnan(value))) {
             return ValError::line_error(ErrorType(ErrorType::Kind::FloatType), Location(), input.as_error_value().repr);
         }
-        
+
         if (std::isinf(value) || std::isnan(value)) return ValidatedValue(value);
-        
+
         if (multiple_of) {
             double remainder = std::fmod(value, *multiple_of);
             if (std::abs(remainder) > 1e-10 && std::abs(remainder - *multiple_of) > 1e-10) {
@@ -255,7 +255,7 @@ struct ConstrainedFloatValidator {
         if (lt && value >= *lt) return ValError::line_error(ErrorType(ErrorType::Kind::FloatLessThan, *lt), Location(), input.as_error_value().repr);
         if (ge && value < *ge) return ValError::line_error(ErrorType(ErrorType::Kind::FloatGreaterThanEqual, *ge), Location(), input.as_error_value().repr);
         if (gt && value <= *gt) return ValError::line_error(ErrorType(ErrorType::Kind::FloatGreaterThan, *gt), Location(), input.as_error_value().repr);
-        
+
         return ValidatedValue(value);
     }
     std::string name() const { return "constrained-float"; }
@@ -263,7 +263,7 @@ struct ConstrainedFloatValidator {
 
 struct StringValidator {
     bool strict = false;
-    
+
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
         auto result = input.validate_str(state.strict_or(strict), false);
         if (result.is_err()) return result.error();
@@ -277,13 +277,13 @@ struct ConstrainedStringValidator {
     std::optional<size_t> min_length, max_length;
     std::optional<std::regex> pattern;
     bool to_lower = false, to_upper = false, to_title = false;
-    
+
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
         auto result = input.validate_str(state.strict_or(strict), false);
         if (result.is_err()) return result.error();
-        
+
         std::string value = result.value().value().to_string();
-        
+
         if (min_length && value.length() < *min_length) {
             std::string s = *min_length == 1 ? "" : "s";
             return ValError::line_error(ErrorType(ErrorType::Kind::StringTooShort, "min_length", std::to_string(*min_length), "s", s), Location(), input.as_error_value().repr);
@@ -295,7 +295,7 @@ struct ConstrainedStringValidator {
         if (pattern && !std::regex_match(value, *pattern)) {
             return ValError::line_error(ErrorType(ErrorType::Kind::StringPatternMismatch), Location(), input.as_error_value().repr);
         }
-        
+
         if (to_lower) std::transform(value.begin(), value.end(), value.begin(), ::tolower);
         else if (to_upper) std::transform(value.begin(), value.end(), value.begin(), ::toupper);
         else if (to_title) {
@@ -305,7 +305,7 @@ struct ConstrainedStringValidator {
                 prev_space = std::isspace(static_cast<unsigned char>(c));
             }
         }
-        
+
         return ValidatedValue(value);
     }
     std::string name() const { return "constrained-str"; }
@@ -314,20 +314,20 @@ struct ConstrainedStringValidator {
 struct BytesValidator {
     bool strict = false;
     std::optional<size_t> min_length, max_length;
-    
+
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
         auto result = input.validate_bytes(state.strict_or(strict));
         if (result.is_err()) return result.error();
-        
+
         EitherBytes either_bytes = result.value().value();
-        
+
         if (min_length && either_bytes.size() < *min_length) {
             return ValError::line_error(ErrorType(ErrorType::Kind::BytesTooShort, "min_length", std::to_string(*min_length)), Location(), input.as_error_value().repr);
         }
         if (max_length && either_bytes.size() > *max_length) {
             return ValError::line_error(ErrorType(ErrorType::Kind::BytesTooLong, "max_length", std::to_string(*max_length)), Location(), input.as_error_value().repr);
         }
-        
+
         return ValidatedValue(either_bytes.to_vector());
     }
     std::string name() const { return "bytes"; }
@@ -341,14 +341,14 @@ struct ListValidator {
     bool strict = false;
     std::shared_ptr<CombinedValidator> item_validator;
     std::optional<size_t> min_length, max_length;
-    
+
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
         auto result = input.validate_list(state.strict_or(strict));
         if (result.is_err()) return result.error();
-        
+
         auto validated_list = std::move(result.value().value());
         size_t actual_length = validated_list->size();
-        
+
         // Length checks
         if (min_length && actual_length < *min_length) {
             return ValError::line_error(
@@ -362,21 +362,21 @@ struct ListValidator {
                 Location(), input.as_error_value().repr
             );
         }
-        
+
         // Validate items
         std::vector<ValidatedValue> output;
         auto entries = validated_list->entries();
-        
+
         for (size_t i = 0; i < entries.size(); ++i) {
             // Push location
             Location item_loc = state.location();
             item_loc.push(static_cast<int64_t>(i));
-            
+
             // For now, placeholder - actual recursive validation needs Input iteration
             // This requires extending Input to provide per-item Input objects
             output.emplace_back(std::monostate{});  // Placeholder
         }
-        
+
         return ValidatedValue(output);
     }
     std::string name() const { return "list"; }
@@ -387,14 +387,14 @@ struct DictValidator {
     std::shared_ptr<CombinedValidator> keys_validator;
     std::shared_ptr<CombinedValidator> values_validator;
     std::optional<size_t> min_length, max_length;
-    
+
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
         auto result = input.validate_dict(state.strict_or(strict));
         if (result.is_err()) return result.error();
-        
+
         auto validated_dict = std::move(result.value());
         size_t actual_length = validated_dict->size();
-        
+
         // Length checks
         if (min_length && actual_length < *min_length) {
             return ValError::line_error(
@@ -408,7 +408,7 @@ struct DictValidator {
                 Location(), input.as_error_value().repr
             );
         }
-        
+
         std::vector<std::pair<std::string, ValidatedValue>> output;
         return ValidatedValue(output);
     }
@@ -419,14 +419,14 @@ struct SetValidator {
     bool strict = false;
     std::shared_ptr<CombinedValidator> item_validator;
     std::optional<size_t> min_length, max_length;
-    
+
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
         auto result = input.validate_list(state.strict_or(strict));
         if (result.is_err()) return result.error();
-        
+
         auto validated_list = std::move(result.value().value());
         size_t actual_length = validated_list->size();
-        
+
         if (min_length && actual_length < *min_length) {
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::SetTooShort, static_cast<int64_t>(*min_length)),
@@ -439,7 +439,7 @@ struct SetValidator {
                 Location(), input.as_error_value().repr
             );
         }
-        
+
         std::vector<ValidatedValue> output;
         return ValidatedValue(output);
     }
@@ -450,7 +450,7 @@ struct FrozenSetValidator {
     bool strict = false;
     std::shared_ptr<CombinedValidator> item_validator;
     std::optional<size_t> min_length, max_length;
-    
+
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
         SetValidator set_val{strict, item_validator, min_length, max_length};
         return set_val.validate(input, state);
@@ -461,22 +461,22 @@ struct FrozenSetValidator {
 struct TupleValidator {
     bool strict = false;
     std::vector<std::shared_ptr<CombinedValidator>> item_validators;
-    
+
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
         auto result = input.validate_tuple(state.strict_or(strict));
         if (result.is_err()) return result.error();
-        
+
         auto validated_tuple = std::move(result.value().value());
         size_t expected_len = item_validators.size();
         size_t actual_len = validated_tuple->size();
-        
+
         if (actual_len != expected_len) {
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::TupleLengthMismatch, static_cast<int64_t>(expected_len), static_cast<int64_t>(actual_len)),
                 Location(), input.as_error_value().repr
             );
         }
-        
+
         std::vector<ValidatedValue> output;
         return ValidatedValue(output);
     }
@@ -485,7 +485,7 @@ struct TupleValidator {
 
 struct LiteralValidator {
     std::vector<ValidatedValue> allowed_values;
-    
+
     ValResult<ValidatedValue> validate(Input& input, ValidationState& /*state*/) const {
         auto input_repr = input.as_error_value().repr;
         for (const auto& allowed : allowed_values) {
@@ -502,14 +502,14 @@ struct LiteralValidator {
 
 struct NullableValidator {
     std::shared_ptr<CombinedValidator> inner_validator;
-    
+
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const;
     std::string name() const { return "nullable"; }
 };
 
 struct UnionValidator {
     std::vector<std::shared_ptr<CombinedValidator>> validators;
-    
+
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const;
     std::string name() const { return "union"; }
 };
@@ -520,14 +520,14 @@ struct UnionValidator {
 
 struct DateValidator {
     bool strict = false;
-    
+
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
         // Date format: YYYY-MM-DD
         auto result = input.validate_str(state.strict_or(strict), false);
         if (result.is_err()) return result.error();
-        
+
         std::string value = result.value().value().to_string();
-        
+
         // Simple validation: check format with regex
         std::regex date_pattern(R"(^\d{4}-\d{2}-\d{2}$)");
         if (!std::regex_match(value, date_pattern)) {
@@ -536,12 +536,12 @@ struct DateValidator {
                 Location(), input.as_error_value().repr
             );
         }
-        
+
         // Basic validation: check parts are valid
         int year = std::stoi(value.substr(0, 4));
         int month = std::stoi(value.substr(5, 2));
         int day = std::stoi(value.substr(8, 2));
-        
+
         if (month < 1 || month > 12) {
             return ValError::line_error(
                 ErrorType(ErrorType::Kind::DateType),
@@ -554,7 +554,7 @@ struct DateValidator {
                 Location(), input.as_error_value().repr
             );
         }
-        
+
         return ValidatedValue(value);
     }
     std::string name() const { return "date"; }
@@ -562,13 +562,13 @@ struct DateValidator {
 
 struct TimeValidator {
     bool strict = false;
-    
+
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
         auto result = input.validate_str(state.strict_or(strict), false);
         if (result.is_err()) return result.error();
-        
+
         std::string value = result.value().value().to_string();
-        
+
         // Time formats: HH:MM:SS or HH:MM:SS.microseconds
         std::regex time_pattern(R"(\d{2}:\d{2}:\d{2}(\.\d+)?)");
         if (!std::regex_match(value, time_pattern)) {
@@ -577,7 +577,7 @@ struct TimeValidator {
                 Location(), input.as_error_value().repr
             );
         }
-        
+
         return ValidatedValue(value);
     }
     std::string name() const { return "time"; }
@@ -585,13 +585,13 @@ struct TimeValidator {
 
 struct DateTimeValidator {
     bool strict = false;
-    
+
     ValResult<ValidatedValue> validate(Input& input, ValidationState& state) const {
         auto result = input.validate_str(state.strict_or(strict), false);
         if (result.is_err()) return result.error();
-        
+
         std::string value = result.value().value().to_string();
-        
+
         // DateTime format: YYYY-MM-DDTHH:MM:SS or similar
         std::regex datetime_pattern(R"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?)");
         if (!std::regex_match(value, datetime_pattern)) {
@@ -600,7 +600,7 @@ struct DateTimeValidator {
                 Location(), input.as_error_value().repr
             );
         }
-        
+
         return ValidatedValue(value);
     }
     std::string name() const { return "datetime"; }
@@ -613,7 +613,7 @@ struct DateTimeValidator {
 struct ValidateVisitor {
     Input& input;
     ValidationState& state;
-    
+
     template<typename T>
     ValResult<ValidatedValue> operator()(const T& validator) {
         return validator.validate(input, state);

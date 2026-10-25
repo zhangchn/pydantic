@@ -49,7 +49,7 @@ ValResult<ValMatch<EitherString>> StringInput::validate_str(bool strict, bool co
         // String input is always a string (exact match)
         return ValMatch<EitherString>::exact(EitherString(*single_value_));
     }
-    
+
     // Mapping is not a string
     return ValError::line_error(PydanticKnownError::string_type(),
                                Location(), as_error_value().repr);
@@ -62,7 +62,7 @@ ValResult<ValMatch<EitherBytes>> StringInput::validate_bytes(bool strict) const 
             return ValMatch<EitherBytes>::lax(EitherBytes(std::string_view(*single_value_)));
         }
     }
-    
+
     return ValError::line_error(PydanticKnownError::bytes_type(),
                                Location(), as_error_value().repr);
 }
@@ -102,7 +102,7 @@ ValResult<ValMatch<bool>> StringInput::validate_bool(bool strict) const {
             return ValMatch<bool>::lax(true);
         }
     }
-    
+
     return ValError::line_error(ErrorType(ErrorType::Kind::BoolParsing),
                                Location(), as_error_value().repr);
 }
@@ -141,7 +141,7 @@ ValResult<std::unique_ptr<ValidatedDict>> StringInput::validate_dict(bool strict
         return ValResult<std::unique_ptr<ValidatedDict>>(
             std::unique_ptr<ValidatedDict>(std::make_unique<StringValidatedDict>(mapping_).release()));
     }
-    
+
     return ValError::line_error(PydanticKnownError::dict_type(),
                                Location(), as_error_value().repr);
 }

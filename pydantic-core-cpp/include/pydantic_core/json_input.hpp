@@ -19,7 +19,7 @@ public:
     InputType input_type() const override { return InputType::Json; }
     InputValue as_error_value() const override;
     bool is_none() const override;
-    
+
     // Convert JSON to Python object
     py::object as_python_object() const override;
 
@@ -35,13 +35,13 @@ public:
     ValResult<ValMatch<EitherDateTime>> validate_datetime(bool strict, TimestampUnit unit) const override;
     ValResult<ValMatch<EitherTime>> validate_time(bool strict) const override;
     ValResult<ValMatch<EitherTimedelta>> validate_timedelta(bool strict) const override;
-    
+
     ValResult<std::unique_ptr<ValidatedDict>> validate_dict(bool strict) const override;
     ValResult<std::unique_ptr<ValidatedDict>> validate_ordered_dict(bool strict) const override;
     ValResult<std::unique_ptr<ValidatedDict>> validate_counter(bool strict) const override;
     ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_list(bool strict) const override;
     ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> validate_tuple(bool strict) const override;
-    
+
     const simdjson::dom::element& json_element() const { return element_; }
 
     // Create a JsonInput wrapping an existing element (shares the element, no parser needed)
@@ -51,7 +51,7 @@ public:
 private:
     simdjson::dom::element element_;
     std::unique_ptr<simdjson::dom::parser> parser_;  // Parser must stay alive
-    
+
     // Friend declaration for parse_json
     friend ValResult<std::unique_ptr<JsonInput>> parse_json(std::string_view json_str);
 };
@@ -60,7 +60,7 @@ private:
 class JsonValidatedDict : public ValidatedDict {
 public:
     explicit JsonValidatedDict(simdjson::dom::object obj) : obj_(obj) {}
-    
+
     size_t size() const override { return obj_.size(); }
     bool empty() const override { return obj_.size() == 0; }
     std::vector<Entry> entries() const override;
@@ -70,7 +70,7 @@ public:
     std::optional<simdjson::dom::element> get_element(const std::string& key) const;
     std::optional<py::object> get_value(const std::string& key) const override;
     std::optional<py::object> get_key(const std::string& key) const override;
-    
+
 private:
     simdjson::dom::object obj_;
 };
@@ -79,7 +79,7 @@ private:
 class JsonValidatedList : public ValidatedList {
 public:
     explicit JsonValidatedList(simdjson::dom::array arr) : arr_(arr) {}
-    
+
     size_t size() const override { return arr_.size(); }
     bool empty() const override { return arr_.size() == 0; }
     std::vector<Entry> entries() const override;
@@ -98,7 +98,7 @@ public:
     bool empty() const override { return arr_.size() == 0; }
     std::vector<Entry> entries() const override;
     py::object get_item(size_t index) const override;
-    
+
 private:
     simdjson::dom::array arr_;
 };

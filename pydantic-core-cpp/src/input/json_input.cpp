@@ -106,7 +106,7 @@ ValResult<ValMatch<EitherString>> JsonInput::validate_str(bool strict, bool coer
             return ValMatch<EitherString>::exact(EitherString(std::string(str_result.value_unsafe())));
         }
     }
-    
+
     // Lax mode - coerce from numbers
     if (!strict) {
         if (element_.type() == simdjson::dom::element_type::INT64) {
@@ -122,8 +122,8 @@ ValResult<ValMatch<EitherString>> JsonInput::validate_str(bool strict, bool coer
             return ValMatch<EitherString>::lax(EitherString(element_.get_bool().value_unsafe() ? std::string("true") : std::string("false")));
         }
     }
-    
-    return ValError::line_error(PydanticKnownError::string_type(), 
+
+    return ValError::line_error(PydanticKnownError::string_type(),
                                Location(), as_error_value().repr);
 }
 
@@ -135,7 +135,7 @@ ValResult<ValMatch<EitherBytes>> JsonInput::validate_bytes(bool strict) const {
             return ValMatch<EitherBytes>::lax(EitherBytes(std::string_view(str)));
         }
     }
-    
+
     return ValError::line_error(PydanticKnownError::bytes_type(),
                                Location(), as_error_value().repr);
 }
@@ -222,7 +222,7 @@ ValResult<ValMatch<EitherInt>> JsonInput::validate_int(bool strict) const {
     if (element_.type() == simdjson::dom::element_type::UINT64) {
         return ValMatch<EitherInt>::exact(EitherInt(element_.get_uint64().value_unsafe()));
     }
-    
+
     // Lax mode - coerce from float/string
     if (!strict) {
         if (element_.type() == simdjson::dom::element_type::DOUBLE) {
@@ -244,7 +244,7 @@ ValResult<ValMatch<EitherInt>> JsonInput::validate_int(bool strict) const {
             return ValMatch<EitherInt>::lax(EitherInt(static_cast<int64_t>(element_.get_bool().value_unsafe())));
         }
     }
-    
+
     return ValError::line_error(PydanticKnownError::int_type(),
                                Location(), as_error_value().repr);
 }
@@ -253,7 +253,7 @@ ValResult<ValMatch<EitherFloat>> JsonInput::validate_float(bool strict) const {
     if (element_.type() == simdjson::dom::element_type::DOUBLE) {
         return ValMatch<EitherFloat>::exact(EitherFloat(element_.get_double().value_unsafe()));
     }
-    
+
     // Ints are valid floats
     if (element_.type() == simdjson::dom::element_type::INT64) {
         double d = static_cast<double>(element_.get_int64().value_unsafe());
@@ -269,7 +269,7 @@ ValResult<ValMatch<EitherFloat>> JsonInput::validate_float(bool strict) const {
         }
         return ValMatch<EitherFloat>::lax(EitherFloat(d));
     }
-    
+
     // Lax mode - string coercion
     if (!strict) {
         if (element_.type() == simdjson::dom::element_type::STRING) {
@@ -280,7 +280,7 @@ ValResult<ValMatch<EitherFloat>> JsonInput::validate_float(bool strict) const {
             } catch (...) {}
         }
     }
-    
+
     return ValError::line_error(PydanticKnownError::float_type(),
                                Location(), as_error_value().repr);
 }
@@ -293,7 +293,7 @@ ValResult<std::unique_ptr<ValidatedDict>> JsonInput::validate_dict(bool strict) 
                 std::unique_ptr<ValidatedDict>(std::make_unique<JsonValidatedDict>(obj.value_unsafe()).release()));
         }
     }
-    
+
     return ValError::line_error(PydanticKnownError::dict_type(),
                                Location(), as_error_value().repr);
 }
@@ -327,7 +327,7 @@ ValResult<ValMatch<std::unique_ptr<ValidatedList>>> JsonInput::validate_list(boo
                 std::make_unique<JsonValidatedList>(arr.value_unsafe()));
         }
     }
-    
+
     return ValError::line_error(PydanticKnownError::list_type(),
                                Location(), as_error_value().repr);
 }
@@ -341,7 +341,7 @@ ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> JsonInput::validate_tuple(b
                 std::make_unique<JsonValidatedTuple>(arr.value_unsafe()));
         }
     }
-    
+
     return ValError::line_error(PydanticKnownError::tuple_type(),
                                Location(), as_error_value().repr);
 }

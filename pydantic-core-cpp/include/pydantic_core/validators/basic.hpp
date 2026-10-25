@@ -46,7 +46,7 @@ public:
             input.as_error_value().repr
         );
     }
-    
+
     std::string name() const override { return "none"; }
     std::string debug_repr() const override { return "None(NoneValidator)"; }
 };
@@ -223,7 +223,7 @@ auto result = input.validate_int(state.strict_or(strict));
         // Return the full validated integer (supports the uint64 range as well).
         return ValResult<std::shared_ptr<void>>(std::make_shared<EitherInt>(either_int));
     }
-    
+
     std::string name() const override { return "constrained-int"; }
 };
 
@@ -255,7 +255,7 @@ auto result = input.validate_float(state.strict_or(strict));
         }
         return ValResult<std::shared_ptr<void>>(std::make_shared<double>(f));
     }
-    
+
     std::string name() const override { return "float"; }
     std::string debug_repr() const override { return "Float(FloatValidator { strict: " + std::string(strict ? "true" : "false") + ", allow_inf_nan: " + std::string(allow_inf_nan ? "true" : "false") + " })"; }
 };
@@ -344,7 +344,7 @@ auto result = input.validate_float(state.strict_or(strict));
 
         return ValResult<std::shared_ptr<void>>(std::make_shared<double>(f));
     }
-    
+
     std::string name() const override { return "constrained-float"; }
 };
 
@@ -533,7 +533,7 @@ auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str,
             std::make_shared<std::string>(result.value().value().to_string())
         );
     }
-    
+
     std::string name() const override { return "str"; }
     std::string debug_repr() const override { return "Str(StrValidator { strict: " + std::string(strict ? "true" : "false") + ", coerce_numbers_to_str: " + std::string(coerce_numbers_to_str ? "true" : "false") + " })"; }
 };
@@ -804,7 +804,7 @@ auto result = input.validate_str(state.strict_or(strict), coerce_numbers_to_str,
         last_type_name_.clear();
         return ValResult<std::shared_ptr<void>>(std::make_shared<std::string>(std::move(str)));
     }
-    
+
     std::string name() const override { return "constrained-str"; }
 
     std::string effective_result_name() const override {
@@ -888,7 +888,7 @@ public:
 
         return ValResult<std::shared_ptr<void>>(std::make_shared<EitherBytes>(bytes));
     }
-    
+
     std::string name() const override { return "constrained-bytes"; }
 
 };

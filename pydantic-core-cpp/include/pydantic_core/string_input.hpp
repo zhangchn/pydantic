@@ -27,7 +27,7 @@ public:
     InputValue as_error_value() const override;
 
     bool is_none() const override;
-    
+
     // Convert to Python object - returns py::str for single value, py::dict for mapping
     py::object as_python_object() const override;
 
@@ -44,21 +44,21 @@ public:
     ValResult<ValMatch<EitherDateTime>> validate_datetime(bool strict, TimestampUnit unit) const override;
     ValResult<ValMatch<EitherTime>> validate_time(bool strict) const override;
     ValResult<ValMatch<EitherTimedelta>> validate_timedelta(bool strict) const override;
-    
+
     ValResult<std::unique_ptr<ValidatedDict>> validate_dict(bool strict) const override;
     ValResult<std::unique_ptr<ValidatedDict>> validate_ordered_dict(bool strict) const override;
     ValResult<std::unique_ptr<ValidatedDict>> validate_counter(bool strict) const override;
     ValResult<ValMatch<std::unique_ptr<ValidatedList>>> validate_list(bool strict) const override;
     ValResult<ValMatch<std::unique_ptr<ValidatedTuple>>> validate_tuple(bool strict) const override;
-    
+
     // Check if this is a single value vs mapping
     bool is_single_value() const { return single_value_.has_value(); }
     bool is_mapping() const { return !mapping_.empty(); }
-    
+
     // Access underlying data
     const std::optional<std::string>& single_value() const { return single_value_; }
     const std::unordered_map<std::string, std::string>& mapping() const { return mapping_; }
-    
+
 private:
     std::unordered_map<std::string, std::string> mapping_;
     std::optional<std::string> single_value_;
@@ -69,10 +69,10 @@ class StringValidatedDict : public ValidatedDict {
 public:
     explicit StringValidatedDict(const std::unordered_map<std::string, std::string>& mapping)
         : mapping_(mapping) {}
-    
+
     size_t size() const override { return mapping_.size(); }
     bool empty() const override { return mapping_.empty(); }
-    
+
     std::vector<Entry> entries() const override;
     std::vector<std::string> keys() const override;
 

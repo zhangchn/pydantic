@@ -62,18 +62,18 @@ std::shared_ptr<Validator> ValidatorFactory::build(
 ) {
     SchemaParser parser(schema);
     std::string type = parser.type();
-    
+
     if (type.empty()) {
         throw SchemaError("Schema missing 'type' field");
     }
-    
+
     // Check registered builders first
     auto& all_builders = builders();
     auto it = all_builders.find(type);
     if (it != all_builders.end()) {
         return it->second->build(schema, config);
     }
-    
+
     // Built-in validators
     if (type == "any") {
         return std::make_shared<AnyValidator>();
@@ -186,7 +186,7 @@ std::shared_ptr<Validator> ValidatorFactory::build(
     if (type == "json") {
         return std::make_shared<JsonValidator>();
     }
-    
+
     throw SchemaError("Unknown validator type: " + type);
 }
 

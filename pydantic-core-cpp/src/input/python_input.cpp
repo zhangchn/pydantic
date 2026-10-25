@@ -860,7 +860,7 @@ ValResult<std::unique_ptr<ValidatedDict>> PythonInput::validate_dict_from_attrib
     if (is_dict()) {
         return validate_dict(strict);
     }
-    
+
     // Then try to get attributes from object
     py::dict attrs_dict = get_attributes_as_dict();
     if (!attrs_dict.empty()) {
@@ -868,7 +868,7 @@ ValResult<std::unique_ptr<ValidatedDict>> PythonInput::validate_dict_from_attrib
             std::make_unique<PythonValidatedDict>(attrs_dict)
         );
     }
-    
+
     // Try __dict__ attribute
     if (py_hasattr(obj_, "__dict__")) {
         try {
@@ -878,7 +878,7 @@ ValResult<std::unique_ptr<ValidatedDict>> PythonInput::validate_dict_from_attrib
             );
         } catch (...) {}
     }
-    
+
     return type_error(ErrorType::Kind::DictType, *this, this->current_location());
 }
 
@@ -970,7 +970,7 @@ bool PythonInput::is_dict_like() const {
 
 py::dict PythonInput::get_attributes_as_dict() const {
     py::dict result;
-    
+
     // First, try __dict__ if it exists
     if (py_hasattr(obj_, "__dict__")) {
         try {
@@ -981,7 +981,7 @@ py::dict PythonInput::get_attributes_as_dict() const {
             }
         } catch (...) {}
     }
-    
+
     // Then, check for slots-defined attributes
     if (py_hasattr(obj_, "__slots__")) {
         try {
@@ -1002,7 +1002,7 @@ py::dict PythonInput::get_attributes_as_dict() const {
             }
         } catch (...) {}
     }
-    
+
     // Finally, iterate over dir() for property-like attributes
     try {
         py::list attrs = obj_.attr("__dir__")().cast<py::list>();
@@ -1031,7 +1031,7 @@ py::dict PythonInput::get_attributes_as_dict() const {
             } catch (...) {}
         }
     } catch (...) {}
-    
+
     return result;
 }
 

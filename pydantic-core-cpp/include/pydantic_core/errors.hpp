@@ -36,9 +36,9 @@ public:
         Omit,
         UseDefault
     };
-    
+
     explicit ValError(Kind kind) : kind_(kind) {}
-    
+
     static ValError line_error(const ErrorType& error_type, const Location& location,
                                const std::string& input_value) {
         ValError err(Kind::LineErrors);
@@ -65,7 +65,7 @@ public:
         err.line_errors_ = std::move(errors);
         return err;
     }
-    
+
     static ValError internal_err(const std::string& message) {
         ValError err(Kind::InternalErr);
         err.internal_message_ = message;
@@ -84,19 +84,19 @@ public:
     bool has_internal_py_err() const { return !internal_py_err_.is_none(); }
     const py::object& internal_py_err() const { return internal_py_err_; }
 #endif
-    
+
     static ValError omit() { return ValError(Kind::Omit); }
     static ValError use_default() { return ValError(Kind::UseDefault); }
-    
+
     Kind kind() const { return kind_; }
     bool has_line_errors() const { return kind_ == Kind::LineErrors; }
     bool is_omit() const { return kind_ == Kind::Omit; }
     bool is_use_default() const { return kind_ == Kind::UseDefault; }
     bool is_internal() const { return kind_ == Kind::InternalErr; }
-    
+
     const std::vector<std::shared_ptr<ValLineError>>& line_errors() const { return line_errors_; }
     const std::string& internal_message() const { return internal_message_; }
-    
+
     void merge(ValError&& other) {
         if (kind_ == Kind::LineErrors && other.kind_ == Kind::LineErrors) {
             for (auto& e : other.line_errors_) {
@@ -104,7 +104,7 @@ public:
             }
         }
     }
-    
+
 private:
     Kind kind_;
     std::vector<std::shared_ptr<ValLineError>> line_errors_;
@@ -124,9 +124,9 @@ public:
     ValidationError(const std::string& title, InputType input_type, const ValError& val_error,
                     py::object raw_input, bool hide_input = false);
 #endif
-    
+
     const char* what() const noexcept override { return what_message_.c_str(); }
-    
+
     struct ErrorDetails {
         std::string type;
         std::string loc;
@@ -148,12 +148,12 @@ public:
         py::object raw_error_obj;
 #endif
     };
-    
+
     const std::vector<ErrorDetails>& errors() const { return errors_; }
     size_t error_count() const { return errors_.size(); }
     const std::string& title() const { return title_; }
     InputType input_type() const { return input_type_; }
-    
+
     std::string error_count_message() const;
     std::string to_json_string() const;
 
@@ -161,7 +161,7 @@ public:
     // carry structured error info across the register_exception boundary where
     // the C++ object cannot be cast back from Python.
     std::string errors_to_json() const;
-    
+
 private:
     std::string title_;
     InputType input_type_;

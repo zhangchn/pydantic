@@ -432,7 +432,7 @@ Url::Url(const std::string& url_str, bool preserve_empty_path, const UrlDefaults
     // A bracketed host is an address, not a spelling: the reference answers the address it parsed
     // rather than the bytes it was handed, so the canonical text is what every later reader has to
     // see -- host_, the url_ reassembled below, and through them unicode_string, __str__, repr and
-    // the json leaf.  An unparseable host keeps its bytes: refusing is is_valid_ipv6's job, not
+    // the json leaf.  A host that will not parse keeps its bytes: refusing is is_valid_ipv6's job, not
     // this one's, and a Url built from a string the validator already blessed never hits it.
     if (host_.size() > 2 && host_.front() == '[' && host_.back() == ']') {
         std::string canon = canonical_ipv6_host(host_.substr(1, host_.size() - 2));

@@ -142,52 +142,52 @@ public:
         MissingSentinelError,
         EllipsisError,
         JsonType,
-        
+
         // Integer constraint errors
         IntMultipleOf,
         IntGreaterThan,
         IntLessThan,
         IntGreaterThanEqual,
         IntLessThanEqual,
-        
+
         // Float constraint errors
         FloatMultipleOf,
         FloatGreaterThan,
         FloatLessThan,
         FloatGreaterThanEqual,
         FloatLessThanEqual,
-        
+
         // String constraint errors
         StringTooShort,
         StringTooLong,
         StringPatternMismatch,
-        
+
         // Bytes constraint errors
         BytesTooShort,
         BytesTooLong,
-        
+
         // List/Set constraint errors
         ListTooShort,
         ListTooLong,
         SetTooShort,
         SetTooLong,
-        
+
         // Dict constraint errors
         DictTooShort,
         DictTooLong,
-        
+
         // Tuple errors
         TupleLengthMismatch,
-        
+
         // Literal errors
         LiteralMismatch,
         LiteralError,
         EnumError,
-        
+
         // Dict field errors
         DictKeysMissing,
         DictKeysUnexpected,
-        
+
         // Field errors
         FieldRequired,
         Missing,
@@ -203,7 +203,7 @@ public:
         UnexpectedPositionalArgument,
         UnexpectedKeywordArgument,
         MultipleArgumentValues,
-        
+
         // Date/Time errors
         DateType,
         DateParsing,
@@ -224,7 +224,7 @@ public:
         TimezoneOffset,
         TimedeltaType,
         TimedeltaParsing,
-        
+
         // URL errors
         UrlType,
         UrlParsing,
@@ -232,7 +232,7 @@ public:
         UrlTooLong,
         UrlScheme,
         UrlHost,
-        
+
         // UUID errors
         UuidType,
         UuidParsing,
@@ -279,7 +279,7 @@ public:
         RecursionLoop,
         ValueError,
         AssertionError,
-        
+
         // Generic constraint errors (used by constrained int/float validators)
         GreaterThan,
         LessThan,
@@ -287,29 +287,29 @@ public:
         LessThanEqual,
         MultipleOf,
         FiniteNumber,
-        
+
         // Container length errors (generic)
         TooShort,
         TooLong,
-        
+
         // String encoding errors
         StringNotAscii
     };
-    
+
     // Constructor for simple error types
     explicit ErrorType(Kind kind) : kind_(kind) {}
-    
+
     // Constructor with numeric context (for constraints)
     ErrorType(Kind kind, int64_t numeric_value) : kind_(kind) {
         context_["value"] = std::to_string(numeric_value);
     }
-    
+
     // Constructor with two numeric values (for tuple mismatch)
     ErrorType(Kind kind, int64_t val1, int64_t val2) : kind_(kind) {
         context_["expected"] = std::to_string(val1);
         context_["actual"] = std::to_string(val2);
     }
-    
+
     // Constructor with double context (for float constraints)
     ErrorType(Kind kind, double numeric_value) : kind_(kind) {
         context_["value"] = std::to_string(numeric_value);
@@ -333,14 +333,14 @@ public:
     Kind kind() const { return kind_; }
     const ContextMap<std::string>& context() const { return context_; }
     ContextMap<std::string>& context() { return context_; }
-    
+
     // Get type name for error
     std::string type_name() const;
     bool is_custom() const { return !custom_type_name_.empty(); }
-    
+
     // Get message template
     std::string message_template() const;
-    
+
     // Get rendered message
     std::string message() const;
 
@@ -363,7 +363,7 @@ public:
     // Tries to match against all registered known kinds first.
     // Falls back to {Kind::CustomError} if no match is found.
     static ErrorType build_known_type(const std::string& type_str);
-    
+
 private:
     Kind kind_;
     ContextMap<std::string> context_;
@@ -414,7 +414,7 @@ public:
     const char* what() const noexcept override { return "PydanticOmit"; }
 };
 
-// PydanticUseDefault - signal to use default value  
+// PydanticUseDefault - signal to use default value
 class PydanticUseDefault : public std::exception {
 public:
     const char* what() const noexcept override { return "PydanticUseDefault"; }

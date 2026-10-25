@@ -19,7 +19,7 @@ public:
     NullableValidator() : inner_(nullptr) {}
     explicit NullableValidator(std::shared_ptr<Validator> inner)
         : inner_(std::move(inner)) {}
-    
+
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state
@@ -29,7 +29,7 @@ public:
         }
         return inner_->validate(input, state);
     }
-    
+
     std::string name() const override {
         // Delegate to the inner validator so result conversion uses the
         // actual stored value type instead of the "nullable" wrapper name.
@@ -49,7 +49,7 @@ public:
         display_name_cache_ = out;
         return out;
     }
-    
+
     void visit_refs(RefVisitor visit, void* arg) const override {
         if (!gc_detail::enter_node(this)) return;
         if (inner_) inner_->visit_refs(visit, arg);
@@ -65,7 +65,7 @@ public:
     UnionValidator() = default;
     explicit UnionValidator(std::vector<std::shared_ptr<Validator>> validators)
         : validators_(std::move(validators)) {}
-    
+
     ValResult<std::shared_ptr<void>> validate(
         const Input& input,
         ValidationState& state

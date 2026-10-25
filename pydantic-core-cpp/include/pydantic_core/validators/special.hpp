@@ -98,11 +98,11 @@ private:
 class DefinitionRefValidator : public Validator {
 public:
     DefinitionRefValidator() = default;
-    
+
     void set_ref(const std::string& ref) {
         schema_ref_ = ref;
     }
-    
+
     void set_definitions(std::shared_ptr<DefinitionsRegistry> definitions) {
         definitions_ = std::move(definitions);
     }

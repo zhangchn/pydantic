@@ -40,13 +40,13 @@ public:
         py::object py_config = py::none();
 #endif
     };
-    
+
     ValidationState() = default;
-    
+
     // Create new validation state with config
     explicit ValidationState(const Config& config)
         : config_(config) {}
-    
+
     // Create with all parameters
     ValidationState(
         const Config& config,
@@ -56,7 +56,7 @@ public:
         const void* self_instance = nullptr
     ) : config_(config), recursion_state_(recursion_state ? recursion_state : &default_recursion_),
         allow_partial_(allow_partial), field_name_(field_name), self_instance_(self_instance) {}
-    
+
     // Accessors
     std::optional<bool> strict() const { return config_.strict_override; }
     // The config-declared value, kept apart from the call-time argument so a
@@ -73,7 +73,7 @@ public:
     std::optional<bool> by_name() const { return config_.by_name; }
     void set_by_name(bool value) { config_.by_name = value; }
     TimestampUnit val_temporal_unit() const { return config_.val_temporal_unit; }
-    
+
     // Determine strict mode - the call-time argument wins, otherwise the
     // validator's own is_strict(schema, config) value.
     bool strict_or(bool default_strict) const {
@@ -134,12 +134,12 @@ public:
     ExtraBehavior extra_behavior_or(ExtraBehavior default_behavior) const {
         return config_.extra_behavior.value_or(default_behavior);
     }
-    
+
     // From attributes
     bool from_attributes_or(bool default_val) const {
         return config_.from_attributes.value_or(default_val);
     }
-    
+
     // Partial validation
     PartialMode allow_partial() const { return allow_partial_; }
     void set_allow_partial(PartialMode mode) { allow_partial_ = mode; }
@@ -147,15 +147,15 @@ public:
     bool is_partial_trailing_strings() const {
         return allow_partial_ == PartialMode::TrailingStrings;
     }
-    
+
     // Field name (for error context)
     std::optional<std::string> field_name() const { return field_name_; }
     void set_field_name(const std::string& name) { field_name_ = name; }
-    
+
     // Self instance (for model validation)
     const void* self_instance() const { return self_instance_; }
     void set_self_instance(const void* instance) { self_instance_ = instance; }
-    
+
     // Input type
     InputType input_type() const { return input_type_; }
     void set_input_type(InputType type) { input_type_ = type; }
@@ -194,7 +194,7 @@ public:
 #endif
         return s;
     }
-    
+
     // Exactness tracking
     Exactness exactness() const { return exactness_; }
     void set_exactness(Exactness e) { exactness_ = e; }
@@ -222,7 +222,7 @@ public:
         // Rust only ever lowers a Strict floor, and only down to Lax.
         if (exactness_ == Exactness::Strict && e == Exactness::Lax) exactness_ = e;
     }
-    
+
 #ifdef HAS_PYBIND11
     // The raw config dict (Rust ValidationInfo.config).
     py::object config_py() const { return config_.py_config; }
@@ -268,7 +268,7 @@ public:
     const py::object& init_fields_snapshot() const { return init_fields_snapshot_; }
     void set_init_fields_snapshot(py::object s) { init_fields_snapshot_ = std::move(s); }
 #endif
-    
+
     // Rust's ValidationState::has_field_error: set when a field validator or a
     // field default fails, so a data-aware default factory can refuse to run
     // instead of observing incomplete validated data.
@@ -278,23 +278,23 @@ public:
     RecursionState::RecursionEntry enter_recursion(const void* obj) {
         return recursion_state_->enter(obj);
     }
-    
+
     int recursion_depth() const { return recursion_state_->depth(); }
     bool at_recursion_limit() const { return recursion_state_->at_limit(); }
-    
+
     // Location tracking for errors
     Location& location() { return location_; }
     const Location& location() const { return location_; }
-    
+
     void push_loc(int64_t index) { location_.push(index); }
     void push_loc(const std::string& key) { location_.push(key); }
     void pop_loc() { location_.pop(); }
-    
+
     // Convenience methods for validators
     void push_index(size_t index) { location_.push(static_cast<int64_t>(index)); }
     void push_key(const std::string& key) { location_.push(key); }
     void pop_location() { location_.pop(); }
-    
+
     // Create child state for nested validation
     ValidationState child(int64_t index) {
         ValidationState child(config_);

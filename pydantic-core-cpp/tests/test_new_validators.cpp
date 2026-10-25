@@ -65,7 +65,7 @@ TEST_SUITE("IsSubclassValidator") {
 TEST_CASE("IsSubclassValidator accepts any input") {
     auto v = std::make_shared<IsSubclassValidator>("BaseClass", py::none());
     ValidationState state;
-    
+
     StringInput str_input("value");
     auto result = v->validate(str_input, state);
     CHECK(result.is_ok());
@@ -86,7 +86,7 @@ TEST_SUITE("CallableValidator") {
 TEST_CASE("CallableValidator rejects non-callable input") {
     auto v = std::make_shared<CallableValidator>();
     ValidationState state;
-    
+
     StringInput str_input("some_func");
     auto result = v->validate(str_input, state);
     CHECK(result.is_err());
@@ -95,7 +95,7 @@ TEST_CASE("CallableValidator rejects non-callable input") {
 TEST_CASE("CallableValidator accepts a Python callable") {
     auto v = std::make_shared<CallableValidator>();
     ValidationState state;
-    
+
     py::object fn = py::eval("lambda x: x");
     PythonInput py_input(fn);
     auto result = v->validate(py_input, state);

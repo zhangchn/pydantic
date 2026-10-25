@@ -17,7 +17,7 @@ namespace pydantic_core {
 
 static void reraise_if_internal(const ValError& err);
 
-SchemaValidator::SchemaValidator(const std::string& schema_json, 
+SchemaValidator::SchemaValidator(const std::string& schema_json,
                                 const std::string& config_json)
     : schema_json_(schema_json), config_json_(config_json) {
     // Parse title from schema (placeholder)
@@ -111,25 +111,25 @@ std::string SchemaValidator::validate_python(const std::string& input_json,
                                              std::optional<ExtraBehavior> extra) {
     (void)strict;
     (void)extra;
-    
+
     if (!validator_) {
         throw std::runtime_error("Validator not initialized");
     }
-    
+
     // Parse input JSON
     auto json_input_result = parse_json(input_json);
     if (json_input_result.is_err()) {
         throw std::runtime_error("Invalid input JSON");
     }
-    
+
     auto json_input = std::move(json_input_result.value());
-    
+
     // Create validation state
     ValidationState state(config_);
-    
+
     // Validate
     auto result = validator_->validate(*json_input, state);
-    
+
     if (result.is_ok()) {
         // For model-fields validation, merge default values into the output JSON.
         // Only do this if the validator chain contains a ModelFieldsValidator.
