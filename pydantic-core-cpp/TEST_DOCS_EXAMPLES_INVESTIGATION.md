@@ -30,12 +30,14 @@ in lax mode, a string/int/float that *cannot* coerce to the target type produces
 | `performance.md:192-207` | `bool_parsing` (1 error) | `bool_type` (2 errors — see §2e) | same as bool row |
 
 Bool details (Rust `shared.rs::str_as_bool` / `int_as_bool`):
-- Accepted strings: `'' f n no off false 0 t y on yes true 1` (case-insensitive).
+
+* Accepted strings: `'' f n no off false 0 t y on yes true 1` (case-insensitive).
   C++ (`python_input.cpp:355-372`, `json_input.cpp:152-163`) accepts only
   `true/1/True` and `false/0/False` (json: lowercased `true/1/false/0`).
-- Lax int must be exactly 0/1, anything else → `bool_parsing`; C++ accepts any int (`v != 0`).
-- Lax float → int → 0/1; C++ has no float path at all.
-- `bool_parsing` vs `bool_type` is also the difference for `int | str`-style union
+
+* Lax int must be exactly 0/1, anything else → `bool_parsing`; C++ accepts any int (`v != 0`).
+* Lax float → int → 0/1; C++ has no float path at all.
+* `bool_parsing` vs `bool_type` is also the difference for `int | str`-style union
   member errors.
 
 ### 1b. Date/datetime/time error codes
@@ -72,13 +74,15 @@ Bool details (Rust `shared.rs::str_as_bool` / `int_as_bool`):
 from its map. The map ends at `StringNotAscii`; the reverse map (line ~350) proves the
 Kinds exist but were never added to the forward map:
 
-- `url_type`, `url_parsing`, `url_syntax_violation`, `url_too_long` (5 URL tests:
+* `url_type`, `url_parsing`, `url_syntax_violation`, `url_too_long` (5 URL tests:
   `validation_errors.md:2139-2228`) — the URL validator (`include/pydantic_core/url_types.hpp`)
   only ever emits `Kind::UrlType`; it needs distinct kinds per failure class, matching
   `url.rs` in Rust.
-- `uuid_type`, `uuid_parsing` (`validation_errors.md:2234-2270`) — same pattern in
+
+* `uuid_type`, `uuid_parsing` (`validation_errors.md:2234-2270`) — same pattern in
   `include/pydantic_core/validators/special.hpp:437-445`.
-- `enum` (`validation_errors.md:727-746`, got `unknown_error`) — enum failure kind.
+
+* `enum` (`validation_errors.md:727-746`, got `unknown_error`) — enum failure kind.
 
 ### 1e. `frozen_field` vs `frozen_instance`
 
@@ -95,7 +99,7 @@ is "try left-to-right, first success wins" with a single generic failure. Rust
 
 | Behavior | Expected (Rust) | Got (C++) | Failing tests |
 |---|---|---|---|
-| Smart-union exact-match preference | `int | str`, input `'1'` → **str** branch (exact type match beats coercion) | int branch coerces `'1'` → `1` | `migration.md:624-634`, `unions.md:141-170` |
+| Smart-union exact-match preference | `int \| str`, input `'1'` → **str** branch (exact type match beats coercion) | int branch coerces `'1'` → `1` | `migration.md:624-634`, `unions.md:141-170` |
 | Union failure aggregation | **all** branch errors listed, per-branch loc suffix (`id.str`, `id.int`), title of outer model | one `custom_error` "No union variant matched", loc `id` | `unions.md:37-61`, `types.md:499-625`, `types.md:834-904`, `unions.md:480-569` (4 nested errors expected) |
 | Tagged-union tag mismatch | `union_tag_invalid` with loc `pet.cat` + per-variant error | `custom_error` "No tagged union variant matched", loc `pet` | `unions.md:396-451`, `validation_errors.md:2081-2104` |
 | Tagged-union tag missing | `union_tag_not_found` | `custom_error` | `unions.md:319-365`, `validation_errors.md:2110-2133` |
@@ -156,14 +160,16 @@ text-reparse bridge.
 
 ## 5. Custom errors / validator-exception mapping (4 tests)
 
-- `PydanticCustomError('the_answer_error', …)` raised in a validator must keep its
+* `PydanticCustomError('the_answer_error', …)` raised in a validator must keep its
   **custom error type**; C++ maps every non-ValueError/AssertionError exception to
-  `value_error`/`custom_error` with a `Value error, ` prefix
+  `value_error`/`custom_error` with a `Value error,` prefix (the prefix keeps its trailing space)
   (`functions.hpp::function_error_from_exception`). Failing: `validators.md:563-593`,
   `standard_library_types.md:1055-1079`.
-- `{message}` placeholder not interpolated for custom errors:
+
+* `{message}` placeholder not interpolated for custom errors:
   `validators.md:836-856` (`Model(name=None)` prints literal `{message}`).
-- `TypeError` raised in a `field_validator` must propagate as `TypeError` (V1→V2
+
+* `TypeError` raised in a `field_validator` must propagate as `TypeError` (V1→V2
   migration guarantee), C++ converts it: `migration.md:445-461`
   (`DID NOT RAISE <class 'TypeError'>`).
 
@@ -219,43 +225,55 @@ text-reparse bridge.
 
 ## 9. Suggested fix order (by impact / effort)
 
-**P0 — cheap, high-impact (error codes & text)**
+### P0 — cheap, high-impact (error codes & text)
+
 1. Complete the `Kind → name` forward map in `error_types.cpp` (url_*, uuid_*, enum,
    time_delta_*, complex_*, iterable_*, mapping_*, string_unicode, needs_python_object,
    model_attributes_type, get_attribute_error, …) — fixes ~15 tests immediately.
-2. Fix lax-coercion error kinds in `python_input.cpp` / `json_input.cpp` / `string_input.cpp`
+
+1. Fix lax-coercion error kinds in `python_input.cpp` / `json_input.cpp` / `string_input.cpp`
    (bool/decimal/float→int/date/datetime/timedelta), including the Rust-accepted token
    sets — fixes ~8 tests.
-3. Error text: Python-repr for `input_value` (str quotes, container reprs instead of
+
+1. Error text: Python-repr for `input_value` (str quotes, container reprs instead of
    `list(len=N)`), correct `input_type`, `url` key placement, no `__PYDANTIC_ERRORS__`
    leak, indentation, `frozen_field` vs `frozen_instance` — fixes ~20 tests.
-4. Title: replace hard-coded `"Schema"` with `config['title']` or a formatted
+
+1. Title: replace hard-coded `"Schema"` with `config['title']` or a formatted
    validator name (`list[User]`, model `model_name`, generic `Response[int]`).
 
-**P1 — semantics**
-5. Union: smart-union exact-match preference, per-branch error aggregation with loc
+### P1 — semantics
+
+1. Union: smart-union exact-match preference, per-branch error aggregation with loc
    suffixes, tagged-union `union_tag_invalid`/`union_tag_not_found` + per-branch errors,
    model-branch materialization (instance, not dict), `union` with `choices`.
-6. Datetime: C-API construction (no mock leak) + `TzInfo` class for offsets + preserve
+
+1. Datetime: C-API construction (no mock leak) + `TzInfo` class for offsets + preserve
    original tzinfo for datetime inputs + JSON-strict string dates + float/int→date.
-7. `make_validation_info`: add `config` (and audit other `ValidationInfo` attrs).
-8. Custom errors: propagate `PydanticCustomError` type/message/ctx; interpolate
+
+1. `make_validation_info`: add `config` (and audit other `ValidationInfo` attrs).
+1. Custom errors: propagate `PydanticCustomError` type/message/ctx; interpolate
    `{message}`; propagate `TypeError` from validators unchanged.
-9. Missing schema types: `complex`, `missing-sentinel`, `iterable`, `mapping`,
+
+1. Missing schema types: `complex`, `missing-sentinel`, `iterable`, `mapping`,
    `arguments-v3`.
 
-**P2 — config & aliases**
-10. Config boundaries (`str_to_lower` must not cross model boundaries),
+### P2 — config & aliases
+
+1. Config boundaries (`str_to_lower` must not cross model boundaries),
     `coerce_numbers_to_str`, field-level `strict` overrides, `validate_default`/default
     fidelity (bytes default `b''` must stay bytes).
-11. `AliasChoices`/`AliasPath`/`alias_generator` parsing in model-fields +
+
+1. `AliasChoices`/`AliasPath`/`alias_generator` parsing in model-fields +
     `serialize_by_alias` in serializer.
 
-**P3 — serialization & partial JSON**
-12. `indent` in SchemaSerializer, `context` in field serializers, `serialize_as_any`,
+### P3 — serialization & partial JSON
+
+1. `indent` in SchemaSerializer, `context` in field serializers, `serialize_as_any`,
     computed fields, TypeVar/generic serialization fidelity, list materialization.
-13. Native `from_json` + `experimental_allow_partial` (replace the Rust .so fallback).
-14. URL trailing-slash repr.
+
+1. Native `from_json` + `experimental_allow_partial` (replace the Rust .so fallback).
+1. URL trailing-slash repr.
 
 ---
 

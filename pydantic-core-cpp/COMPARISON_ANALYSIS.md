@@ -80,23 +80,25 @@
 | ❌ Missing | 10 | 17% |
 
 **Progress since last update:**
-- `DictValidator` ✅ (real key/value validation, was a size stub)
-- `MultiHostUrl` ✅ (validator + type class implemented, was entirely missing)
-- `Union` ✅ smart exact-class matching (model instance inputs reuse the matching branch)
-- `Model` ✅ `root_model` + Python class stored for union discrimination
-- `Function*` ✅ (call Python callables with ValidationInfo, were stubs)
-- `Enum*` ✅ (short-name/value matching, was partial)
-- `IsInstance`/`IsSubclass`/`Callable` ✅ (real type checks, were stubs)
-- `Url` ✅ (real urllib.parse validation, was a Phase-2 stub)
-- `Date`/`Time`/`Datetime`/`Timedelta` ✅ (real parsing + specific error kinds)
-- `Set`/`Tuple`/`FrozenSet` ⚠️ (still stubs — returns int placeholder)
+
+* `DictValidator` ✅ (real key/value validation, was a size stub)
+* `MultiHostUrl` ✅ (validator + type class implemented, was entirely missing)
+* `Union` ✅ smart exact-class matching (model instance inputs reuse the matching branch)
+* `Model` ✅ `root_model` + Python class stored for union discrimination
+* `Function*` ✅ (call Python callables with ValidationInfo, were stubs)
+* `Enum*` ✅ (short-name/value matching, was partial)
+* `IsInstance`/`IsSubclass`/`Callable` ✅ (real type checks, were stubs)
+* `Url` ✅ (real urllib.parse validation, was a Phase-2 stub)
+* `Date`/`Time`/`Datetime`/`Timedelta` ✅ (real parsing + specific error kinds)
+* `Set`/`Tuple`/`FrozenSet` ⚠️ (still stubs — returns int placeholder)
 
 **Remaining critical gaps**: Decimal, Arguments, FunctionCall, Complex, Prebuilt, MissingSentinel, CustomError, Generator, Set/Tuple/FrozenSet (stubs), TaggedUnion (no tag matching)
 
 **Note on status criteria:**
-- ✅ **Fully implemented**: Validator class exists, `build_from_py_dict` constructs it, and `validate()` performs actual validation logic (not just a success-marker stub).
-- ⚠️ **Partially implemented**: Validator class exists but is a stub (returns placeholder), or only implements a subset of expected behavior, or is only wired in the serializer path.
-- ❌ **Missing**: No validator class, no schema type handler in `build_from_py_dict`, or both.
+
+* ✅ **Fully implemented**: Validator class exists, `build_from_py_dict` constructs it, and `validate()` performs actual validation logic (not just a success-marker stub).
+* ⚠️ **Partially implemented**: Validator class exists but is a stub (returns placeholder), or only implements a subset of expected behavior, or is only wired in the serializer path.
+* ❌ **Missing**: No validator class, no schema type handler in `build_from_py_dict`, or both.
 
 ---
 
@@ -165,12 +167,13 @@
 | ❌ Missing (enum_only infrastructure) | 2 | — |
 
 **Progress since last update:**
-- `by_alias` ✅ (aliases read from `serialization_alias`, then `alias`)
-- `ser_json_inf_nan='strings'` ✅ (float to_json branch)
-- Root model serialization ✅ (`.root` extraction)
-- Union discrimination ✅ (to_python rejects wrong-class instances so the union falls through)
-- `exclude_unset` ✅ works (reads `__pydantic_fields_set__`); `exclude_defaults` is dead code (`__pydantic_defaults__` never set)
-- Note: the parallel factory serializer (`src/serializer.cpp` + `serializers/*.hpp`) has stub `serialize_json` methods and is only used by doctests — the production path is `SerNode` in `main_module.cpp`.
+
+* `by_alias` ✅ (aliases read from `serialization_alias`, then `alias`)
+* `ser_json_inf_nan='strings'` ✅ (float to_json branch)
+* Root model serialization ✅ (`.root` extraction)
+* Union discrimination ✅ (to_python rejects wrong-class instances so the union falls through)
+* `exclude_unset` ✅ works (reads `__pydantic_fields_set__`); `exclude_defaults` is dead code (`__pydantic_defaults__` never set)
+* Note: the parallel factory serializer (`src/serializer.cpp` + `serializers/*.hpp`) has stub `serialize_json` methods and is only used by doctests — the production path is `SerNode` in `main_module.cpp`.
 
 ---
 
@@ -217,7 +220,7 @@
 | **DefinitionRef / Recursion** | ✅ Full | ✅ Working | Self-referencing models work |
 | **Constrained validators** | ✅ Full | ⚠️ Partial | Constraints implemented but may need more testing |
 | **ValidationInfo** | ✅ Full | ✅ Working | `field_name`/`data`/`context` passed to Python validators |
-| **from_attributes** | ✅ Full | ✅ Working | Attribute extraction via __dict__, __slots__, dir() |
+| **from_attributes** | ✅ Full | ✅ Working | Attribute extraction via `__dict__`, `__slots__`, dir() |
 | **ArgsKwargs** | ✅ Full | ✅ Working | Python class implemented |
 | **UrlValidator** | ✅ Full | ✅ Working | Uses urllib.parse for validation |
 | **MultiHostUrl** | ✅ Full | ✅ Working | `MultiHostUrlValidator` + `MultiHostUrl` class |
@@ -273,6 +276,7 @@
 ## 7. Priority Recommendations (Updated)
 
 ### P0 — Critical for Pydantic Compatibility
+
 1. ✅ **DONE: DefinitionRef** — Recursive schemas now work
 2. ⚠️ **ConstrainedInt/Float/Str/Bytes** — Validators exist, need more testing
 3. ✅ **DONE: ValidationInfo** — `field_name`/`data`/`context` passed to Python validators
@@ -285,20 +289,22 @@
 10. ✅ **DONE: MultiHostUrl** — Validator + type class
 
 ### P1 — High Impact
-11. ❌ **Set/Tuple/FrozenSet validators** — Still stubs (return int placeholder)
-12. ❌ **exclude_defaults** — Dead code (`__pydantic_defaults__` never set)
-13. ⚠️ **include/exclude (nested)** — Top-level works; nested dict filtering missing
-14. ❌ **ValidationError.from_exception_data** — pydantic relies on it (`_check_frozen`)
-15. ❌ **Arguments validator** — Function argument validation
+
+1. ❌ **Set/Tuple/FrozenSet validators** — Still stubs (return int placeholder)
+2. ❌ **exclude_defaults** — Dead code (`__pydantic_defaults__` never set)
+3. ⚠️ **include/exclude (nested)** — Top-level works; nested dict filtering missing
+4. ❌ **ValidationError.from_exception_data** — pydantic relies on it (`_check_frozen`)
+5. ❌ **Arguments validator** — Function argument validation
 
 ### P2 — Medium Impact
-16. ❌ **Decimal** — Precision numeric type (currently AnyValidator stub)
-17. ❌ **TaggedUnion tag matching** — Discriminator ignored
-18. ⚠️ **computed fields serialization** — Tracking exists, full serialization missing
-19. ❌ **Polymorphic serialization** — Inheritance-based serialization
-20. ⚠️ **CustomError** — Python-only wrapper, not a C++ pyclass
-21. ⚠️ **Date to_json** — Falls to infer_json (repr garbage)
-22. ⚠️ **to_json union/tagged-union/enum branches** — Missing (fall to infer_json)
+
+1. ❌ **Decimal** — Precision numeric type (currently AnyValidator stub)
+2. ❌ **TaggedUnion tag matching** — Discriminator ignored
+3. ⚠️ **computed fields serialization** — Tracking exists, full serialization missing
+4. ❌ **Polymorphic serialization** — Inheritance-based serialization
+5. ⚠️ **CustomError** — Python-only wrapper, not a C++ pyclass
+6. ⚠️ **Date to_json** — Falls to infer_json (repr garbage)
+7. ⚠️ **to_json union/tagged-union/enum branches** — Missing (fall to infer_json)
 
 ---
 
@@ -317,6 +323,7 @@
 | Pydantic compatibility | ~45% | **~55-60%** |
 
 **Key improvements since last update:**
+
 1. ✅ Recursive/DefinitionRef schemas fully working
 2. ✅ DictValidator — real key/value validation returning actual dict
 3. ✅ MultiHostUrlValidator + MultiHostUrl type class
@@ -334,6 +341,7 @@
 15. ✅ exclude_unset works
 
 **Remaining critical gaps (validator side):**
+
 1. ⚠️ **Set/Tuple/FrozenSet** — stubs returning int placeholders
 2. ⚠️ **TaggedUnion** — discriminator tag ignored
 3. ❌ **Decimal** — AnyValidator stub
@@ -342,6 +350,7 @@
 6. ❌ **Generator** — SchemaError in py_dict path
 
 **Remaining critical gaps (infrastructure):**
+
 1. ❌ **exclude_defaults** — dead code
 2. ⚠️ **include/exclude nested** — top-level only
 3. ❌ **ValidationError.from_exception_data** — missing (breaks `_check_frozen` etc.)

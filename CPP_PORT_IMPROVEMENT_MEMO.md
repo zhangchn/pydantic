@@ -27,12 +27,16 @@ All three were pre-existing and invisible until a broad suite exercised them.
 
 1. **Fail at build time, not at validate time.** A schema the port cannot fully
    honor must raise `SchemaError` during construction.
+
 2. **Payload and type-tag are one invariant.** If they can disagree, they will.
    Make mismatch unrepresentable (or at least loud in debug builds).
+
 3. **Port Rust's own unit tests**, not just pydantic's end-to-end suites —
    Rust's validators encode contracts that e2e tests rarely touch.
+
 4. **Error strings are API.** Docs and tests assert them byte-for-byte
    (`"Circular reference detected (id repeated)"`).
+
 5. **In a dual-backend repo, assert which backend ran** before analyzing any
    behavioral anomaly.
 
@@ -47,21 +51,23 @@ The result pipeline is `std::shared_ptr<void>` tagged by validator
 `static_cast`. This is a hand-rolled variant with zero compiler enforcement;
 bug #3 was exactly a tag/payload divergence.
 
-- [ ] **A1 (quick win)** Add a debug-mode consistency checker: when compiled
+* [ ] **A1 (quick win)** Add a debug-mode consistency checker: when compiled
       with `-DPYDANTIC_CORE_DEBUG` (or env `PYDANTIC_CORE_DEBUG=1`), every
       result crossing the binding layer is verified against its declared
       `effective_result_name()` (e.g. `"py_raw_object"` payload must be a
       plausible `PyObject*`, `"list"`/`"dict"`/`"py_object"` payloads must be
       `py::object`/`py::list`/`py::dict`, etc.). Mismatch → abort with both the
       tag and the producing validator's name.
-- [ ] **A2** Introduce a single construction helper, e.g.
+
+* [ ] **A2** Introduce a single construction helper, e.g.
       `make_result<T>(value)` returning a small struct `{ shared_ptr<void> data; const char* tag; }`
       so payload+tag are written together. Migrate validators incrementally,
       starting with the ones whose payloads diverge from their class name:
       `IsInstanceValidator`/`IsSubclassValidator` (`"py_raw_object"`),
       function-* (`"function-wrap"` etc. holding `py::object`),
       model-fields (`ValidatedModelFieldsOutput`), union (`last_type_name_`).
-- [ ] **A3** Audit every `return ValResult<...>(std::make_shared<int>(1))` /
+
+* [ ] **A3** Audit every `return ValResult<...>(std::make_shared<int>(1))` /
       other non-conforming payloads left in the tree; replace with honest
       passthroughs (as done for the is-instance fallback in `basic.hpp`).
 
@@ -72,15 +78,17 @@ zero tag-mismatch aborts; no `static_cast` without a matching helper.
 
 Bug #3's deeper cause: builders silently degrade schemas they cannot honor.
 
-- [ ] **B1** Grep-audit all `build_from_py_dict` / `build_from_element` arms for
+* [ ] **B1** Grep-audit all `build_from_py_dict` / `build_from_element` arms for
       silent-drop patterns: `if (schema.contains(k)) { ... }` with no else, bare
       `catch (...) {}` around required keys, optional-treatment of required
       schema keys. Each becomes either an honored path or a `SchemaError`.
-- [ ] **B2** Specifically verify these known-tricky extractions reject loudly or
+
+* [ ] **B2** Specifically verify these known-tricky extractions reject loudly or
       handle fully: `cls` (is-instance/is-subclass — fixed in `ac1c2810e`,
       keep regression tests), discriminator callables, `custom_error`,
       `serialization` sub-schemas, `definitions` refs.
-- [ ] **B3** Rule: **no empty catch blocks in builders.** Where third-party
+
+* [ ] **B3** Rule: **no empty catch blocks in builders.** Where third-party
       Python exceptions are expected, narrow to `py::error_already_set` and
       re-raise as `SchemaError` with context.
 
@@ -93,23 +101,25 @@ deliberately truncated schemas.
 Fixed for inferred JSON/python serialization (`infer_json`, `serialize_any_value`)
 in commit `ac1c2810e`. Remaining gaps:
 
-- [ ] **C1** Schema-driven serialization recursion: self-referential *model*
+* [ ] **C1** Schema-driven serialization recursion: self-referential *model*
       instances serialized via `SerNode::to_json` / `serialize_fields_json` /
       `to_python` model branches bypass `infer_json`'s guard. Thread the same
       thread-local ancestor stack through those entry points (Rust guards model
       serializers too — see `serializers/type_serializers/model.rs`).
-- [ ] **C2** Validation-side depth guard for deeply nested inputs against
+
+* [ ] **C2** Validation-side depth guard for deeply nested inputs against
       recursive schemas (Rust has depth limits in `RecursionState`; the C++
       port currently relies on nothing). Convert "segfault" into
       `"Circular reference detected (depth exceeded)"`.
-- [ ] **C3** Property-style tests: cyclic dict/list/set/tuple/model graphs
+
+* [ ] **C3** Property-style tests: cyclic dict/list/set/tuple/model graphs
       through every public entrypoint (`to_json`, `to_python`,
       `dump_json`, `dump_python`, `validate_python`); assert either success or
       the exact Rust error message — never a crash.
 
 ### WS-D — Rust parity unit tests  *(P1, prevents drift)*
 
-- [ ] **D1** Port focused unit tests from Rust sources into a new
+* [ ] **D1** Port focused unit tests from Rust sources into a new
       `pydantic-core-cpp/tests/test_core_parity.py` (raw `_pydantic_core_cpp`
       module level, bypassing the Python wrapper):
       - chain folding semantics (`validators/chain.rs`): each step sees the
@@ -121,25 +131,29 @@ in commit `ac1c2810e`. Remaining gaps:
         `970ee2da0`).
       - literal enum-member identity, lax-list iterables — existing fixes get
         pinned at raw-core level too.
-- [ ] **D2** Error-message parity table test: for a list of inputs, compare CPP
+
+* [ ] **D2** Error-message parity table test: for a list of inputs, compare CPP
       exception type + message against recorded RUST outputs (run once with
       `PYDANTIC_USE_CPP_CORE=0` to regenerate expectations).
-- [ ] **D3** Wire `test_core_parity.py` into the standard sweep command used
+
+* [ ] **D3** Wire `test_core_parity.py` into the standard sweep command used
       per-fix (see §5).
 
 ### WS-E — Debugging infrastructure & harness hygiene  *(P0 quick wins)*
 
-- [ ] **E1** Backend pinning helper for tests/scripts:
+* [ ] **E1** Backend pinning helper for tests/scripts:
       `assert_backend('cpp'|'rust')` checking `sys.modules['pydantic_core'].__name__`
       / presence of `_pydantic_core_cpp`, plus a note in AGENT.md documenting
       the aliasing trap: plain `import pydantic_core` may be Rust even when cpp
       is installed; `from pydantic_core import _pydantic_core_cpp` resolves via
       whatever the shim registered. All repro scripts must assert first.
-- [ ] **E2** Pre-commit gate: `grep -rn "std::cerr" pydantic-core-cpp/src pydantic-core-cpp/include`
+
+* [ ] **E2** Pre-commit gate: `grep -rn "std::cerr" pydantic-core-cpp/src pydantic-core-cpp/include`
       must be empty (add to the manual ritual checklist in AGENT.md; optionally
       a git hook). Session `ac1c2810e` needed a cleanup pass for `[ASG]`/`[FE]`/
       `[JOP]` leftovers from prior work.
-- [ ] **E3** Debugging playbook section in AGENT.md:
+
+* [ ] **E3** Debugging playbook section in AGENT.md:
       - Suspected memory corruption → lldb native bt immediately
         (`lldb -b -o run -o "bt 30" python -- repro.py`); faulthandler stacks lie
         about the crime scene.
@@ -154,13 +168,15 @@ in commit `ac1c2810e`. Remaining gaps:
 All three bugs predated the session and were caught only when a new feature
 widened the exercised surface.
 
-- [ ] **F1** Per-fix verification battery stays mandatory (already practiced):
+* [ ] **F1** Per-fix verification battery stays mandatory (already practiced):
       targeted file + `test_validators.py` + `test_main.py` + dataclasses
       failure-set diff + Rust-mode green + 5-file sweep count comparison.
-- [ ] **F2** Add `test_docs.py::test_docs_examples` to the periodic sweep now
+
+* [ ] **F2** Add `test_docs.py::test_docs_examples` to the periodic sweep now
       that it completes (354✓/130F baseline) — track the failure count; it is a
       wide net for semantic drift across many real snippets.
-- [ ] **F3** Stash A/B attribution stays the rule for any new failure: confirm
+
+* [ ] **F3** Stash A/B attribution stays the rule for any new failure: confirm
       pre-existing vs regression before investigating.
 
 ---
@@ -203,12 +219,14 @@ python -m pytest tests/test_docs.py::test_docs_examples -q --tb=line   # must no
 
 ## Appendix: what each fix looked like (for future reference)
 
-- Cycle guard: thread-local `std::vector<const void*>` ancestor stack inside
+* Cycle guard: thread-local `std::vector<const void*>` ancestor stack inside
   `infer_json` / separate one for `serialize_any_value`; raise
   `PydanticSerializationError("Error serializing to JSON: ValueError: "
   "Circular reference detected (id repeated)")`; pop via RAII.
-- Chain: fold with per-step conversion
+
+* Chain: fold with per-step conversion
   `current = value_to_python_with_type(carried, v->effective_result_name())`;
   `effective_result_name()` delegates to `validators_[last_used_]`.
-- is-instance/subclass: accept `py::isinstance<py::type>(cls) || hasattr(cls, "__mro__")`;
+
+* is-instance/subclass: accept `py::isinstance<py::type>(cls) || hasattr(cls, "__mro__")`;
   no-info fallback returns input as genuine `py_raw_object` payload.

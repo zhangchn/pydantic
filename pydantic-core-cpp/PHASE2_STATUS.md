@@ -5,10 +5,11 @@
 All tests passing (38 test cases, 3 test suites).
 
 ### Build Status
-```
+
+```text
 100% tests passed, 0 tests failed out of 3
 - test_errors: 14 test cases
-- test_validation_state: 15 test cases  
+- test_validation_state: 15 test cases
 - test_validators: 38 test cases
 ```
 
@@ -37,7 +38,9 @@ All tests passing (38 test cases, 3 test suites).
 ## Architecture
 
 ### CombinedValidator (std::variant)
+
 Zero-cost dispatch via visitor pattern:
+
 ```cpp
 using CombinedValidator = std::variant<
     NoneValidator,
@@ -55,7 +58,9 @@ struct ValidateVisitor {
 ```
 
 ### ValidatedValue
+
 Output type for validation:
+
 ```cpp
 struct ValidatedValue {
     std::variant<
@@ -75,75 +80,87 @@ struct ValidatedValue {
 ## Test Coverage
 
 ### NoneValidator (3 tests)
-- Validates null
-- Rejects non-null in strict mode
-- StringInput null recognition
+
+* Validates null
+* Rejects non-null in strict mode
+* StringInput null recognition
 
 ### BoolValidator (5 tests)
-- Validates true/false in strict mode
-- Rejects non-bool in strict mode
-- Coerces in lax mode (string/int)
-- StringInput boolean coercion
+
+* Validates true/false in strict mode
+* Rejects non-bool in strict mode
+* Coerces in lax mode (string/int)
+* StringInput boolean coercion
 
 ### IntValidator (5 tests)
-- Validates integers in strict mode
-- Validates large uint64
-- Rejects float in strict mode
-- Coerces float to int in lax mode
-- Coerces string to int in lax mode
+
+* Validates integers in strict mode
+* Validates large uint64
+* Rejects float in strict mode
+* Coerces float to int in lax mode
+* Coerces string to int in lax mode
 
 ### ConstrainedIntValidator (6 tests)
-- gt constraint
-- lt constraint
-- ge constraint
-- le constraint
-- multiple_of constraint
-- Combined constraints
+
+* gt constraint
+* lt constraint
+* ge constraint
+* le constraint
+* multiple_of constraint
+* Combined constraints
 
 ### FloatValidator (2 tests)
-- Validates floats
-- Int is valid float
+
+* Validates floats
+* Int is valid float
 
 ### StringValidator (4 tests)
-- Validates strings
-- Rejects non-string in strict mode
-- Coerces int to string in lax mode
+
+* Validates strings
+* Rejects non-string in strict mode
+* Coerces int to string in lax mode
 
 ### ConstrainedStringValidator (5 tests)
-- min_length constraint
-- max_length constraint
-- to_lower transformation
-- to_upper transformation
-- pattern constraint
+
+* min_length constraint
+* max_length constraint
+* to_lower transformation
+* to_upper transformation
+* pattern constraint
 
 ### CombinedValidator variant (2 tests)
-- Can hold different validators
-- Validate with visitor
+
+* Can hold different validators
+* Validate with visitor
 
 ### NullableValidator (2 tests)
-- Accepts None
-- Validates with inner validator
+
+* Accepts None
+* Validates with inner validator
 
 ### LiteralValidator (2 tests)
-- Matches allowed value
-- Rejects non-allowed value
+
+* Matches allowed value
+* Rejects non-allowed value
 
 ### ValidatedValue (1 test)
-- repr() for different types
+
+* repr() for different types
 
 ### ValidationState (2 tests)
-- Uses validator strict when state has no override
-- State override takes precedence
+
+* Uses validator strict when state has no override
+* State override takes precedence
 
 ## Files Changed
 
-- `include/pydantic_core/validators/mod.hpp` - Consolidated validator definitions
-- Removed 13 separate validator header files
-- `include/pydantic_core/input.hpp` - Added result.hpp include
-- `include/pydantic_core/validation_state.hpp` - Added set_strict() method
-- `src/input/json_input.cpp` - Fixed unique_ptr conversions, removed value_unsafe()
-- `src/input/string_input.cpp` - Fixed unique_ptr conversions
-- `tests/test_validators.cpp` - Fixed explicit casts, simdjson parser lifetime
+* `include/pydantic_core/validators/mod.hpp` - Consolidated validator definitions
+* Removed 13 separate validator header files
+* `include/pydantic_core/input.hpp` - Added result.hpp include
+* `include/pydantic_core/validation_state.hpp` - Added set_strict() method
+* `src/input/json_input.cpp` - Fixed unique_ptr conversions, removed value_unsafe()
+* `src/input/string_input.cpp` - Fixed unique_ptr conversions
+* `tests/test_validators.cpp` - Fixed explicit casts, simdjson parser lifetime
 
 ## Key Fixes Applied
 

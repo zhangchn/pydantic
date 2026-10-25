@@ -7,7 +7,7 @@
 
 ## 架构概述
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                    pydantic Python 测试 (~2,659 个)              │
 ├─────────────────────────────────────────────────────────────────┤
@@ -24,6 +24,7 @@
 ```
 
 三种 fallback 层级:
+
 1. **符号级** — `__getattr__` 从 Rust `.so` 加载白名单符号
 2. **模块级** — `core_schema` 代理完全从 Rust `pydantic_core/core_schema.py` 加载
 3. **函数级** — `from_json()`/`to_json()`/`to_jsonable_python()` 永远走 Rust
@@ -54,9 +55,10 @@
 ### 1.2 模块级 (`core_schema` 代理)
 
 整个 `core_schema` 模块从 Rust `pydantic_core/core_schema.py` 加载，包含:
-- `core_schema.int_schema()`, `core_schema.str_schema()` 等 schema 构建函数
-- `core_schema.ValidatorFunctionWrapHandler` 等类型
-- `core_schema.ValidationInfo` 等类
+
+* `core_schema.int_schema()`, `core_schema.str_schema()` 等 schema 构建函数
+* `core_schema.ValidatorFunctionWrapHandler` 等类型
+* `core_schema.ValidationInfo` 等类
 
 ### 1.3 函数级
 
@@ -186,10 +188,10 @@
 
 但是！这些文件中间接使用 `core_schema` 的方式：
 
-- **`test_type_adapter.py`**: `TypeAdapter(int)` 内部调用 `pydantic._internal._generate_schema` → 最终调用 `core_schema.int_schema()` → **Rust fallback**
-- **`test_validate_call.py`**: `validate_call` 内部也需要 `core_schema` 构造 → **Rust fallback**
-- **`test_plugins.py`**: 构造 Model 类 → `__get_pydantic_core_schema__` → **Rust fallback**
-- **`test_version.py`**: 纯粹的版本信息，不涉及 core → ✅
+* **`test_type_adapter.py`**: `TypeAdapter(int)` 内部调用 `pydantic._internal._generate_schema` → 最终调用 `core_schema.int_schema()` → **Rust fallback**
+* **`test_validate_call.py`**: `validate_call` 内部也需要 `core_schema` 构造 → **Rust fallback**
+* **`test_plugins.py`**: 构造 Model 类 → `__get_pydantic_core_schema__` → **Rust fallback**
+* **`test_version.py`**: 纯粹的版本信息，不涉及 core → ✅
 
 ### 3.3 完全不需要 pydantic_core 的测试文件
 
@@ -322,16 +324,16 @@
 3. **序列化全走 Rust**: `SchemaSerializer` 在 C++ 中没有原生实现，所有序列化相关测试（`model_dump()`、`model_dump_json()`、`serializer.to_json()`）都走 Rust fallback。
 
 4. **特定符号的 Rust 依赖**:
-   - `Url/MultiHostUrl` → `test_networks.py` 全部 ~150 个测试走 Rust
-   - `SchemaSerializer` → 序列化相关测试
-   - `PydanticCustomError` → 4 个文件中错误断言走 Rust
-   - `PydanticUndefined` → 8 个文件中字段默认值走 Rust
+   * `Url/MultiHostUrl` → `test_networks.py` 全部 ~150 个测试走 Rust
+   * `SchemaSerializer` → 序列化相关测试
+   * `PydanticCustomError` → 4 个文件中错误断言走 Rust
+   * `PydanticUndefined` → 8 个文件中字段默认值走 Rust
 
 5. **如果只安装 C++ 不装 Rust backend**，可运行的测试约 **30-35%**：主要是基础类型验证、Model 构造/校验、TypeAdapter 基本用途。`model_dump()`/序列化、网络类型、自定义错误、JSON Schema 生成等全部不可用。
 
 ### 6.4 典型测试的代码路径追踪
 
-```
+```text
 # 测试: model_validate({"name": "Alice"})
 # 文件: test_main.py
 

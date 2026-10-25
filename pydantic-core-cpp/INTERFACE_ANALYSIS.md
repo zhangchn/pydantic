@@ -13,47 +13,50 @@ engine for pydantic. It's built on PyO3 (Python bindings for Rust) and exposes a
 ### Core Classes
 
 #### SchemaValidator
+
 ```python
 class SchemaValidator:
     def __init__(self, schema: CoreSchema, config: CoreConfig | None = None)
-    
+
     # Validation methods
-    def validate_python(input, *, strict=None, extra=None, from_attributes=None, 
+    def validate_python(input, *, strict=None, extra=None, from_attributes=None,
                         context=None, self_instance=None, allow_partial=False,
                         by_alias=None, by_name=None) -> Any
-    
+
     def validate_json(input, *, strict=None, extra=None, context=None,
-                      self_instance=None, allow_partial=False, by_alias=None, 
+                      self_instance=None, allow_partial=False, by_alias=None,
                       by_name=None) -> Any
-    
+
     def validate_strings(input, *, strict=None, extra=None, context=None,
                          allow_partial=False, by_alias=None, by_name=None) -> Any
-    
+
     def isinstance_python(input, ...) -> bool  # Returns True/False instead of raising
-    
+
     def validate_assignment(obj, field_name, field_value, ...) -> dict | tuple
-    
+
     def get_default_value(*, strict=None, context=None) -> Some | None
-    
+
     @property
     def title(self) -> str
 ```
 
 #### SchemaSerializer
+
 ```python
 class SchemaSerializer:
     def __init__(self, schema: CoreSchema, config: CoreConfig | None = None)
-    
+
     def to_python(value, *, mode=None, include=None, exclude=None, by_alias=None,
                   exclude_unset=False, exclude_defaults=False, exclude_none=False,
-                  round_trip=False, warnings=True, fallback=None, 
+                  round_trip=False, warnings=True, fallback=None,
                   serialize_as_any=False, context=None) -> Any
-    
-    def to_json(value, *, indent=None, ensure_ascii=False, include=None, 
+
+    def to_json(value, *, indent=None, ensure_ascii=False, include=None,
                 exclude=None, ...) -> bytes
 ```
 
 ### Standalone Functions
+
 ```python
 def from_json(data, *, allow_inf_nan=True, cache_strings=True, allow_partial=False) -> Any
 def to_json(value, ...) -> bytes
@@ -62,6 +65,7 @@ def list_all_errors() -> list[dict]
 ```
 
 ### Error Types
+
 ```python
 class ValidationError(Exception)
 class SchemaError(Exception)
@@ -73,6 +77,7 @@ class PydanticSerializationError(Exception)
 ```
 
 ### Utility Types
+
 ```python
 class Some(Generic[T]):  # Rust-style Option::Some wrapper
     @property
@@ -90,6 +95,7 @@ class ArgsKwargs:
 ## 2. Schema Types (from `core_schema.py`)
 
 ### CoreSchema Union (~50+ schema types)
+
 The schema is a TypedDict with a `type` field that determines the validator/serializer behavior:
 
 ```python
@@ -110,6 +116,7 @@ CoreSchema: TypeAlias = (
 ```
 
 ### CoreConfig TypedDict
+
 ```python
 class CoreConfig(TypedDict, total=False):
     title: str
@@ -148,6 +155,7 @@ class CoreConfig(TypedDict, total=False):
 ## 3. Rust Architecture (Core Design Patterns)
 
 ### Validator Trait (validators/mod.rs)
+
 ```rust
 pub trait Validator: Send + Sync + Debug {
     fn validate<'py>(
@@ -156,7 +164,7 @@ pub trait Validator: Send + Sync + Debug {
         input: &(impl Input<'py> + ?Sized),
         state: &mut ValidationState<'_, 'py>,
     ) -> ValResult<Py<PyAny>>;
-    
+
     fn default_value<'py>(...) -> ValResult<Option<Py<PyAny>>>;
     fn validate_assignment<'py>(...) -> ValResult<Py<PyAny>>;
     fn get_name(&self) -> &str;
@@ -164,7 +172,9 @@ pub trait Validator: Send + Sync + Debug {
 ```
 
 ### CombinedValidator Enum (~50 validator types)
+
 Uses `enum_dispatch` for zero-cost dispatch:
+
 ```rust
 pub enum CombinedValidator {
     TypedDict(TypedDictValidator),
@@ -185,10 +195,11 @@ pub enum CombinedValidator {
 ```
 
 ### BuildValidator Trait (Schema -> Validator)
+
 ```rust
 pub trait BuildValidator: Sized {
     const EXPECTED_TYPE: &'static str;  // e.g., "str", "int", "model"
-    
+
     fn build(
         schema: &Bound<'_, PyDict>,
         config: Option<&Bound<'_, PyDict>>,
@@ -198,14 +209,16 @@ pub trait BuildValidator: Sized {
 ```
 
 ### Input Trait (input/input_abstract.rs)
+
 Abstracts input source (Python object, JSON, or string):
+
 ```rust
 pub(crate) trait Input<'py>: fmt::Debug {
     fn as_error_value(&self) -> InputValue;
     fn is_none(&self) -> bool;
     fn as_python(&self) -> Option<&Bound<'py, PyAny>>;
     fn as_json(&self) -> Option<&JsonValue<'_>>;
-    
+
     // Type-specific validation methods
     fn validate_str(&self, strict: bool, coerce_numbers_to_str: bool) -> ValMatch<EitherString>;
     fn validate_bytes(&self, strict: bool, mode: ValBytesMode) -> ValMatch<EitherBytes>;
@@ -219,6 +232,7 @@ pub(crate) trait Input<'py>: fmt::Debug {
 ```
 
 ### InputType Enum
+
 ```rust
 pub enum InputType {
     Python,  // Python objects via PyO3
@@ -232,6 +246,7 @@ pub enum InputType {
 ## 4. Serializer Architecture
 
 ### Serializer Trait (serializers/shared.rs)
+
 ```rust
 pub trait Serializer: Send + Sync + Debug {
     fn to_python(
@@ -239,7 +254,7 @@ pub trait Serializer: Send + Sync + Debug {
         value: &Bound<'_, PyAny>,
         state: &mut SerializationState,
     ) -> PyResult<Py<PyAny>>;
-    
+
     fn to_json(
         &self,
         value: &Bound<'_, PyAny>,
@@ -249,6 +264,7 @@ pub trait Serializer: Send + Sync + Debug {
 ```
 
 ### CombinedSerializer Enum
+
 ```rust
 pub enum CombinedSerializer {
     None(NoneSerializer),
@@ -270,6 +286,7 @@ pub enum CombinedSerializer {
 ## 5. Error Handling
 
 ### ValError / ValResult (errors/line_error.rs)
+
 ```rust
 pub enum ValError {
     LineErrors(Vec<ValLineError>),  // Validation errors with location
@@ -282,11 +299,12 @@ pub type ValResult<T> = Result<T, ValError>;
 ```
 
 ### ErrorType Enum (~100+ error types)
+
 ```rust
 pub enum ErrorType {
     // Type errors
     BoolType, IntType, FloatType, StringType, BytesType, ...
-    
+
     // Value errors
     StringTooShort { min_length: usize },
     StringTooLong { max_length: usize },
@@ -320,28 +338,33 @@ pub enum ErrorType {
 ## 7. C++ Port Strategy
 
 ### Phase 1: Core Infrastructure
+
 1. Python bindings setup (pybind11/nanobind)
 2. Error types and result handling
 3. Input abstraction layer
 4. ValidationState and recursion guard
 
 ### Phase 2: Basic Validators
+
 1. None, Bool, Int, Float, String, Bytes
 2. List, Dict, Set, FrozenSet, Tuple
 3. Literal, Enum, Nullable, Union
 
-### Phase 3: Complex Validators  
+### Phase 3: Complex Validators
+
 1. Model, ModelFields, TypedDict, Dataclass
 2. Function validators (before/after/plain/wrap)
 3. Date, Time, Datetime, Timedelta
 4. URL, UUID, Decimal, JSON
 
 ### Phase 4: Serialization
+
 1. Basic serializers (mirroring validators)
 2. JSON serialization
 3. Python object serialization
 
 ### Phase 5: JSON Parsing
+
 1. Integrate simdjson for fast JSON parsing
 2. from_json() standalone function
 
@@ -371,29 +394,34 @@ pub enum ErrorType {
 ## 9. Critical Implementation Details
 
 ### Recursion Guard
-- Limits recursion depth (RECURSION_GUARD_LIMIT = 100)
-- Prevents infinite loops in self-referencing schemas
-- Uses HashSet to track visited objects
+
+* Limits recursion depth (RECURSION_GUARD_LIMIT = 100)
+* Prevents infinite loops in self-referencing schemas
+* Uses HashSet to track visited objects
 
 ### Definitions (Self-referencing schemas)
-- `Definitions` stores reusable validators/serializers
-- `DefinitionRefValidator` references stored definitions
-- Supports recursive models like `class Node(TreeNode): children: list[Node]`
+
+* `Definitions` stores reusable validators/serializers
+* `DefinitionRefValidator` references stored definitions
+* Supports recursive models like `class Node(TreeNode): children: list[Node]`
 
 ### Strict vs Lax Validation
-- Strict: Exact type match (no coercion)
-- Lax: Allow coercion (e.g., "123" -> 123)
-- Each validator has `strict_*` and `lax_*` methods
+
+* Strict: Exact type match (no coercion)
+* Lax: Allow coercion (e.g., "123" -> 123)
+* Each validator has `strict_*` and `lax_*` methods
 
 ### Partial Validation
-- `allow_partial=True`: Allow incomplete JSON
-- `trailing-strings`: Include unfinished strings
-- Useful for streaming/incremental parsing
+
+* `allow_partial=True`: Allow incomplete JSON
+* `trailing-strings`: Include unfinished strings
+* Useful for streaming/incremental parsing
 
 ### String Caching
-- Cache short strings during validation
-- Reduces Python object creation overhead
-- `StringCacheMode::All`, `Keys`, `None`
+
+* Cache short strings during validation
+* Reduces Python object creation overhead
+* `StringCacheMode::All`, `Keys`, `None`
 
 ---
 

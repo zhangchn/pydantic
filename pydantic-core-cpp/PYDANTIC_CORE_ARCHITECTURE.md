@@ -9,7 +9,7 @@
 
 ## 1. High-Level Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────┐
 │              Python (pydantic)               │
 │  pydantic/_internal/_generate_schema.py       │
@@ -33,19 +33,20 @@
 ```
 
 ### Build Chain
-```
+
+```text
 pyproject.toml → maturin/maturin2 → Cargo.toml → build.rs → Rust src/ → _pydantic_core.so
 ```
 
-- **maturin**: Build tool for Rust-based Python extensions
-- **pyo3**: Rust ↔ Python binding framework (similar to pybind11)
-- **build.rs**: Cargo build script that generates Python version detection code, handles WASM compilation flags
+* **maturin**: Build tool for Rust-based Python extensions
+* **pyo3**: Rust ↔ Python binding framework (similar to pybind11)
+* **build.rs**: Cargo build script that generates Python version detection code, handles WASM compilation flags
 
 ---
 
 ## 2. Rust Source Structure (src/)
 
-```
+```text
 src/
 ├── lib.rs                    # Module registration, PyO3 bindings
 ├── build_tools.rs            # Schema building helpers
@@ -156,13 +157,14 @@ struct SchemaValidator {
 }
 ```
 
-- `CombinedValidator` is an `enum_dispatch` enum — at runtime, it dispatches to the correct validator's methods via a generated vtable-like mechanism
-- Constructor takes `schema: &PyDict` and `config: &PyDict` directly, NOT JSON strings
+* `CombinedValidator` is an `enum_dispatch` enum — at runtime, it dispatches to the correct validator's methods via a generated vtable-like mechanism
+* Constructor takes `schema: &PyDict` and `config: &PyDict` directly, NOT JSON strings
 
 **Critical difference from C++ port**: Rust receives the Python dict directly. There's **no JSON serialization step**. This means:
-- Python class/function references in the schema are preserved
-- No `_default_serializer` workaround needed
-- The `function` key in `function-after`/`function-before` schemas just works
+
+* Python class/function references in the schema are preserved
+* No `_default_serializer` workaround needed
+* The `function` key in `function-after`/`function-before` schemas just works
 
 **Note (2026-08)**: The C++ port now matches this — `SchemaBuilder::build_from_py` passes the Python dict directly to `build_from_py_dict` (no JSON round-trip). Python class references are handled by `_schema_clean_cls_keys`, which keeps `cls` on `model`/`dataclass`/`is-instance`/`is-subclass` schemas in the deep-copied schema passed to C++ (needed for smart-union class matching and root models) and strips it elsewhere; `_extract_model_classes` keeps a Python-side `ref → class` map for dict-to-model conversion.
 
@@ -184,7 +186,7 @@ class IntSchema(TypedDict, total=False):
 
 These are **pure Python type hints** used by pydantic's schema generator. The Rust validators don't use them at runtime — they parse the Python dict directly. This means:
 
-```
+```text
 pydantic generates schema:
     core_schema.int_schema(multiple_of=3)
     → returns a Python dict: {"type": "int", "multiple_of": 3}
@@ -229,9 +231,10 @@ trait Input {
 ```
 
 **Architecture impact for C++ port**: Our C++ `Input` base class mirrors this, with all three implementations:
-- `EitherString`/`EitherBytes` (`include/pydantic_core/input.hpp`) for owned/borrowed value representation
-- `as_python_object()` for Python callable interaction
-- `ValidatedList`/`ValidatedDict`/`ValidatedTuple` containers with entry iteration; `ValidatedDict` also exposes `get_value()`/`get_key()` so the dict validator can sub-validate keys and values (keys may be non-string in Python input)
+
+* `EitherString`/`EitherBytes` (`include/pydantic_core/input.hpp`) for owned/borrowed value representation
+* `as_python_object()` for Python callable interaction
+* `ValidatedList`/`ValidatedDict`/`ValidatedTuple` containers with entry iteration; `ValidatedDict` also exposes `get_value()`/`get_key()` so the dict validator can sub-validate keys and values (keys may be non-string in Python input)
 
 ### 4.2 CombinedValidator Dispatch
 
@@ -273,14 +276,16 @@ struct ValidationState {
 ```
 
 Key methods:
-- `push_loc(key)` / `pop_loc()` — RAII location tracking
-- `strict_or(bool)` — config-aware strict mode
-- `set_field_name(name)` — for function validators' `ValidationInfo`
+
+* `push_loc(key)` / `pop_loc()` — RAII location tracking
+* `strict_or(bool)` — config-aware strict mode
+* `set_field_name(name)` — for function validators' `ValidationInfo`
 
 **Our C++ state** (`ValidationState` in `include/pydantic_core/validation_state.hpp`) has all of these features, plus:
-- `coerce_strings()` — strings-mode flag set by `validate_strings` so string values always coerce regardless of strict (matches Rust's StringInput semantics)
-- `sub_copy(force_lax)` — constructs a fresh sub-state (used by list/dict validators to force lax key/value validation in strings mode)
-- `extra_behavior_or(default)` — lets call-level `extra='allow'` override the build-time config
+
+* `coerce_strings()` — strings-mode flag set by `validate_strings` so string values always coerce regardless of strict (matches Rust's StringInput semantics)
+* `sub_copy(force_lax)` — constructs a fresh sub-state (used by list/dict validators to force lax key/value validation in strings mode)
+* `extra_behavior_or(default)` — lets call-level `extra='allow'` override the build-time config
 
 ### 4.4 Error Collection
 
@@ -301,8 +306,9 @@ struct ValLineError {
 ```
 
 **Special errors for control flow**:
-- `ValError::Omit` — signals "skip this field" to Wrap/After validators
-- `ValError::UseDefault` — signals "use the default value" to WithDefault
+
+* `ValError::Omit` — signals "skip this field" to Wrap/After validators
+* `ValError::UseDefault` — signals "use the default value" to WithDefault
 
 **Our C++ errors** (`ValError` in `include/pydantic_core/errors.hpp`) have the same structure with `ValError::Omit`/`ValError::UseDefault` equivalents.
 
@@ -310,7 +316,7 @@ struct ValLineError {
 
 For `SchemaValidator.validate_python({'a': 42})` with a model schema:
 
-```
+```text
 1. SchemaValidator::validate_python(input_dict)
 2.   ↓ input_dict → PythonInput
 3.   CombinedValidator::validate(input, state)
@@ -370,8 +376,8 @@ trait Serializer {
 }
 ```
 
-- `to_python` → returns Python objects (dicts, lists, etc.)
-- `to_json` → returns JSON strings directly
+* `to_python` → returns Python objects (dicts, lists, etc.)
+* `to_json` → returns JSON strings directly
 
 This avoids the "construct Python dict then serialize" two-pass approach, though Rust does both depending on context.
 
@@ -394,11 +400,12 @@ for (key, value) in dict.iter_items() {
 ### 5.4 Serializer capabilities now in the C++ port
 
 Beyond the base pattern, the C++ `SerNode` serializer (`src/main_module.cpp`) implements:
-- **by_alias** — field aliases read from `serialization_alias` (fallback `alias`) and applied in `serialize_fields`/`serialize_fields_json`
-- **ser_json_inf_nan='strings'** — float `to_json` emits quoted `"NaN"`/`"Infinity"`; the mode is propagated from schema config (`inf_nan_mode`)
-- **Root models** — `root_model` flag; `to_python`/`to_json` extract the `.root` attribute before delegating to the inner serializer
-- **Union discrimination** — model/dataclass serializer nodes store `class_` (from schema `cls`) and throw for wrong-class instances, so the union serializer falls through to the matching branch (to_python; `to_json` lacks union/enum/date branches and falls back to `infer_json`)
-- **exclude_unset** — reads `__pydantic_fields_set__`; `exclude_defaults` is currently dead code (`__pydantic_defaults__` is never set)
+
+* **by_alias** — field aliases read from `serialization_alias` (fallback `alias`) and applied in `serialize_fields`/`serialize_fields_json`
+* **ser_json_inf_nan='strings'** — float `to_json` emits quoted `"NaN"`/`"Infinity"`; the mode is propagated from schema config (`inf_nan_mode`)
+* **Root models** — `root_model` flag; `to_python`/`to_json` extract the `.root` attribute before delegating to the inner serializer
+* **Union discrimination** — model/dataclass serializer nodes store `class_` (from schema `cls`) and throw for wrong-class instances, so the union serializer falls through to the matching branch (to_python; `to_json` lacks union/enum/date branches and falls back to `infer_json`)
+* **exclude_unset** — reads `__pydantic_fields_set__`; `exclude_defaults` is currently dead code (`__pydantic_defaults__` is never set)
 
 ---
 
@@ -412,7 +419,7 @@ Beyond the base pattern, the C++ `SerNode` serializer (`src/main_module.cpp`) im
 enum ErrorType {
     // Type validation
     IntParsing,        // "int_parsing"
-    FloatParsing,      // "float_parsing"  
+    FloatParsing,      // "float_parsing"
     StringType,        // "string_type"
     BytesType,         // "bytes_type"
     BoolParsing,       // "bool_parsing"
@@ -451,9 +458,10 @@ The `strum` derive macro auto-generates the `to_string()` (as snake_case) and `f
 
 ### 7.3 Either Types for Borrowed Data
 
-**Rust**: 
+**Rust**:
+
 ```rust
-enum EitherString { 
+enum EitherString {
     Py(Py<PyString>),    // Borrowed from Python
     Str(String),         // Owned from JSON
 }
@@ -468,7 +476,8 @@ enum EitherString {
 
 ### 7.5 Definitions System for Recursive Schemas
 
-**Rust**: 
+**Rust**:
+
 ```rust
 struct DefinitionsBuilder {
     definitions: HashMap<String, OnceLock<ParsedSchema>>,
@@ -516,7 +525,7 @@ Passed as the second argument to Python callable validators (`function-before`/`
 
 ## 9. Python Package Structure
 
-```
+```text
 python/pydantic_core/
 ├── __init__.py               # Re-exports from _pydantic_core + core_schema
 ├── _pydantic_core.pyi        # Type stubs for the Rust native module

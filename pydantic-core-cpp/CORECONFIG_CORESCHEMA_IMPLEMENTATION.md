@@ -135,14 +135,16 @@ from . import core_schema
 ```
 
 **优点**：
-- 零 C++ 代码改动
-- 完全与 Rust 版 API 兼容
-- `from pydantic_core import CoreConfig` 不再触发 Rust fallback
-- 可以作为 `core_schema` 模块代理的目标，消除整个 `core_schema` 的 Rust 依赖
+
+* 零 C++ 代码改动
+* 完全与 Rust 版 API 兼容
+* `from pydantic_core import CoreConfig` 不再触发 Rust fallback
+* 可以作为 `core_schema` 模块代理的目标，消除整个 `core_schema` 的 Rust 依赖
 
 **缺点**：
-- 需要维护与 Rust 端相同的类型定义（但这是纯定义，几乎不变）
-- `core_schema` 的 schema 构建函数（`int_schema()`, `str_schema()` 等）需要一起提供，否则还是走 Rust
+
+* 需要维护与 Rust 端相同的类型定义（但这是纯定义，几乎不变）
+* `core_schema` 的 schema 构建函数（`int_schema()`, `str_schema()` 等）需要一起提供，否则还是走 Rust
 
 ### 3.2 方案 B: C++ 原生 struct + pybind11 绑定
 
@@ -174,13 +176,15 @@ py::class_<CoreConfig>(m, "CoreConfig")
 ```
 
 **优点**：
-- 真正的 C++ 实现，性能最优
-- 类型安全
+
+* 真正的 C++ 实现，性能最优
+* 类型安全
 
 **缺点**：
-- 工程量巨大，`CoreConfig` 有 **~30 个字段**，每种都有复杂的可选/联合类型
-- `CoreSchema` 是递归 TypedDict 联合（**40+ 个变体**），在 C++ 中表示为 `std::variant` 或虚基类，复杂度极高
-- Rust 本身都没有用 struct，说明这没有必要
+
+* 工程量巨大，`CoreConfig` 有 **~30 个字段**，每种都有复杂的可选/联合类型
+* `CoreSchema` 是递归 TypedDict 联合（**40+ 个变体**），在 C++ 中表示为 `std::variant` 或虚基类，复杂度极高
+* Rust 本身都没有用 struct，说明这没有必要
 
 ### 3.3 方案 C: 混合方案 — Python 定义 + C++ config 处理
 
@@ -194,24 +198,28 @@ py::class_<CoreConfig>(m, "CoreConfig")
 4. 各 validator 的 `build()` 方法读取 config 中的相关字段
 
 **优点**：
-- Python 导入层面消除 Rust 依赖
-- C++ 运行时真正使用 config 字段
-- 增量实现 — 可以先实现最常用的字段
+
+* Python 导入层面消除 Rust 依赖
+* C++ 运行时真正使用 config 字段
+* 增量实现 — 可以先实现最常用的字段
 
 **缺点**：
-- 需要同时在 Python 和 C++ 两处改动
+
+* 需要同时在 Python 和 C++ 两处改动
 
 ### 3.4 推荐方案: A + 渐进式 C++ C
 
 **第一阶段（立即）**:
-- 创建 `pydantic_core_cpp/core_schema.py`，定义 `CoreConfig` 和 `CoreSchema` 的 TypedDict
-- 从 `_RUST_FALLBACKS` 中移除这两个符号
-- 修改 `core_schema` 代理指向本地模块而不是 Rust
+
+* 创建 `pydantic_core_cpp/core_schema.py`，定义 `CoreConfig` 和 `CoreSchema` 的 TypedDict
+* 从 `_RUST_FALLBACKS` 中移除这两个符号
+* 修改 `core_schema` 代理指向本地模块而不是 Rust
 
 **第二阶段（逐步）**:
-- 按需扩展 `ValidationState::Config` 的字段
-- 在 validator `build()` 中读取新字段并应用到验证逻辑
-- 最终所有 config 字段都由 C++ 处理
+
+* 按需扩展 `ValidationState::Config` 的字段
+* 在 validator `build()` 中读取新字段并应用到验证逻辑
+* 最终所有 config 字段都由 C++ 处理
 
 ---
 
@@ -334,7 +342,7 @@ if (config_it != config.end()) {
 
 ### 建议实施顺序
 
-```
+```text
 Week 1:  创建 pydantic_core_cpp/core_schema.py (Part A: 类型定义)
           从 _RUST_FALLBACKS 移除 CoreConfig/CoreSchema/CoreSchemaType
           修改 core_schema 代理 → 本地模块
