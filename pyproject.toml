@@ -314,6 +314,10 @@ source = [
 
 [tool.pyright]
 include = ['pydantic', 'tests/test_pipeline.py']
+# `pydantic/_pydantic_core_shim.py` and `pydantic/version.py` import the C++ backend, which the
+# lint job deliberately does not install (`--no-install-package pydantic-core-cpp`), so point the
+# resolver at its source in this repo rather than silencing the two imports.
+extraPaths = ['pydantic-core-cpp']
 exclude = ['pydantic/_hypothesis_plugin.py', 'pydantic/mypy.py', 'pydantic/v1']
 # reportUnnecessaryTypeIgnoreComment can't be set since we run pyright with multiple python versions
 # reportUnnecessaryTypeIgnoreComment = true
