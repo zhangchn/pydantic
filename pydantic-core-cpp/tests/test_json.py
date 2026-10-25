@@ -28,6 +28,7 @@ from pydantic_core_cpp import (
     PydanticOmit,
     PydanticSerializationError,
     PydanticSerializationUnexpectedValue,
+    PydanticUseDefault,
     SchemaError,
     SchemaSerializer,
     SchemaValidator,
@@ -4986,6 +4987,58 @@ def test_a_dataclass_post_init_failure_belongs_to_the_run() -> None:
         )
     )
     assert omit_holder.validate_python({'x': {'a': 1}, 'y': 2}) == {'y': 2}
+
+
+def test_a_use_default_is_answered_once_by_a_default_and_by_nothing_else() -> None:
+    # `PydanticUseDefault` is a signal, and exactly two places in the reference are allowed to do
+    # anything with it: a default node answers it with its own default (with_default.rs:163,
+    # `self.default_value(...)?.ok_or(e)?`) and returns it untouched when the default itself is
+    # what failed (with_default.rs:203).  Everything else lets it leave the schema, where
+    # mod.rs:257 ends the run as a SchemaError.  A field answers it because pydantic hoists a
+    # field's default into the field machinery, which is the same node -- so it may answer once,
+    # but not a second time and not at all without a default.  The port answered it every time a
+    # field saw it: a field with a validated default returned that default although the default had
+    # just refused it, and a field with no default disappeared from the output, so a run that the
+    # reference ends in a SchemaError returned a value instead.
+    def refuse(value: object) -> int:
+        raise PydanticUseDefault()
+
+    def refused(schema: core_schema.CoreSchema) -> core_schema.CoreSchema:
+        return core_schema.no_info_after_validator_function(refuse, schema)
+
+    def one_field(field: core_schema.CoreSchema) -> SchemaValidator:
+        return SchemaValidator(core_schema.typed_dict_schema({'a': core_schema.typed_dict_field(field)}))
+
+    uncaught = 'Uncaught `PydanticUseDefault` exception'
+    answered = core_schema.with_default_schema(refused(core_schema.int_schema()), default=7)
+
+    # Once, from the default: the signal is what the field validator returned, so the default
+    # stands in for it whether or not a value was supplied.
+    node = one_field(answered)
+    assert node.validate_python({}) == {'a': 7}
+    assert node.validate_python({'a': 1}) == {'a': 7}
+
+    # Not twice: with `validate_default` the default goes through the same validator that just
+    # raised, so the signal comes back and there is no second default to answer it with.
+    revalidated = core_schema.with_default_schema(
+        refused(core_schema.int_schema()), default=7, validate_default=True
+    )
+    twice = one_field(revalidated)
+    with pytest.raises(SchemaError, match=uncaught):
+        twice.validate_python({'a': 1})
+    with pytest.raises(SchemaError, match=uncaught):
+        twice.validate_python({})
+
+    # And not at all by a field that has nothing to fall back on: `ok_or(e)` puts the signal back.
+    empty = one_field(refused(core_schema.int_schema()))
+    with pytest.raises(SchemaError, match=uncaught):
+        empty.validate_python({'a': 1})
+
+    # The node on its own follows the same two rules, with no field machinery in between.
+    plain = SchemaValidator(answered)
+    assert plain.validate_python(1) == 7
+    with pytest.raises(SchemaError, match=uncaught):
+        SchemaValidator(revalidated).validate_python(1)
 
 
 if __name__ == '__main__':

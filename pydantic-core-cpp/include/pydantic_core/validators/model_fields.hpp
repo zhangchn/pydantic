@@ -503,13 +503,25 @@ public:
                     // UseDefault raised by the field validator is answered with the
                     // field's default rather than dropping the field.
                     ValidatedModelFieldsOutput::FieldValue fv;
+                    size_t errors_before_default = combined_errors.line_errors().size();
                     resolve_field_default(field, output, state, fv, combined_errors);
+                    if (state.has_hard_error()) {
+                        state.pop_loc();
+                        return state.take_hard_error();
+                    }
                     if (fv.value) {
                         output.fields[name] = std::move(fv);
                         output.fields_set.insert(name);
                         ++fields_set_count;
                         output.field_order.push_back(name);
                         add_to_data(name, output.fields.at(name));
+                    } else if (combined_errors.line_errors().size() == errors_before_default) {
+                        // `self.default_value(...)?.ok_or(e)?` (with_default.rs:163): a field
+                        // with nothing to fall back on does not quietly disappear -- the
+                        // signal goes back to whoever is running the schema, which answers
+                        // it with `SchemaError: Uncaught \`PydanticUseDefault\``.
+                        state.pop_loc();
+                        return ValError::use_default();
                     }
                 }
             } else {
@@ -532,6 +544,12 @@ public:
                 } else {
                     ValidatedModelFieldsOutput::FieldValue fv;
                     resolve_field_default(field, output, state, fv, combined_errors);
+                    if (state.has_hard_error()) {
+                        // An absent field gets its default validated just the same, so the
+                        // default's own re-validation can raise UseDefault here too.
+                        state.pop_loc();
+                        return state.take_hard_error();
+                    }
                     if (fv.value) {
                         output.fields[name] = std::move(fv);
                         output.field_order.push_back(name);
@@ -624,6 +642,16 @@ public:
             if (r.is_ok()) {
                 fv.value = r.value();
                 fv.type_name = field_type_name(field.schema);
+                return;
+            }
+            if (r.error().is_use_default()) {
+                // with_default.rs:203: a UseDefault raised *while the default itself is
+                // being validated* is not answerable here -- this is the default, there is
+                // no second one to fall back on -- so WithDefaultValidator::default_value
+                // returns the signal unchanged and the run ends in
+                // `SchemaError: Uncaught \`PydanticUseDefault\``.  Answering it with the
+                // very default that just refused is what made the family return a value.
+                state.set_hard_error(ValError::use_default());
                 return;
             }
             combined_errors.merge(std::move(r.error()));
