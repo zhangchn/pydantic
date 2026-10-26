@@ -221,7 +221,8 @@ static std::shared_ptr<Validator> build_from_flat_dict(
             simdjson::dom::parser as_parser;
             auto as_res = as_parser.parse(as_doc);
             if (!as_res.error() && as_res.value().is_array()) {
-                for (auto s : as_res.value().get_array().value()) {
+                simdjson::dom::array schemes = as_res.value().get_array().value();
+                for (auto s : schemes) {
                     if (s.is_string()) {
                         v->allowed_schemes.push_back(std::string(s.get_string().value()));
                     }
@@ -447,7 +448,8 @@ static std::shared_ptr<Validator> build_from_element(
         auto tv = std::make_shared<TupleValidator>();
         auto items_arr = elem["items_schema"];
         if (!items_arr.error() && items_arr.value().is_array()) {
-            for (auto item : items_arr.value().get_array().value()) {
+            simdjson::dom::array pos_items = items_arr.value().get_array().value();
+            for (auto item : pos_items) {
                 tv->items.push_back(build_from_element(item, config, definitions));
             }
         }
@@ -473,7 +475,8 @@ static std::shared_ptr<Validator> build_from_element(
         auto choices = elem["choices"];
         if (!choices.error() && choices.value().is_array()) {
             std::vector<std::shared_ptr<Validator>> validators;
-            for (auto choice : choices.value().get_array().value()) {
+            simdjson::dom::array choice_arr = choices.value().get_array().value();
+            for (auto choice : choice_arr) {
                 validators.push_back(build_from_element(choice, config, definitions));
             }
             return std::make_shared<UnionValidator>(validators);
@@ -529,7 +532,8 @@ static std::shared_ptr<Validator> build_from_element(
         auto steps = elem["steps"];
         if (!steps.error() && steps.value().is_array()) {
             std::vector<std::shared_ptr<Validator>> validators;
-            for (auto step : steps.value().get_array().value()) {
+            simdjson::dom::array step_arr = steps.value().get_array().value();
+            for (auto step : step_arr) {
                 validators.push_back(build_from_element(step, config, definitions));
             }
             return std::make_shared<ChainValidator>(validators);
@@ -555,7 +559,8 @@ static std::shared_ptr<Validator> build_from_element(
         if (!expected.error() && expected.value().is_array()) {
             std::vector<std::string> values;
             std::vector<std::string> reprs;
-            for (auto v : expected.value().get_array().value()) {
+            simdjson::dom::array expected_arr = expected.value().get_array().value();
+            for (auto v : expected_arr) {
                 if (v.is_string()) {
                     std::string s = std::string(v.get_string().value());
                     values.push_back(s);
@@ -580,7 +585,8 @@ static std::shared_ptr<Validator> build_from_element(
         std::unordered_set<std::string> members;
         auto members_elem = elem["members"];
         if (!members_elem.error() && members_elem.value().is_array()) {
-            for (auto m : members_elem.value().get_array().value()) {
+            simdjson::dom::array member_arr = members_elem.value().get_array().value();
+            for (auto m : member_arr) {
                 if (m.is_string()) {
                     members.insert(std::string(m.get_string().value()));
                 }
@@ -824,18 +830,20 @@ static std::shared_ptr<Validator> build_from_element(
                     info.validation_paths.push_back({info.alias});
                     info.has_alias = true;
                 } else if (alias_val.value().is_array()) {
+                    simdjson::dom::array alias_arr = alias_val.value().get_array().value();
                     // Determine if it's an AliasPath (flat list of scalars) or
                     // AliasChoices (list of lists).
                     bool is_choices = false;
-                    for (auto a : alias_val.value().get_array().value()) {
+                    for (auto a : alias_arr) {
                         if (a.is_array()) { is_choices = true; break; }
                     }
                     if (is_choices) {
                         // AliasChoices: each element is a path
-                        for (auto a : alias_val.value().get_array().value()) {
+                        for (auto a : alias_arr) {
                             std::vector<std::string> path;
                             if (a.is_array()) {
-                                for (auto inner : a.get_array().value()) {
+                                simdjson::dom::array inner_arr = a.get_array().value();
+                                for (auto inner : inner_arr) {
                                     if (inner.is_string()) path.push_back(std::string(inner.get_string().value()));
                                     else if (inner.is_int64()) path.push_back(std::to_string(inner.get_int64()));
                                     else if (inner.is_uint64()) path.push_back(std::to_string(inner.get_uint64()));
@@ -851,7 +859,7 @@ static std::shared_ptr<Validator> build_from_element(
                     } else {
                         // AliasPath: flat list of scalars
                         std::vector<std::string> path;
-                        for (auto a : alias_val.value().get_array().value()) {
+                        for (auto a : alias_arr) {
                             if (a.is_string()) path.push_back(std::string(a.get_string().value()));
                             else if (a.is_int64()) path.push_back(std::to_string(a.get_int64()));
                             else if (a.is_uint64()) path.push_back(std::to_string(a.get_uint64()));
@@ -980,15 +988,17 @@ static std::shared_ptr<Validator> build_from_element(
                     info.validation_paths.push_back({info.alias});
                     info.has_alias = true;
                 } else if (alias_val.value().is_array()) {
+                    simdjson::dom::array alias_arr = alias_val.value().get_array().value();
                     bool is_choices = false;
-                    for (auto a : alias_val.value().get_array().value()) {
+                    for (auto a : alias_arr) {
                         if (a.is_array()) { is_choices = true; break; }
                     }
                     if (is_choices) {
-                        for (auto a : alias_val.value().get_array().value()) {
+                        for (auto a : alias_arr) {
                             std::vector<std::string> path;
                             if (a.is_array()) {
-                                for (auto inner : a.get_array().value()) {
+                                simdjson::dom::array inner_arr = a.get_array().value();
+                                for (auto inner : inner_arr) {
                                     if (inner.is_string()) path.push_back(std::string(inner.get_string().value()));
                                     else if (inner.is_int64()) path.push_back(std::to_string(inner.get_int64()));
                                     else if (inner.is_uint64()) path.push_back(std::to_string(inner.get_uint64()));
@@ -1003,7 +1013,7 @@ static std::shared_ptr<Validator> build_from_element(
                         }
                     } else {
                         std::vector<std::string> path;
-                        for (auto a : alias_val.value().get_array().value()) {
+                        for (auto a : alias_arr) {
                             if (a.is_string()) path.push_back(std::string(a.get_string().value()));
                             else if (a.is_int64()) path.push_back(std::to_string(a.get_int64()));
                             else if (a.is_uint64()) path.push_back(std::to_string(a.get_uint64()));
@@ -1097,7 +1107,8 @@ static std::shared_ptr<Validator> build_from_element(
         std::vector<DataclassFieldInfo> dc_fields;
         auto fields_arr = elem["fields"];
         if (!fields_arr.error() && fields_arr.value().is_array()) {
-            for (auto field_elem : fields_arr.value().get_array().value()) {
+            simdjson::dom::array field_arr = fields_arr.value().get_array().value();
+            for (auto field_elem : field_arr) {
                 DataclassFieldInfo info;
 
                 auto name_val = field_elem["name"];
@@ -1159,7 +1170,8 @@ static std::shared_ptr<Validator> build_from_element(
 
         // First pass: extract all refs and register stubs so recursive refs can resolve
         if (!defs_arr.error() && defs_arr.value().is_array()) {
-            for (auto def_elem : defs_arr.value().get_array().value()) {
+            simdjson::dom::array def_list = defs_arr.value().get_array().value();
+            for (auto def_elem : def_list) {
                 auto ref_val = def_elem["ref"];
                 if (!ref_val.error() && ref_val.value().is_string()) {
                     std::string ref = std::string(ref_val.value().get_string().value());
@@ -1170,7 +1182,8 @@ static std::shared_ptr<Validator> build_from_element(
 
         // Second pass: build all definitions (recursive refs resolve to stubs, then get replaced)
         if (!defs_arr.error() && defs_arr.value().is_array()) {
-            for (auto def_elem : defs_arr.value().get_array().value()) {
+            simdjson::dom::array def_list = defs_arr.value().get_array().value();
+            for (auto def_elem : def_list) {
                 auto ref_val = def_elem["ref"];
                 std::string ref;
                 if (!ref_val.error() && ref_val.value().is_string()) {

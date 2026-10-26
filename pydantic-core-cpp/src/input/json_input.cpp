@@ -30,14 +30,19 @@ static py::object json_element_to_py(const simdjson::dom::element& elem) {
             return py::none();
         case simdjson::dom::element_type::ARRAY: {
             py::list lst;
-            for (auto item : elem.get_array().value()) {
+            // get_array() returns a simdjson_result temporary and value() names a reference
+            // inside it. A range-for binds that expression as a declaration, so the temporary
+            // is gone before begin() runs; copying the view keeps it alive for the loop.
+            simdjson::dom::array items = elem.get_array().value();
+            for (auto item : items) {
                 lst.append(json_element_to_py(item));
             }
             return lst;
         }
         case simdjson::dom::element_type::OBJECT: {
             py::dict d;
-            for (auto [key, value] : elem.get_object().value()) {
+            simdjson::dom::object fields = elem.get_object().value();
+            for (auto [key, value] : fields) {
                 d[py::str(std::string(key))] = json_element_to_py(value);
             }
             return d;
