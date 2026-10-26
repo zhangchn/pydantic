@@ -32,7 +32,7 @@ def _get_backend() -> tuple[Any, str]:
             finally:
                 # Restore saved modules
                 sys.modules.update(_saved_modules)
-        except ImportError:
+        except ImportError as exc:
             # Only warn when the C++ package is installed but failed to load
             # (e.g. a broken build) — that is surprising and hides regressions.
             # When it is simply not installed, falling back to Rust is the
@@ -41,12 +41,17 @@ def _get_backend() -> tuple[Any, str]:
             # import-time warning for a missing optional backend.
             import importlib.util
 
-            if importlib.util.find_spec('pydantic_core_cpp') is not None:
+            spec = importlib.util.find_spec('pydantic_core_cpp')
+            if spec is not None:
                 import warnings
 
+                # The reason travels with the warning because the swallow is what
+                # makes a backend that is present-but-broken read like a backend
+                # that is absent, and those two need different fixes.
                 warnings.warn(
-                    'pydantic-core-cpp is installed but failed to load; '
-                    'falling back to the Rust pydantic-core backend. '
+                    'pydantic-core-cpp is installed but failed to load: '
+                    f'{exc}; falling back to the Rust pydantic-core backend '
+                    f'(it was looked for at {spec.origin or "unknown"}). '
                     'Check the install/build of pydantic-core-cpp, or set '
                     'PYDANTIC_USE_CPP_CORE=0 to opt out explicitly (and '
                     'silence this warning).',
