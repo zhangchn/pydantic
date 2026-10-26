@@ -56,7 +56,12 @@ linting = [
 [tool.scikit-build]
 install.strip = false
 cmake.source-dir = "."
-wheel.py-api = "cp310"
+# No `wheel.py-api`: pybind11 builds against the full CPython API, so an `abi3` tag
+# would promise an interpreter-independent wheel while the module inside stays pinned
+# to the build's own version (`_pydantic_core_cpp.cpython-310-darwin.so`). Installed
+# into 3.12+ that module is not an importable suffix at all, the wrapper's
+# `from ._pydantic_core_cpp import ...` raises ModuleNotFoundError, and pydantic's shim
+# reports the backend as "installed but failed to load" and silently runs Rust instead.
 wheel.packages = ["pydantic_core_cpp"]
 wheel.license-files = []
 
