@@ -92,7 +92,15 @@ struct SerCallExtra {
     // caller said nothing says the same thing -- and a value that brings its own serializer is
     // delegated through that entry point, which would otherwise stop hearing a run that said
     // "none": Rust hands such a value the very state the run collects into (infer.rs:667).
-    py::object warnings = py::str("warn");
+    //
+    // Null means "the run never said anything", and warnings() then materializes "warn" on the
+    // first read.  It cannot be the member's default the way the None-holding ones are: this
+    // struct is also instantiated as the namespace-scope thread_local below, and MSVC runs
+    // such a dynamic initializer from __dyn_tls_init inside DllMain, under the loader lock,
+    // where allocating a string asks the interpreter to initialize itself and the load fails
+    // with ERROR_DLL_INIT_FAILED.  py::none() gets away with it because on this interpreter it
+    // only touches the static runtime; PyUnicode_New does not.
+    py::object warnings_;
     bool exclude_unset = false;
     bool exclude_defaults = false;
     bool exclude_none = false;
@@ -122,10 +130,16 @@ struct SerCallExtra {
     ~SerCallExtra() {
         if (!Py_IsInitialized() || !PyGILState_Check()) {
             by_alias.release();
-            warnings.release();
+            warnings_.release();
             fallback.release();
             context.release();
         }
+    }
+    // The run's value, or the entry point's own default the first time a run that never said
+    // anything is asked about it.  Cached so a delegated value keeps hearing the same object.
+    py::object warnings() {
+        if (!warnings_) warnings_ = py::str("warn");
+        return warnings_;
     }
     SerCallExtra() = default;
     SerCallExtra(const SerCallExtra&) = default;
@@ -176,7 +190,7 @@ static void ser_apply_delegated_extra() {
 static py::dict ser_extra_forwarded() {
     py::dict kw;
     if (!g_ser_extra.by_alias.is_none()) kw["by_alias"] = g_ser_extra.by_alias;
-    kw["warnings"] = g_ser_extra.warnings;
+    kw["warnings"] = g_ser_extra.warnings();
     kw["exclude_unset"] = g_ser_extra.exclude_unset;
     kw["exclude_defaults"] = g_ser_extra.exclude_defaults;
     kw["exclude_none"] = g_ser_extra.exclude_none;
@@ -8103,7 +8117,7 @@ public:
         g_ser_extra.timedelta_mode = ser_json_timedelta_;
         g_ser_extra.temporal_mode = ser_json_temporal_;
         g_ser_extra.inf_nan_mode = inf_nan_mode_;
-        g_ser_extra.warnings = warnings;
+        g_ser_extra.warnings_ = warnings;
         if (!ser_) throw std::runtime_error("Serializer not initialized");
 
         // Pass include/exclude through as-is (nested dict/set filters supported)
@@ -8202,7 +8216,7 @@ public:
         g_ser_extra.timedelta_mode = ser_json_timedelta_;
         g_ser_extra.temporal_mode = ser_json_temporal_;
         g_ser_extra.inf_nan_mode = inf_nan_mode_;
-        g_ser_extra.warnings = warnings;
+        g_ser_extra.warnings_ = warnings;
         if (!ser_) throw std::runtime_error("Serializer not initialized");
 
         // Pass include/exclude through as-is (nested dict/set filters supported)
@@ -8374,7 +8388,7 @@ static py::bytes to_json_fn(const py::object& value, std::optional<size_t> inden
     g_ser_extra.fallback = fallback && !fallback->is_none() ? *fallback : py::none();
     g_ser_extra.round_trip = round_trip;
     g_ser_extra.context = context && !context->is_none() ? *context : py::none();
-    g_ser_extra.warnings = py::str("warn");   // this entry has no warnings keyword to ask
+    g_ser_extra.warnings_ = py::str("warn");   // this entry has no warnings keyword to ask
     // Reset, not inherited: this entry's Extra carries its own polymorphic flag, and the
     // thread local otherwise still answers for whoever ran last.
     g_polymorphic_serialization = polymorphic;
@@ -8927,7 +8941,7 @@ static py::object to_jsonable_fn(const py::object& value, std::optional<py::obje
     g_ser_extra.inf_nan_mode = inf_nan_mode;
     g_ser_extra.round_trip = round_trip;  // mod.rs:302 hands it to the Extra
     g_ser_extra.context = context && !context->is_none() ? *context : py::none();
-    g_ser_extra.warnings = py::str("warn");   // this entry has no warnings keyword to ask
+    g_ser_extra.warnings_ = py::str("warn");   // this entry has no warnings keyword to ask
     g_polymorphic_serialization = polymorphic;
     JsonableRun run{bytes_mode, delta_shape, temporal, inf_nan_mode, serialize_unknown, by_alias};
     return infer_jsonable_python(value, run, include ? *include : py::none(), exclude ? *exclude : py::none());
