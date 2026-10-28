@@ -6430,6 +6430,35 @@ static void ser_check_unexpected_kw(const char* fname, const std::vector<std::st
     }
 }
 
+// The words of a refusal the interpreter raised, in the same `Name: message` shape Rust's
+// `{err}` prints.  Normalizing is not optional here: what a failed extraction leaves behind is
+// a class and a bare string on one interpreter and a materialized exception on another, so
+// reading `val` as a string -- which is exactly what a fetch of an un-normalized pair hands
+// back -- answers with an empty message on any interpreter that does not pre-normalize.
+// str() answers on every one, and it is also what makes KeyError's own str() (its argument,
+// quoted) answer for a builtin pybind throw.
+static std::string ser_fetched_text(const char* fallback_tname) {
+    PyObject *ty = nullptr, *val = nullptr, *tb = nullptr;
+    PyErr_Fetch(&ty, &val, &tb);
+    PyErr_NormalizeException(&ty, &val, &tb);
+    std::string tn = ty ? ((PyTypeObject*)ty)->tp_name : fallback_tname;
+    std::string msg;
+    if (val) {
+        PyObject* sv = PyObject_Str(val);
+        if (sv) {
+            const char* c = PyUnicode_AsUTF8(sv);
+            if (c) msg = c;
+            Py_DECREF(sv);
+        } else {
+            PyErr_Clear();
+        }
+        Py_XDECREF(val);
+    }
+    Py_XDECREF(ty);
+    Py_XDECREF(tb);
+    return tn + ": " + msg;
+}
+
 static std::optional<std::unordered_set<int64_t>> ser_index_filter_set(const py::object& v,
                                                                        const std::string& tname) {
     static const std::string wrap = "` serializer:\n  ";
@@ -6442,15 +6471,8 @@ static std::optional<std::unordered_set<int64_t>> ser_index_filter_set(const py:
     py::object cap = py::reinterpret_steal<py::object>(PyLong_FromString("18446744073709551615", nullptr, 10));
     for (py::handle item : py::set(v)) {
         PyObject* idx = PyNumber_Index(item.ptr());
-        if (!idx) {
-            PyObject *ty = nullptr, *val = nullptr, *tb = nullptr;
-            PyErr_Fetch(&ty, &val, &tb);
-            std::string tn = ty ? ((PyTypeObject*)ty)->tp_name : "TypeError";
-            const char* ms = val && PyUnicode_Check(val) ? PyUnicode_AsUTF8(val) : nullptr;
-            std::string msg = ms ? ms : "";
-            Py_XDECREF(ty); Py_XDECREF(val); Py_XDECREF(tb);
-            throw SchemaError("Error building `" + tname + wrap + tn + ": " + msg);
-        }
+        if (!idx)
+            throw SchemaError("Error building `" + tname + wrap + ser_fetched_text("TypeError"));
         int neg = PyObject_RichCompareBool(idx, zero.ptr(), Py_LT);
         int over = neg == 0 ? PyObject_RichCompareBool(idx, cap.ptr(), Py_GT) : 0;
         if (neg < 0 || over < 0) PyErr_Clear();
@@ -6462,15 +6484,8 @@ static std::optional<std::unordered_set<int64_t>> ser_index_filter_set(const py:
         }
         unsigned long long u = PyLong_AsUnsignedLongLong(idx);
         Py_DECREF(idx);
-        if (u == (unsigned long long)-1 && PyErr_Occurred()) {
-            PyObject *ty = nullptr, *val = nullptr, *tb = nullptr;
-            PyErr_Fetch(&ty, &val, &tb);
-            std::string tn = ty ? ((PyTypeObject*)ty)->tp_name : "OverflowError";
-            const char* ms = val && PyUnicode_Check(val) ? PyUnicode_AsUTF8(val) : nullptr;
-            std::string msg = ms ? ms : "";
-            Py_XDECREF(ty); Py_XDECREF(val); Py_XDECREF(tb);
-            throw SchemaError("Error building `" + tname + wrap + tn + ": " + msg);
-        }
+        if (u == (unsigned long long)-1 && PyErr_Occurred())
+            throw SchemaError("Error building `" + tname + wrap + ser_fetched_text("OverflowError"));
         out.insert((int64_t)u);
     }
     return out;
@@ -6502,28 +6517,9 @@ static std::string ser_pyerr_text(const py::error_already_set& e) {
 // exception and reading str() back is what Rust's `{err}` shows -- including KeyError's habit of
 // rendering its argument quoted.
 static std::string ser_builtin_text(const py::builtin_exception& e) {
+    // pybind's set_error leaves the pair un-normalized, so this site needs the normalization too.
     e.set_error();
-    PyObject *ty = nullptr, *val = nullptr, *tb = nullptr;
-    PyErr_Fetch(&ty, &val, &tb);
-    // SetString leaves the pair un-normalized, so the fetch hands back the class and the bare
-    // string; normalizing is what makes KeyError's own str() (its argument, quoted) answer.
-    PyErr_NormalizeException(&ty, &val, &tb);
-    std::string tname = ty ? ((PyTypeObject*)ty)->tp_name : "RuntimeError";
-    std::string msg;
-    if (val) {
-        PyObject* sv = PyObject_Str(val);
-        if (sv) {
-            const char* c = PyUnicode_AsUTF8(sv);
-            if (c) msg = c;
-            Py_DECREF(sv);
-        } else {
-            PyErr_Clear();
-        }
-        Py_XDECREF(val);
-    }
-    Py_XDECREF(ty);
-    Py_XDECREF(tb);
-    return tname + ": " + msg;
+    return ser_fetched_text("RuntimeError");
 }
 
 // DefinitionsBuilder::finish (definitions.rs:195-202), which the SchemaSerializer entry
