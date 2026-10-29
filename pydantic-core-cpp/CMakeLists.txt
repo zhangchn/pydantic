@@ -80,6 +80,13 @@ else()
             "found Python ${Python3_VERSION} (${Python3_EXECUTABLE}); the test binaries would link "
             "one interpreter's library against the other's headers.")
     endif()
+
+    # Where the interpreter this project found lives -- on a full install that is also where its dll
+    # sits.  The test binaries link Python3::Python, so the loader resolves that dll before main runs,
+    # and on Windows the loader asks PATH; see pdc_add_test below.  A venv's directory holds only a
+    # launcher, so a build configured inside one on Windows would still have to be told the base
+    # install's directory.
+    get_filename_component(PDC_PY_RUNTIME_DIR "${Python3_EXECUTABLE}" DIRECTORY)
 endif()
 
 # simdjson for JSON parsing (build-only dependency, don't install into wheel)
@@ -231,6 +238,23 @@ install(TARGETS _pydantic_core_cpp
 # Tests (only for standalone builds, not during wheel building)
 # ---------------------------------------------------------------------------
 
+# Every test binary links Python3::Python, so before its main runs the loader has to resolve the
+# interpreter's dll, and on Windows the loader asks PATH.  A shell that reached `ctest` after
+# `cmake --build` normally has that directory already -- but a job that installs no Python at all
+# (Configure just asks FindPython for whatever the image happens to hold) does not, and the run then
+# stops dead on the first test with nothing printed, because the failure is before any code of
+# ours runs.  So hand each test the interpreter's own directory on PATH, which is what running the
+# suite through python gets for free.  Registered through this wrapper so a test cannot be added
+# without it; ENVIRONMENT_MODIFICATION wants CMake 3.22.
+function(pdc_add_test)
+    cmake_parse_arguments(PDC_ADD_TEST "" "NAME" "" ${ARGN})
+    add_test(${ARGN})
+    if(PDC_PY_RUNTIME_DIR AND NOT CMAKE_VERSION VERSION_LESS 3.22)
+        set_property(TEST ${PDC_ADD_TEST_NAME} PROPERTY ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:${PDC_PY_RUNTIME_DIR}")
+    endif()
+endfunction()
+
 if(NOT SKBUILD)
     enable_testing()
 
@@ -276,9 +300,9 @@ if(NOT SKBUILD)
     target_link_libraries(test_validators PRIVATE doctest::doctest simdjson::simdjson pybind11::module Python3::Python)
     target_include_directories(test_validators PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-    add_test(NAME Errors COMMAND test_errors)
-    add_test(NAME ValidationState COMMAND test_validation_state)
-    add_test(NAME Validators COMMAND test_validators)
+    pdc_add_test(NAME Errors COMMAND test_errors)
+    pdc_add_test(NAME ValidationState COMMAND test_validation_state)
+    pdc_add_test(NAME Validators COMMAND test_validators)
 
     # Test serializers
     add_executable(test_serializers tests/test_serializers.cpp
@@ -291,7 +315,7 @@ if(NOT SKBUILD)
     target_link_libraries(test_serializers PRIVATE doctest::doctest pybind11::module Python3::Python)
     target_include_directories(test_serializers PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-    add_test(NAME Serializers COMMAND test_serializers)
+    pdc_add_test(NAME Serializers COMMAND test_serializers)
 
     # Test integration
     add_executable(test_integration tests/test_integration.cpp
@@ -313,7 +337,7 @@ if(NOT SKBUILD)
     target_link_libraries(test_integration PRIVATE doctest::doctest simdjson::simdjson pybind11::module Python3::Python)
     target_include_directories(test_integration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-    add_test(NAME Integration COMMAND test_integration)
+    pdc_add_test(NAME Integration COMMAND test_integration)
 
     # Test model/typed-dict/dataclass validators
     add_executable(test_model_fields tests/test_model_fields.cpp
@@ -334,7 +358,7 @@ if(NOT SKBUILD)
     target_link_libraries(test_model_fields PRIVATE doctest::doctest simdjson::simdjson pybind11::module Python3::Python)
     target_include_directories(test_model_fields PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-    add_test(NAME ModelFields COMMAND test_model_fields)
+    pdc_add_test(NAME ModelFields COMMAND test_model_fields)
 
     # Constrained validators test suite
     add_executable(test_constrained_validators tests/test_constrained_validators.cpp
@@ -355,7 +379,7 @@ if(NOT SKBUILD)
     target_link_libraries(test_constrained_validators PRIVATE doctest::doctest simdjson::simdjson pybind11::module Python3::Python)
     target_include_directories(test_constrained_validators PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-    add_test(NAME ConstrainedValidators COMMAND test_constrained_validators)
+    pdc_add_test(NAME ConstrainedValidators COMMAND test_constrained_validators)
 
     # Test suite: New validators and features
     add_executable(test_new_validators tests/test_new_validators.cpp
@@ -374,7 +398,7 @@ if(NOT SKBUILD)
     target_link_libraries(test_new_validators PRIVATE doctest::doctest simdjson::simdjson pybind11::module Python3::Python)
     target_include_directories(test_new_validators PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-    add_test(NAME NewValidators COMMAND test_new_validators)
+    pdc_add_test(NAME NewValidators COMMAND test_new_validators)
 
     # Test suite: PythonInput (native Python object validation)
     add_executable(test_python_input tests/test_python_input.cpp
@@ -389,7 +413,7 @@ if(NOT SKBUILD)
     target_link_libraries(test_python_input PRIVATE doctest::doctest pybind11::module Python3::Python)
     target_include_directories(test_python_input PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-    add_test(NAME PythonInput COMMAND test_python_input)
+    pdc_add_test(NAME PythonInput COMMAND test_python_input)
 
     # Test suite: speedate (pure C++ temporal parsing rules; no pybind11)
     add_executable(test_speedate tests/test_speedate.cpp
@@ -398,7 +422,7 @@ if(NOT SKBUILD)
     target_link_libraries(test_speedate PRIVATE doctest::doctest)
     target_include_directories(test_speedate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-    add_test(NAME Speedate COMMAND test_speedate)
+    pdc_add_test(NAME Speedate COMMAND test_speedate)
 
     # Test suite: JSON grammar diagnostics (jiter-compatible wording)
     # json_input.cpp parses temporal text through speedate.cpp, so that object has to be linked
@@ -413,5 +437,5 @@ if(NOT SKBUILD)
     target_link_libraries(test_json_diagnose PRIVATE doctest::doctest simdjson::simdjson pybind11::module Python3::Python)
     target_include_directories(test_json_diagnose PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-    add_test(NAME JsonDiagnose COMMAND test_json_diagnose)
+    pdc_add_test(NAME JsonDiagnose COMMAND test_json_diagnose)
 endif()

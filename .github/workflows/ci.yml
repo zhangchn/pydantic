@@ -653,6 +653,9 @@ jobs:
 
   core-cpp-test:
     name: core-cpp / Unit tests on ${{ matrix.os }}
+    # A test that never returned used to hold this leg open until GitHub's six-hour job limit
+    # cancelled it, with the log stopping at the line naming the test ctest had started.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -674,7 +677,10 @@ jobs:
         run: cmake --build pydantic-core-cpp/build --parallel 4
 
       - name: Run tests
-        run: ctest --test-dir pydantic-core-cpp/build --output-on-failure
+        # --timeout: no binary here needs two minutes to run its cases, so one that trips the limit
+        # is stuck rather than slow. ctest then kills it and carries on, so a single stuck binary no
+        # longer stands between the ten that would have reported and a job that says nothing.
+        run: ctest --test-dir pydantic-core-cpp/build --output-on-failure --timeout 120
 
   test-pyemscripten:
     name: Test build on PyEmscripten (Pyodide) (${{ matrix.python-version }})
