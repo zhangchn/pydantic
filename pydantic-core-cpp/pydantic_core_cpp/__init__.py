@@ -1216,6 +1216,13 @@ def _find_inner_type(schema: dict) -> str:
     return t
 
 
+# Notes on an exception and native exception groups both arrive in 3.11. That is the same split
+# Rust makes with #[cfg(Py_3_11)] in maybe_add_cause: below it there is no add_note to call and no
+# BaseExceptionGroup to build, so the reference wraps each collected exception in a UserWarning and
+# takes the group from the `exceptiongroup` backport instead.
+_HAS_EXC_GROUP = _sys.version_info >= (3, 11)
+
+
 class SchemaValidator:
     def __init__(self, schema, config=None, _use_prebuilt=True):
         # Do NOT mutate the caller's schema dict: model `__pydantic_core_schema__`
@@ -1245,6 +1252,10 @@ class SchemaValidator:
         # copy also strips ``cls`` keys in one pass (see _schema_copy_clean).
         cpp_schema = _schema_copy_clean(schema)
         self._base = _SchemaValidatorBase(cpp_schema, config_dict, _use_prebuilt)
+        # validators/mod.rs:170 reads this from the schema config -- not from any node -- and what
+        # it decides happens to the ValidationError after C++ has already raised it, which is why
+        # it lives here rather than in the tree.
+        self._validation_error_cause = bool(config_dict.get('validation_error_cause', False))
 
     @staticmethod
     def _extract_model_classes(schema):
@@ -1927,6 +1938,66 @@ class SchemaValidator:
         model_name = self._schema_title()
         if model_name and model_name != 'Schema':
             e._model_name = model_name
+        if self._validation_error_cause:
+            self._attach_error_cause_chain(e)
+
+    def _attach_error_cause_chain(self, e) -> None:
+        """Hang the user exceptions behind the ``ValidationError``, as ``maybe_add_cause`` does.
+
+        Only ``assertion_error`` and ``value_error`` line errors carry the user's own exception (in
+        ``ctx['error']``), and only those are collected, in line-error order.  On 3.11+ an entry
+        *is* that exception, carrying ``\\nPydantic: cause of loc: <location>`` as a note, and the
+        entries go into a ``BaseExceptionGroup`` titled ``Pydantic User Code Exceptions``.  Below
+        3.11 each entry is a ``UserWarning`` holding the same location without its newline, chained
+        to the user exception, and the group comes from the backport.
+
+        The location is the dotted one -- ``x.0``, ``x.k``, ``inner.y``, or ``root`` when the line
+        error has none -- which is what ``Location::to_string()`` prints, not the shape the error
+        message itself prints.  An entry whose ``add_note`` fails is skipped, and a missing backport
+        replaces the whole ``ValidationError`` with the ``ImportError`` naming it, as the reference
+        returns instead of raising the validation error.
+        """
+        try:
+            rows = e.errors()
+        except Exception:
+            return
+
+        users = []
+        for row in rows:
+            if row.get('type') not in ('assertion_error', 'value_error'):
+                continue
+            ctx = row.get('ctx')
+            if not isinstance(ctx, dict) or 'error' not in ctx:
+                continue
+            user_exc = ctx['error']
+            loc = '.'.join(str(part) for part in row.get('loc') or ()) or 'root'
+            if _HAS_EXC_GROUP:
+                try:
+                    user_exc.add_note(f'\nPydantic: cause of loc: {loc}')
+                except Exception:
+                    continue
+                users.append(user_exc)
+            else:
+                entry = UserWarning(f'Pydantic: cause of loc: {loc}')
+                entry.__cause__ = user_exc
+                users.append(entry)
+
+        if not users:
+            return
+
+        title = 'Pydantic User Code Exceptions'
+        if _HAS_EXC_GROUP:
+            from builtins import BaseExceptionGroup
+            e.__cause__ = BaseExceptionGroup(title, users)
+            return
+        try:
+            from exceptiongroup import ExceptionGroup as _BackportedGroup
+        except ImportError:
+            raise ImportError(
+                'validation_error_cause flag requires the exceptiongroup module backport '
+                'to be installed when used on Python <3.11.'
+            ) from None
+        e.__cause__ = _BackportedGroup(title, users)
 
     def validate_python(self, obj, *, strict=None, context=None, self_instance=None,
                         extra=None, from_attributes=None, by_alias=None, by_name=None,
