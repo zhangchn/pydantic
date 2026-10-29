@@ -411,7 +411,7 @@ Url::Url(const std::string& url_str, bool preserve_empty_path, const UrlDefaults
         } else {
             host_ = netloc;
         }
-    } else if (!netloc.empty() && netloc[0] == '[' && netloc.find(']:') != std::string::npos) {
+    } else if (!netloc.empty() && netloc[0] == '[' && netloc.find("]:") != std::string::npos) {
         size_t bracket_end = netloc.find(']');
         host_ = netloc.substr(0, bracket_end + 1);
         try { port_ = std::stoi(netloc.substr(bracket_end + 2)); } catch (...) {}
