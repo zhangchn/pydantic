@@ -976,12 +976,12 @@ public:
         }
 
         // Validate the authority (userinfo@host[:port]) when there is one.
+        std::string host;
         if (!authority.empty() || special) {
             std::string hostport = authority;
             size_t at = hostport.rfind('@');
             if (at != std::string::npos) hostport = hostport.substr(at + 1);
 
-            std::string host;
             std::string port_str;
             bool has_port = false;
             if (!hostport.empty() && hostport[0] == '[') {
@@ -1011,6 +1011,13 @@ public:
                 }
             }
 
+            // A separator with nothing after it is no port: the reference answers the scheme's
+            // default for "http://a:/p" rather than refusing, and a non-digit is what makes
+            // "http://a:80:/p" refuse.  `file:` keeps its refusal because a colon there is not a
+            // separator at all -- its authority is its host, so "file://a:/p" comes back as the
+            // path "/a:/p" with no host, which this split cannot express either way.
+            if (has_port && port_str.empty() && scheme != "file") has_port = false;
+
             if (has_port) {
                 bool digits = !port_str.empty() && std::all_of(port_str.begin(), port_str.end(),
                     [](char c) { return std::isdigit(static_cast<unsigned char>(c)); });
@@ -1021,11 +1028,24 @@ public:
                 }
             }
 
-            // Empty host: required for special schemes (file exempt; default_host substitutes).
-            bool host_req = host_required.value_or(special && scheme != "file");
-            if (host.empty() && !default_host && host_req) {
+            // An authority that is spelled out has to name a host, and that is decided by the parse
+            // -- `default_host` and `host_required` are consulted only once a URL exists
+            // (check_sub_defaults, url.rs:759), so a default does not rescue "http://@/p".
+            // It holds for a non-special scheme too: what refuses is the empty host inside a
+            // spelled authority, not the scheme's own requirement.  "non-special:///p" stays open,
+            // having no authority.
+            if (host.empty() && !authority.empty() && scheme != "file") {
                 return url_parsing_err("empty host");
             }
+        }
+
+        // What a URL without a host is worth is the schema's say, asked once and whatever the
+        // scheme: a special one has to have a host (file excepted, which substitutes one), a
+        // non-special one may go without until the schema asks for one, and a default stands in
+        // before the demand is made (check_sub_defaults, url.rs:770-779).
+        bool host_req = host_required.value_or(special && scheme != "file");
+        if (host.empty() && !default_host && host_req) {
+            return url_parsing_err("empty host");
         }
 
         // Scheme allow-list (checked after parsing, matching Rust order).

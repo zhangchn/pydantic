@@ -319,8 +319,13 @@ static HostSpec parse_host_segment(const std::string& seg, bool lower) {
             std::string canon = canonical_ipv6_host(s.substr(1, be - 1));
             if (!canon.empty()) h.host = "[" + canon + "]";
             if (be + 1 < s.size() && s[be + 1] == ':') {
-                try { h.port = std::stoi(s.substr(be + 2)); }
-                catch (...) { throw std::invalid_argument("invalid port: " + seg); }
+                // A separator with nothing after it is no port at all -- the reference parses
+                // "http://[::1]:,/x" with both hosts at the scheme's default -- while anything
+                // else there has to be digits or the segment refuses.
+                if (s.size() > be + 2) {
+                    try { h.port = std::stoi(s.substr(be + 2)); }
+                    catch (...) { throw std::invalid_argument("invalid port: " + seg); }
+                }
             }
         } else {
             h.host = s;
@@ -337,6 +342,8 @@ static HostSpec parse_host_segment(const std::string& seg, bool lower) {
                 h.host = s.substr(0, colon);
                 try { h.port = std::stoi(port_str); }
                 catch (...) { throw std::invalid_argument("invalid port: " + seg); }
+            } else if (port_str.empty()) {
+                h.host = s.substr(0, colon);
             } else {
                 h.host = s;
             }
@@ -344,6 +351,11 @@ static HostSpec parse_host_segment(const std::string& seg, bool lower) {
             h.host = s;
         }
     }
+    // Every host a segment names has to be there: the reference re-parses each comma-separated
+    // segment on its own and refuses any one of them that ends without a host (url.rs:622-666).
+    // An empty segment is allowed by the caller, because a list of one may hold no host at all and
+    // still take a default_host.
+    if (h.host.empty() && !seg.empty()) throw UrlEmptyHostError();
     if (lower) h.host = to_lower(h.host);
     return h;
 }
@@ -408,6 +420,10 @@ Url::Url(const std::string& url_str, bool preserve_empty_path, const UrlDefaults
         if (all_digits) {
             host_ = netloc.substr(0, colon_pos);
             port_ = std::stoi(port_str);
+        } else if (port_str.empty()) {
+            // A separator with nothing after it is not a port and not part of the host either:
+            // "http://a:/p" comes back as the host "a" at the scheme's default port.
+            host_ = netloc.substr(0, colon_pos);
         } else {
             host_ = netloc;
         }

@@ -5041,6 +5041,73 @@ def test_a_use_default_is_answered_once_by_a_default_and_by_nothing_else() -> No
         SchemaValidator(revalidated).validate_python(1)
 
 
+def test_an_empty_port_carries_no_port_and_a_spelled_authority_names_a_host() -> None:
+    # Two rules at the end of an authority that this port had fused into one check.  An empty port
+    # is no port at all -- the reference answers the scheme's default for "http://a:/p", so the
+    # scheme decides the value and a non-empty non-digit is what makes "http://a:80:/p" refuse.
+    # And an authority that is spelled out has to name a host, which the *parse* decides:
+    # `default_host` and `host_required` are consulted only once a URL exists (check_sub_defaults,
+    # url.rs:759), so a default does not rescue "http://@/p", and the rule holds for a non-special
+    # scheme too -- what refuses there is the empty host inside a spelled authority, not a scheme
+    # requirement.  Measured on the 2.50.0 wheel (probes adhoc_empty_authority.py,
+    # adhoc_bracket_port.py).
+    val = SchemaValidator(core_schema.url_schema())
+
+    def answer(text: str):
+        try:
+            url = val.validate_python(text)
+        except ValidationError as exc:
+            err = exc.errors()[0]
+            return err['type'], err['msg']
+        return str(url), url.host, url.port
+
+    no_host = ('url_parsing', 'Input should be a valid URL, empty host')
+    bad_port = ('url_parsing', 'Input should be a valid URL, invalid port number')
+
+    assert answer('http://a:/p') == ('http://a/p', 'a', 80)
+    assert answer('http://a.:/p') == ('http://a./p', 'a.', 80)
+    assert answer('http://[::1]:/p') == ('http://[::1]/p', '[::1]', 80)
+    assert answer('non-special://a:/p') == ('non-special://a/p', 'a', None)
+    assert answer('non-special://[::1]:/p') == ('non-special://[::1]/p', '[::1]', None)
+
+    # A port that is spelled has to be a number, and one separator is not two: everything after the
+    # first colon is the port text, so a second colon is part of it and refuses.
+    for refused_in in ('http://a:80:/p', 'http://a::80/p', 'http://a:80:90/p', 'http://[::1]:80:/p'):
+        assert answer(refused_in) == bad_port
+
+    assert answer('http://:/p') == no_host
+    assert answer('http://@/p') == no_host
+    assert answer('http://@:/p') == no_host
+    assert answer('http://a@/p') == no_host
+    assert answer('http://a:@/p') == no_host
+    assert answer('non-special://@/p') == no_host
+    assert answer('non-special://a@/p') == no_host
+    assert answer('non-special://a:@/p') == no_host
+    assert answer('non-special://@:80/p') == no_host  # a spelled port does not make the host legal
+
+    # No authority at all is the other case: a non-special URL keeps it as a path, and what fills a
+    # missing host is the schema's business, not the parse's.
+    assert answer('non-special:///p') == ('non-special:///p', None, None)
+    filled = SchemaValidator(core_schema.url_schema(default_host='d.example'))
+    assert str(filled.validate_python('non-special:///p')) == 'non-special://d.example/p'
+    with pytest.raises(ValidationError) as exc_info:
+        filled.validate_python('http://@/p')
+    assert exc_info.value.errors()[0]['msg'].endswith('empty host')
+    required = SchemaValidator(core_schema.url_schema(host_required=True))
+    with pytest.raises(ValidationError) as exc_info:
+        required.validate_python('non-special:///p')
+    assert exc_info.value.errors()[0]['msg'].endswith('empty host')
+
+    # The multi-host sibling re-parses every comma-separated segment and refuses any one of them
+    # that ends without a host (url.rs:622-666), and an empty port there is no port either.
+    mh = SchemaValidator(core_schema.multi_host_url_schema())
+    assert str(mh.validate_python('http://[::1]:,[::2]/p')) == 'http://[::1],[::2]/p'
+    for refused_in in ('http://:,a/p', 'http://a:@,b/p', 'http://,a/p', 'http://a,,b/p'):
+        with pytest.raises(ValidationError) as exc_info:
+            mh.validate_python(refused_in)
+        assert exc_info.value.errors()[0]['msg'].endswith('empty host')
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_') and callable(fn):
