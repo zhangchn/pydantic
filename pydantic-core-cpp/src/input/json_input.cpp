@@ -2,6 +2,7 @@
 #include "pydantic_core/result.hpp"
 #include "pydantic_core/error_types.hpp"
 #include "pydantic_core/bytes_mode.hpp"
+#include "pydantic_core/num_parse.hpp"
 #include <simdjson.h>
 #include <cstring>
 #include <memory>
@@ -278,11 +279,16 @@ ValResult<ValMatch<EitherFloat>> JsonInput::validate_float(bool strict) const {
     // Lax mode - string coercion
     if (!strict) {
         if (element_.type() == simdjson::dom::element_type::STRING) {
+            // A JSON string goes through str_as_float (input_json.rs:196), so a string that is
+            // not a number is `float_parsing` -- the `float_type` below is only what a JSON value
+            // that was never a string earns.
             auto str = std::string(element_.get_string().value_unsafe());
-            try {
-                double d = std::stod(str);
+            double d = 0;
+            if (str_as_float(str, &d)) {
                 return ValMatch<EitherFloat>::lax(EitherFloat(d));
-            } catch (...) {}
+            }
+            return ValError::line_error(ErrorType(ErrorType::Kind::FloatParsing),
+                                        Location(), as_error_value().repr);
         }
     }
 

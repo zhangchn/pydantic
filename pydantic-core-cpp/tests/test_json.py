@@ -5108,6 +5108,51 @@ def test_an_empty_port_carries_no_port_and_a_spelled_authority_names_a_host() ->
         assert exc_info.value.errors()[0]['msg'].endswith('empty host')
 
 
+def test_a_number_read_out_of_text_has_to_be_the_whole_string():
+    # Rust reads a float out of text in ONE place, str_as_float (input/shared.rs:94), which every
+    # text input shares: a Python str (input_python.rs:321), a JSON string (input_json.rs:196) and
+    # strings mode (input_string.rs:157).  It trims the Unicode whitespace, parses the WHOLE
+    # remainder as f64, and only when that fails tries once more with underscores removed -- a
+    # second pass that does not trim and refuses edge or doubled underscores (shared.rs:53).
+    # std::stod is another grammar entirely: it stops at the first character it cannot use, reads
+    # "0x10" as a hex float, throws where Rust returns +/-inf and 0.0, and skips only the C
+    # whitespace set.  So a date reached 2020.0, "1_0" reached 1.0, and every negative lost its
+    # sign to the code that re-applied it only to inf and nan.
+    v = SchemaValidator(core_schema.float_schema())
+
+    def same(a, b):
+        # 0.0 == -0.0 and nan != nan, so == alone cannot tell those apart
+        return ((math.copysign(1.0, a) == math.copysign(1.0, b) and a == b)
+                or (math.isnan(a) and math.isnan(b)))
+
+    for text, expected in (
+        ('1_0', 10.0), ('1_000.5_0', 1000.5), ('-.5', -0.5), ('+.5', 0.5), ('5.', 5.0), ('.5', 0.5),
+        ('  1.5  ', 1.5), ('\u00a01.5\u00a0', 1.5), ('\u3000-1.5e2', -150.0), ('\t1.5\n', 1.5),
+        ('inf', math.inf), ('-Infinity', -math.inf), ('+INF', math.inf), ('NAN', math.nan),
+        ('nan ', math.nan), ('1e400', math.inf), ('-1e400', -math.inf),
+        ('-1e-400', -0.0), ('-0', -0.0), ('1e-323', 1e-323), ('1e-324', 0.0),
+    ):
+        for got in (v.validate_python(text), v.validate_json(json.dumps(text)), v.validate_strings(text)):
+            assert same(got, expected), (text, got)
+    assert same(v.validate_python('-nan'), math.nan) and same(v.validate_python('+nan'), math.nan)
+
+    # Refused, and named as a parsing failure by all three text entries -- a JSON string that is
+    # not a number is float_parsing, not the float_type a JSON value that was never a string earns.
+    for refused in (
+        '2020-01-01', '0x10', '0x1p3', '1d5', '1e5x', '1e', '1e+', '1.5.5', '5.5.5', '1 2', '1,5',
+        ' 1_0 ', '_1', '1_', '1__0', '__1', '٣', '１２３', 'infinityx', 'nan nan', '.', '-', '',
+        # '٣' and '１２３' are Arabic-Indic and fullwidth digits: Python's float() reads
+        # them, Rust's f64 grammar knows ASCII digits only, so the port must refuse them too.
+    ):
+        for entry in ('validate_python', 'validate_strings'):
+            with pytest.raises(ValidationError) as exc_info:
+                getattr(v, entry)(refused)
+            assert exc_info.value.errors()[0]['type'] == 'float_parsing', (entry, refused)
+        with pytest.raises(ValidationError) as exc_info:
+            v.validate_json(json.dumps(refused))
+        assert exc_info.value.errors()[0]['type'] == 'float_parsing', refused
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_') and callable(fn):

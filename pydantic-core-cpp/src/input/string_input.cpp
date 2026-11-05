@@ -2,6 +2,7 @@
 #include "pydantic_core/error_types.hpp"
 #include "pydantic_core/result.hpp"
 #include "pydantic_core/bytes_mode.hpp"
+#include "pydantic_core/num_parse.hpp"
 #include <algorithm>
 #include <memory>
 #include <sstream>
@@ -125,11 +126,12 @@ ValResult<ValMatch<EitherInt>> StringInput::validate_int(bool strict) const {
 
 ValResult<ValMatch<EitherFloat>> StringInput::validate_float(bool strict) const {
     if (single_value_) {
-        std::string v = *single_value_;
-        try {
-            double d = std::stod(v);
+        // Strings mode reaches the same str_as_float the Python str path uses
+        // (input_string.rs:157), so it takes the same two-pass whole-string rule.
+        double d = 0;
+        if (str_as_float(*single_value_, &d)) {
             return ValMatch<EitherFloat>::lax(EitherFloat(d));
-        } catch (...) {}
+        }
     }
 
     return ValError::line_error(ErrorType(ErrorType::Kind::FloatParsing),

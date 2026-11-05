@@ -2,6 +2,7 @@
 #include "pydantic_core/py_compat.hpp"
 #include "pydantic_core/errors.hpp"
 #include "pydantic_core/bytes_mode.hpp"
+#include "pydantic_core/num_parse.hpp"
 #include <memory>
 #include <string>
 #include <vector>
@@ -717,12 +718,13 @@ ValResult<ValMatch<EitherFloat>> PythonInput::validate_float(bool strict) const 
             return type_error(ErrorType::Kind::FloatParsing, *this, this->current_location());
         }
         if (str_src == StringSource::Ok) {
-            try {
-                double v = std::stod(s);
+            // Rust's str_as_float, not a std::stod that stops wherever it likes: "2020-01-01"
+            // has to be refused, and "1_0" has to reach 10.0.
+            double v = 0;
+            if (str_as_float(s, &v)) {
                 return ValMatch<EitherFloat>::lax(EitherFloat(v));
-            } catch (...) {
-                return type_error(ErrorType::Kind::FloatParsing, *this, this->current_location());
             }
+            return type_error(ErrorType::Kind::FloatParsing, *this, this->current_location());
         }
 
         double n = 0;
