@@ -313,30 +313,34 @@ auto result = input.validate_float(state.strict_or(strict));
                 );
             }
         }
-        if (gt.has_value() && f <= gt.value()) {
+        // Rust compares with partial_cmp (float.rs:128-166), so the question is
+        // "did the bound hold", never "did the raw comparison misbehave": NaN
+        // relates to no bound and is refused by all four. It checks le, lt, ge,
+        // gt in that order, which picks the ctx a doubly-violated range reports.
+        if (le.has_value() && !(f <= le.value())) {
             return ValError::line_error(
-                float_ctx(ErrorType::Kind::GreaterThan, "gt", gt.value()),
+                float_ctx(ErrorType::Kind::LessThanEqual, "le", le.value()),
                 state.location(),
                 input.as_error_value().repr
             );
         }
-        if (ge.has_value() && f < ge.value()) {
-            return ValError::line_error(
-                float_ctx(ErrorType::Kind::GreaterThanEqual, "ge", ge.value()),
-                state.location(),
-                input.as_error_value().repr
-            );
-        }
-        if (lt.has_value() && f >= lt.value()) {
+        if (lt.has_value() && !(f < lt.value())) {
             return ValError::line_error(
                 float_ctx(ErrorType::Kind::LessThan, "lt", lt.value()),
                 state.location(),
                 input.as_error_value().repr
             );
         }
-        if (le.has_value() && f > le.value()) {
+        if (ge.has_value() && !(f >= ge.value())) {
             return ValError::line_error(
-                float_ctx(ErrorType::Kind::LessThanEqual, "le", le.value()),
+                float_ctx(ErrorType::Kind::GreaterThanEqual, "ge", ge.value()),
+                state.location(),
+                input.as_error_value().repr
+            );
+        }
+        if (gt.has_value() && !(f > gt.value())) {
+            return ValError::line_error(
+                float_ctx(ErrorType::Kind::GreaterThan, "gt", gt.value()),
                 state.location(),
                 input.as_error_value().repr
             );

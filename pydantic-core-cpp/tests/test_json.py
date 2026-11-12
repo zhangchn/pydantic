@@ -5153,6 +5153,63 @@ def test_a_number_read_out_of_text_has_to_be_the_whole_string():
         assert exc_info.value.errors()[0]['type'] == 'float_parsing', refused
 
 
+def test_a_bound_a_float_cannot_answer_is_a_refusal():
+    # Rust asks each bound "did you hold", never "was the raw comparison well-behaved": every bound
+    # is `!matches!(float.partial_cmp(&bound), Some(...))` (float.rs:128-166), and partial_cmp hands
+    # back None for NaN, so nan is refused by ge, gt, le and lt alike.  A plain IEEE test is the
+    # other answer -- `f < ge` is no more true of nan than `f >= ge` -- and waves it through all
+    # four.  The same body owns the order the bounds are asked in: le, lt, ge, gt, which is what
+    # decides the ctx when a value violates two of them at once.
+    nan = math.nan
+
+    def first(schema, value):
+        with pytest.raises(ValidationError) as exc_info:
+            SchemaValidator(schema).validate_python(value)
+        return exc_info.value.errors()[0]
+
+    for key, kind, value in (
+        ('ge', 'greater_than_equal', 0.5),
+        ('gt', 'greater_than', 0.5),
+        ('le', 'less_than_equal', 0.5),
+        ('lt', 'less_than', 0.5),
+    ):
+        error = first(core_schema.float_schema(**{key: value}), nan)
+        assert error['type'] == kind, key
+        assert error['ctx'] == {key: value}, key
+
+    # The order belongs to the reference too: 7 violates both ge=10 and le=5, and le is asked first.
+    assert first(core_schema.float_schema(ge=10.0, le=5.0), 7.0)['type'] == 'less_than_equal'
+    assert first(core_schema.float_schema(gt=5.0, lt=3.0), 4.0)['type'] == 'less_than'
+    assert first(core_schema.float_schema(ge=1.0, lt=0.0), 0.5)['type'] == 'less_than'
+    assert first(core_schema.float_schema(ge=10.0, le=5.0, multiple_of=3.0), 7.0)['type'] == 'multiple_of'
+
+    # An infinity does relate to a bound, so it is refused or accepted by the ordering alone.
+    assert first(core_schema.float_schema(ge=0.0, le=1.0), math.inf)['type'] == 'less_than_equal'
+    assert first(core_schema.float_schema(ge=0.0, le=1.0), -math.inf)['type'] == 'greater_than_equal'
+    assert SchemaValidator(core_schema.float_schema(ge=0.0)).validate_python(math.inf) == math.inf
+    # allow_inf_nan is answered before any bound, and multiple_of asks nan the same question it asks
+    # every other value -- the reference's difference comes out nan, which is not over the
+    # tolerance, so nan divides by anything.
+    assert first(core_schema.float_schema(allow_inf_nan=False, ge=0.5), nan)['type'] == 'finite_number'
+    assert math.isnan(SchemaValidator(core_schema.float_schema(multiple_of=0.25)).validate_python(nan))
+
+    # A number read out of text is an ordinary float before the bounds, so 'nan' meets them too --
+    # through the JSON string and strings entries as well as the Python one.
+    v_ge = SchemaValidator(core_schema.float_schema(ge=0.5))
+    for entry in ('validate_python', 'validate_strings'):
+        with pytest.raises(ValidationError) as exc_info:
+            getattr(v_ge, entry)('nan')
+        assert exc_info.value.errors()[0]['type'] == 'greater_than_equal', entry
+    with pytest.raises(ValidationError) as exc_info:
+        SchemaValidator(core_schema.float_schema(le=0.5)).validate_json('"NAN"')
+    assert exc_info.value.errors()[0]['type'] == 'less_than_equal'
+
+    # Values that do answer their bounds are untouched by any of this.
+    assert SchemaValidator(core_schema.float_schema(ge=0.5)).validate_python(0.5) == 0.5
+    assert SchemaValidator(core_schema.float_schema(le=1.0, gt=0.0)).validate_python(0.5) == 0.5
+    assert math.isnan(SchemaValidator(core_schema.float_schema()).validate_python(nan))
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_') and callable(fn):
