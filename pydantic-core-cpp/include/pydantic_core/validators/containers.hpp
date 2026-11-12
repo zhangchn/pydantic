@@ -688,7 +688,31 @@ public:
                 validated = value_to_python_with_type(item_result.value(),
                                                       items_schema->effective_result_name());
             }
-            result_set.add(validated);
+            // add() answers with a bool rather than an exception, and a failed PySet_Add leaves its
+            // own error set while adding nothing at all.  Ignoring that answer loses the item twice:
+            // the run reports the length of a set that is short by one, or returns a value while the
+            // interpreter still holds the TypeError, which CPython reports as SystemError.  Rust
+            // reads the answer (return_enums.rs:200-212): a TypeError is the item refusing to be
+            // hashed and is named at the item's position -- the same kind for a frozenset, which has
+            // no kind of its own; anything else PySet_Add reports travels on unchanged.  The failed
+            // add counts as a refusal, so min_length is never asked of a set this built.
+            if (!result_set.add(validated)) {
+                py::error_already_set refused;
+                if (!refused.matches(PyExc_TypeError)) throw refused;
+                PythonInput item_input(validated);
+                state.location().push(static_cast<int64_t>(index));
+                ValError refusal = ValError::line_error(
+                    ErrorType(ErrorType::Kind::SetItemNotHashable),
+                    state.location(),
+                    item_input.as_error_value().repr,
+                    validated);
+                state.location().pop();
+                for (auto& le : refusal.line_errors()) errors.push_back(le);
+                if (fail_fast) {
+                    return ValError::line_errors(std::move(errors));
+                }
+                continue;
+            }
             if (max_length.has_value() && py::len(result_set) > max_length.value()) {
                 ErrorType err(ErrorType::Kind::SetTooLong);
                 err.context()["field_type"] = "Set";
@@ -820,7 +844,25 @@ public:
                     return item_result.error();
                 }
             }
-            result_set.add(validated);
+            if (!result_set.add(validated)) {
+                // The set rule above, same helper: the frozenset has no error kind of its own.
+                py::error_already_set refused;
+                if (!refused.matches(PyExc_TypeError)) throw refused;
+                PythonInput item_input(validated);
+                state.location().push(static_cast<int64_t>(index));
+                ValError refusal = ValError::line_error(
+                    ErrorType(ErrorType::Kind::SetItemNotHashable),
+                    state.location(),
+                    item_input.as_error_value().repr,
+                    validated);
+                state.location().pop();
+                for (auto& le : refusal.line_errors()) errors.push_back(le);
+                if (fail_fast) {
+                    return ValError::line_errors(std::move(errors));
+                }
+                index++;
+                continue;
+            }
             if (max_length.has_value() && py::len(result_set) > max_length.value()) {
                 ErrorType err(ErrorType::Kind::SetTooLong);
                 err.context()["field_type"] = "Frozenset";

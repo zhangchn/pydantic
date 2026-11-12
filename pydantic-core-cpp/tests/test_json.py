@@ -5210,6 +5210,52 @@ def test_a_bound_a_float_cannot_answer_is_a_refusal():
     assert math.isnan(SchemaValidator(core_schema.float_schema()).validate_python(nan))
 
 
+def test_a_set_names_the_item_it_cannot_hash():
+    # pybind's `set.add` answers with a bool, not an exception, and a failed PySet_Add leaves its own
+    # TypeError set while adding nothing.  Ignoring that answer loses the item twice over: the set
+    # comes back short, so min_length reports `too_short` against what was never built, and where no
+    # length is asked the run returns a value while the interpreter still holds the TypeError --
+    # which CPython turns into SystemError, an error that is not a ValidationError at all.
+    # Rust reads the answer (return_enums.rs:200-212) and names the item, at its position.
+    def errors_of(schema, value, entry='validate_python'):
+        with pytest.raises(ValidationError) as exc_info:
+            getattr(SchemaValidator(schema), entry)(value)
+        return exc_info.value.errors()
+
+    for kind in ('set', 'frozenset'):
+        error = errors_of({'type': kind}, [[1]])
+        assert len(error) == 1, kind
+        assert error[0]['type'] == 'set_item_not_hashable', kind  # the frozenset has no kind of its own
+        assert error[0]['loc'] == (0,), kind
+
+    # The position is the item's own, and every refusal is reported, not just the first.
+    assert [e['loc'] for e in errors_of({'type': 'set'}, [1, [2]])] == [(1,)]
+    both = errors_of({'type': 'set'}, [[2], [3]])
+    assert [e['loc'] for e in both] == [(0,), (1,)]
+    assert all(e['type'] == 'set_item_not_hashable' for e in both)
+
+    # A failed item outranks the length checks, which are asked only of a set that was built.
+    lengths = errors_of(core_schema.set_schema(min_length=5, max_length=9), [[2], [3]])
+    assert [e['type'] for e in lengths] == ['set_item_not_hashable'] * 2, lengths
+    assert [e['loc'] for e in lengths] == [(0,), (1,)]
+
+    # The item validator is asked first, so a typed set names the type instead.
+    assert errors_of(core_schema.set_schema(items_schema={'type': 'int'}), [[1]])[0]['type'] == 'int_type'
+    # Reached out of JSON text, the same rule holds.
+    assert errors_of({'type': 'set'}, '[[1]]', 'validate_json')[0]['type'] == 'set_item_not_hashable'
+
+    # Only set and frozenset hash their items: the collections that do not keep the value.
+    assert SchemaValidator(core_schema.list_schema()).validate_python([[1]]) == [[1]]
+    assert SchemaValidator({'type': 'deque'}).validate_python([[1]]) == deque([[1]])
+    assert SchemaValidator(core_schema.tuple_variable_schema()).validate_python([[1]]) == ([1],)
+
+    # What the lengths were always for, still answering: deduplicated size against max_length,
+    # reporting no actual length because the input may have held far more items.
+    assert SchemaValidator(core_schema.set_schema(max_length=2)).validate_python([1, 1, 2]) == {1, 2}
+    over = errors_of(core_schema.set_schema(max_length=2), [1, 2, 3])[0]
+    assert over['type'] == 'too_long' and over['ctx']['actual_length'] is None, over
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_') and callable(fn):
