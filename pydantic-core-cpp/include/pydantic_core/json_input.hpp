@@ -112,6 +112,14 @@ ValResult<std::unique_ptr<JsonInput>> parse_json(std::string_view json_str);
 // and use this only to word the failure.
 std::optional<std::string> json_diagnose_parse_error(const std::string& json_text);
 
+// The one deviation from the JSON grammar a caller's parser gets *wrong* rather than merely
+// worded differently: a \u escape that leaves half a character behind, which json.loads decodes
+// and jiter refuses.  The two grammars part company on acceptance only inside the surrogate
+// range, and every escape in it begins with the three bytes "\ud", so ordinary text costs one
+// search and nothing else.  Nullopt means the text holds no half-character and a caller that
+// already decoded it may keep its answer.
+std::optional<std::string> json_surrogate_refusal(const std::string& json_text);
+
 struct JsonParseOutcome {
     bool ok = false;
     py::object value;               // meaningful when ok

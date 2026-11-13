@@ -5256,6 +5256,72 @@ def test_a_set_names_the_item_it_cannot_hash():
     assert over['type'] == 'too_long' and over['ctx']['actual_length'] is None, over
 
 
+def test_a_json_escape_that_leaves_half_a_character_is_refused_on_the_way_in():
+    # json.loads decodes '"\ud800"' into a str holding half a character and reports the text as
+    # well-formed, where jiter refuses it.  Accepting it is not a wrong message but a wrong
+    # value: the str it builds cannot be asked for bytes, so the refusal has to happen while the
+    # text is being decoded, before any value exists to refuse.
+    #
+    # Rust reads the four hex bytes as one unit (so text that runs out inside them is out of
+    # input, and only a byte that is not hex is named), demands a high surrogate's partner in the
+    # next two bytes, and refuses a low half that no high half leads -- each with its own phrase
+    # and its own column.
+    any_schema = SchemaValidator({'type': 'any'})
+
+    def refused(text):
+        with pytest.raises(ValidationError) as exc_info:
+            any_schema.validate_json(text)
+        error = exc_info.value.errors()[0]
+        assert error['type'] == 'json_invalid', text
+        return error['ctx']['error']
+
+    assert refused('"\\ud800"') == 'unexpected end of hex escape at line 1 column 8'
+    assert refused('["\\ud800", 1]') == 'unexpected end of hex escape at line 1 column 9'
+    assert refused('"\\ud800\\x"') == 'unexpected end of hex escape at line 1 column 9'
+    assert refused('"\\ud800\\u0041"') == 'lone leading surrogate in hex escape at line 1 column 13'
+    assert refused('"\\ud800\\ud800"') == 'lone leading surrogate in hex escape at line 1 column 13'
+    assert refused('"\\udc00"') == 'lone leading surrogate in hex escape at line 1 column 7'
+    assert refused('"a\\udfff"') == 'lone leading surrogate in hex escape at line 1 column 8'
+    # A stranded half is refused wherever it sits, including in a key, and whatever walked past it.
+    # A high half is named at the byte that stood where its partner belongs; a low half at its own
+    # last hex digit, which is one column earlier for the same-looking text.
+    assert refused('{"\\ud800": 1}') == 'unexpected end of hex escape at line 1 column 9'
+    assert refused('{"k": "\\udc00"}') == 'lone leading surrogate in hex escape at line 1 column 13'
+    # The four bytes are one unit: text that runs out inside them is out of input, while a byte
+    # that is merely not hex is named.
+    assert refused('"\\ud8"') == 'EOF while parsing a string at line 1 column 6'
+    assert refused('"\\ud80"') == 'invalid escape at line 1 column 7'
+    assert refused('"\\ud8ZZ"') == 'invalid escape at line 1 column 6'
+    assert refused('"\\uZZZZ"') == 'invalid escape at line 1 column 4'
+
+    # Two halves are one character, and that is the answer both cores give.
+    assert any_schema.validate_json('"\\ud83d\\ude00"') == '\U0001f600'
+    assert any_schema.validate_json('"\\ud800\\udc00\\ud800\\udc00"') == '\U00010000\U00010000'
+    assert any_schema.validate_json('{"k": ["\\ud83d\\ude00"]}') == {'k': ['\U0001f600']}
+    assert any_schema.validate_json('"\\u00e9"') == 'é'
+
+    # The other JSON entry decodes through the same rule: a `json` schema reaches the reader from
+    # validate_python, and allow_partial repairs brackets but does not keep half a character.
+    with pytest.raises(ValidationError) as exc_info:
+        SchemaValidator({'type': 'json'}).validate_python('"\\ud800"')
+    assert exc_info.value.errors()[0]['ctx']['error'] == 'unexpected end of hex escape at line 1 column 8'
+    with pytest.raises(ValidationError) as exc_info:
+        SchemaValidator({'type': 'json', 'items_schema': {'type': 'int'}}).validate_python('[1, "\\udc00"]')
+    assert exc_info.value.errors()[0]['type'] == 'json_invalid'
+    for mode in (True, 'trailing-strings'):
+        with pytest.raises(ValidationError) as exc_info:
+            any_schema.validate_json('"\\ud800"', allow_partial=mode)
+        assert exc_info.value.errors()[0]['ctx']['error'] == 'unexpected end of hex escape at line 1 column 8', mode
+    assert any_schema.validate_json('["a"', allow_partial=True) == ['a']
+
+    # `from_json` has no ValidationError to raise, so the same refusal arrives as the ValueError
+    # its own parse failures arrive as -- and the repair path it also owns still repairs.
+    with pytest.raises(ValueError, match='lone leading surrogate in hex escape at line 1 column 7'):
+        from_json('"\\udc00"')
+    assert from_json('"\\ud83d\\ude00"') == '\U0001f600'
+    assert from_json('{"a": 1', allow_partial=True) == {'a': 1}
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_') and callable(fn):

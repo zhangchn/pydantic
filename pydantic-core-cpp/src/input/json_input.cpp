@@ -819,47 +819,80 @@ private:
         return Step::Ok;
     }
 
+    // Reads the four bytes one \u escape is made of.  jiter takes them as a unit: text that
+    // runs out inside the four is out of input, and only once four bytes are in hand does it
+    // look at them, so what gets named is the byte that is not hex -- measured, `"\ud8"` is
+    // EOF, while `"\ud80"` and `"\ud8ZZ"` name the quote and the first `Z`.
+    enum class Hex4 { Complete, OutOfInput, NotHex };
+
+    Hex4 read_hex4(unsigned int& value, size_t& offending) {
+        if (i_ + 4 > s_.size()) {
+            return Hex4::OutOfInput;
+        }
+        value = 0;
+        for (int k = 0; k < 4; ++k) {
+            char c = s_[i_];
+            if (!is_hex(c)) {
+                offending = i_;
+                return Hex4::NotHex;
+            }
+            unsigned int digit = is_digit(c) ? static_cast<unsigned int>(c - '0')
+                                            : static_cast<unsigned int>((c | 0x20) - 'a' + 10);
+            value = (value << 4) | digit;
+            ++i_;
+        }
+        return Hex4::Complete;
+    }
+
     Step parse_unicode_escape() {
         // s_[i_] is just past the 'u' of \uXXXX
         unsigned int first = 0;
-        for (int k = 0; k < 4; ++k) {
-            if (i_ >= s_.size()) {
-                return fail(error_at_eof("a string"));
-            }
-            if (!is_hex(s_[i_])) {
-                return fail(error_at("invalid escape", i_));
-            }
-            char c = s_[i_];
-            unsigned int digit = is_digit(c) ? static_cast<unsigned int>(c - '0')
-                                            : static_cast<unsigned int>((c | 0x20) - 'a' + 10);
-            first = (first << 4) | digit;
-            ++i_;
+        size_t offending = 0;
+        Hex4 head = read_hex4(first, offending);
+        if (head == Hex4::OutOfInput) {
+            return fail(error_at_eof("a string"));
+        }
+        if (head == Hex4::NotHex) {
+            return fail(error_at("invalid escape", offending));
+        }
+
+        // A surrogate is half a character and the reference will not hand over half of one.  A
+        // low half with no high in front of it is named at its own last hex digit.  A high half
+        // demands its partner in the very next two bytes, and the words the refusal takes
+        // depend on what stood in the partner's place: no byte at all is the end of input, a
+        // byte that is not `\` -- or a `\` with nothing faithful behind it -- is an "unexpected
+        // end of hex escape" at that byte, and a complete escape that is not a low half is the
+        // same "lone leading surrogate" a stray low half got.  A partner that is itself broken
+        // is reported as the broken escape it is, because both halves have to be read before
+        // the pairing can be judged at all.
+        if (first >= 0xDC00 && first <= 0xDFFF) {
+            return fail(error_at("lone leading surrogate in hex escape", i_ - 1));
         }
         if (first < 0xD800 || first > 0xDBFF) {
             return Step::Ok;
         }
-        // A high surrogate must be followed by its low half
-        if (i_ + 5 < s_.size() && s_[i_] == '\\' && s_[i_ + 1] == 'u') {
-            unsigned int low = 0;
-            size_t cur = i_ + 2;
-            bool ok = true;
-            for (int k = 0; k < 4 && ok; ++k) {
-                if (!is_hex(s_[cur])) {
-                    ok = false;
-                } else {
-                    char c = s_[cur];
-                    unsigned int digit = is_digit(c) ? static_cast<unsigned int>(c - '0')
-                                                    : static_cast<unsigned int>((c | 0x20) - 'a' + 10);
-                    low = (low << 4) | digit;
-                    ++cur;
-                }
-            }
-            if (ok && low >= 0xDC00 && low <= 0xDFFF) {
-                i_ = cur;
-                return Step::Ok;
-            }
+        if (i_ >= s_.size()) {
+            return fail(error_at_eof("a string"));
         }
-        return fail(error_at("unexpected end of hex escape", i_));
+        if (s_[i_] != '\\') {
+            return fail(error_at("unexpected end of hex escape", i_));
+        }
+        if (i_ + 1 >= s_.size() || s_[i_ + 1] != 'u') {
+            return fail(error_at("unexpected end of hex escape", i_ + 1));
+        }
+        i_ += 2;
+        unsigned int low = 0;
+        Hex4 tail = read_hex4(low, offending);
+        if (tail == Hex4::OutOfInput) {
+            return fail(error_at_eof("a string"));
+        }
+        if (tail == Hex4::NotHex) {
+            return fail(error_at("invalid escape", offending));
+        }
+        if (low < 0xDC00 || low > 0xDFFF) {
+            return fail(error_at("lone leading surrogate in hex escape", i_ - 1));
+        }
+        return Step::Ok;
     }
 
     Step parse_string() {
@@ -1007,12 +1040,53 @@ std::optional<std::string> json_diagnose_parse_error(const std::string& json_tex
     return scan.run();
 }
 
+namespace {
+
+const char* const kSurrogateRefusals[] = {
+    "unexpected end of hex escape",
+    "lone leading surrogate in hex escape",
+};
+
+}  // namespace
+
+std::optional<std::string> json_surrogate_refusal(const std::string& json_text) {
+    // json.loads decodes `"\ud800"` into a str holding half a character and calls the text
+    // well-formed, so a refusal has to be reached on the way in: a value that was never built
+    // cannot be refused by anything downstream, and what gets built instead is a str that
+    // throws the moment anyone asks it for bytes.  Only escapes in the surrogate range are
+    // where the two grammars part company on acceptance, and every one of them begins with
+    // the three bytes "\ud" -- D800 through DFFF has `d` as its first hex digit either way
+    // up -- so text without them is not worth a second look.
+    if (json_text.find("\\ud") == std::string::npos && json_text.find("\\uD") == std::string::npos) {
+        return std::nullopt;
+    }
+    std::optional<std::string> diagnosis = json_diagnose_parse_error(json_text);
+    if (!diagnosis) {
+        return std::nullopt;
+    }
+    // Anything else the scan finds is a disagreement between the two grammars rather than a
+    // half-character, and json.loads has its own answer for those; this gate exists to refuse
+    // exactly what it fails to refuse.
+    for (const char* phrase : kSurrogateRefusals) {
+        const size_t length = std::char_traits<char>::length(phrase);
+        if (diagnosis->compare(0, length, phrase) == 0) {
+            return diagnosis;
+        }
+    }
+    return std::nullopt;
+}
+
 JsonParseOutcome json_parse_python(const std::string& json_text) {
     JsonParseOutcome outcome;
     try {
         py::object json_mod = py::module_::import("json");
         outcome.value = json_mod.attr("loads")(json_text);
         outcome.ok = true;
+        if (std::optional<std::string> refusal = json_surrogate_refusal(json_text)) {
+            outcome.ok = false;
+            outcome.value = py::none();
+            outcome.error_description = *refusal;
+        }
     } catch (const py::error_already_set& e) {
         auto diagnosis = json_diagnose_parse_error(json_text);
         outcome.error_description = diagnosis.has_value() ? *diagnosis : py::str(e.value()).cast<std::string>();

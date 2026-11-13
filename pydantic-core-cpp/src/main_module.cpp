@@ -470,9 +470,23 @@ static std::string pyobj_to_json_str(const py::object& obj) {
     return json_mod.attr("dumps")(obj, py::arg("default") = default_fn).cast<std::string>();
 }
 
+// json.loads has no rule against a \u escape that leaves half a character behind: it hands back
+// a str holding one and calls the text well-formed, where the reference refuses the text.  The
+// refusal therefore has to come from wherever the text is decoded, and it arrives as a Python
+// error so that the callers' existing json_invalid path renders it in the reference's words.
+static void refuse_half_character(const std::string& json_str) {
+    auto refusal = json_surrogate_refusal(json_str);
+    if (refusal) {
+        PyErr_SetString(PyExc_ValueError, refusal->c_str());
+        throw py::error_already_set();
+    }
+}
+
 static py::object json_to_pyobj(const std::string& json_str) {
     py::object json_mod = py::module_::import("json");
-    return json_mod.attr("loads")(json_str);
+    py::object parsed = json_mod.attr("loads")(json_str);
+    refuse_half_character(json_str);
+    return parsed;
 }
 
 // Partial JSON parsing (Rust: jiter::JsonValue::parse_with_config with
@@ -482,10 +496,20 @@ static py::object json_to_pyobj(const std::string& json_str) {
 static py::object json_to_pyobj_partial(const std::string& json_str,
                                         PartialMode mode = PartialMode::On) {
     py::object json_mod = py::module_::import("json");
+    py::object decoded;
+    bool decoded_ok = false;
     try {
-        return json_mod.attr("loads")(json_str);
+        decoded = json_mod.attr("loads")(json_str);
+        decoded_ok = true;
     } catch (const py::error_already_set&) {
         // Fall through to repair
+    }
+    if (decoded_ok) {
+        // Half a character is not something a partial parse is allowed to keep: the reference
+        // refuses it in this mode too, and word for word as elsewhere.  It is refused outside
+        // the try above because a refusal is not a repair job.
+        refuse_half_character(json_str);
+        return decoded;
     }
 
     // Walk the string tracking bracket/brace/quote state.  Build a repaired
